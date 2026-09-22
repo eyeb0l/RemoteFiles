@@ -1,0 +1,42 @@
+import XCTest
+
+@MainActor
+final class RemoteFilesUITests: XCTestCase {
+    func testBrowseReadRefreshAndReturn() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        app.launch()
+
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Mac")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15))
+        projects.tap()
+        let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Latest report")).firstMatch
+        XCTAssertTrue(report.waitForExistence(timeout: 10))
+        if !report.isHittable { app.swipeUp() }
+        report.tap()
+        let rendered = app.scrollViews["Rendered Markdown document"]
+        XCTAssertTrue(rendered.waitForExistence(timeout: 15))
+        attachScreenshot("Physical reader")
+
+        app.buttons["Source"].tap()
+        XCTAssertTrue(app.scrollViews["Markdown source"].waitForExistence(timeout: 5))
+        app.buttons["Rendered"].tap()
+        XCTAssertTrue(rendered.waitForExistence(timeout: 5))
+        app.buttons["Document actions"].tap()
+        app.buttons["Refresh"].tap()
+        XCTAssertTrue(rendered.waitForExistence(timeout: 10))
+        app.navigationBars.buttons["Projects"].tap()
+        XCTAssertTrue(report.waitForExistence(timeout: 5))
+        attachScreenshot("Physical folder after back")
+        app.navigationBars.buttons["RemoteFiles"].tap()
+        XCTAssertTrue(projects.waitForExistence(timeout: 5))
+    }
+
+    private func attachScreenshot(_ name: String) {
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+}

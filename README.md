@@ -7,7 +7,7 @@ A native, read-only iPhone browser for a Mac’s SFTP folders and agent-produced
 1. Open `RemoteFiles.xcodeproj` in Xcode 27.0 or newer.
 2. Select the shared **RemoteFiles** scheme and an iOS 27 simulator. Dependencies resolve from the checked-in lockfile.
 3. Run. The app starts with an empty real library. **Settings → Explore Demo** is an explicit sample workspace; it is never used as a connection-error fallback. The `--demo` launch argument also selects that mode.
-4. For a physical iPhone, select your own signing team under Signing & Capabilities, set an available bundle ID if necessary, and select your device. No personal signing team is checked in.
+4. The project uses the Iris Giertuga development team for this workspace. For another developer, select your own signing team under Signing & Capabilities and set an available bundle ID if necessary. Keep the paired iPhone unlocked with Developer Mode enabled when installing or running tests.
 
 ```sh
 xcodebuild -project RemoteFiles.xcodeproj -scheme RemoteFiles \
@@ -20,7 +20,7 @@ xcodebuild -project RemoteFiles.xcodeproj -scheme RemoteFiles \
 
 Simulator signing is ad hoc and requires no personal development team. The generic device command checks compilation; it does not produce an installable signed iPhone build.
 
-The local Swift package contains `RemoteFilesCore` and `RemoteFilesUI`. Xcode owns the runnable app and hosted iOS test target. Tests use the separate minimal `RemoteFilesTestHost`, so the core package is linked independently from the main application's renderer dependency graph. After adding test files, regenerate its small project with `python3 scripts/generate-project.py`; the script does not fetch packages or modify source files. Commit both `Package.resolved` and `RemoteFiles.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved` when dependency resolution changes.
+The local Swift package contains `RemoteFilesCore` and `RemoteFilesUI`. Xcode owns the runnable app, hosted iOS core-test target, and native UI-test target. The UI test uses the explicit demo workspace and exercises browsing, rendered/source reading, refresh, and back navigation without touching saved real connections. Tests use the separate minimal `RemoteFilesTestHost`, so the core package is linked independently from the main application's renderer dependency graph. After adding test files, regenerate its small project with `python3 scripts/generate-project.py`; the script does not fetch packages or modify source files. Commit both `Package.resolved` and `RemoteFiles.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved` when dependency resolution changes.
 
 ## Connect your Mac
 

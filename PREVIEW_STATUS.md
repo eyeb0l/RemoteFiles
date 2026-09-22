@@ -93,7 +93,7 @@ Sampling during the **Debug** interval implicates **cold rendered-view and Swift
 
 ## Outstanding acceptance and known limits
 
-1. **Physical device:** an iPhone was discovered, but no usable signing identity was available. Install with the user's signing team, then run favourite → folder → rendered report → back with preserved position → changed-file refresh over cellular with Tailscale. No physical-device, cellular, or Tailscale result is claimed.
+1. **Physical device:** signing is now configured and the app is installed (see the update below). Unlock the iPhone to launch and run the prepared device tests, then run favourite → folder → rendered report → back with preserved position → changed-file refresh over cellular with Tailscale. No physical-device, cellular, or Tailscale result is claimed.
 2. **Device permissions/lifecycle:** verify denied Local Network permission and actual-network background/foreground teardown/reconnect on hardware. Unit tests establish cancellation and unlocked-cache contracts, not operating-system suspension behavior.
 3. **Reader interaction/accessibility:** verify selection/copy, Copy Source clipboard contents, independent wide regions, VoiceOver, Reduce Motion, and Reduce Transparency. Light/default and dark/accessibility-large reader configurations have been visually inspected; the full interaction and accessibility matrix remains unverified.
 4. **Performance:** investigate and address the approximately 0.6-second cold-reader main-thread stall reproduced in Debug and Release. Then profile the representative large report and 1,000-entry directory and measure cached display. No additional >250 ms hang was recorded during the Release warm reopen, but neither the no-hitch nor sub-200 ms cached-display target is established.
@@ -101,3 +101,20 @@ Sampling during the **Debug** interval implicates **cold rendered-view and Swift
 6. **Formats/scope:** image/PDF preview, relative Markdown resources, HTML, Mermaid, math, editing, uploads, general downloads, private-key export, and background transfers remain deferred in [ROADMAP.md](ROADMAP.md). The remote account itself may still have write permission; this app's operations are read only.
 
 The implementation is available for further profiling and device/interaction verification. The working preview has not yet passed the performance gate or the plan's decisive end-to-end acceptance.
+
+## Physical-device signing update
+
+On 22 September 2026, Xcode automatic signing was configured with the existing Iris Giertuga team (`359794K46A`). Xcode created an Apple Development identity and an iOS team provisioning profile. The signed Debug build and device test build passed; the final app signature passed `codesign --verify --deep --strict`. The project generator preserves the team setting for the app and test targets.
+
+RemoteFiles was installed successfully on the paired **iPhone 17 Pro, iOS 27.0 (24A437)** with Developer Mode enabled. iOS rejected launch because the phone was locked and required a passcode. **Physical launch and test execution are pending unlock; installation alone is not a passing device test.** A native UI test now covers the explicit demo browse/read/source/refresh/back journey without changing real saved connections.
+
+Evidence: `/private/tmp/remotefiles-physical-build.log` and `/private/tmp/remotefiles-physical-test-build.log`. Run the prepared tests with the phone unlocked:
+
+```sh
+xcodebuild test-without-building -project RemoteFiles.xcodeproj \
+  -scheme RemoteFiles -destination 'platform=iOS,name=Iris’ iPhone' \
+  -derivedDataPath DerivedData-device -parallel-testing-enabled NO \
+  -collect-test-diagnostics never
+```
+
+The existing loopback OpenSSH fixture is host-local; a hardware run without an accessible fixture must report its real-server cases as skipped, not successful.
