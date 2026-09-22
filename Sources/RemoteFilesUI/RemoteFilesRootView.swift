@@ -93,13 +93,20 @@ private struct HomeView: View {
             }.listRowBackground(Color.clear).listRowSeparator(.hidden)
             if model.metadata.connections.isEmpty {
                 Section {
-                    ContentUnavailableView {
-                        Label("A place for your projects", systemImage: "folder.badge.plus")
-                    } description: {
+                    VStack(spacing: 16) {
+                        Image(systemName: "folder.badge.plus")
+                            .font(.system(size: 44)).foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                        Text("A place for your projects").font(.title2.bold())
                         Text("Connect to your Mac to browse folders and read the latest reports.")
-                    } actions: {
-                        Button("Add Connection", systemImage: "plus") { model.sheet = .connection(nil) }.buttonStyle(.borderedProminent)
+                            .foregroundStyle(.secondary)
+                        Button("Add Connection", systemImage: "plus") { model.sheet = .connection(nil) }
+                            .buttonStyle(.borderedProminent)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
+                    .multilineTextAlignment(.center)
+                    .padding(.vertical, 24)
+                    .frame(maxWidth: .infinity)
                 }
             }
             if !model.metadata.favourites.isEmpty {

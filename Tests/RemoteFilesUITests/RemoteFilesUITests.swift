@@ -33,6 +33,21 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(projects.waitForExistence(timeout: 5))
     }
 
+    func testNormalLaunchOffersUsableConnectionSetup() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launch()
+        let add = app.buttons["Add Connection"].firstMatch
+        XCTAssertTrue(add.waitForExistence(timeout: 15))
+        XCTAssertTrue(add.isHittable)
+        XCTAssertLessThan(add.frame.height, 150, "The setup action must not expand into an unreadable vertical capsule.")
+        attachScreenshot("Physical normal Home")
+        add.tap()
+        XCTAssertTrue(app.textFields["Hostname or IP address"].waitForExistence(timeout: 5))
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(add.waitForExistence(timeout: 5))
+    }
+
     private func attachScreenshot(_ name: String) {
         let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         attachment.name = name

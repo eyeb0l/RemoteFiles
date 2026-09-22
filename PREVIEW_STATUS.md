@@ -93,7 +93,7 @@ Sampling during the **Debug** interval implicates **cold rendered-view and Swift
 
 ## Outstanding acceptance and known limits
 
-1. **Physical device:** signing is now configured and the app is installed (see the update below). Unlock the iPhone to launch and run the prepared device tests, then run favourite → folder → rendered report → back with preserved position → changed-file refresh over cellular with Tailscale. No physical-device, cellular, or Tailscale result is claimed.
+1. **Physical device:** signing is now configured and the app is installed (see the update below). The physical core/UI checks pass as recorded below; still run favourite → folder → rendered report → back with preserved position → changed-file refresh over cellular with Tailscale. No physical-device, cellular, or Tailscale result is claimed.
 2. **Device permissions/lifecycle:** verify denied Local Network permission and actual-network background/foreground teardown/reconnect on hardware. Unit tests establish cancellation and unlocked-cache contracts, not operating-system suspension behavior.
 3. **Reader interaction/accessibility:** verify selection/copy, Copy Source clipboard contents, independent wide regions, VoiceOver, Reduce Motion, and Reduce Transparency. Light/default and dark/accessibility-large reader configurations have been visually inspected; the full interaction and accessibility matrix remains unverified.
 4. **Performance:** investigate and address the approximately 0.6-second cold-reader main-thread stall reproduced in Debug and Release. Then profile the representative large report and 1,000-entry directory and measure cached display. No additional >250 ms hang was recorded during the Release warm reopen, but neither the no-hitch nor sub-200 ms cached-display target is established.
@@ -106,9 +106,9 @@ The implementation is available for further profiling and device/interaction ver
 
 On 22 September 2026, Xcode automatic signing was configured with the existing Iris Giertuga team (`359794K46A`). Xcode created an Apple Development identity and an iOS team provisioning profile. The signed Debug build and device test build passed; the final app signature passed `codesign --verify --deep --strict`. The project generator preserves the team setting for the app and test targets.
 
-RemoteFiles was installed successfully on the paired **iPhone 17 Pro, iOS 27.0 (24A437)** with Developer Mode enabled. iOS rejected launch because the phone was locked and required a passcode. **Physical launch and test execution are pending unlock; installation alone is not a passing device test.** A native UI test now covers the explicit demo browse/read/source/refresh/back journey without changing real saved connections.
+RemoteFiles was installed successfully on the paired **iPhone 17 Pro, iOS 27.0 (24A437)** with Developer Mode enabled. The first launch was blocked by the device lock. After the user unlocked it, the physical test run completed successfully at **14:10:54**: **27 core tests and 2 UI tests passed, zero failures, 5 real-server integration tests explicitly skipped** because the host-local fixture was not available to the phone. The core run includes actual device Keychain persistence/accessibility checks. The UI run completed explicit demo Home → Projects → report → Source → Rendered → Refresh → Projects → Home and checked normal Home → Add Connection → Cancel; the two UI tests took 32.027 seconds. It did not change real saved connections. RemoteFiles then launched normally on the phone without demo arguments; the empty Add Connection screen was captured and visually inspected.
 
-Evidence: `/private/tmp/remotefiles-physical-build.log` and `/private/tmp/remotefiles-physical-test-build.log`. Run the prepared tests with the phone unlocked:
+Evidence: `/private/tmp/remotefiles-physical-build.log` and `/private/tmp/remotefiles-physical-test-build.log`. Repeat the device tests with the phone unlocked:
 
 ```sh
 xcodebuild test-without-building -project RemoteFiles.xcodeproj \
@@ -118,3 +118,7 @@ xcodebuild test-without-building -project RemoteFiles.xcodeproj \
 ```
 
 The existing loopback OpenSSH fixture is host-local; a hardware run without an accessible fixture must report its real-server cases as skipped, not successful.
+
+Physical-run evidence: `/private/tmp/remotefiles-physical-verified.log` and `/private/tmp/remotefiles-physical-verified.xcresult`. Visually inspected captures: [normal Home](docs/screenshots/physical-home.png), [rendered report](docs/screenshots/physical-reader.png), and [folder after back](docs/screenshots/physical-browser.png). These show actual iPhone UI, but demo content; the displayed cellular status is not proof of an SFTP connection over cellular/Tailscale. Real remote setup/connectivity and hardware performance profiling remain separate acceptance checks.
+
+The first physical screenshot exposed a malformed vertically stretched Add Connection action in the empty Home view. Replacing the unavailable-content action container with a bounded native stack fixed it. The final device UI test checks a visible, tappable, reasonably sized action, opens setup, and cancels successfully. Final screenshots above show the corrected build.
