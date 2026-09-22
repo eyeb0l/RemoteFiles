@@ -64,3 +64,7 @@ Use the signed simulator test command for the actual Keychain tests: an unsigned
 The OpenSSH fixture binds loopback port 22222 (override `REMOTEFILES_TEST_PORT`), authorises only generated test keys in a temporary file, uses its own host keys/config, disables passwords/PAM, and cleans up on exit. It does not edit the Mac’s SSH configuration or existing keys. It runs under the current account, so tests intentionally touch only its generated fixture directory. Starting this fixture requires permission to run local loopback networking in restricted environments.
 
 See [PREVIEW_STATUS.md](PREVIEW_STATUS.md) for **actual** results and outstanding acceptance, [SSH_SPIKE.md](docs/SSH_SPIKE.md) for the dependency decision, [RENDERER_SPIKE.md](docs/RENDERER_SPIKE.md) for rendering evidence, and [ROADMAP.md](ROADMAP.md) for deferred scope. Citadel is vendored from an exact upstream commit with a narrow cancellation patch and original license; see [its provenance](Vendor/Citadel/UPSTREAM.md).
+
+## Renderer performance
+
+Textual is locally vendored at the original pinned revision with two focused startup fixes. [Provenance](Vendor/Textual/UPSTREAM.md) records the changes and license; [performance evidence](docs/READER_PERFORMANCE.md) records simulator and physical-iPhone measurements, tests, and remaining limits.

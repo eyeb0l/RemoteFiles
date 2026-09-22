@@ -10,7 +10,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "Vendor/Citadel"),
-        .package(url: "https://github.com/gonzalezreal/textual.git", revision: "01b51875a5406eefc95f52a058cb059e7bc94dc4"),
+        .package(path: "Vendor/Textual"),
         .package(url: "https://github.com/Wellz26/swift-nio-ssh.git", "0.3.4"..<"0.4.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.12.3"),

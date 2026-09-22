@@ -6,7 +6,13 @@ final class RemoteFilesUITests: XCTestCase {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["--demo"]
-        app.launch()
+        // Profiling attaches to a freshly launched process before XCTest drives the journey.
+        // Normal test runs still own launch; only the explicit profiling harness reuses it.
+        if ProcessInfo.processInfo.environment["REMOTEFILES_PROFILE_EXISTING_APP"] == "1" {
+            app.activate()
+        } else {
+            app.launch()
+        }
 
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Mac")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15))

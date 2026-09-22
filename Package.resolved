@@ -99,14 +99,6 @@
         "revision" : "0b5c2cfaaec8d6193db206f675048eeb5ce95f71",
         "version" : "0.1.0"
       }
-    },
-    {
-      "identity" : "textual",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/gonzalezreal/textual.git",
-      "state" : {
-        "revision" : "01b51875a5406eefc95f52a058cb059e7bc94dc4"
-      }
     }
   ],
   "version" : 3

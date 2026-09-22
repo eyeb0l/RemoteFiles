@@ -1,6 +1,6 @@
 # Renderer spike
 
-Inspected on 22 September 2026. The selected renderer is [Textual](https://github.com/gonzalezreal/textual/tree/01b51875a5406eefc95f52a058cb059e7bc94dc4), pinned to commit `01b51875a5406eefc95f52a058cb059e7bc94dc4`. `DocumentContentView(text:markdown:source:)` is the app's only renderer integration boundary.
+Inspected on 22 September 2026. The selected renderer is [Textual](https://github.com/gonzalezreal/textual/tree/01b51875a5406eefc95f52a058cb059e7bc94dc4), now locally vendored from commit `01b51875a5406eefc95f52a058cb059e7bc94dc4`. `DocumentContentView(text:markdown:source:)` is the app's only renderer integration boundary.
 
 ## Source findings and choices
 
@@ -49,3 +49,7 @@ The final signed simulator app was navigated through a demo project, symlink ope
 A 45-second Debug browse/read profile recorded a 577.84 ms cold-reader main-thread hang. Sampled stacks implicate SwiftUI type-conformance/view construction, Textual's first JavaScriptCore/Prism initialization, and block layout. Markdown preparation was sampled off the main thread before that interval. Inclusive sample counts overlap and do not allocate the whole wall duration. A later 45-second **Release** journey reproduced a **604.71 ms** cold-reader hang; no additional event above 250 ms appeared during the warm reopen. The cold-renderer performance gate remains **unpassed**, and warm cached display below 200 ms has not been established. See [PREVIEW_STATUS.md](../PREVIEW_STATUS.md) for exact traces, environment, and evidence limits.
 
 Selection handles, clipboard contents after gesture selection or Copy Source, independent table/code panning, full realistic-fixture rendering, VoiceOver order, Reduce Motion, Reduce Transparency, and the full range of accessibility sizes remain to be verified. Physical-device interaction, real-network UI acceptance, and large-report/directory profiling remain distinct outstanding steps; the inspected screenshots do not establish those behaviors.
+
+## Subsequent performance patch
+
+Textual now defers JavaScriptCore/Prism startup to its tokenizer actor and erases the heterogeneous block view boundary. The optimized device and simulator builds passed. See [READER_PERFORMANCE.md](READER_PERFORMANCE.md) for before/after measurements, regression checks, and the remaining simulator runtime stall. The recordings above predate this patch.
