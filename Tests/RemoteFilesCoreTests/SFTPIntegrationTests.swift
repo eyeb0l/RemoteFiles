@@ -65,6 +65,42 @@ final class SFTPIntegrationTests: XCTestCase {
         await service.disconnect()
     }
 
+    func testResourceStreamUsesSessionAndRejectsSymlinkEscape() async throws {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Resource test")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        defer { Task { await service.disconnect() } }
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        _ = try await service.listDirectory(profile: profile, path: fixture.files)
+        let result = try await service.downloadFile(profile: profile, path: fixture.files + "/report-link.md", allowedRoot: fixture.files, destination: temp, limit: 1024)
+        XCTAssertEqual(result.path, fixture.files + "/report.md")
+        XCTAssertTrue(String(decoding: try Data(contentsOf: temp), as: UTF8.self).contains("independent OpenSSH"))
+        do {
+            _ = try await service.downloadFile(profile: profile, path: fixture.files + "/report.md", allowedRoot: fixture.files + "/empty", destination: temp, limit: 1024)
+            XCTFail("Canonical path outside resource root must be rejected")
+        } catch RemoteResourceError.outsideDocument { }
+        do {
+            _ = try await service.downloadFile(profile: profile, path: fixture.files + "/report.md", allowedRoot: fixture.files, destination: temp, limit: 3)
+            XCTFail("Resource byte cap must be enforced")
+        } catch RemoteFileError.tooLarge { }
+        #if os(macOS)
+        let escape = fixture.files + "/resource-escape"
+        try FileManager.default.createSymbolicLink(atPath: escape, withDestinationPath: "/etc/hosts")
+        defer { try? FileManager.default.removeItem(atPath: escape) }
+        do {
+            _ = try await service.downloadFile(profile: profile, path: escape, allowedRoot: fixture.files, destination: temp, limit: 4096)
+            XCTFail("Symlink escape must be rejected before download")
+        } catch RemoteResourceError.outsideDocument { }
+        #endif
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.connections, 1)
+    }
+
     func testOrdinaryUnencryptedAndEncryptedOpenSSHAuthentication() async throws {
         let fixture = try Fixture()
         for (filename, passphrase) in [("plain", Optional<String>.none), ("encrypted", Optional("fixture-passphrase"))] {

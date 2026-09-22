@@ -180,3 +180,78 @@ extension RealServerUITests {
         let capture = XCTAttachment(screenshot: app.screenshot()); capture.name = "Real project report over SFTP"; capture.lifetime = .keepAlways; add(capture)
     }
 }
+
+
+extension RealServerUITests {
+    func testAuditRemoteInlineImages() throws {
+        try enabled()
+        let app = XCUIApplication(); app.launch()
+        let audit = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "audit.md,")).firstMatch
+        XCTAssertTrue(audit.waitForExistence(timeout: 10), app.debugDescription)
+        if !audit.isHittable { app.swipeUp() }
+        audit.tap()
+        let image = app.buttons["Open image 01-wardrobe-before.png"]
+        let placeholder = app.staticTexts["01-wardrobe-before.png"]
+        let scroll = app.scrollViews["Rendered Markdown document"]
+        for _ in 0..<18 {
+            if (image.exists && image.isHittable) || (placeholder.exists && placeholder.isHittable) { break }
+            // Stop on the resource row instead of racing past it and cancelling its lazy fetch.
+            let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
+            let end = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.42))
+            start.press(forDuration: 0.05, thenDragTo: end)
+        }
+        XCTAssertTrue(image.waitForExistence(timeout: 60), app.debugDescription)
+        if !image.isHittable { app.swipeUp() }
+        let capture = XCTAttachment(screenshot: app.screenshot()); capture.name = "Real audit inline SFTP image"; capture.lifetime = .keepAlways; add(capture)
+        image.tap()
+        XCTAssertTrue(app.buttons["Share"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Share"].isEnabled)
+        app.pinch(withScale: 2, velocity: 1)
+        let full = XCTAttachment(screenshot: app.screenshot()); full.name = "Remote image zoom viewer"; full.lifetime = .keepAlways; add(full)
+        app.buttons["Share"].tap()
+        XCTAssertTrue(app.otherElements["ActivityListView"].waitForExistence(timeout: 5) || app.buttons["Copy"].exists, app.debugDescription)
+    }
+}
+
+
+extension RealServerUITests {
+    func testRelativeLargeAndMissingImages() throws {
+        try enabled()
+        let app = XCUIApplication(); app.launch()
+        let connection = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Image checks,")).firstMatch
+        if !connection.waitForExistence(timeout: 2) {
+            let add = app.buttons["Add Connection"]
+            if !add.isHittable { app.swipeUp() }
+            add.tap()
+            for (label, value) in [("Display name", "Image checks"), ("Hostname or IP address", "100.125.79.6"), ("Mac account username", "iris"), ("Starting directory (optional)", "/Users/iris/Developer/RemoteFiles/.test-server/remote-images")] {
+                let field = app.textFields[label]
+                if !field.isHittable { app.swipeUp() }
+                field.tap(); field.typeText(value)
+            }
+            app.buttons["Save"].tap()
+        }
+        XCTAssertTrue(connection.waitForExistence(timeout: 10)); connection.tap()
+        let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "images.md,")).firstMatch
+        XCTAssertTrue(report.waitForExistence(timeout: 20), app.debugDescription); report.tap()
+        let small = app.buttons["Open image small.png"].firstMatch
+        XCTAssertTrue(small.waitForExistence(timeout: 20), app.debugDescription)
+        let missing = app.staticTexts["missing.png"]
+        for _ in 0..<5 {
+            if missing.exists && missing.isHittable { break }; app.swipeUp()
+        }
+        XCTAssertTrue(app.buttons["Tap to retry"].firstMatch.waitForExistence(timeout: 15), app.debugDescription)
+        let failure = XCTAttachment(screenshot: app.screenshot()); failure.name = "Image failure with retry and open"; failure.lifetime = .keepAlways; add(failure)
+        let large = app.buttons["Open image large-70mb.png"]
+        for _ in 0..<4 { if large.exists && large.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(large.waitForExistence(timeout: 160), app.debugDescription)
+        if !large.isHittable { app.swipeDown() }
+        large.tap()
+        XCTAssertTrue(app.buttons["Share"].waitForExistence(timeout: 10))
+        let share = app.buttons["Share"]
+        let ready = NSPredicate(format: "enabled == true")
+        expectation(for: ready, evaluatedWith: share)
+        waitForExpectations(timeout: 30)
+        let capture = XCTAttachment(screenshot: app.screenshot()); capture.name = "Seventy MB SFTP image downsampled"; capture.lifetime = .keepAlways; add(capture)
+        app.buttons["Done"].tap()
+    }
+}

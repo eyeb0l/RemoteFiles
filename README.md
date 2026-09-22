@@ -45,7 +45,7 @@ Profiles, favourites, recent references, and public identity metadata are stored
 
 ## Reader scope
 
-Markdown, UTF-8 text/config/code, a 2 MiB receive-time bound, explicit empty/binary/unsupported states. External images never load. Only a tapped absolute HTTP/HTTPS link may open; unsafe schemes and relative links are disabled. Tables/code scroll within the rendered document. Markdown source and plain text remain read only. A failed refresh labels the previous content as previously loaded.
+Markdown, UTF-8 text/config/code, a 2 MiB receive-time bound, explicit empty/binary/unsupported states. Markdown images load lazily through SFTP relative to the document directory, with bounded disk/pixel caches, retry, zoom and Share. Web/file/data image URLs never load. See [remote image policy](docs/REMOTE_IMAGES.md). Only a tapped absolute HTTP/HTTPS link may open; unsafe schemes and relative links are disabled. Tables/code scroll within the rendered document. Markdown source and plain text remain read only. A failed refresh labels the previous content as previously loaded.
 
 ## Reproducible verification
 

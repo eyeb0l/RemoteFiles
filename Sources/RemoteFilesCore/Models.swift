@@ -52,7 +52,14 @@ public protocol RemoteFileService: Sendable {
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data
     func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry
     func disconnect() async
+}
+
+public extension RemoteFileService {
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
+        throw RemoteFileError.unsupportedFile
+    }
 }
 
 public enum RemoteFileError: LocalizedError, Sendable {

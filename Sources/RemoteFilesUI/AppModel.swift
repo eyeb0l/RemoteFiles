@@ -21,6 +21,14 @@ final class AppModel {
     let identities = IdentityStore()
     let trust: HostTrustStore
     private(set) var service: any RemoteFileService
+    let resourceDirectory: URL
+    private var resourceService: RemoteResourceResolver?
+    var resources: RemoteResourceResolver {
+        if let resourceService { return resourceService }
+        let value = RemoteResourceResolver(service: service, directory: resourceDirectory)
+        resourceService = value
+        return value
+    }
     var metadata = AppMetadata()
     var routes: [Route] = []
     var sheet: Sheet?
@@ -36,6 +44,7 @@ final class AppModel {
     private var documentOrder: [String] = []
 
     init(directory: URL) throws {
+        resourceDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("RemoteImages-v1")
         metadataStore = try MetadataStore(fileURL: directory.appendingPathComponent("library-v1.json"))
         trust = try HostTrustStore(fileURL: directory.appendingPathComponent("known-hosts-v1.json"))
         service = CoalescingFileService(base: SFTPRemoteFileService(identityStore: identities, trustStore: trust, metadataStore: metadataStore))
@@ -102,6 +111,8 @@ final class AppModel {
     }
     func isSecurityError(_ error: Error) -> Bool { error is HostTrustError || error is IdentityError }
     func disconnect() async {
+        await resourceService?.cancelAll(); resourceService = nil
+        await RemoteImageDecoder.shared.clear()
         await service.disconnect(); await identities.clearSession()
         connectionStates = [:]; clearCaches()
     }

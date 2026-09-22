@@ -9,6 +9,8 @@ struct ReaderView: View {
     let entry: RemoteEntry
     @State private var preview: DocumentPreview?
     @State private var source = false
+    @State private var imageVersion = 0
+    @State private var lastImageRefresh = 0
     @State private var loading = false
     @State private var error: String?
     @State private var refreshID = 0
@@ -28,7 +30,7 @@ struct ReaderView: View {
             Group {
                 if let preview {
                     switch preview {
-                    case .text(let text, let markdown): DocumentContentView(text: text, markdown: markdown, source: source)
+                    case .text(let text, let markdown): DocumentContentView(text: text, markdown: markdown, source: source, location: .init(profile: profile, path: entry.path), resolver: model.resources).id(imageVersion)
                     case .empty: ContentUnavailableView("This file is empty", systemImage: "doc", description: Text("Refresh after it has been updated on your Mac."))
                     case .unsupportedFileType: infoView("Preview not available", detail: "This preview supports Markdown and UTF-8 text. Other file previews are planned.")
                     case .unsupportedEncodingOrBinary: infoView("Can’t display this file", detail: "This file contains binary data or text that is not UTF-8.")
@@ -77,6 +79,11 @@ struct ReaderView: View {
             let decoded = await Task.detached(priority: .userInitiated) { DocumentPolicy.decode(bytes, filename: entry.name) }.value
             try Task.checkCancellation()
             guard token == requestID else { return }
+            if refreshID != lastImageRefresh {
+                await model.resources.clearCache()
+                await RemoteImageDecoder.shared.clear()
+                lastImageRefresh = refreshID; imageVersion += 1
+            }
             preview = decoded; loadedAt = .now; copied = false
             model.cache(bytes, id: profile.id, path: entry.path)
             model.connectionStates[profile.id] = "Connected"

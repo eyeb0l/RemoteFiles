@@ -17,10 +17,10 @@ Relevant upstream implementation: [`MarkupParser.swift`](https://github.com/gonz
 
 Textual's default attachment loader fetches URLs, so RemoteFiles does not use that default:
 
-1. `DocumentPolicy.prepareMarkdown` replaces every parsed image run with readable alt text plus “preview unavailable”, removing the image URL and any enclosing link. Empty-alt images receive an explicit placeholder. This applies equally to HTTP, relative, file, and data URLs.
-2. Both Textual image and emoji loaders are replaced by a loader which immediately throws and performs no I/O. This is a second boundary if future code ever reintroduces an attachment attribute.
-3. Unsafe and relative link attributes are removed during preparation. The reader also overrides `openURL` to admit only absolute HTTP/HTTPS URLs with a nonempty host and no embedded credentials, in response to a link tap.
-4. No base URL is supplied. Relative Markdown paths do not resolve to local files or remote SFTP resources. HTML remains inactive attributed text; there is no HTML renderer or document web view.
+1. The remote reader uses `DocumentPolicy.remoteMarkdownParts`: parsed image runs become native image rows, while attributed text segments retain Markdown styling and have no image URLs. The legacy `prepareMarkdown` default remains an image-free preparation API.
+2. Both Textual image and emoji loaders still perform no I/O. Only the injected remote-resource resolver fetches images through SFTP.
+3. Automatic resources are confined to the remote document directory tree, with lexical and server-canonical path checks. Relative paths and in-tree absolute remote paths are supported. HTTP/file/data images remain blocked. See [REMOTE_IMAGES.md](REMOTE_IMAGES.md) for cache, transfer, downsampling and cancellation policies.
+4. Unsafe and relative link attributes remain inactive; tapped absolute HTTP/HTTPS links can open externally. Local Markdown document navigation is future work. HTML remains inactive attributed text; no web view is used.
 
 The plain-text/source branch uses `Text(verbatim:)`, monospaced Dynamic Type, native selection, and two-axis scrolling. It does not interpret code or HTML. UTF-8 validation rejects malformed byte sequences and non-whitespace C0 controls, and handles empty files and UTF-8 BOMs deliberately. Unsupported extensions and oversized input have separate policy results. The transport separately enforces the byte limit while receiving data.
 

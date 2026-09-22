@@ -39,6 +39,9 @@ public actor CoalescingFileService: RemoteFileService {
         try Task.checkCancellation()
         return try await base.resolveEntry(profile: profile, path: path)
     }
+    public func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
+        try await base.downloadFile(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination, limit: limit)
+    }
     public func disconnect() async {
         lists.values.forEach { $0.1.cancel() }; reads.values.forEach { $0.1.cancel() }
         lists.removeAll(); reads.removeAll()

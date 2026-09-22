@@ -75,6 +75,39 @@ public actor SFTPRemoteFileService: RemoteFileService {
         return result.0
     }
 
+    public func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String,
+                             destination: URL, limit: Int) async throws -> RemoteEntry {
+        guard limit > 0, limit < Int.max else { throw RemoteFileError.tooLarge(limit) }
+        let session = try await session(for: profile)
+        let result = try await perform(session: session, timeout: 180) { sftp in
+            let root = try await sftp.getRealPath(atPath: Self.validated(allowedRoot))
+            let canonical = try await sftp.getRealPath(atPath: Self.validated(path))
+            guard RemoteResourcePath.contains(canonical, in: root) else { throw RemoteResourceError.outsideDocument }
+            let file = try await sftp.openFile(filePath: canonical, flags: .read)
+            let attributes = try await file.readAttributes()
+            let entry = Self.entry(name: RemotePath.name(of: canonical), path: canonical, attributes: attributes)
+            guard entry.kind == .file else { throw RemoteFileError.unsupportedFile }
+            if let size = attributes.size, size > UInt64(limit) { throw RemoteFileError.tooLarge(limit) }
+            FileManager.default.createFile(atPath: destination.path, contents: nil)
+            let handle = try FileHandle(forWritingTo: destination)
+            defer { try? handle.close() }
+            var count = 0
+            while true {
+                try Task.checkCancellation()
+                let amount = min(256 * 1024, limit - count + 1)
+                let chunk = try await file.read(from: UInt64(count), length: UInt32(amount))
+                if chunk.readableBytes == 0 { break }
+                guard chunk.readableBytes <= amount, chunk.readableBytes <= limit - count else { throw RemoteFileError.tooLarge(limit) }
+                try handle.write(contentsOf: Data(chunk.readableBytesView))
+                count += chunk.readableBytes
+            }
+            try await file.close()
+            return (entry, count)
+        }
+        measurements.fileOperations += 1; measurements.bytesReceived += result.1
+        return result.0
+    }
+
     public func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
         let session = try await session(for: profile)
         return try await perform(session: session) { sftp in
@@ -183,13 +216,13 @@ public actor SFTPRemoteFileService: RemoteFileService {
         }
     }
 
-    private func perform<T: Sendable>(session: LiveSession,
+    private func perform<T: Sendable>(session: LiveSession, timeout: UInt64? = nil,
                                      operation: @escaping @Sendable (SFTPClient) async throws -> T) async throws -> T {
         // The dependency's listDirectory leaves its directory handle open. Retiring
         // this operation's SFTP channel fixes that without reconnecting/authenticating.
         let channel = SFTPChannelControl()
         do {
-            return try await Self.deadline(seconds: timeoutSeconds, close: {
+            return try await Self.deadline(seconds: timeout ?? timeoutSeconds, close: {
                 channel.close()
                 if !channel.hasClient { session.control.close() }
             }) {

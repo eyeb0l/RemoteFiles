@@ -5,8 +5,8 @@ The preview stays read only. These are deliberate future decisions, not hidden o
 ## After the first real usage session
 
 - Physical iPhone over cellular/Tailscale acceptance, accessibility and Instruments profiling.
-- Remote relative Markdown links and images with explicit resource policy.
-- Image/PDF previews and single-file export through Share.
+- Remote relative Markdown document links using the implemented remote-resource resolver.
+- Standalone image/PDF browsing and original-file export. Markdown images already support inline preview, full-screen zoom and sharing the downsampled image.
 - Broader **verified** SSH key formats and optional passphrase conveniences.
 - Richer sorting and advanced symlink behavior.
 - Cached parsed-document eviction and stronger scroll restoration across app termination.

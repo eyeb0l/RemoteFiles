@@ -7,14 +7,17 @@ public struct DocumentContentView: View {
     public let text: String
     public let markdown: Bool
     public let source: Bool
-    @State private var prepared: AttributedString?
+    @State private var prepared: [MarkdownPart]?
+    public let location: RemoteDocumentLocation?
+    public let resolver: (any RemoteResourceResolving)?
     @State private var preparedSource: String?
     @State private var preparationFailed = false
 
-    public init(text: String, markdown: Bool, source: Bool) {
+    public init(text: String, markdown: Bool, source: Bool, location: RemoteDocumentLocation? = nil, resolver: (any RemoteResourceResolving)? = nil) {
         self.text = text
         self.markdown = markdown
         self.source = source
+        self.location = location; self.resolver = resolver
     }
 
     public var body: some View {
@@ -29,8 +32,9 @@ public struct DocumentContentView: View {
                 }
                 .accessibilityLabel(markdown ? "Markdown source" : "Plain text document")
             } else {
+                GeometryReader { viewport in
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
+                    LazyVStack(alignment: .leading, spacing: 12) {
                         if let prepared {
                             if preparationFailed {
                                 Label("The updated document could not be rendered. Showing the previous rendering.", systemImage: "exclamationmark.triangle")
@@ -40,18 +44,31 @@ public struct DocumentContentView: View {
                                 ProgressView("Preparing updated document…")
                                     .font(.callout)
                             }
-                            // The text changes only when preparation completes. Unrelated view updates
-                            // and switching to Source do not reparse the document.
-                            StructuredText(preparedSource ?? "", parser: PreparedDocumentParser(document: prepared))
-                                .textual.textSelection(.enabled)
-                                .textual.tableStyle(.overflow(relativeWidth: 3))
-                                .textual.overflowMode(.scroll)
-                                .textual.imageAttachmentLoader(NoImageLoader())
-                                .textual.emojiAttachmentLoader(NoImageLoader())
-                                .environment(\.openURL, OpenURLAction { url in
-                                    DocumentPolicy.allowsExternalLink(url) ? .systemAction : .discarded
-                                })
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            ForEach(prepared) { part in
+                                switch part.content {
+                                case .text(let attributed):
+                                    StructuredText(String(attributed.characters), parser: PreparedDocumentParser(document: attributed))
+                                        .textual.textSelection(.enabled)
+                                        .textual.tableStyle(.overflow(relativeWidth: 3))
+                                        .textual.overflowMode(.scroll)
+                                        .textual.imageAttachmentLoader(NoImageLoader())
+                                        .textual.emojiAttachmentLoader(NoImageLoader())
+                                        .environment(\.openURL, OpenURLAction { url in
+                                            DocumentPolicy.allowsExternalLink(url) ? .systemAction : .discarded
+                                        })
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                case .image(let reference, let alt):
+                                    #if os(iOS)
+                                    if let location, let resolver {
+                                        RemoteInlineImage(reference: reference, alt: alt, location: location,
+                                                          resolver: resolver, viewportHeight: viewport.size.height)
+                                    } else { Text(alt.isEmpty ? reference : alt).foregroundStyle(.secondary) }
+                                    #else
+                                    Text(alt.isEmpty ? reference : alt).foregroundStyle(.secondary)
+                                    #endif
+                                }
+                            }
+
                         } else if preparationFailed {
                             ContentUnavailableView("Rendered Preview Unavailable", systemImage: "doc.text",
                                                    description: Text("Use Source to read or copy this document."))
@@ -64,7 +81,9 @@ public struct DocumentContentView: View {
                     .padding(20)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .coordinateSpace(name: "readerViewport")
                 .accessibilityLabel("Rendered Markdown document")
+                }
             }
         }
         .task(id: markdown ? text : "") {
@@ -92,9 +111,9 @@ private struct PreparedDocumentParser: MarkupParser {
 
 private actor MarkdownPreparation {
     static let shared = MarkdownPreparation()
-    func prepare(_ text: String) throws -> AttributedString {
+    func prepare(_ text: String) throws -> [MarkdownPart] {
         try Task.checkCancellation()
-        let result = try DocumentPolicy.prepareMarkdown(text)
+        let result = try DocumentPolicy.remoteMarkdownParts(text)
         try Task.checkCancellation()
         return result
     }

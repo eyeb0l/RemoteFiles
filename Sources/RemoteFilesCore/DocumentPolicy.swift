@@ -58,12 +58,12 @@ public enum DocumentPolicy {
     /// Foundation is the same CommonMark/GFM parser used by Textual. This performs only
     /// attributed-output policy/formatting, never Markdown syntax parsing or resource loading.
     /// Invoke away from the main actor for substantial reports.
-    public static func prepareMarkdown(_ source: String) throws -> AttributedString {
+    public static func prepareMarkdown(_ source: String, preserveImages: Bool = false) throws -> AttributedString {
         var document = try AttributedString(markdown: source)
         // Replace image runs before handing content to Textual, so its default image loader never
         // receives a URL. Keep readable alt text, including for relative/data/file image URLs.
         for run in Array(document.runs).reversed() {
-            if run.imageURL != nil {
+            if run.imageURL != nil && !preserveImages {
                 // Foundation uses an object-replacement character for an image with no alt text.
                 let alt = String(document[run.range].characters)
                     .replacingOccurrences(of: "\u{FFFC}", with: "")
@@ -100,5 +100,30 @@ public enum DocumentPolicy {
             document.replaceSubrange(range, with: replacement)
         }
         return document
+    }
+}
+
+
+public struct MarkdownPart: Identifiable, Sendable {
+    public enum Content: Sendable { case text(AttributedString), image(reference: String, alt: String) }
+    public let id: Int
+    public let content: Content
+}
+
+public extension DocumentPolicy {
+    static func remoteMarkdownParts(_ source: String) throws -> [MarkdownPart] {
+        let document = try prepareMarkdown(source, preserveImages: true)
+        var parts: [MarkdownPart] = []
+        var start = document.startIndex
+        for run in document.runs where run.imageURL != nil {
+            if start < run.range.lowerBound {
+                parts.append(.init(id: parts.count, content: .text(AttributedString(document[start..<run.range.lowerBound]))))
+            }
+            parts.append(.init(id: parts.count, content: .image(reference: run.imageURL!.absoluteString,
+                alt: String(document[run.range].characters).replacingOccurrences(of: "\u{FFFC}", with: ""))))
+            start = run.range.upperBound
+        }
+        if start < document.endIndex { parts.append(.init(id: parts.count, content: .text(AttributedString(document[start..<document.endIndex])))) }
+        return parts
     }
 }
