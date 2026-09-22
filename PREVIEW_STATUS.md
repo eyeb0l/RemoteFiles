@@ -1,6 +1,6 @@
 # RemoteFiles preview status
 
-Recorded **22 September 2026**. The runnable iOS 27 preview implements saved connections, dedicated SSH identities, explicit host trust, real read-only SFTP browsing, favourites, recent references, Markdown/source/plain-text reading, refresh, cancellation, and bounded in-memory caching. **The decisive physical-iPhone-over-cellular/Tailscale acceptance remains outstanding.**
+Recorded **22 September 2026**. The runnable iOS 27 preview implements saved connections, dedicated SSH identities, explicit host trust, real read-only SFTP browsing, favourites, recent references, Markdown/source/plain-text reading, refresh, cancellation, and bounded in-memory caching. **Real-server browsing, reading and changed-file refresh now pass on the physical iPhone via Tailscale. The remaining lifecycle/accessibility/performance matrix is still outstanding.**
 
 ## Tested environment and dependency pins
 
@@ -93,11 +93,11 @@ Sampling during the **Debug** interval implicates **cold rendered-view and Swift
 
 ## Outstanding acceptance and known limits
 
-1. **Physical device:** signing is now configured and the app is installed (see the update below). The physical core/UI checks pass as recorded below; still run favourite → folder → rendered report → back with preserved position → changed-file refresh over cellular with Tailscale. No physical-device SFTP-over-cellular/Tailscale result is claimed.
+1. **Physical device:** [real-server acceptance](docs/REAL_SERVER_ACCEPTANCE.md) now verifies saved connection → real folder → rendered/source report → changed-file refresh → back via Tailscale, plus a fresh launch and actual project report. The screenshots show 5G; an independently controlled off-site run and preserved long-folder scroll position remain unverified.
 2. **Device permissions/lifecycle:** verify denied Local Network permission and actual-network background/foreground teardown/reconnect on hardware. Unit tests establish cancellation and unlocked-cache contracts, not operating-system suspension behavior.
 3. **Reader interaction/accessibility:** verify selection/copy, Copy Source clipboard contents, independent wide regions, VoiceOver, Reduce Motion, and Reduce Transparency. Light/default and dark/accessibility-large reader configurations have been visually inspected; the full interaction and accessibility matrix remains unverified.
 4. **Performance:** the [renderer patch](docs/READER_PERFORMANCE.md) moves highlighter startup off the main thread and reduced one measured simulator reader stall from 627.30 to 314.92 ms. Both physical before/after journeys recorded zero >250 ms hangs. Residual simulator runtime initialization remains; profile the representative large report and 1,000-entry directory and measure cached display. No additional >250 ms hang was recorded during the Release warm reopen, but neither the no-hitch nor sub-200 ms cached-display target is established.
-5. **Real connection setup, refresh, and navigation:** complete a real-server UI session proving connection setup/authentication, previous content remaining clearly stale after a failed refresh, and returning from a document with preserved folder position. Final-build demo navigation, source switching, scrolling, symlink opening, UI key generation, and deterministic service/state tests cover only parts of this journey.
+5. **Real connection setup, refresh, and navigation:** setup/authentication, matching host trust, actual read/changed-file refresh, saved-connection reopen and back navigation now pass on the physical phone. Still verify previous content remaining clearly stale after a failed refresh and preserved long-folder position.
 6. **Formats/scope:** image/PDF preview, relative Markdown resources, HTML, Mermaid, math, editing, uploads, general downloads, private-key export, and background transfers remain deferred in [ROADMAP.md](ROADMAP.md). The remote account itself may still have write permission; this app's operations are read only.
 
 The implementation is available for further profiling and device/interaction verification. The working preview has not yet passed the performance gate or the plan's decisive end-to-end acceptance.
@@ -126,3 +126,7 @@ The first physical screenshot exposed a malformed vertically stretched Add Conne
 ## Performance patch verification
 
 The optimized patched build is installed on the physical iPhone. The final run at **14:40:42** passed **27 core and 2 UI tests**, with **5 real-server cases skipped** and zero failures. Three focused tokenizer tests passed separately. See [READER_PERFORMANCE.md](docs/READER_PERFORMANCE.md) for measured before/after results and residual performance limits.
+
+## Real-server update
+
+At **15:08:30**, the physical iPhone completed an actual OpenSSH/SFTP journey against this Mac over Tailscale, including independently verified host trust and changed-file refresh. At **15:10:15**, a fresh app launch reopened the saved connection and read the real performance report. Three opt-in device tests (identity preparation, real journey, saved reopen) passed, zero failures in the final runs. **My MacBook** and the project favourite remain configured. The user explicitly approved a dedicated public-key authorization restricted to read-only SFTP. See [full evidence and remaining limits](docs/REAL_SERVER_ACCEPTANCE.md).
