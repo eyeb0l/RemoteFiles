@@ -34,7 +34,10 @@ public struct DocumentContentView: View {
             } else {
                 GeometryReader { viewport in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
+                    // Textual installs prepared content after its first layout. A lazy stack
+                    // can retain that initial zero-height row for image-free documents.
+                    // Mount text eagerly; RemoteInlineImage still gates I/O by viewport geometry.
+                    VStack(alignment: .leading, spacing: 12) {
                         if let prepared {
                             if preparationFailed {
                                 Label("The updated document could not be rendered. Showing the previous rendering.", systemImage: "exclamationmark.triangle")

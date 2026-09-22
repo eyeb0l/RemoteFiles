@@ -255,3 +255,23 @@ extension RealServerUITests {
         app.buttons["Done"].tap()
     }
 }
+
+extension RealServerUITests {
+    func testImageFreeReadmeRendersBeforeAndAfterSourceSwitch() throws {
+        try enabled()
+        let app = XCUIApplication(); app.launch()
+        let readme = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "README.md,")).firstMatch
+        XCTAssertTrue(readme.waitForExistence(timeout: 10), app.debugDescription)
+        if !readme.isHittable { app.swipeUp() }
+        readme.tap()
+        let heading = app.staticTexts["Build and run"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 12), "Image-free README must render visible content, not merely an empty scroll view.\n" + app.debugDescription)
+        let initial = XCTAttachment(screenshot: app.screenshot()); initial.name = "README rendered"; initial.lifetime = .keepAlways; add(initial)
+        app.buttons["Source"].tap()
+        XCTAssertTrue(app.scrollViews["Markdown source"].waitForExistence(timeout: 5))
+        app.buttons["Rendered"].tap()
+        XCTAssertTrue(heading.waitForExistence(timeout: 10))
+        app.buttons["Document actions"].tap(); app.buttons["Refresh"].tap()
+        XCTAssertTrue(heading.waitForExistence(timeout: 10))
+    }
+}

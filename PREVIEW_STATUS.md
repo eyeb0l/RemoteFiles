@@ -134,3 +134,12 @@ At **15:08:30**, the physical iPhone completed an actual OpenSSH/SFTP journey ag
 ## Remote Markdown images
 
 The physical iPhone now displays the real Wardrobe audit screenshots using the existing SFTP transport. The audit test passed inline display, full-screen opening, pinch zoom and the Share sheet. A separate device run passed nested/duplicate references, missing-image actions and a **73.5 MB** streamed image. Core OpenSSH/resource tests: **40 passed, zero failures**. See [REMOTE_IMAGES.md](docs/REMOTE_IMAGES.md) for exact limits, policy and evidence.
+
+## Blank rendered Markdown fix — 22 September, evening
+
+Fixed the image integration's lazy-layout regression that left image-free text
+rows at zero height. Text mounts eagerly; image I/O remains viewport-gated.
+A new regression test reproduced the blank README before the fix. The installed
+signed Release build passed three real-SFTP iPhone UI tests afterward: README
+rendering/source/refresh, another project Markdown document, and nested/missing/
+large inline images. See [details and screenshot](docs/REMOTE_IMAGES.md#text-only-rendering-regression-22-september-evening).

@@ -37,8 +37,8 @@ model in a later navigation change.
 - Foundation parses Markdown; its attributed image runs become image blocks interleaved
   with native Textual text segments. No regex Markdown parser. Images occupy their own
   row, including images embedded in prose; selection is per text segment.
-- A lazy stack mounts nearby rows. Image geometry requests bytes only within 300 points
-  of the viewport. Leaving that region releases the row's decoded image; its measured
+- Text rows mount eagerly so Textual can populate its initially empty layout. Image
+  geometry requests bytes only within 300 points of the viewport. Leaving that region releases the row's decoded image; its measured
   height is retained to avoid collapsing content above the reader.
 - Equal normalized references within a connection/document root share one in-flight
   transfer. Each consumer has independent cancellation; the final cancellation retires
@@ -112,3 +112,24 @@ Local evidence: `/private/tmp/remotefiles-large-images.xcresult`,
 `/private/tmp/remotefiles-audit-images.xcresult`, and the corresponding build/test logs.
 
 Final installed-build audit rerun: **passed at 15:52:53**, including inline image, zoom and Share. Evidence: `/private/tmp/remotefiles-images-final-audit2.xcresult`. An earlier repeat scrolled past the target while it loaded; the test now stops at the filename placeholder, consistent with viewport cancellation.
+
+## Text-only rendering regression (22 September, evening)
+
+The image integration's `LazyVStack` could retain Textual's initial empty row at
+zero height, leaving image-free Markdown blank even though Source was available.
+Text rows now mount in a `VStack`; image downloads remain gated by viewport
+geometry and retain their cancellation/cache behavior.
+
+The new physical-device README regression test failed before the fix and passed
+after it, checking actual rendered heading text, Source → Rendered, and Refresh.
+[Fixed README in dark mode](screenshots/readme-rendering-fixed.png).
+Evidence: `/private/tmp/remotefiles-blank-before.xcresult` and
+`/private/tmp/remotefiles-blank-after.xcresult`. The latter bundle also contains an
+audit test that could not find its required saved recent, before opening a document.
+
+Final physical-device rerun: **3 tests passed, zero failures**. Verified README
+initial rendering / Source toggle / Refresh (17.771 s), nested/duplicate and missing
+images plus the 73.5 MB image and full-screen viewer (146.912 s), and the real
+`READER_PERFORMANCE.md` text document (13.969 s). These are automation durations.
+Evidence: `/private/tmp/remotefiles-blank-final.xcresult`. The fixed signed Release
+build is installed and was relaunched normally after testing.
