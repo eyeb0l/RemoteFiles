@@ -70,8 +70,11 @@ Local evidence:
 - `/private/tmp/remotefiles-real-reopen.xcresult`: saved-connection reopen and real project report.
 - Adjacent `.log` files record the UI steps and assertions.
 
-Still outstanding: forced network interruption/stale rendering, denied Local
-Network permission, locked/encrypted-key lifecycle, preserved scroll position
+Denied Local Network access, permission recovery, and actual-network background
+teardown/foreground refetch now pass on the physical iPhone; see
+[device lifecycle evidence](DEVICE_PERMISSIONS_LIFECYCLE.md).
+
+Still outstanding: forced network interruption/stale rendering, locked/encrypted-key lifecycle, preserved scroll position
 for a long folder, full accessibility/selection matrix, and representative large
 report/directory performance. Read-only enforcement here is an OpenSSH command
 restriction; this UI test deliberately did not attempt remote writes.

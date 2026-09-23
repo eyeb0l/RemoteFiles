@@ -275,3 +275,120 @@ extension RealServerUITests {
         XCTAssertTrue(heading.waitForExistence(timeout: 10))
     }
 }
+
+extension RealServerUITests {
+    func testBackgroundReconnectsToChangedRealServerDocument() throws {
+        try enabled()
+        let app = XCUIApplication()
+        app.launch()
+        let connection = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Image checks,")).firstMatch
+        XCTAssertTrue(connection.waitForExistence(timeout: 10), app.debugDescription)
+        connection.tap()
+        let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "lifecycle.md,")).firstMatch
+        XCTAssertTrue(report.waitForExistence(timeout: 20), app.debugDescription)
+        report.tap()
+        XCTAssertTrue(app.staticTexts["Initial lifecycle revision"].waitForExistence(timeout: 15), app.debugDescription)
+
+        print("REMOTEFILES_LIFECYCLE_CONNECTED_READY")
+        Thread.sleep(forTimeInterval: 4)
+        XCUIDevice.shared.press(.home)
+        print("REMOTEFILES_LIFECYCLE_BACKGROUND_READY")
+        // The host test harness changes the remote fixture while this app is backgrounded.
+        Thread.sleep(forTimeInterval: 15)
+        app.activate()
+
+        let updated = app.staticTexts["Updated while backgrounded"]
+        XCTAssertTrue(updated.waitForExistence(timeout: 25),
+                      "Foregrounding must make a new SFTP read and display the changed server file.\n" + app.debugDescription)
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Connection paused while the app is in the background")).firstMatch.exists)
+        let capture = XCTAttachment(screenshot: app.screenshot())
+        capture.name = "Foreground reconnect fetched changed server document"
+        capture.lifetime = .keepAlways
+        add(capture)
+    }
+
+    func testLocalNetworkDeniedAndRestored() throws {
+        try enabled()
+        let host = try XCTUnwrap(ProcessInfo.processInfo.environment["REMOTEFILES_LAN_HOST"])
+        let fingerprint = try XCTUnwrap(ProcessInfo.processInfo.environment["REMOTEFILES_LAN_FINGERPRINT"])
+        let app = XCUIApplication()
+        app.launch()
+        let localProfile = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Local network check,")).firstMatch
+        if !localProfile.waitForExistence(timeout: 2) {
+            let add = app.buttons["Add Connection"]
+            if !add.isHittable { app.swipeUp() }
+            add.tap()
+            for (label, value) in [("Display name", "Local network check"),
+                                   ("Hostname or IP address", host),
+                                   ("Mac account username", "iris"),
+                                   ("Starting directory (optional)", "/Users/iris/Developer/RemoteFiles/.test-server/remote-images")] {
+                let field = app.textFields[label]
+                if !field.isHittable { app.swipeUp() }
+                field.tap(); field.typeText(value)
+            }
+            app.buttons["Save"].tap()
+        }
+        XCTAssertTrue(localProfile.waitForExistence(timeout: 10), app.debugDescription)
+        localProfile.tap()
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        if springboard.alerts.firstMatch.waitForExistence(timeout: 5) {
+            let deny = springboard.alerts.firstMatch.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Don")).firstMatch
+            XCTAssertTrue(deny.exists, springboard.alerts.firstMatch.debugDescription)
+            deny.tap()
+        }
+
+        let settings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        settings.launch()
+        let privacy = settings.buttons["Privacy & Security"]
+        if !privacy.isHittable { for _ in 0..<6 where !privacy.isHittable { settings.swipeUp() } }
+        XCTAssertTrue(privacy.waitForExistence(timeout: 5), settings.debugDescription)
+        privacy.tap()
+        let local = settings.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Local Network")).firstMatch
+        if !local.isHittable { for _ in 0..<5 where !local.isHittable { settings.swipeUp() } }
+        XCTAssertTrue(local.waitForExistence(timeout: 5), settings.debugDescription)
+        local.tap()
+        let permission = settings.switches["RemoteFiles"]
+        if !permission.isHittable { for _ in 0..<8 where !permission.isHittable { settings.swipeUp() } }
+        XCTAssertTrue(permission.waitForExistence(timeout: 5), settings.debugDescription)
+        permission.tap()
+        let permissionToggle = settings.switches["Local Network"]
+        XCTAssertTrue(permissionToggle.waitForExistence(timeout: 5), settings.debugDescription)
+        if permissionToggle.value as? String != "0" {
+            permissionToggle.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
+        }
+        XCTAssertEqual(permissionToggle.value as? String, "0")
+        defer {
+            settings.activate()
+            if permissionToggle.value as? String == "0" {
+                permissionToggle.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
+            }
+        }
+
+        app.activate()
+        let denied = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Local Network")).firstMatch
+        XCTAssertTrue(denied.waitForExistence(timeout: 15), "A denied LAN connection needs actionable guidance.\n" + app.debugDescription)
+        let retainedFile = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "images.md,")).firstMatch
+        XCTAssertTrue(app.buttons["Try Again"].exists || retainedFile.exists,
+                      "The folder must remain navigable, with either retry or its previously loaded entries.")
+        let failure = XCTAttachment(screenshot: app.screenshot())
+        failure.name = "Local Network denied with Settings guidance"
+        failure.lifetime = .keepAlways
+        add(failure)
+
+        settings.activate()
+        permissionToggle.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
+        XCTAssertEqual(permissionToggle.value as? String, "1")
+        app.activate()
+        let trust = app.buttons["Trust & Connect"]
+        if trust.waitForExistence(timeout: 15) {
+            XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", fingerprint)).firstMatch.exists)
+            trust.tap()
+        }
+        let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "images.md,")).firstMatch
+        XCTAssertTrue(report.waitForExistence(timeout: 25), "Re-enabling permission should permit the LAN SFTP read.\n" + app.debugDescription)
+        app.navigationBars.buttons["RemoteFiles"].tap()
+        localProfile.press(forDuration: 1)
+        app.buttons["Delete Connection"].tap()
+        XCTAssertFalse(localProfile.exists)
+    }
+}

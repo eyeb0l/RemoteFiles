@@ -33,7 +33,7 @@ Do these setup steps yourself on the Mac you intend to access. The app does not 
 5. Verify the displayed server SHA-256 fingerprint using a trusted channel. On the Mac, the public host-key fingerprint can be inspected with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256` (choose the public file for the algorithm presented). Accept trust only when it matches.
 6. Open a folder and choose **Folder actions → Add Favourite**. Open a `.md` report. Use **Rendered / Source**, **Copy Source**, and **Refresh** from its actions menu.
 
-The first connection on a local network may require iOS Local Network permission. A timeout alone does not identify whether the Mac is asleep, the tunnel is unavailable, a permission was denied, or network policy blocked access. Check these possible causes individually. Denied-permission behavior must still be verified on hardware.
+The first connection on a local network may require iOS Local Network permission. A timeout alone does not identify whether the Mac is asleep, the tunnel is unavailable, a permission was denied, or network policy blocked access. Check these possible causes individually. Denial and Settings recovery were verified on the physical iPhone; see [device permissions and lifecycle evidence](docs/DEVICE_PERMISSIONS_LIFECYCLE.md).
 
 ## Keys and trust
 

@@ -3,6 +3,7 @@ import Citadel
 import Crypto
 import Logging
 import NIOCore
+import NIOPosix
 import NIOSSH
 
 /// Read-only SFTP adapter. The SSH connection is reused; every operation owns a child
@@ -212,6 +213,9 @@ public actor SFTPRemoteFileService: RemoteFileService {
                 pending = nil; pendingProfile = nil; pendingControl = nil
             }
             if Task.isCancelled { throw CancellationError() }
+            if error is NIOConnectionError {
+                throw RemoteFileError.unavailable("Couldn't connect to this Mac. Check its address and network. For local Wi-Fi, allow RemoteFiles in iPhone Settings → Privacy & Security → Local Network, then try again.")
+            }
             throw error
         }
     }
