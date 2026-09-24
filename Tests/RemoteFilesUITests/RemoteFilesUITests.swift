@@ -183,6 +183,41 @@ extension RealServerUITests {
 
 
 extension RealServerUITests {
+    func testStandaloneImagePDFAndText() throws {
+        try enabled()
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["REMOTEFILES_FORMAT_FIXTURES"] == "1",
+                          "Generate format fixtures in the Image checks SFTP folder first")
+        let app = XCUIApplication(); app.launch()
+        let connection = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Image checks,")).firstMatch
+        XCTAssertTrue(connection.waitForExistence(timeout: 10)); connection.tap()
+
+        func open(_ name: String) {
+            let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", name + ",")).firstMatch
+            XCTAssertTrue(row.waitForExistence(timeout: 20), app.debugDescription)
+            if !row.isHittable { app.swipeUp() }
+            row.tap()
+        }
+        func back() { app.navigationBars.buttons["remote-images"].tap() }
+
+        open("sample.png")
+        let image = app.buttons["Open image sample.png full screen"]
+        XCTAssertTrue(image.waitForExistence(timeout: 30), app.debugDescription)
+        image.tap()
+        XCTAssertTrue(app.buttons["Share"].waitForExistence(timeout: 10))
+        app.buttons["Done"].tap(); back()
+
+        open("sample.pdf")
+        XCTAssertTrue(app.staticTexts["1 page"].waitForExistence(timeout: 30), app.debugDescription)
+        let pdf = XCTAttachment(screenshot: app.screenshot()); pdf.name = "Real SFTP PDF preview"; pdf.lifetime = .keepAlways; add(pdf)
+        back()
+
+        open("sample.csv")
+        XCTAssertTrue(app.scrollViews["Plain text document"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "name,count")).firstMatch.exists)
+    }
+}
+
+extension RealServerUITests {
     func testAuditRemoteInlineImages() throws {
         try enabled()
         let app = XCUIApplication(); app.launch()

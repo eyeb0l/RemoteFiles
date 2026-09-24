@@ -1,7 +1,7 @@
 import Foundation
 
 public enum DocumentKind: Equatable, Sendable {
-    case markdown, plainText, unsupported
+    case markdown, plainText, image, pdf, unsupported
 }
 
 public enum DocumentPreview: Equatable, Sendable {
@@ -20,12 +20,15 @@ public enum DocumentPolicy {
         let name = filename.split(separator: "/").last.map(String.init)?.lowercased() ?? ""
         let suffix = name.split(separator: ".", omittingEmptySubsequences: false).last.map(String.init) ?? ""
         if ["md", "markdown"].contains(suffix) { return .markdown }
+        if ["jpg", "jpeg", "png", "heic", "heif", "gif", "tif", "tiff", "webp", "bmp"].contains(suffix) { return .image }
+        if suffix == "pdf" { return .pdf }
         let textExtensions: Set<String> = [
             "txt", "text", "log", "json", "jsonl", "ndjson", "yaml", "yml", "toml", "ini", "conf", "config",
             "env", "properties", "csv", "tsv", "xml", "html", "htm", "css", "scss", "less", "svg", "sql",
             "swift", "m", "mm", "h", "c", "cc", "cpp", "hpp", "rs", "go", "py", "rb", "php", "java", "kt",
             "kts", "js", "jsx", "ts", "tsx", "sh", "bash", "zsh", "fish", "ps1", "r", "lua", "dart",
             "vue", "svelte", "graphql", "gql", "gitignore", "gitattributes", "editorconfig", "lock",
+            "rst", "adoc", "diff", "patch", "ipynb", "proto", "tf", "tfvars", "cfg", "bat", "mk",
         ]
         // Extensionless names (including dotfiles) are candidates; byte validation remains mandatory.
         if !name.contains(".") || name.first == "." || textExtensions.contains(suffix) { return .plainText }
@@ -36,7 +39,7 @@ public enum DocumentPolicy {
         guard data.count <= max(0, maxBytes) else { return .tooLarge }
         guard !data.isEmpty else { return .empty }
         let kind = kind(filename: filename)
-        guard kind != .unsupported else { return .unsupportedFileType }
+        guard kind == .plainText || kind == .markdown else { return .unsupportedFileType }
         // NUL and other non-whitespace C0 controls are a deliberate binary signal even in valid UTF-8.
         guard !data.contains(where: { ($0 < 0x20 && ![0x09, 0x0A, 0x0D].contains($0)) || $0 == 0x7F }),
               var text = String(data: data, encoding: .utf8) else { return .unsupportedEncodingOrBinary }

@@ -1,6 +1,6 @@
 # RemoteFiles preview status
 
-Recorded **22 September 2026**, with device-permission and lifecycle results updated **23 September 2026**. The runnable iOS 27 preview implements saved connections, dedicated SSH identities, explicit host trust, real read-only SFTP browsing, favourites, recent references, Markdown/source/plain-text reading, refresh, cancellation, and bounded in-memory caching. **Real-server browsing, reading and changed-file refresh now pass on the physical iPhone via Tailscale. Locked-device, encrypted-key, accessibility, and performance checks remain outstanding.**
+Recorded **22 September 2026**, with format-preview results updated **24 September 2026**. The runnable iOS 27 preview implements saved connections, dedicated SSH identities, explicit host trust, real read-only SFTP browsing, favourites, recent references, Markdown/source/plain-text and standalone image/PDF reading, refresh, cancellation, and bounded caching. **Real-server browsing, reading and changed-file refresh now pass on the physical iPhone via Tailscale. Locked-device, encrypted-key, accessibility, and performance checks remain outstanding.**
 
 ## Tested environment and dependency pins
 
@@ -98,7 +98,7 @@ Sampling during the **Debug** interval implicates **cold rendered-view and Swift
 3. **Reader interaction/accessibility:** verify selection/copy, Copy Source clipboard contents, independent wide regions, VoiceOver, Reduce Motion, and Reduce Transparency. Light/default and dark/accessibility-large reader configurations have been visually inspected; the full interaction and accessibility matrix remains unverified.
 4. **Performance:** the [renderer patch](docs/READER_PERFORMANCE.md) moves highlighter startup off the main thread and reduced one measured simulator reader stall from 627.30 to 314.92 ms. Both physical before/after journeys recorded zero >250 ms hangs. Residual simulator runtime initialization remains; profile the representative large report and 1,000-entry directory and measure cached display. No additional >250 ms hang was recorded during the Release warm reopen, but neither the no-hitch nor sub-200 ms cached-display target is established.
 5. **Real connection setup, refresh, and navigation:** setup/authentication, matching host trust, actual read/changed-file refresh, saved-connection reopen and back navigation now pass on the physical phone. Still verify previous content remaining clearly stale after a failed refresh and preserved long-folder position.
-6. **Formats/scope:** Markdown SFTP images now support lazy inline loading, zoom and Share ([evidence](docs/REMOTE_IMAGES.md)). Standalone image/PDF browsing, relative document links, HTML, Mermaid, math, editing, uploads, general downloads, private-key export, and background transfers remain deferred in [ROADMAP.md](ROADMAP.md). The remote account itself may still have write permission; this app's operations are read only.
+6. **Formats/scope:** Markdown SFTP images support lazy inline loading, zoom and Share ([evidence](docs/REMOTE_IMAGES.md)). Standalone images and PDFs now have native previews, with text/config/code still read as UTF-8. Relative document links, HTML, Mermaid, math, editing, uploads, original-file export, private-key export, and background transfers remain deferred in [ROADMAP.md](ROADMAP.md). The remote account itself may still have write permission; this app's operations are read only.
 
 The implementation is available for further profiling and device/interaction verification. The working preview has not yet passed the performance gate or the plan's decisive end-to-end acceptance.
 
@@ -143,3 +143,7 @@ A new regression test reproduced the blank README before the fix. The installed
 signed Release build passed three real-SFTP iPhone UI tests afterward: README
 rendering/source/refresh, another project Markdown document, and nested/missing/
 large inline images. See [details and screenshot](docs/REMOTE_IMAGES.md#text-only-rendering-regression-22-september-evening).
+
+## Standalone formats — 24 September
+
+Standalone JPEG/PNG/HEIC/HEIF/GIF/TIFF/WebP/BMP files now use the existing bounded SFTP resource cache and ImageIO downsampling. Tap an image for the existing full-screen zoom and Share view. PDFs use the same 128 MiB transfer cap and open in PDFKit; UTF-8 text/config/code, CSV and JSON retain the 2 MiB text-reader limit. `python3 Fixtures/generate-format-fixtures.py .test-server/remote-images` creates a tiny PNG, one-page PDF, CSV and JSON without scanning the remote directory. A signed Release UI test on the physical iPhone passed PNG display and full-screen opening, PDF page count and visible page content, and CSV reading over the saved real SFTP connection. [The PDF capture](docs/screenshots/standalone-pdf-iphone.png) was inspected visually. The full local core suite passed **41 tests, zero failures**, with **six optional real-server cases skipped**. Original-file export remains deferred.

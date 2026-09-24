@@ -25,14 +25,19 @@ struct ReaderView: View {
                     Text("Source").tag(true)
                 }.pickerStyle(.segmented).padding(.horizontal).padding(.vertical, 8)
             }
-            if let error { StatusBanner(message: preview == nil ? error : "Previously loaded copy · \(error)", error: true) }
-            else if loading && preview != nil { StatusBanner(message: "Previously loaded copy · refreshing…") }
+            if !isMedia {
+                if let error { StatusBanner(message: preview == nil ? error : "Previously loaded copy · \(error)", error: true) }
+                else if loading && preview != nil { StatusBanner(message: "Previously loaded copy · refreshing…") }
+            }
             Group {
-                if let preview {
+                if isMedia {
+                    RemoteMediaView(model: model, profile: profile, entry: entry,
+                                    kind: DocumentPolicy.kind(filename: entry.name), refreshID: refreshID)
+                } else if let preview {
                     switch preview {
                     case .text(let text, let markdown): DocumentContentView(text: text, markdown: markdown, source: source, location: .init(profile: profile, path: entry.path), resolver: model.resources).id(imageVersion)
                     case .empty: ContentUnavailableView("This file is empty", systemImage: "doc", description: Text("Refresh after it has been updated on your Mac."))
-                    case .unsupportedFileType: infoView("Preview not available", detail: "This preview supports Markdown and UTF-8 text. Other file previews are planned.")
+                    case .unsupportedFileType: infoView("Preview not available", detail: "This file type is not supported for preview.")
                     case .unsupportedEncodingOrBinary: infoView("Can’t display this file", detail: "This file contains binary data or text that is not UTF-8.")
                     case .tooLarge: infoView("Too Large to Preview", detail: "The document exceeds the 2 MiB preview limit.")
                     }
@@ -63,10 +68,15 @@ struct ReaderView: View {
         }
         .task(id: "\(model.isForeground)-\(model.sessionRevision)-\(refreshID)") { await reload() }
     }
+    private var isMedia: Bool {
+        let kind = DocumentPolicy.kind(filename: entry.name)
+        return kind == .image || kind == .pdf
+    }
     private func infoView(_ title: String, detail: String) -> some View {
         ContentUnavailableView(title, systemImage: "doc", description: Text("\(detail)\n\n\(entry.name)\n\(entry.size.map { ByteCountFormatter.string(fromByteCount: Int64(clamping: $0), countStyle: .file) } ?? "Size unavailable")"))
     }
     private func reload() async {
+        guard !isMedia else { return }
         guard model.isForeground else { loading = false; error = "Connection paused while the app is in the background."; return }
         guard DocumentPolicy.kind(filename: entry.name) != .unsupported else { preview = .unsupportedFileType; return }
         let token = UUID(); requestID = token

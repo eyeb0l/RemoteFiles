@@ -11,6 +11,18 @@ final class DocumentPolicyTests: XCTestCase {
         XCTAssertEqual(DocumentPolicy.decode(Data("%PDF text".utf8), filename: "report.pdf"), .unsupportedFileType)
     }
 
+    func testStandaloneImagePDFAndAdditionalTextKinds() {
+        for name in ["photo.JPG", "shot.png", "phone.HEIC", "animation.gif", "scan.tiff", "web.webp", "bitmap.bmp"] {
+            XCTAssertEqual(DocumentPolicy.kind(filename: name), .image, name)
+            XCTAssertEqual(DocumentPolicy.decode(Data("not image bytes".utf8), filename: name), .unsupportedFileType)
+        }
+        XCTAssertEqual(DocumentPolicy.kind(filename: "REPORT.PDF"), .pdf)
+        XCTAssertEqual(DocumentPolicy.kind(filename: "report.pdf.exe"), .unsupported)
+        for name in ["changes.diff", "fix.patch", "notebook.ipynb", "settings.cfg", "main.tf"] {
+            XCTAssertEqual(DocumentPolicy.decode(Data("text".utf8), filename: name), .text("text", markdown: false), name)
+        }
+    }
+
     func testEmptyBOMBinaryAndInvalidEncodingAreDeliberateStates() {
         XCTAssertEqual(DocumentPolicy.decode(Data(), filename: "empty.md"), .empty)
         XCTAssertEqual(DocumentPolicy.decode(Data([0xEF, 0xBB, 0xBF]), filename: "empty.txt"), .empty)

@@ -85,7 +85,14 @@ struct FolderView: View {
         }.padding(.horizontal).background(.bar)
     }
     private func entryRow(_ entry: RemoteEntry) -> some View {
-        LocationRow(name: entry.name, subtitle: metadata(entry), symbol: entry.kind == .directory ? "folder.fill" : entry.kind == .symlink ? "link" : entry.name.lowercased().hasSuffix(".md") ? "doc.richtext" : "doc.text", color: entry.kind == .directory ? .indigo : .secondary)
+        LocationRow(name: entry.name, subtitle: metadata(entry), symbol: entry.kind == .directory ? "folder.fill" : entry.kind == .symlink ? "link" : fileSymbol(entry.name), color: entry.kind == .directory ? .indigo : .secondary)
+    }
+    private func fileSymbol(_ name: String) -> String {
+        switch DocumentPolicy.kind(filename: name) {
+        case .markdown, .pdf: "doc.richtext"
+        case .image: "photo"
+        case .plainText, .unsupported: "doc.text"
+        }
     }
     private func metadata(_ entry: RemoteEntry) -> String {
         if entry.kind == .directory { return "Folder" }

@@ -45,7 +45,7 @@ Profiles, favourites, recent references, and public identity metadata are stored
 
 ## Reader scope
 
-Markdown, UTF-8 text/config/code, a 2 MiB receive-time bound, explicit empty/binary/unsupported states. Markdown images load lazily through SFTP relative to the document directory, with bounded disk/pixel caches, retry, zoom and Share. Web/file/data image URLs never load. See [remote image policy](docs/REMOTE_IMAGES.md). Only a tapped absolute HTTP/HTTPS link may open; unsafe schemes and relative links are disabled. Tables/code scroll within the rendered document. Markdown source and plain text remain read only. A failed refresh labels the previous content as previously loaded.
+Markdown and UTF-8 text/config/code use a 2 MiB receive-time bound and explicit empty/binary/unsupported states. Standalone JPEG, PNG, HEIC/HEIF, GIF, TIFF, WebP and BMP images open with bounded SFTP caching and downsampled display; tap for full-screen zoom and Share. Animated images show their first frame. PDFs open in a native scrolling, zoomable reader. Image/PDF transfers are capped at 128 MiB per file. Markdown images load lazily through SFTP relative to the document directory, with bounded disk/pixel caches, retry, zoom and Share. Web/file/data image URLs never load. See [remote image policy](docs/REMOTE_IMAGES.md). Only a tapped absolute HTTP/HTTPS Markdown link may open; unsafe schemes and relative links are disabled. Tables/code scroll within the rendered document. Markdown source and plain text remain read only. A failed refresh labels the previous content as previously loaded.
 
 ## Reproducible verification
 
