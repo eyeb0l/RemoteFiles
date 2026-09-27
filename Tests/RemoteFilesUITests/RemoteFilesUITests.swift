@@ -2,6 +2,30 @@ import XCTest
 
 @MainActor
 final class RemoteFilesUITests: XCTestCase {
+    func testLargeFolderKeepsScrollPositionAfterOpeningFile() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        app.launch()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Mac")).firstMatch.tap()
+        let largeFolder = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Thousand files,")).firstMatch
+        XCTAssertTrue(largeFolder.waitForExistence(timeout: 10))
+        largeFolder.tap()
+        XCTAssertTrue(app.navigationBars["Thousand files"].waitForExistence(timeout: 10))
+        for _ in 0..<5 { app.swipeUp() }
+        let visibleReport = try XCTUnwrap(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Report "))
+            .allElementsBoundByIndex.first(where: { $0.isHittable }))
+        let label = visibleReport.label
+        visibleReport.tap()
+        XCTAssertTrue(app.navigationBars.buttons["Thousand files"].waitForExistence(timeout: 10))
+        app.navigationBars.buttons["Thousand files"].tap()
+        let restored = app.buttons[label]
+        XCTAssertTrue(restored.waitForExistence(timeout: 5) && restored.isHittable,
+                      "Returning from a file should preserve the folder's scroll position")
+        XCTAssertFalse(app.staticTexts["Showing cached folder · refreshing…"].exists,
+                       "Back navigation should not refetch a cached listing")
+    }
+
     func testBrowseReadRefreshAndReturn() throws {
         continueAfterFailure = false
         let app = XCUIApplication()

@@ -41,7 +41,7 @@ Generated Ed25519 keys and verified OpenSSH Ed25519 import formats are documente
 
 Unknown hosts require explicit trust. Changed host keys block before account authentication. The reset flow removes trust and requires another verification; it does not silently accept the new key. A key used by a saved connection cannot be deleted.
 
-Profiles, favourites, recent references, and public identity metadata are stored atomically in Application Support. Private material stays in Keychain. Recent files are references, not persistent offline copies. In-memory cache is bounded to ten directory results and at most four documents / 6 MiB, and cleared on memory warnings or disconnect. Networking and unlocked keys are retired on backgrounding.
+Profiles, favourites, recent references, and public identity metadata are stored atomically in Application Support. Private material stays in Keychain. Recent files are references, not persistent offline copies. In-memory cache is bounded to ten prepared directory listings and at most four documents / 6 MiB, and cleared on memory warnings or disconnect. Returning to a cached folder preserves its scroll position without a new listing; use pull-to-refresh or **Refresh** to check for remote changes. Networking and unlocked keys are retired on backgrounding.
 
 ## Reader scope
 

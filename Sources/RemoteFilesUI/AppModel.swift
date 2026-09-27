@@ -38,7 +38,7 @@ final class AppModel {
     var demo = false
     var isForeground = true
     private var realMetadata = AppMetadata()
-    private var directories: [String: DirectorySnapshot] = [:]
+    private var directories: [String: FolderListing] = [:]
     private var documents: [String: Data] = [:]
     private var directoryOrder: [String] = []
     private var documentOrder: [String] = []
@@ -122,8 +122,8 @@ final class AppModel {
     }
     func clearCaches() { directories.removeAll(); documents.removeAll(); directoryOrder.removeAll(); documentOrder.removeAll() }
     private func key(_ id: UUID, _ path: String) -> String { "\(id.uuidString):\(path)" }
-    func cachedDirectory(_ id: UUID, path: String) -> DirectorySnapshot? { directories[key(id, path)] }
-    func cache(_ value: DirectorySnapshot, id: UUID, requestedPath: String) {
+    func cachedListing(_ id: UUID, path: String) -> FolderListing? { directories[key(id, path)] }
+    func cache(_ value: FolderListing, id: UUID, requestedPath: String) {
         let k = key(id, requestedPath)
         directories[k] = value; directoryOrder.removeAll { $0 == k }; directoryOrder.append(k)
         while directoryOrder.count > 10 { directories.removeValue(forKey: directoryOrder.removeFirst()) }
