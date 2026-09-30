@@ -43,6 +43,10 @@ extension StructuredText {
     @ViewBuilder
     private var label: some View {
       let rowRuns = content.blockRuns(parent: intent)
+      let headers: [String] = rowRuns.first.map { row in
+        let cells = content[row.range].blockRuns(parent: row.intent)
+        return cells.map { String(content[$0.range].characters) }
+      } ?? []
 
       Grid(horizontalSpacing: spacing.horizontal, verticalSpacing: spacing.vertical) {
         ForEach(rowRuns.indices, id: \.self) { rowIndex in
@@ -55,7 +59,8 @@ extension StructuredText {
               let cellRun = columnRuns[columnIndex]
               let cellContent = rowContent[cellRun.range]
 
-              TableCell(cellContent, row: rowIndex, column: columnIndex)
+              TableCell(cellContent, row: rowIndex, column: columnIndex,
+                        header: headers.indices.contains(columnIndex) ? headers[columnIndex] : "")
                 .gridColumnAlignment(alignment(for: columnIndex))
             }
           }

@@ -77,6 +77,11 @@ native scroll/pinch zoom and Share. A failed full-screen reload discards the pre
 not the potentially enormous original source. The system share sheet is shown only
 on an explicit tap; nothing is sent automatically.
 
+The full-screen image is an accessible image labelled with the Markdown alt text,
+or its filename when alt text is blank. Dismissing the viewer restores VoiceOver
+focus to the image control (or **Open file**) that presented it. Standalone image
+previews use the filename and return focus to their full-screen opener.
+
 ## Verification
 
 - 40 core tests passed, zero failures, with the independent real OpenSSH fixture.

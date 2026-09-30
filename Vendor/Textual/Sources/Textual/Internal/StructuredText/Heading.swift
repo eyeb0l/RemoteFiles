@@ -22,6 +22,7 @@ extension StructuredText {
 
       AnyView(resolvedStyle)
         .id(content.slugified())
+        .accessibilityAddTraits(.isHeader)
     }
 
     private var label: some View {

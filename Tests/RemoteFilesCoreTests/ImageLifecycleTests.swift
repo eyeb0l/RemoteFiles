@@ -115,6 +115,29 @@ private struct ImageViewerFixture: View {
     func testIdentityFailureDiscardsPreviousFullScreenImage() async throws {
         try await checkReloadFailure(IdentityError.missingPassphrase)
     }
+    private func checkImageAccessibility(alt: String, expected: String) async throws {
+        let url = try png()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let resolver = ImageReloadResolver(file: url, reloadError: IdentityError.missingPassphrase)
+        let profile = ConnectionProfile(name: "Image accessibility tests", host: "fixture.invalid", username: "fixture", identityID: UUID())
+        let item = ImagePresentation(reference: "image.png", filename: "image.png",
+                                    location: .init(profile: profile, path: "/fixture/report.md"), alt: alt)
+        let previousWindow = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first { $0.isKeyWindow }
+        let window = try host(RemoteImageViewer(item: item, resolver: resolver).environment(\.scenePhase, .active))
+        defer { window.isHidden = true; window.rootViewController = nil; previousWindow?.makeKey() }
+        try await waitUntil { self.hasZoomImage(window) }
+        let image = try XCTUnwrap(views(window).compactMap { $0 as? UIScrollView }
+            .flatMap(\.subviews).compactMap { $0 as? UIImageView }.first { $0.image != nil })
+        XCTAssertTrue(image.isAccessibilityElement)
+        XCTAssertTrue(image.accessibilityTraits.contains(.image))
+        XCTAssertEqual(image.accessibilityLabel, expected)
+    }
+    func testFullScreenImageExposesAltDescription() async throws {
+        try await checkImageAccessibility(alt: "Purple project diagram", expected: "Purple project diagram")
+    }
+    func testFullScreenImageUsesFilenameWhenAltIsBlank() async throws {
+        try await checkImageAccessibility(alt: " \n\t", expected: "image.png")
+    }
     func testMemoryWarningEvictsBothDecodedImageSizes() async throws {
         let previousWindow = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first { $0.isKeyWindow }
         let window = try host(RemoteFilesRootView().environment(\.scenePhase, .active))

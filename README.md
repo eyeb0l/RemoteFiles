@@ -57,7 +57,11 @@ scripts/test-openssh.sh xcodebuild -project RemoteFiles.xcodeproj \
   -derivedDataPath DerivedData -collect-test-diagnostics never \
   -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- test
 python3 Fixtures/generate-fixtures.py /private/tmp/remotefiles-fixtures
+# Optional actual iOS VoiceOver speech/focus checks (Xcode 27, local fixtures):
+scripts/test-voiceover.sh SIMULATOR_UDID /private/tmp/remotefiles-voiceover-run
 ```
+
+The optional VoiceOver runner copies the project into its output directory and substitutes a local fixture entry point. It tests the current production reader/image views, records actual `XCUIVoiceOverService` utterances and screenshots, and restores the original Simulator VoiceOver enabled state after each test. Use a fresh output directory. It does not install on a physical phone or open external links. Simulator speech/focus checks do not establish touch gestures, rotor behaviour, Braille, or physical-device acceptance.
 
 Use the signed simulator test command for the actual Keychain tests: an unsigned simulator test host returns Keychain error `-34018`. The fixture launcher forwards its environment into iOS XCTest through `TEST_RUNNER_REMOTEFILES_*`; do not run the integration test command without the launcher and count skipped server tests as passed. `-collect-test-diagnostics never` avoids diagnostic collection unrelated to this bounded test run.
 
@@ -67,4 +71,4 @@ See [PREVIEW_STATUS.md](PREVIEW_STATUS.md) for **actual** results and outstandin
 
 ## Renderer performance
 
-Textual is locally vendored at the original pinned revision with two focused startup fixes. [Provenance](Vendor/Textual/UPSTREAM.md) records the changes and license; [performance evidence](docs/READER_PERFORMANCE.md) records simulator and physical-iPhone measurements, tests, and remaining limits.
+Textual is locally vendored at the original pinned revision with focused startup and reader accessibility fixes. [Provenance](Vendor/Textual/UPSTREAM.md) records the changes and license; [performance evidence](docs/READER_PERFORMANCE.md) records simulator and physical-iPhone measurements, tests, and remaining limits.

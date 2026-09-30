@@ -18,6 +18,7 @@ struct RemoteMediaView: View {
     @State private var retryID = 0
     @State private var lastRetryID = 0
     @State private var viewer: ImagePresentation?
+    @AccessibilityFocusState(for: .voiceOver) private var imageFocused: Bool
 
     private var location: RemoteDocumentLocation { .init(profile: profile, path: entry.path) }
     private var reference: String {
@@ -43,6 +44,7 @@ struct RemoteMediaView: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Open image \(entry.name) full screen")
+                        .accessibilityFocused($imageFocused)
                     }
                 } else if kind == .pdf, let pdf {
                     VStack(spacing: 0) {
@@ -67,7 +69,7 @@ struct RemoteMediaView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .task(id: "\(model.isForeground)-\(model.sessionRevision)-\(refreshID)-\(retryID)") { await load() }
-        .fullScreenCover(item: $viewer) { item in RemoteImageViewer(item: item, resolver: model.resources) }
+        .fullScreenCover(item: $viewer, onDismiss: { imageFocused = true }) { item in RemoteImageViewer(item: item, resolver: model.resources) }
     }
 
     private func load() async {

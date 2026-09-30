@@ -72,6 +72,7 @@ extension StructuredText {
           )
         )
       )
+      .accessibilityHidden(true)
     }
 
     private var indentationLevel: Int {

@@ -18,14 +18,18 @@ struct RemoteInlineImage: View {
     @State private var reservedHeight: CGFloat?
     @State private var retry = 0
     @State private var viewer: ImagePresentation?
+    private enum ImageAction: Hashable { case image, openFile }
+    @AccessibilityFocusState(for: .voiceOver) private var focusedAction: ImageAction?
+    @State private var invokingAction: ImageAction?
     private var filename: String { URLComponents(string: reference)?.path.split(separator: "/").last.map(String.init) ?? reference }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let image {
-                Button { open() } label: {
+                Button { open(from: .image) } label: {
                     Image(uiImage: UIImage(cgImage: image.image)).resizable().scaledToFit()
                         .frame(maxHeight: 520).frame(maxWidth: .infinity)
                 }.buttonStyle(.plain).accessibilityLabel("Open image \(filename)")
+                    .accessibilityFocused($focusedAction, equals: .image)
                 if !alt.isEmpty { Text(alt).font(.caption).foregroundStyle(.secondary) }
             } else {
                 HStack {
@@ -38,7 +42,8 @@ struct RemoteInlineImage: View {
                     Text(failure).font(.caption).foregroundStyle(.secondary).lineLimit(3)
                     HStack {
                         Button("Tap to retry") { retry += 1 }
-                        Button("Open file") { open() }
+                        Button("Open file") { open(from: .openFile) }
+                            .accessibilityFocused($focusedAction, equals: .openFile)
                     }.font(.callout)
                 } else { Text("Image loads as you scroll").font(.caption).foregroundStyle(.secondary) }
             }
@@ -67,11 +72,14 @@ struct RemoteInlineImage: View {
             catch { if !Task.isCancelled { failure = error.localizedDescription } }
         }
         .onDisappear { image = nil }
-        .fullScreenCover(item: $viewer) { item in
+        .fullScreenCover(item: $viewer, onDismiss: { focusedAction = invokingAction }) { item in
             RemoteImageViewer(item: item, resolver: resolver)
         }
     }
-    private func open() { viewer = ImagePresentation(reference: reference, filename: filename, location: location) }
+    private func open(from action: ImageAction) {
+        invokingAction = action
+        viewer = ImagePresentation(reference: reference, filename: filename, location: location, alt: alt)
+    }
 }
 
 struct ImagePresentation: Identifiable {
@@ -79,6 +87,10 @@ struct ImagePresentation: Identifiable {
     let reference: String
     let filename: String
     let location: RemoteDocumentLocation
+    var alt: String = ""
+    var accessibilityDescription: String {
+        alt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? filename : alt
+    }
 }
 
 struct RemoteImageViewer: View {
@@ -93,7 +105,7 @@ struct RemoteImageViewer: View {
     var body: some View {
         NavigationStack {
             Group {
-                if let image { ZoomableRemoteImage(image: UIImage(cgImage: image.image)) }
+                if let image { ZoomableRemoteImage(image: UIImage(cgImage: image.image), description: item.accessibilityDescription) }
                 else if let failure {
                     ContentUnavailableView {
                         Label(item.filename, systemImage: "photo")
@@ -142,16 +154,23 @@ private struct ImageShareSheet: UIViewControllerRepresentable {
 
 private struct ZoomableRemoteImage: UIViewRepresentable {
     let image: UIImage
+    let description: String
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeUIView(context: Context) -> ImageZoomScrollView {
         let scroll = ImageZoomScrollView()
         scroll.delegate = context.coordinator
         scroll.minimumZoomScale = 1; scroll.maximumZoomScale = 6
         scroll.imageView.image = image
+        scroll.imageView.isAccessibilityElement = true
+        scroll.imageView.accessibilityTraits = .image
+        scroll.imageView.accessibilityLabel = description
         scroll.addSubview(scroll.imageView)
         return scroll
     }
-    func updateUIView(_ scroll: ImageZoomScrollView, context: Context) { scroll.imageView.image = image }
+    func updateUIView(_ scroll: ImageZoomScrollView, context: Context) {
+        scroll.imageView.image = image
+        scroll.imageView.accessibilityLabel = description
+    }
     final class Coordinator: NSObject, UIScrollViewDelegate {
         func viewForZooming(in scrollView: UIScrollView) -> UIView? { (scrollView as? ImageZoomScrollView)?.imageView }
     }

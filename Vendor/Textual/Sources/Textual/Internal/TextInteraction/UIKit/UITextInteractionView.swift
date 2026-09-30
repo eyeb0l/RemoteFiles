@@ -40,6 +40,10 @@
 
       super.init(frame: .zero)
       self.backgroundColor = .clear
+      // Selection gestures belong to this transparent overlay. Assistive technologies
+      // read the underlying SwiftUI text and links, not a duplicate UITextInput.
+      isAccessibilityElement = false
+      accessibilityElementsHidden = true
 
       setUp()
     }
