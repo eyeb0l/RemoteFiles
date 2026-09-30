@@ -87,17 +87,20 @@ struct ReaderView: View {
         do {
             let bytes = try await model.service.readFile(profile: profile, path: entry.path, limit: DocumentPolicy.previewByteLimit)
             let decoded = await Task.detached(priority: .userInitiated) { DocumentPolicy.decode(bytes, filename: entry.name) }.value
-            try Task.checkCancellation()
-            guard token == requestID else { return }
-            if refreshID != lastImageRefresh {
-                await model.resources.clearCache()
-                await RemoteImageDecoder.shared.clear()
-                lastImageRefresh = refreshID; imageVersion += 1
-            }
-            preview = decoded; loadedAt = .now; copied = false
-            model.cache(bytes, id: profile.id, path: entry.path)
-            model.connectionStates[profile.id] = "Connected"
-            await model.recordRecent(profile: profile, entry: entry)
+            let refreshImages = refreshID != lastImageRefresh
+            let published = try await ReaderReloadPublication.perform(
+                clearImages: refreshImages,
+                isCurrent: { token == requestID },
+                clearResources: { await model.resources.clearCache() },
+                clearDecoded: { await RemoteImageDecoder.shared.clear() },
+                publish: {
+                    if refreshImages { lastImageRefresh = refreshID; imageVersion += 1 }
+                    preview = decoded; loadedAt = .now; copied = false
+                    model.cache(bytes, id: profile.id, path: entry.path)
+                    model.connectionStates[profile.id] = "Connected"
+                    await model.recordRecent(profile: profile, entry: entry)
+                })
+            guard published else { return }
         } catch {
             guard token == requestID else { return }
             if !Task.isCancelled && !(error is CancellationError) {

@@ -26,7 +26,7 @@ let package = Package(
             .product(name: "Crypto", package: "swift-crypto")
         ]),
         .target(name: "RemoteFilesUI", dependencies: ["RemoteFilesCore", .product(name: "Textual", package: "textual")]),
-        .testTarget(name: "RemoteFilesCoreTests", dependencies: ["RemoteFilesCore"])
+        .testTarget(name: "RemoteFilesCoreTests", dependencies: ["RemoteFilesCore", "RemoteFilesUI"])
     ],
     swiftLanguageModes: [.v5]
 )

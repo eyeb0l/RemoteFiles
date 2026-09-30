@@ -56,7 +56,7 @@ model in a later navigation change.
   different accounts/identities/endpoints do not share entries. This is `Library/Caches`,
   excluded from backup, with complete iOS file protection.
 - Decoded image cache: **32 MiB** explicit LRU. Rows/viewer also retain their currently
-  displayed thumbnail. Background/disconnect clears decoded caches and cancels flights.
+  displayed thumbnail. Memory warnings clear the decoded LRU along with document/folder caches. Background/disconnect clears decoded caches and cancels flights.
 - ImageIO downsamples from the disk URL, disables full-source caching, and decodes away
   from MainActor. Inline thumbnails have a **1600-pixel** longest edge; full-screen uses
   **3072 pixels**. Sources over 400 million pixels are rejected to limit decoder exposure.
@@ -73,7 +73,7 @@ pixel size, orientation transform and immediate thumbnail decode.
 Failure is local to the image: filename, reason, **Tap to retry**, and **Open file**.
 Open file presents the focused image viewer and retries the same safely resolved
 resource; it cannot bypass path restrictions. Images open full-screen on tap, with
-native scroll/pinch zoom and Share. **Share exports the displayed downsampled image**,
+native scroll/pinch zoom and Share. A failed full-screen reload discards the previous image, shows the error and retry action, and disables Share until an image loads successfully. **Share exports the displayed downsampled image**,
 not the potentially enormous original source. The system share sheet is shown only
 on an explicit tap; nothing is sent automatically.
 

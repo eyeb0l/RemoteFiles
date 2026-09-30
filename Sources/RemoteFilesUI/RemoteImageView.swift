@@ -117,7 +117,13 @@ struct RemoteImageViewer: View {
                     let result = try await RemoteImageDecoder.shared.decode(file, maxPixel: 3072)
                     try Task.checkCancellation(); image = result
                 } catch is CancellationError { }
-                catch { if !Task.isCancelled { failure = error.localizedDescription } }
+                catch {
+                    if !Task.isCancelled {
+                        image = nil
+                        sharing = false
+                        failure = error.localizedDescription
+                    }
+                }
             }
             .sheet(isPresented: $sharing) {
                 if let image { ImageShareSheet(image: UIImage(cgImage: image.image)) }
