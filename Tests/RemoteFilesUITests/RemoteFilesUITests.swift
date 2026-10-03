@@ -2,6 +2,44 @@ import XCTest
 
 @MainActor
 final class RemoteFilesUITests: XCTestCase {
+    func testSourceSyntaxHighlightingAndMarkdownSource() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Mac")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15))
+        projects.tap()
+        let example = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Example.swift,")).firstMatch
+        XCTAssertTrue(example.waitForExistence(timeout: 10))
+        if !example.isHittable { app.swipeUp() }
+        example.tap()
+        let highlighted = app.staticTexts["Syntax highlighted source"]
+        XCTAssertTrue(highlighted.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(highlighted.label.contains("// Keep remote files within reach. 東京 ✨"))
+        XCTAssertTrue(highlighted.label.contains("let fileLimit = 2_097_152"))
+        attachScreenshot("Syntax highlighted Swift source")
+        app.buttons["Document actions"].tap()
+        app.buttons["Copy Source"].tap()
+        app.buttons["Document actions"].tap()
+        XCTAssertTrue(app.buttons["Source Copied"].waitForExistence(timeout: 5))
+        // Dismiss the native menu before navigating back.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+        app.navigationBars.buttons["Projects"].tap()
+        let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly review.md,")).firstMatch
+        if !report.isHittable { app.swipeUp() }
+        XCTAssertTrue(report.waitForExistence(timeout: 10))
+        report.tap()
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+        app.buttons["Source"].tap()
+        XCTAssertTrue(highlighted.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(highlighted.label.hasPrefix("# A little closer to home"))
+        app.swipeUp()
+        attachScreenshot("Syntax highlighted Markdown source")
+        app.buttons["Rendered"].tap()
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 5))
+    }
+
     func testLargeFolderKeepsScrollPositionAfterOpeningFile() throws {
         continueAfterFailure = false
         let app = XCUIApplication()

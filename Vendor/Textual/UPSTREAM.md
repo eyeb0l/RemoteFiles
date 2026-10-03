@@ -6,6 +6,10 @@ The MIT license is retained. The Markdown parser and visual rendering policies a
 
 Local changes:
 
+- `SourceCodeTokenization.swift`: a small public, lossless token API exposes the
+  existing actor-isolated Prism tokenizer to the app's source reader. It does not
+  add grammars, execute source files, or interpret them as Markdown. The app owns
+  filename detection, colors, cancellation, cache limits and plain-text fallback.
 - `CodeTokenizer.swift`: constructing the shared actor is cheap; JavaScriptCore
   context creation, bundled Prism loading and evaluation are deferred to a lazy
   actor-isolated property accessed during tokenization. The synchronous actor

@@ -7,16 +7,18 @@ public struct DocumentContentView: View {
     public let text: String
     public let markdown: Bool
     public let source: Bool
+    public let filename: String?
     @State private var prepared: [MarkdownPart]?
     public let location: RemoteDocumentLocation?
     public let resolver: (any RemoteResourceResolving)?
     @State private var preparedSource: String?
     @State private var preparationFailed = false
 
-    public init(text: String, markdown: Bool, source: Bool, location: RemoteDocumentLocation? = nil, resolver: (any RemoteResourceResolving)? = nil) {
+    public init(text: String, markdown: Bool, source: Bool, filename: String? = nil, location: RemoteDocumentLocation? = nil, resolver: (any RemoteResourceResolving)? = nil) {
         self.text = text
         self.markdown = markdown
         self.source = source
+        self.filename = filename
         self.location = location; self.resolver = resolver
     }
 
@@ -24,11 +26,7 @@ public struct DocumentContentView: View {
         Group {
             if !markdown || source {
                 ScrollView([.horizontal, .vertical]) {
-                    Text(verbatim: text)
-                        .font(.body.monospaced())
-                        .textSelection(.enabled)
-                        .padding(20)
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                    SourceCodeView(text: text, language: markdown ? "markdown" : SourceLanguage.forFilename(filename))
                 }
                 .accessibilityLabel(markdown ? "Markdown source" : "Plain text document")
             } else {

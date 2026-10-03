@@ -45,7 +45,10 @@ public struct RemoteFilesRootView: View {
         #if canImport(UIKit)
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
             model?.clearCaches()
-            Task { await RemoteImageDecoder.shared.clear() }
+            Task {
+                await RemoteImageDecoder.shared.clear()
+                await SourceHighlighting.shared.clear()
+            }
         }
         #endif
     }

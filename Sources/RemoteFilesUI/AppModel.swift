@@ -113,6 +113,7 @@ final class AppModel {
     func disconnect() async {
         await resourceService?.cancelAll(); resourceService = nil
         await RemoteImageDecoder.shared.clear()
+        await SourceHighlighting.shared.clear()
         await service.disconnect(); await identities.clearSession()
         connectionStates = [:]; clearCaches()
     }

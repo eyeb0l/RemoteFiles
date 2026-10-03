@@ -29,6 +29,7 @@ public actor DemoRemoteFileService: RemoteFileService {
             .init(name: "Reports", path: path + "/Reports", kind: .directory),
             .init(name: "Empty", path: path + "/Empty", kind: .directory),
             .init(name: "Thousand files", path: path + "/Thousand files", kind: .directory),
+            .init(name: "Example.swift", path: path + "/Example.swift", kind: .file, size: UInt64(Self.sourceExample.utf8.count)),
             .init(name: "Weekly review.md", path: path + "/Weekly review.md", kind: .file, size: UInt64(Self.report.utf8.count), modifiedAt: Date(timeIntervalSince1970: 1790035200)),
             .init(name: "Notes — 東京.txt", path: path + "/Notes — 東京.txt", kind: .file, size: 92),
             .init(name: ".config", path: path + "/.config", kind: .file, size: 18),
@@ -45,7 +46,7 @@ public actor DemoRemoteFileService: RemoteFileService {
         if path.hasSuffix("Too large.md") { throw RemoteFileError.tooLarge(limit) }
         if path.hasSuffix("Binary.txt") { return Data([0, 0xff, 0]) }
         if path.hasSuffix("Empty.txt") { return Data() }
-        let text = path.hasSuffix(".md") ? Self.report : "# RemoteFiles configuration\nmode = read-only\n\nSpaces and Unicode: 東京 ✨\n"
+        let text = path.hasSuffix("Example.swift") ? Self.sourceExample : path.hasSuffix(".md") ? Self.report : "# RemoteFiles configuration\nmode = read-only\n\nSpaces and Unicode: 東京 ✨\n"
         let data = Data(text.utf8)
         guard data.count <= limit else { throw RemoteFileError.tooLarge(limit) }
         return data
@@ -55,6 +56,22 @@ public actor DemoRemoteFileService: RemoteFileService {
         return RemoteEntry(name: "Weekly review.md", path: RemotePath.parent(of: path) + "/Weekly review.md", kind: .file)
     }
     public func disconnect() { generation += 1 }
+    public static let sourceExample = """
+    import Foundation
+
+    // Keep remote files within reach. 東京 ✨
+    struct Workspace {
+        let name = "RemoteFiles"
+        let fileLimit = 2_097_152
+
+        func greeting() -> String {
+            return "Welcome home"
+        }
+    }
+
+    let workspace = Workspace()
+    print(workspace.greeting())
+    """ + "\n"
     public static let report = """
     # A little closer to home
 
