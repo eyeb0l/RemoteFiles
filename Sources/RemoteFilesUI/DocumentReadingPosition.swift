@@ -1,10 +1,13 @@
 import SwiftUI
+import Textual
 
 /// Owned by each reader route, rather than the content subtree that refresh/mode changes replace.
 /// Rendered and source coordinates remain independent when switching reading modes.
 @MainActor @Observable public final class DocumentReadingPosition {
     public var rendered: CGPoint = .zero
     public var source: CGPoint = .zero
+    /// Geometry belongs to the reader route, surviving rendered/source subtree replacement.
+    public let overflowGeometry = OverflowGeometryCache()
     public init() {}
 }
 
@@ -12,6 +15,7 @@ struct DocumentScrollPreservation: ViewModifier {
     private enum Phase: Equatable { case awaitingContent, awaitingOffset, tracking }
     @Binding var saved: CGPoint
     let ready: Bool
+    var overflowGeometry: OverflowGeometryCache? = nil
     @State private var position = ScrollPosition(point: .zero)
     @State private var target = CGPoint.zero
     @State private var phase = Phase.tracking
@@ -38,7 +42,9 @@ struct DocumentScrollPreservation: ViewModifier {
                         return
                     }
                 }
+                guard overflowGeometry?.isRestoringReadingAnchor != true else { return }
                 if !near(saved, offset) { saved = offset }
+                overflowGeometry?.recordReadingAnchor()
             }
             .onAppear {
                 appeared = true
@@ -61,6 +67,11 @@ struct DocumentScrollPreservation: ViewModifier {
     private func beginRestoration() {
         target = saved
         command = nil
+        if !near(target, .zero), let overflowGeometry, overflowGeometry.hasReadingAnchor {
+            phase = .tracking
+            overflowGeometry.restoreReadingAnchor { saved = $0 }
+            return
+        }
         // A synchronously laid-out Source view can emit its first geometry before onAppear.
         // There is no restoration to wait for at zero; its next scroll must be tracked.
         phase = near(target, .zero) ? .tracking : .awaitingContent

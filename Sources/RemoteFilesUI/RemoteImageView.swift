@@ -1,5 +1,6 @@
 #if os(iOS)
 import SwiftUI
+import Textual
 import UIKit
 import ImageIO
 import RemoteFilesCore
@@ -11,6 +12,8 @@ struct RemoteInlineImage: View {
     let location: RemoteDocumentLocation
     let resolver: any RemoteResourceResolving
     let viewportHeight: CGFloat
+    var readingAnchorID = ""
+    var readingGeometry: OverflowGeometryCache? = nil
     @State private var nearViewport = false
     @State private var image: DisplayImage?
     @State private var failure: String?
@@ -71,6 +74,8 @@ struct RemoteInlineImage: View {
             } catch is CancellationError { }
             catch { if !Task.isCancelled { failure = error.localizedDescription } }
         }
+        .textual.readingAnchorRegion(id: readingAnchorID, geometryCache: readingGeometry,
+                                    ready: image != nil || failure != nil)
         .onDisappear { image = nil }
         .fullScreenCover(item: $viewer, onDismiss: { focusedAction = invokingAction }) { item in
             RemoteImageViewer(item: item, resolver: resolver)

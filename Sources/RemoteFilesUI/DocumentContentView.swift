@@ -16,6 +16,7 @@ public struct DocumentContentView: View {
     public let resolver: (any RemoteResourceResolving)?
     @State private var preparedSource: String?
     @State private var preparationFailed = false
+    @State private var deferInitialOverflow = false
 
     public init(text: String, markdown: Bool, source: Bool, filename: String? = nil, location: RemoteDocumentLocation? = nil, resolver: (any RemoteResourceResolving)? = nil, readingPosition: DocumentReadingPosition? = nil, openDocumentLink: ((URL) -> Void)? = nil) {
         self.text = text
@@ -73,7 +74,8 @@ public struct DocumentContentView: View {
                                     #if os(iOS)
                                     if let location, let resolver {
                                         RemoteInlineImage(reference: reference, alt: alt, location: location,
-                                                          resolver: resolver, viewportHeight: viewport.size.height)
+                                                          resolver: resolver, viewportHeight: viewport.size.height,
+                                                          readingAnchorID: "image-\(part.id)", readingGeometry: position.overflowGeometry)
                                     } else { Text(alt.isEmpty ? reference : alt).foregroundStyle(.secondary) }
                                     #else
                                     Text(alt.isEmpty ? reference : alt).foregroundStyle(.secondary)
@@ -91,20 +93,30 @@ public struct DocumentContentView: View {
                         }
                     }
                     #if os(iOS)
-                    .textual.viewportOverflowRendering(in: "readerViewport", viewportHeight: viewport.size.height)
+                    .textual.viewportOverflowRendering(in: "readerViewport", viewportHeight: viewport.size.height,
+                        deferInitialOffscreenContent: deferInitialOverflow, geometryCache: position.overflowGeometry)
                     #endif
                     .padding(20)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .modifier(DocumentScrollPreservation(saved: $position.rendered, ready: prepared != nil))
+                .modifier(DocumentScrollPreservation(saved: $position.rendered, ready: prepared != nil,
+                                                     overflowGeometry: position.overflowGeometry))
                 .coordinateSpace(name: "readerViewport")
                 .accessibilityLabel("Rendered Markdown document")
+                .onAppear {
+                    deferInitialOverflow = text.utf8.count >= 64 * 1024 && position.rendered == .zero
+                }
                 }
             }
         }
         .task(id: markdown ? text : "") {
             guard markdown, preparedSource != text else { return }
             let input = text
+            (readingPosition ?? localReadingPosition).overflowGeometry.documentDidChange(input)
+            // Small documents and coordinate restoration keep precise eager layout.
+            // Freeze this choice for the mount; ordinary scrolling must not switch renderers.
+            deferInitialOverflow = input.utf8.count >= 64 * 1024 &&
+                (readingPosition ?? localReadingPosition).rendered == .zero
             preparationFailed = false
             do {
                 let result = try await MarkdownPreparation.shared.prepare(input)

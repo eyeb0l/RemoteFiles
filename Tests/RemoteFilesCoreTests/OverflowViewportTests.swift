@@ -8,16 +8,19 @@ import Observation
 
 @MainActor @Observable private final class OverflowFixtureState {
     var text: String
+    var source = false
+    let position = DocumentReadingPosition()
     init(_ text: String) { self.text = text }
 }
 private struct OverflowFixtureView: View {
     @Bindable var state: OverflowFixtureState
-    var body: some View { DocumentContentView(text: state.text, markdown: true, source: false, filename: "viewport.md") }
+    var body: some View { DocumentContentView(text: state.text, markdown: true, source: state.source,
+        filename: "viewport.md", readingPosition: state.position) }
 }
 
 @MainActor final class OverflowViewportTests: XCTestCase {
-    private var fixture: String {
-        (0..<24).map { index in
+    private func fixture(_ count: Int = 24) -> String {
+        (0..<count).map { index in
             """
             ## Section \(index)
 
@@ -57,11 +60,11 @@ private struct OverflowFixtureView: View {
         XCTFail("Timed out waiting for settled overflow viewport state", file: file, line: line)
         throw NSError(domain: "OverflowViewportTests", code: 1)
     }
-    private func host() throws -> (UIWindow, UIWindow?, OverflowFixtureState) {
+    private func host(text: String? = nil) throws -> (UIWindow, UIWindow?, OverflowFixtureState) {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previous = scene.windows.first { $0.isKeyWindow }
         let window = UIWindow(windowScene: scene)
-        let state = OverflowFixtureState(fixture)
+        let state = OverflowFixtureState(text ?? fixture())
         window.rootViewController = UIHostingController(rootView: OverflowFixtureView(state: state))
         window.makeKeyAndVisible()
         return (window, previous, state)
@@ -145,6 +148,114 @@ private struct OverflowFixtureView: View {
         XCTAssertTrue(selectedText(interaction.model).string.contains("updated_offscreen_code_19"))
         try await Task.sleep(for: .milliseconds(500))
         XCTAssertEqual(scroll.contentSize.height, updatedHeight, accuracy: 1)
+    }
+
+    private func prose(_ window: UIWindow) -> UITextInteractionView? {
+        guard let scroll = outer(window) else { return nil }
+        return views(window).compactMap { $0 as? UITextInteractionView }.first {
+            $0.model.hasText && $0.bounds.height > scroll.contentSize.height * 0.9
+        }
+    }
+    private func visibleCharacter(_ window: UIWindow) throws -> (Int, CGFloat) {
+        let scroll = try XCTUnwrap(outer(window)); let interaction = try XCTUnwrap(prose(window))
+        let viewport = scroll.convert(scroll.bounds, to: window)
+        let point = CGPoint(x: viewport.minX + 30, y: viewport.minY + 60)
+        let position = try XCTUnwrap(interaction.model.closestPosition(to: interaction.convert(point, from: window)))
+        return (interaction.model.offset(from: interaction.model.startPosition, to: position),
+                interaction.convert(interaction.model.caretRect(for: position), to: window).minY)
+    }
+    private func characterY(_ character: Int, in window: UIWindow) throws -> CGFloat {
+        let interaction = try XCTUnwrap(prose(window))
+        let position = try XCTUnwrap(interaction.model.position(from: interaction.model.startPosition, offset: character))
+        return interaction.convert(interaction.model.caretRect(for: position), to: window).minY
+    }
+
+    func testLargeInitialMountDefersRegionsWithoutLosingFullProseCopyOrSelectAll() async throws {
+        let text = fixture(72); XCTAssertGreaterThan(text.utf8.count, 64 * 1024)
+        let (window, previous, _) = try host(text: text); defer { cleanup(window, previous: previous) }
+        try await wait { self.prose(window).map { self.selectedText($0.model).string.contains("Paragraph 71") } == true }
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertLessThan(horizontal(window).count, 144, "Do not initially construct all distant horizontal labels")
+        let interaction = try XCTUnwrap(prose(window))
+        let copy = selectedText(interaction.model)
+        XCTAssertTrue(copy.string.contains("Paragraph 0")); XCTAssertTrue(copy.string.contains("Paragraph 71"))
+        interaction.model.selectedRange = TextRange(start: interaction.model.startPosition, end: interaction.model.endPosition)
+        try await wait { self.horizontal(window).count == 144 }
+        XCTAssertNotNil(interaction.model.selectedRange)
+        XCTAssertTrue(selectedText(interaction.model).isEqual(to: copy), "Full formatted prose copy must survive eager selection fallback")
+        interaction.model.selectedRange = nil
+    }
+
+    func testLargeFastJumpKeepsVisibleProseAnchorAndSourceReturnRestoresSameCharacter() async throws {
+        let (window, previous, state) = try host(text: fixture(72)); defer { cleanup(window, previous: previous) }
+        try await wait { self.prose(window).map { self.selectedText($0.model).string.contains("Paragraph 71") } == true }
+        let scroll = try XCTUnwrap(outer(window))
+        let initialHeight = scroll.contentSize.height
+        let initialViewport = scroll.bounds.height
+        scroll.setContentOffset(CGPoint(x: 0, y: scroll.contentSize.height * 0.73), animated: false)
+        let before = try visibleCharacter(window)
+        let initialOffset = scroll.contentOffset.y
+        try await Task.sleep(for: .seconds(2))
+        let settledCharacterY = try characterY(before.0, in: window)
+        print("OVERFLOW RANGE initial_height=\(initialHeight) settled_height=\(scroll.contentSize.height) viewport_height=\(initialViewport) initial_offset=\(initialOffset) settled_offset=\(scroll.contentOffset.y) character=\(before.0) initial_caret_y=\(before.1) settled_caret_y=\(settledCharacterY) vertical_indicator=\(scroll.showsVerticalScrollIndicator)")
+        XCTAssertEqual(settledCharacterY, before.1, accuracy: 2,
+                       "Measuring skipped regions above the viewport must keep the visible prose line anchored")
+        try await wait { state.position.overflowGeometry.hasReadingAnchor }
+        let saved = try visibleCharacter(window)
+        for _ in 0..<3 {
+            state.source = true
+            try await Task.sleep(for: .seconds(1))
+            state.source = false
+            try await wait { self.prose(window).map { self.selectedText($0.model).string.contains("Paragraph 71") } == true && !state.position.overflowGeometry.isRestoringReadingAnchor }
+            try await Task.sleep(for: .milliseconds(500))
+            XCTAssertEqual(try characterY(saved.0, in: window), saved.1, accuracy: 2,
+                           "Return to the same logical prose character even when previously unseen heights become precise")
+        }
+    }
+
+    private func checkBlockReturn(marker: String) async throws {
+        let text = String(repeating: "Selectable opening prose. ", count: 2700) + "\n\n```text\n" +
+            (0..<40).map { "anchor-code-\($0) " + String(repeating: "wide_", count: 50) }.joined(separator: "\n") +
+            "\n```\n\n| Heading | Value |\n| --- | --- |\n" +
+            (0..<40).map { "| anchor-cell-\($0) | " + String(repeating: "wide_", count: 30) + " |" }.joined(separator: "\n") +
+            "\n\nClosing selectable prose."
+        XCTAssertGreaterThan(text.utf8.count, 64 * 1024)
+        let (window, previous, state) = try host(text: text); defer { cleanup(window, previous: previous) }
+        func region() -> ReadingAnchorRegionBridge.Probe? {
+            views(window).compactMap { $0 as? ReadingAnchorRegionBridge.Probe }.first {
+                if case .overflow(let key) = $0.id { return String(key.revision.characters).contains(marker) }
+                return false
+            }
+        }
+        try await wait { self.outer(window) != nil && region() != nil }
+        let scroll = try XCTUnwrap(outer(window))
+        var block = try XCTUnwrap(region())
+        var viewport = scroll.convert(scroll.bounds, to: window)
+        scroll.setContentOffset(CGPoint(x: 0, y: scroll.contentOffset.y + block.convert(block.bounds, to: window).minY - viewport.minY), animated: false)
+        try await wait { region()?.ready == true }
+        try await Task.sleep(for: .seconds(1))
+        block = try XCTUnwrap(region()); viewport = scroll.convert(scroll.bounds, to: window)
+        let localY = min(block.bounds.height / 2, 300)
+        scroll.setContentOffset(CGPoint(x: 0, y: scroll.contentOffset.y + block.convert(block.bounds, to: window).minY + localY - viewport.minY - 60), animated: false)
+        try await Task.sleep(for: .seconds(1))
+        state.position.overflowGeometry.recordReadingAnchor()
+        XCTAssertTrue(state.position.overflowGeometry.hasReadingAnchor)
+        let before = block.convert(block.bounds, to: window).minY
+        for _ in 0..<3 {
+            state.source = true; try await Task.sleep(for: .milliseconds(500))
+            state.source = false
+            try await wait { region()?.ready == true && !state.position.overflowGeometry.isRestoringReadingAnchor }
+            try await Task.sleep(for: .milliseconds(300))
+            XCTAssertEqual(try XCTUnwrap(region()).convert(try XCTUnwrap(region()).bounds, to: window).minY,
+                           before, accuracy: 2, "Keep the same point inside a dominant code/table block")
+        }
+    }
+
+    func testDominantCodeBlockReturnsAcrossRepeatedSourceSwitches() async throws {
+        try await checkBlockReturn(marker: "anchor-code-")
+    }
+    func testDominantTableReturnsAcrossRepeatedSourceSwitches() async throws {
+        try await checkBlockReturn(marker: "anchor-cell-")
     }
 
 }

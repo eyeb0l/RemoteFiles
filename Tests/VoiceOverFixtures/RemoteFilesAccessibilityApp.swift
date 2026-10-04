@@ -3,6 +3,21 @@ import UIKit
 import RemoteFilesCore
 @testable import RemoteFilesUI
 
+// Exercise the large-document initial path before VoiceOver turns on, then the
+// actual assistive fallback during heading/table/link traversal.
+private let largeTableLinkFixture: String = {
+    let first = "# Local Markdown heading\n\n| Area | Reference |\n| --- | --- |\n| Reader | [Local cell link](https://example.invalid/cell) |\n\n[After table link](https://example.invalid/after)"
+    let tail = (0..<36).map { index in
+        "\n\n## Additional section \(index)\n\n" +
+        String(repeating: "Long-document selectable prose. ", count: 50) +
+        "\n\n```text\n" + String(repeating: "wide_code_", count: 60) + "\n```\n\n" +
+        "| Area | Reference |\n| --- | --- |\n| Section \(index) | Additional table content |"
+    }.joined()
+    let result = first + tail
+    precondition(result.utf8.count >= 64 * 1024)
+    return result
+}()
+
 private actor LocalImageResolver: RemoteResourceResolving {
     let file: URL
     private var calls = 0
@@ -86,8 +101,9 @@ private struct StaleReaderFixture: View {
             else if ProcessInfo.processInfo.arguments.contains("--voiceover-stale-fixture") { StaleReaderFixture() }
             else if ProcessInfo.processInfo.arguments.contains("--voiceover-table-links-fixture") {
                 NavigationStack {
-                    DocumentContentView(text: "# Local Markdown heading\n\n| Area | Reference |\n| --- | --- |\n| Reader | [Local cell link](https://example.invalid/cell) |\n\n[After table link](https://example.invalid/after)", markdown: true, source: false)
+                    DocumentContentView(text: largeTableLinkFixture, markdown: true, source: false)
                         .navigationTitle("Local Markdown fixture")
+                        .onAppear { print("VO LARGE fixture bytes=\(largeTableLinkFixture.utf8.count), actual_voiceover=\(UIAccessibility.isVoiceOverRunning)") }
                 }
             }
             else { RemoteFilesRootView() }

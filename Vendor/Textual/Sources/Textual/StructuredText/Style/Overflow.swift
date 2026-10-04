@@ -49,7 +49,7 @@ public struct Overflow<Content: View>: View {
   #endif
   @State private var contentSize: CGSize?
   @State private var tableSpacing = StructuredText.TableCell.Spacing()
-  @State private var isNearViewport = true
+  @State private var isNearViewport = false
   @State private var contentIsMounted = true
   @State private var hasRetiredContent = false
   @State private var contentIsReady = false
@@ -91,6 +91,16 @@ public struct Overflow<Content: View>: View {
 
   private let content: (OverflowState) -> Content
 
+  private var defersInitialContent: Bool { viewport?.defersInitialContent == true }
+  private var cacheKey: OverflowGeometryCache.Key? {
+    guard let contentRevision, let containerWidth else { return nil }
+    return .init(revision: contentRevision, environment: textEnvironment, width: containerWidth)
+  }
+  private func rememberExtent() {
+    guard contentIsReady, let contentSize, let cacheKey else { return }
+    viewport?.cache?.record(.init(size: contentSize, spacing: tableSpacing), for: cacheKey)
+  }
+
   /// Creates an overflow container.
   public init(@ViewBuilder content: @escaping () -> Content) {
     self.init { _ in
@@ -114,14 +124,21 @@ public struct Overflow<Content: View>: View {
         ZStack {
           // Update the scroll view height when the content height changes
           Color.clear
-            .frame(minWidth: viewport == nil ? nil : contentSize?.width, minHeight: contentSize?.height)
-          if contentIsMounted || retainContent || isNearViewport || contentSize == nil {
+            .frame(minWidth: viewport == nil ? nil : contentSize?.width,
+                   minHeight: contentSize?.height ?? (defersInitialContent ? 120 : nil))
+          if (contentIsMounted && (!defersInitialContent || contentSize != nil)) || retainContent || isNearViewport || (!defersInitialContent && contentSize == nil) {
             content(.scroll(containerWidth: containerWidth))
               .environment(\.overflowReadinessTracking, viewport != nil)
               .onGeometryChange(for: ContentMeasurement.self) {
                 ContentMeasurement(size: $0.size, ready: contentIsReady)
-              } action: { if $0.ready || !hasRetiredContent { contentSize = $0.size } }
-              .onPreferenceChange(StructuredText.TableCell.SpacingKey.self) { tableSpacing = $0 }
+              } action: {
+                if $0.ready || (!defersInitialContent && !hasRetiredContent) {
+                  contentSize = $0.size
+                  rememberExtent()
+                  viewport?.cache?.geometryDidChange()
+                }
+              }
+              .onPreferenceChange(StructuredText.TableCell.SpacingKey.self) { tableSpacing = $0; rememberExtent() }
               .onPreferenceChange(OverflowContentReadyKey.self) {
                 contentIsReady = $0.hasReport && $0.allReady
               }
@@ -137,6 +154,14 @@ public struct Overflow<Content: View>: View {
           }
         }
       }
+      .background {
+        #if os(iOS) && TEXTUAL_ENABLE_TEXT_SELECTION
+        if let cache = viewport?.cache, let cacheKey {
+          ReadingAnchorRegionBridge(cache: cache, id: .overflow(cacheKey),
+                                    ready: contentIsReady || (hasRetiredContent && contentSize != nil))
+        }
+        #endif
+      }
       .onScrollGeometryChange(for: CGFloat.self, of: \.containerSize.width) {
         containerWidth = $1
       }
@@ -144,11 +169,15 @@ public struct Overflow<Content: View>: View {
         guard let viewport else { return true }
         let frame = geometry.frame(in: .named(viewport.coordinateSpaceName))
         return frame.maxY >= -viewport.height && frame.minY <= viewport.height * 2
-      } action: { isNearViewport = $0 }
+      } action: {
+        if $0, !isNearViewport, defersInitialContent, contentSize == nil { viewport?.cache?.captureAnchor() }
+        isNearViewport = $0
+      }
       .task(id: RetentionWork(viewport: viewport, environment: textEnvironment, revision: contentRevision,
                              size: contentSize, width: containerWidth,
                              ready: contentIsReady, near: isNearViewport, retain: retainContent)) {
-        if retainContent || isNearViewport || contentSize == nil {
+        if retainContent || isNearViewport || (!defersInitialContent && contentSize == nil) {
+          if defersInitialContent, contentSize == nil { viewport?.cache?.captureAnchor() }
           contentIsMounted = true
           return
         }
@@ -161,9 +190,16 @@ public struct Overflow<Content: View>: View {
         contentIsReady = false
         contentIsMounted = false
       }
-      .onChange(of: contentRevision) { contentIsMounted = true }
-      .onChange(of: textEnvironment) { contentIsMounted = true }
-      .onChange(of: containerWidth) { contentIsMounted = true }
+      .onChange(of: contentRevision) { viewport?.cache?.cancelGeometryAnchor(); contentIsMounted = true }
+      .onChange(of: textEnvironment) { viewport?.cache?.cancelGeometryAnchor(); contentIsMounted = true }
+      .onChange(of: containerWidth) {
+        if defersInitialContent, contentSize == nil, !isNearViewport, !retainContent {
+          if let cacheKey, let extent = viewport?.cache?.extent(for: cacheKey) {
+            contentIsMounted = false; hasRetiredContent = true
+            contentSize = extent.size; tableSpacing = extent.spacing
+          }
+        } else { contentIsMounted = true }
+      }
       #if os(iOS)
       .onReceive(NotificationCenter.default.publisher(for: UIAccessibility.voiceOverStatusDidChangeNotification)) { _ in assistiveContentRequired = Self.assistiveContentRequired }
       .onReceive(NotificationCenter.default.publisher(for: UIAccessibility.switchControlStatusDidChangeNotification)) { _ in assistiveContentRequired = Self.assistiveContentRequired }
@@ -217,6 +253,8 @@ struct OverflowContentReadyKey: PreferenceKey {
 struct OverflowViewport: Hashable, Sendable {
   let coordinateSpaceName: String
   let height: CGFloat
+  var defersInitialContent = false
+  var cache: OverflowGeometryCache? = nil
 }
 
 extension EnvironmentValues {
@@ -228,7 +266,17 @@ extension EnvironmentValues {
 extension TextualNamespace where Base: View {
   /// Retains settled geometry while retiring offscreen horizontal code/table labels.
   /// Selection and active assistive technologies retain the complete content.
-  public func viewportOverflowRendering(in coordinateSpaceName: String, viewportHeight: CGFloat) -> some View {
-    base.environment(\.overflowViewport, OverflowViewport(coordinateSpaceName: coordinateSpaceName, height: viewportHeight))
+  public func viewportOverflowRendering(in coordinateSpaceName: String, viewportHeight: CGFloat,
+                                       deferInitialOffscreenContent: Bool = false,
+                                       geometryCache: OverflowGeometryCache? = nil) -> some View {
+    base.environment(\.overflowViewport, OverflowViewport(coordinateSpaceName: coordinateSpaceName, height: viewportHeight,
+                                                         defersInitialContent: deferInitialOffscreenContent, cache: geometryCache))
+      .background {
+        #if os(iOS) && TEXTUAL_ENABLE_TEXT_SELECTION
+        if let geometryCache {
+          OverflowAnchorBridge(cache: geometryCache, deferring: deferInitialOffscreenContent)
+        }
+        #endif
+      }
   }
 }
