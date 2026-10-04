@@ -41,7 +41,7 @@ import XCTest
         }
         return result
     }
-    private func focus(_ contains: String, name: String, limit: Int = 35) throws {
+    private func focus(_ contains: String, name: String, limit: Int = 35, backward: Bool = false) throws {
         var value = try service.currentSpeech().utterance
         var previous = ""
         var duplicates = 0
@@ -49,7 +49,8 @@ import XCTest
             print("VO FOCUS \(name): \(value)")
             if value.localizedCaseInsensitiveContains(contains) { return }
             previous = value
-            value = try service.moveForward().utterance
+            if backward { value = try service.moveBackward().utterance }
+            else { value = try service.moveForward().utterance }
             duplicates = value == previous ? duplicates + 1 : 0
             if duplicates >= 2 { break }
         }
@@ -83,17 +84,25 @@ import XCTest
             XCTAssertTrue(read.contains { $0.contains("A small configuration") && $0.contains("Heading") }, "Traversal must advance past the table")
             XCTAssertTrue(read.contains { $0.contains("Open Apple documentation") && $0.localizedCaseInsensitiveContains("link") })
             // Inspect the link's speech/trait without opening an external page.
+            // A VoiceOver double-tap activates the current focus, irrespective of
+            // XCTest's named element. Traversal ended on the external link: move
+            // focus back to the intended control before synthesizing activation.
+            try focus("Source Button", name: "source", limit: 65, backward: true)
             app.buttons["Source"].doubleTap()
             XCTAssertTrue(app.scrollViews["Markdown source"].waitForExistence(timeout: 5))
             let source = try speech("SOURCE", limit: 12)
             XCTAssertFalse(source.contains { $0.localizedCaseInsensitiveContains("double-tap to edit") })
+            try focus("Rendered", name: "rendered", limit: 20, backward: true)
             app.buttons["Rendered"].doubleTap()
+            try focus("Document actions", name: "actions", limit: 20, backward: true)
             app.buttons["Document actions"].doubleTap()
             _ = try speech("ACTIONS", limit: 12)
             capture("VoiceOver document actions", app)
+            try focus("Refresh", name: "refresh", limit: 12, backward: true)
             app.buttons["Refresh"].doubleTap()
             XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 10))
             print("VO REFRESH CURRENT: \(try service.currentSpeech().utterance)")
+            try focus("Back Button", name: "back", backward: true)
             app.navigationBars.buttons["Projects"].doubleTap()
             XCTAssertTrue(report.waitForExistence(timeout: 5))
             print("VO BACK CURRENT: \(try service.currentSpeech().utterance)")
@@ -132,7 +141,9 @@ import XCTest
             XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 10), app.debugDescription)
             _ = try speech("SHARE", limit: 10)
             capture("VoiceOver share sheet", app)
+            try focus("Close", name: "close-share", limit: 20, backward: true)
             app.buttons["Close"].doubleTap()
+            try focus("Done Button", name: "done-image", limit: 20, backward: true)
             app.buttons["Done"].doubleTap()
             XCTAssertTrue(app.buttons["Open image diagram.png"].waitForExistence(timeout: 5))
             let returned = try service.currentSpeech().utterance

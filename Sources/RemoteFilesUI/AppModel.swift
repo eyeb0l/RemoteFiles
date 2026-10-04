@@ -23,6 +23,13 @@ final class AppModel {
     private(set) var service: any RemoteFileService
     let resourceDirectory: URL
     private var resourceService: RemoteResourceResolver?
+    private var exportService: RemoteOriginalExporter?
+    var originalExporter: RemoteOriginalExporter {
+        if let exportService { return exportService }
+        let value = RemoteOriginalExporter(service: service, directory: FileManager.default.temporaryDirectory.appendingPathComponent("RemoteOriginalExports-v1", isDirectory: true))
+        exportService = value
+        return value
+    }
     var resources: RemoteResourceResolver {
         if let resourceService { return resourceService }
         let value = RemoteResourceResolver(service: service, directory: resourceDirectory)
@@ -43,11 +50,11 @@ final class AppModel {
     private var directoryOrder: [String] = []
     private var documentOrder: [String] = []
 
-    init(directory: URL) throws {
+    init(directory: URL, fileService: (any RemoteFileService)? = nil) throws {
         resourceDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("RemoteImages-v1")
         metadataStore = try MetadataStore(fileURL: directory.appendingPathComponent("library-v1.json"))
         trust = try HostTrustStore(fileURL: directory.appendingPathComponent("known-hosts-v1.json"))
-        service = CoalescingFileService(base: SFTPRemoteFileService(identityStore: identities, trustStore: trust, metadataStore: metadataStore))
+        service = fileService ?? CoalescingFileService(base: SFTPRemoteFileService(identityStore: identities, trustStore: trust, metadataStore: metadataStore))
     }
     func load() async { metadata = await metadataStore.snapshot() }
     func profile(_ id: UUID) -> ConnectionProfile? { metadata.connections.first { $0.id == id } }
@@ -109,12 +116,22 @@ final class AppModel {
             sheet = .unlock(key)
         }
     }
-    func isSecurityError(_ error: Error) -> Bool { error is HostTrustError || error is IdentityError }
+    func isSecurityError(_ error: Error) -> Bool {
+        if error is HostTrustError || error is IdentityError { return true }
+        if let boundary = error as? RemoteDocumentLinkError, boundary == .outsideConnection { return true }
+        if case RemoteResourceError.outsideDocument = error { return true }
+        return false
+    }
     func disconnect() async {
+        let previousExporter = exportService
+        await previousExporter?.cancelAll()
         await resourceService?.cancelAll(); resourceService = nil
         await RemoteImageDecoder.shared.clear()
         await SourceHighlighting.shared.clear()
-        await service.disconnect(); await identities.clearSession()
+        await service.disconnect()
+        await previousExporter?.cancelAndDrain()
+        exportService = nil
+        await identities.clearSession()
         connectionStates = [:]; clearCaches()
     }
     func background() async {

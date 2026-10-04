@@ -35,7 +35,9 @@ public enum RemoteResourcePath {
         return RemotePath.appending(parts.joined(separator: "/"), to: document.resourceRoot)
     }
     public static func contains(_ path: String, in root: String) -> Bool {
-        path == root || path.hasPrefix(root == "/" ? "/" : root + "/")
+        // SFTP paths are UTF-8 byte names; String equality folds Unicode normalization.
+        let pathBytes = Array(path.utf8), rootBytes = Array(root.utf8)
+        return pathBytes == rootBytes || pathBytes.starts(with: root == "/" ? rootBytes : rootBytes + [47])
     }
 }
 

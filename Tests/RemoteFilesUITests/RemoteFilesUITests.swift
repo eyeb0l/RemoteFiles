@@ -116,6 +116,150 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(add.waitForExistence(timeout: 5))
     }
 
+    func testRelativeDocumentNavigationKeepsBackReadingPosition() throws {
+        continueAfterFailure = false
+        let app = launchDemoReader(filename: "Navigation guide.md")
+        let rendered = app.scrollViews["Rendered Markdown document"]
+        let nested = try revealDocumentLink("Open nested note", in: app, scroll: rendered)
+        let before = nested.frame
+        let marker = app.staticTexts["Navigation return marker"]
+        XCTAssertTrue(marker.isHittable, "The return marker should be on screen beside the selected link")
+        let markerY = marker.frame.minY
+        nested.tap()
+        XCTAssertTrue(app.navigationBars["Linked notes.md"].waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Linked note marker"].waitForExistence(timeout: 10))
+
+        // Exercise the actual native Back button, not another link to a new copy of the guide.
+        let back = app.navigationBars.buttons["Navigation guide.md"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
+        XCTAssertTrue(app.navigationBars["Navigation guide.md"].waitForExistence(timeout: 5))
+        let restored = documentLink("Open nested note", in: app)
+        XCTAssertTrue(restored.waitForExistence(timeout: 5) && restored.isHittable,
+                      "Back should return to the selected link without scrolling from the top")
+        XCTAssertEqual(restored.frame.minY, before.minY, accuracy: 4,
+                       "Back should preserve the link's vertical reading position")
+        XCTAssertTrue(marker.isHittable)
+        XCTAssertEqual(marker.frame.minY, markerY, accuracy: 4)
+        XCTAssertFalse(app.staticTexts["Previously loaded copy · refreshing…"].exists,
+                       "Returning to an unchanged reader should not refetch it")
+        attachScreenshot("Relative document native Back position")
+
+        // The nested document may reach its parent within the connection's starting folder.
+        restored.tap()
+        XCTAssertTrue(app.navigationBars["Linked notes.md"].waitForExistence(timeout: 10))
+        let parent = try revealDocumentLink("Open parent guide", in: app,
+                                            scroll: app.scrollViews["Rendered Markdown document"])
+        parent.tap()
+        XCTAssertTrue(app.navigationBars["Navigation guide.md"].waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Navigation guide"].waitForExistence(timeout: 10))
+    }
+
+    func testRelativeDocumentErrorsKeepCurrentReaderAndExplainRecovery() throws {
+        continueAfterFailure = false
+        let app = launchDemoReader(filename: "Navigation guide.md")
+        let scroll = app.scrollViews["Rendered Markdown document"]
+        for (label, explanation) in [
+            ("Heading link", "Links to headings aren’t supported yet"),
+            ("Missing file", "could not be found"),
+            ("Outside starting folder", "leaves the connection’s starting folder"),
+            ("Unsupported archive", "isn’t a supported document, image, or PDF")
+        ] {
+            let link = try revealDocumentLink(label, in: app, scroll: scroll)
+            link.tap()
+            let alert = app.alerts["Couldn’t open link"]
+            XCTAssertTrue(alert.waitForExistence(timeout: 10), "Expected an actionable error for \(label).\n" + app.debugDescription)
+            XCTAssertTrue(alert.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", explanation)).firstMatch.exists,
+                          "The link error should explain how to recover: \(label)")
+            alert.buttons["OK"].tap()
+            XCTAssertTrue(app.navigationBars["Navigation guide.md"].exists)
+            XCTAssertTrue(documentLink(label, in: app).isHittable,
+                          "Dismissing the error should retain the current document and reading position")
+        }
+        attachScreenshot("Relative document errors retain reader")
+    }
+
+    func testOriginalExportSystemPickerCancellationKeepsReaderUsable() throws {
+        continueAfterFailure = false
+        let app = launchDemoReader(filename: "Example.swift", markdown: false)
+        let export = app.buttons["Save Original to Files"]
+        XCTAssertTrue(export.waitForExistence(timeout: 5) && export.isEnabled)
+        for _ in 0..<2 {
+            export.tap()
+            XCTAssertTrue(app.buttons["Save"].waitForExistence(timeout: 45),
+                          "The original should prepare and open the system Save to Files picker.\n" + app.debugDescription)
+            attachScreenshot("Original file native Save to Files picker")
+            let cancel = app.descendants(matching: .any)
+                .matching(NSPredicate(format: "label == %@", "Cancel")).firstMatch
+            if cancel.exists && cancel.isHittable {
+                cancel.tap()
+            } else {
+                // This Files version retains a hidden Cancel accessibility element.
+                // Dismiss the real native page sheet through its header gesture.
+                let header = app.navigationBars["FullDocumentManagerViewControllerNavigationBar"]
+                XCTAssertTrue(header.waitForExistence(timeout: 5))
+                let start = header.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.25))
+                let end = app.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.8))
+                start.press(forDuration: 0.1, thenDragTo: end)
+            }
+            let gone = expectation(for: NSPredicate(format: "exists == false"),
+                                   evaluatedWith: app.buttons["Save"])
+            wait(for: [gone], timeout: 10)
+            XCTAssertTrue(app.navigationBars["Example.swift"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.scrollViews["Plain text document"].exists)
+            let ready = expectation(for: NSPredicate(format: "exists == true AND enabled == true"), evaluatedWith: export)
+            wait(for: [ready], timeout: 5)
+        }
+        app.buttons["Document actions"].tap()
+        XCTAssertTrue(app.buttons["Copy Source"].waitForExistence(timeout: 5),
+                      "Cancelling export should leave the reader's existing actions usable")
+    }
+
+    private func launchDemoReader(filename: String, markdown: Bool = true) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo"]
+        app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Mac")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15))
+        projects.tap()
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
+        let file = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", filename + ",")).firstMatch
+        // List virtualizes off-screen rows, so existence must be checked while revealing.
+        for _ in 0..<6 {
+            if file.exists && file.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(file.waitForExistence(timeout: 5) && file.isHittable,
+                      "The Demo file should be reachable: \(filename)\n" + app.debugDescription)
+        file.tap()
+        XCTAssertTrue(app.navigationBars[filename].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.scrollViews[markdown ? "Rendered Markdown document" : "Plain text document"].waitForExistence(timeout: 15))
+        return app
+    }
+
+    private func documentLink(_ label: String, in app: XCUIApplication) -> XCUIElement {
+        let link = app.links[label].firstMatch
+        if link.exists { return link }
+        // Native attributed Text may expose a single-link paragraph as static text.
+        return app.staticTexts[label].firstMatch
+    }
+
+    private func revealDocumentLink(_ label: String, in app: XCUIApplication,
+                                    scroll: XCUIElement) throws -> XCUIElement {
+        XCTAssertTrue(scroll.waitForExistence(timeout: 10))
+        for _ in 0..<24 {
+            let link = documentLink(label, in: app)
+            // XCTest can report links under the Home indicator as hittable.
+            // Tap only after the whole link lies within the reading viewport.
+            let safeViewport = scroll.frame.insetBy(dx: 0, dy: 44)
+            if link.exists && link.isHittable && safeViewport.contains(link.frame) { return link }
+            scroll.swipeUp(velocity: .fast)
+        }
+        let link = documentLink(label, in: app)
+        XCTAssertTrue(link.exists && link.isHittable, "Could not reach the Demo link: \(label).\n" + app.debugDescription)
+        return link
+    }
+
     private func attachScreenshot(_ name: String) {
         let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         attachment.name = name

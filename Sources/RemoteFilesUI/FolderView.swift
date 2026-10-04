@@ -166,7 +166,10 @@ struct FolderView: View {
             do {
                 let target = try await model.service.resolveEntry(profile: profile, path: entry.path)
                 try Task.checkCancellation()
-                model.routes.append(route(target))
+                let routed = RemoteEntry(name: target.name, path: target.path, kind: target.kind,
+                                         size: target.size, modifiedAt: target.modifiedAt,
+                                         navigationRoot: target.navigationRoot, exportFilename: entry.name)
+                model.routes.append(route(routed))
             } catch { if !Task.isCancelled { self.error = error.localizedDescription; model.handle(error, profile: profile) } }
         }
     }

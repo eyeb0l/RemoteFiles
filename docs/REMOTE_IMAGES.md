@@ -138,3 +138,5 @@ images plus the 73.5 MB image and full-screen viewer (146.912 s), and the real
 `READER_PERFORMANCE.md` text document (13.969 s). These are automation durations.
 Evidence: `/private/tmp/remotefiles-blank-final.xcresult`. The fixed signed Release
 build is installed and was relaunched normally after testing.
+
+Use the reader’s **Save Original to Files** action to export original image/PDF bytes and filename instead of display pixels. See [original export](ORIGINAL_EXPORT.md).

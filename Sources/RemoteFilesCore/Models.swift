@@ -26,8 +26,13 @@ public struct RemoteEntry: Identifiable, Hashable, Sendable {
     public let kind: Kind
     public let size: UInt64?
     public let modifiedAt: Date?
-    public init(name: String, path: String, kind: Kind, size: UInt64? = nil, modifiedAt: Date? = nil) {
+    /// Present only for a user-tapped document link; rechecked by every reader fetch.
+    public let navigationRoot: String?
+    /// The tapped alias name, retained for exporting the original after canonical resolution.
+    public let exportFilename: String?
+    public init(name: String, path: String, kind: Kind, size: UInt64? = nil, modifiedAt: Date? = nil, navigationRoot: String? = nil, exportFilename: String? = nil) {
         self.name = name; self.path = path; self.kind = kind; self.size = size; self.modifiedAt = modifiedAt
+        self.navigationRoot = navigationRoot; self.exportFilename = exportFilename
     }
 }
 
@@ -52,11 +57,20 @@ public protocol RemoteFileService: Sendable {
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data
     func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry
+    func readDocumentFile(profile: ConnectionProfile, path: String, allowedRoot: String, limit: Int) async throws -> Data
+    func resolveDocumentLink(profile: ConnectionProfile, documentPath: String, reference: String) async throws -> RemoteEntry
     func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry
     func disconnect() async
 }
 
 public extension RemoteFileService {
+    func readDocumentFile(profile: ConnectionProfile, path: String, allowedRoot: String, limit: Int) async throws -> Data {
+        throw RemoteFileError.unsupportedFile
+    }
+    /// Adapters must opt in with canonical connection-root confinement.
+    func resolveDocumentLink(profile: ConnectionProfile, documentPath: String, reference: String) async throws -> RemoteEntry {
+        throw RemoteFileError.unsupportedFile
+    }
     func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
         throw RemoteFileError.unsupportedFile
     }

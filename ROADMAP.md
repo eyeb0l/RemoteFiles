@@ -5,8 +5,7 @@ The preview stays read only. These are deliberate future decisions, not hidden o
 ## After the first real usage session
 
 - Physical iPhone over cellular/Tailscale acceptance, accessibility and Instruments profiling.
-- Remote relative Markdown document links using the implemented remote-resource resolver.
-- Original-file export. Standalone images and PDFs can be previewed; image Share currently exports the downsampled display image.
+- Complete physical acceptance of relative Markdown links, back reading position and original Save to Files; the implementation and automated checks are described in [document links](docs/DOCUMENT_LINKS.md), [original export](docs/ORIGINAL_EXPORT.md), and [acceptance](docs/AUTOMATED_ACCEPTANCE.md). Image Share continues to export display pixels; Save Original to Files preserves the original bytes.
 - Broader **verified** SSH key formats and optional passphrase conveniences.
 - Richer sorting and advanced symlink behavior.
 - Cached parsed-document eviction and stronger scroll restoration across app termination.

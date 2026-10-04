@@ -8,26 +8,32 @@ public struct DocumentContentView: View {
     public let markdown: Bool
     public let source: Bool
     public let filename: String?
+    public let openDocumentLink: ((URL) -> Void)?
+    public let readingPosition: DocumentReadingPosition?
+    @State private var localReadingPosition = DocumentReadingPosition()
     @State private var prepared: [MarkdownPart]?
     public let location: RemoteDocumentLocation?
     public let resolver: (any RemoteResourceResolving)?
     @State private var preparedSource: String?
     @State private var preparationFailed = false
 
-    public init(text: String, markdown: Bool, source: Bool, filename: String? = nil, location: RemoteDocumentLocation? = nil, resolver: (any RemoteResourceResolving)? = nil) {
+    public init(text: String, markdown: Bool, source: Bool, filename: String? = nil, location: RemoteDocumentLocation? = nil, resolver: (any RemoteResourceResolving)? = nil, readingPosition: DocumentReadingPosition? = nil, openDocumentLink: ((URL) -> Void)? = nil) {
         self.text = text
         self.markdown = markdown
         self.source = source
         self.filename = filename
         self.location = location; self.resolver = resolver
+        self.readingPosition = readingPosition; self.openDocumentLink = openDocumentLink
     }
 
     public var body: some View {
+        @Bindable var position = readingPosition ?? localReadingPosition
         Group {
             if !markdown || source {
                 ScrollView([.horizontal, .vertical]) {
                     SourceCodeView(text: text, language: markdown ? "markdown" : SourceLanguage.forFilename(filename))
                 }
+                .modifier(DocumentScrollPreservation(saved: $position.source, ready: true))
                 .accessibilityLabel(markdown ? "Markdown source" : "Plain text document")
             } else {
                 GeometryReader { viewport in
@@ -55,7 +61,12 @@ public struct DocumentContentView: View {
                                         .textual.imageAttachmentLoader(NoImageLoader())
                                         .textual.emojiAttachmentLoader(NoImageLoader())
                                         .environment(\.openURL, OpenURLAction { url in
-                                            DocumentPolicy.allowsExternalLink(url) ? .systemAction : .discarded
+                                            if DocumentPolicy.allowsExternalLink(url) { return .systemAction }
+                                            if DocumentPolicy.isRelativeDocumentLink(url), let openDocumentLink {
+                                                openDocumentLink(url)
+                                                return .handled
+                                            }
+                                            return .discarded
                                         })
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                 case .image(let reference, let alt):
@@ -82,6 +93,7 @@ public struct DocumentContentView: View {
                     .padding(20)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .modifier(DocumentScrollPreservation(saved: $position.rendered, ready: prepared != nil))
                 .coordinateSpace(name: "readerViewport")
                 .accessibilityLabel("Rendered Markdown document")
                 }

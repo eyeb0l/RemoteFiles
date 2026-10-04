@@ -14,16 +14,24 @@
 
   struct UIKitTextSelectionInteraction: ViewModifier {
     private let model: TextSelectionModel
+    private let coordinator: TextSelectionCoordinator?
+    @State private var overflowFrames: [CGRect] = []
 
-    init(model: TextSelectionModel) {
+    init(model: TextSelectionModel, coordinator: TextSelectionCoordinator?) {
       self.model = model
+      self.coordinator = coordinator
     }
 
     func body(content: Content) -> some View {
-      content.overlayPreferenceValue(OverflowFrameKey.self) { frames in
-        UIKitTextInteractionOverlay(model: model, overflowFrames: frames)
-          .accessibilityHidden(true)
-      }
+      content
+        .onPreferenceChange(OverflowFrameKey.self) { @MainActor frames in
+          overflowFrames = frames
+        }
+        .overlayTextLayoutCollection { layoutCollection in
+          UIKitTextInteractionOverlay(model: model, layoutCollection: layoutCollection,
+                                      coordinator: coordinator, overflowFrames: overflowFrames)
+            .accessibilityHidden(true)
+        }
     }
   }
 #endif

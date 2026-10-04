@@ -45,7 +45,7 @@ Profiles, favourites, recent references, and public identity metadata are stored
 
 ## Reader scope
 
-Markdown and UTF-8 text/config/code use a 2 MiB receive-time bound and explicit empty/binary/unsupported states. Standalone JPEG, PNG, HEIC/HEIF, GIF, TIFF, WebP and BMP images open with bounded SFTP caching and downsampled display; tap for full-screen zoom and Share. Animated images show their first frame. PDFs open in a native scrolling, zoomable reader. Image/PDF transfers are capped at 128 MiB per file. Markdown images load lazily through SFTP relative to the document directory, with bounded disk/pixel caches, retry, zoom and Share. Web/file/data image URLs never load. See [remote image policy](docs/REMOTE_IMAGES.md). Only a tapped absolute HTTP/HTTPS Markdown link may open; unsafe schemes and relative links are disabled. Tables/code scroll within the rendered document. Markdown source and plain text remain read only. A failed refresh labels the previous content as previously loaded.
+Markdown and UTF-8 text/config/code use a 2 MiB receive-time bound and explicit empty/binary/unsupported states. Standalone JPEG, PNG, HEIC/HEIF, GIF, TIFF, WebP and BMP images open with bounded SFTP caching and downsampled display; tap for full-screen zoom and Share. Animated images show their first frame. PDFs open in a native scrolling, zoomable reader. Image/PDF transfers are capped at 128 MiB per file. Markdown images load lazily through SFTP relative to the document directory, with bounded disk/pixel caches, retry, zoom and Share. Web/file/data image URLs never load. See [remote image policy](docs/REMOTE_IMAGES.md). Tapped HTTP/HTTPS links may open externally; relative document links resolve within the canonical connection starting folder, and unsafe schemes remain disabled. Tables/code scroll within the rendered document. Markdown source and plain text remain read only. A failed refresh labels the previous content as previously loaded.
 
 Source files and the Markdown **Source** tab have automatic syntax highlighting in light and dark appearances, using the filename to select the bundled grammar (including Swift, JavaScript/TypeScript, Python, JSON, YAML, shell, HTML/CSS and SQL). Plain source appears immediately; tokenization and color preparation happen off the main actor. Selection and **Copy Source** retain the original text. Unknown formats, sources above 256 KiB, and results above 16,000 tokens stay plain to bound rendering work; the existing 2 MiB text-preview limit is unchanged. The tokenizer runs locally and loads no remote scripts. Its token cache holds at most two documents within an estimated 2 MiB budget and clears on disconnect/background or memory warning. Leaving the source view cancels publication of unfinished highlighting.
 
@@ -74,3 +74,25 @@ See [PREVIEW_STATUS.md](PREVIEW_STATUS.md) for **actual** results and outstandin
 ## Renderer performance
 
 Textual is locally vendored at the original pinned revision with focused startup and reader accessibility fixes. [Provenance](Vendor/Textual/UPSTREAM.md) records the changes and license; [performance evidence](docs/READER_PERFORMANCE.md) records simulator and physical-iPhone measurements, tests, and remaining limits.
+
+### Document navigation and original export
+
+Rendered Markdown can open relative Markdown/text/image/PDF links within the
+connection’s canonical starting folder. Native Back keeps separate Rendered and
+Source reading positions. Fragment/query links show an actionable explanation.
+See [document links](docs/DOCUMENT_LINKS.md).
+
+The reader’s **Save Original to Files** toolbar action streams the original file
+(up to 128 MiB), preserving exact bytes and the selected filename/extension. It
+works for files without a supported preview. Preparation can be cancelled; the
+native Files picker saves a copy. Temporary exports expire after ten minutes
+and are removed on dismissal, navigation away, disconnect or backgrounding.
+See [original export](docs/ORIGINAL_EXPORT.md).
+
+For repeatable verification of the current source, use
+[scripts/test-acceptance.py](scripts/test-acceptance.py) with an available iOS 27
+Simulator and a fresh evidence directory. It records the exact source snapshot,
+requires all macOS/OpenSSH, signed hosted/demo UI, actual VoiceOver and Release
+compile lanes, and reports missing tests or unexpected skips as failures.
+[Automated acceptance](docs/AUTOMATED_ACCEPTANCE.md) distinguishes these results
+from the physical-device and human checks that remain.

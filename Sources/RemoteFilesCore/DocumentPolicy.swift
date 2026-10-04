@@ -58,10 +58,24 @@ public enum DocumentPolicy {
         return true
     }
 
+    /// Relative link actions are retained only for an explicitly injected remote navigation handler.
+    /// Full confinement and file validation happen after the user taps, using the server's canonical root.
+    public static func isRelativeDocumentLink(_ url: URL) -> Bool {
+        guard url.baseURL == nil,
+              let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              parts.scheme == nil, parts.host == nil, parts.user == nil, parts.password == nil,
+              let path = parts.percentEncodedPath.removingPercentEncoding,
+              !path.hasPrefix("/"), !path.contains("\\"),
+              !path.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
+              !url.absoluteString.hasPrefix("//") else { return false }
+        // Keep fragments/queries actionable so the navigation policy can explain their limitation.
+        return !path.isEmpty || parts.fragment != nil || parts.query != nil
+    }
+
     /// Foundation is the same CommonMark/GFM parser used by Textual. This performs only
     /// attributed-output policy/formatting, never Markdown syntax parsing or resource loading.
     /// Invoke away from the main actor for substantial reports.
-    public static func prepareMarkdown(_ source: String, preserveImages: Bool = false) throws -> AttributedString {
+    public static func prepareMarkdown(_ source: String, preserveImages: Bool = false, preserveDocumentLinks: Bool = false) throws -> AttributedString {
         var document = try AttributedString(markdown: source)
         // Replace image runs before handing content to Textual, so its default image loader never
         // receives a URL. Keep readable alt text, including for relative/data/file image URLs.
@@ -77,7 +91,8 @@ public enum DocumentPolicy {
                 replacement.link = nil
                 replacement.inlinePresentationIntent = .emphasized
                 document.replaceSubrange(run.range, with: replacement)
-            } else if let link = run.link, !allowsExternalLink(link) {
+            } else if let link = run.link, !allowsExternalLink(link),
+                      !(preserveDocumentLinks && isRelativeDocumentLink(link)) {
                 document[run.range].link = nil
             }
         }
@@ -115,7 +130,7 @@ public struct MarkdownPart: Identifiable, Sendable {
 
 public extension DocumentPolicy {
     static func remoteMarkdownParts(_ source: String) throws -> [MarkdownPart] {
-        let document = try prepareMarkdown(source, preserveImages: true)
+        let document = try prepareMarkdown(source, preserveImages: true, preserveDocumentLinks: true)
         var parts: [MarkdownPart] = []
         var start = document.startIndex
         for run in document.runs where run.imageURL != nil {

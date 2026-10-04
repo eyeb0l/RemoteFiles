@@ -12,15 +12,21 @@
 
   struct UIKitTextInteractionOverlay: UIViewRepresentable {
     private let model: TextSelectionModel
+    private let layoutCollection: any TextLayoutCollection
+    private let coordinator: TextSelectionCoordinator?
     private let overflowFrames: [CGRect]
 
-    init(model: TextSelectionModel, overflowFrames: [CGRect]) {
+    init(model: TextSelectionModel, layoutCollection: any TextLayoutCollection,
+         coordinator: TextSelectionCoordinator?, overflowFrames: [CGRect]) {
       self.model = model
+      self.layoutCollection = layoutCollection
+      self.coordinator = coordinator
       self.overflowFrames = overflowFrames
     }
 
     func makeUIView(context: Context) -> UITextInteractionView {
-      UITextInteractionView(
+      updateModel()
+      return UITextInteractionView(
         model: model,
         exclusionRects: overflowFrames,
         openURL: context.environment.openURL
@@ -28,9 +34,17 @@
     }
 
     func updateUIView(_ uiView: UITextInteractionView, context: Context) {
+      updateModel()
       uiView.model = model
       uiView.exclusionRects = overflowFrames
       uiView.openURL = context.environment.openURL
+    }
+
+    private func updateModel() {
+      // Keep hit testing and selection reconciliation in the model, but hand it the
+      // current resolved collection whenever SwiftUI updates this native overlay.
+      model.setCoordinator(coordinator)
+      model.setLayoutCollection(layoutCollection)
     }
   }
 #endif

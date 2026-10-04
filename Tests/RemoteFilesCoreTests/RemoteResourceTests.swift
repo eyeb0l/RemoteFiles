@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 import ImageIO
 import CoreGraphics
+import zlib
 @testable import RemoteFilesCore
 
 final class RemoteResourceTests: XCTestCase {
@@ -28,18 +29,64 @@ final class RemoteResourceTests: XCTestCase {
         catch RemoteResourceError.notImage { }
     }
 
+    /// Valid RGB PNG with uncompressed DEFLATE rows. The fixture has actual image
+    /// bytes over 70 MB rather than padding, and generation retains only one row.
+    private func largePNG(at file: URL) throws {
+        let width = 7000, height = 3500
+        XCTAssertTrue(FileManager.default.createFile(atPath: file.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: file)
+        defer { try? handle.close() }
+        func bytes(_ value: UInt32) -> Data {
+            var bigEndian = value.bigEndian
+            return withUnsafeBytes(of: &bigEndian) { Data($0) }
+        }
+        func chunk(_ type: String, _ payload: Data) throws {
+            let kind = Data(type.utf8)
+            var checksum = kind.withUnsafeBytes { crc32(0, $0.bindMemory(to: Bytef.self).baseAddress, uInt(kind.count)) }
+            if !payload.isEmpty {
+                checksum = payload.withUnsafeBytes { crc32(checksum, $0.bindMemory(to: Bytef.self).baseAddress, uInt(payload.count)) }
+            }
+            var framed = bytes(UInt32(payload.count))
+            framed.append(kind); framed.append(payload); framed.append(bytes(UInt32(checksum)))
+            try handle.write(contentsOf: framed)
+        }
+        try handle.write(contentsOf: Data([137, 80, 78, 71, 13, 10, 26, 10]))
+        var header = bytes(UInt32(width)); header.append(bytes(UInt32(height)))
+        header.append(contentsOf: [8, 2, 0, 0, 0])
+        try chunk("IHDR", header)
+        try chunk("IDAT", Data([0x78, 0x01])) // zlib header, no compression.
+        var row = Data([0]) // PNG filter: none.
+        for _ in 0..<width { row.append(contentsOf: [42, 125, 190]) }
+        let length = UInt16(row.count)
+        var checksum = adler32(0, nil, 0)
+        for index in 0..<height {
+            checksum = row.withUnsafeBytes { adler32(checksum, $0.bindMemory(to: Bytef.self).baseAddress, uInt(row.count)) }
+            var block = Data([index == height - 1 ? 1 : 0,
+                              UInt8(truncatingIfNeeded: length), UInt8(truncatingIfNeeded: length >> 8),
+                              UInt8(truncatingIfNeeded: ~length), UInt8(truncatingIfNeeded: ~length >> 8)])
+            block.append(row)
+            try chunk("IDAT", block)
+        }
+        try chunk("IDAT", bytes(UInt32(checksum)))
+        try chunk("IEND", Data())
+    }
+
     func testSeventyMegabyteImageUsesBoundedDisplayPixels() async throws {
-        #if os(macOS)
-        let file = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".test-server/remote-images/large-70mb.png")
-        try XCTSkipUnless(FileManager.default.fileExists(atPath: file.path), "Generate the large image acceptance fixture")
-        let bytes = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try largePNG(at: file)
+        let bytes = try XCTUnwrap(file.resourceValues(forKeys: [.fileSizeKey]).fileSize)
         XCTAssertGreaterThan(bytes, 70_000_000)
-        let image = try await RemoteImageDecoder.shared.decode(file, maxPixel: 1600)
-        XCTAssertEqual(image.image.width, 1600)
-        XCTAssertEqual(image.image.height, 800)
-        XCTAssertLessThanOrEqual(image.cost, 6 * 1024 * 1024)
-        print("Large image: sourceBytes=\(bytes), decodedBytes=\(image.cost), pixels=1600x800")
-        #endif
+        let decoder = RemoteImageDecoder()
+        let inline = try await decoder.decode(file, maxPixel: 1600)
+        XCTAssertEqual(inline.image.width, 1600)
+        XCTAssertEqual(inline.image.height, 800)
+        XCTAssertLessThanOrEqual(inline.cost, 6 * 1024 * 1024)
+        let viewer = try await decoder.decode(file, maxPixel: 3072)
+        XCTAssertEqual(viewer.image.width, 3072)
+        XCTAssertEqual(viewer.image.height, 1536)
+        XCTAssertLessThanOrEqual(viewer.cost, 20 * 1024 * 1024)
+        print("Large image: sourceBytes=\(bytes), inlineDecodedBytes=\(inline.cost), viewerDecodedBytes=\(viewer.cost), platform=\(ProcessInfo.processInfo.operatingSystemVersionString)")
     }
 
     func testRelativePathsAndBoundary() throws {

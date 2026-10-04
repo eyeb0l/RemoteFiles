@@ -29,7 +29,12 @@ public actor MetadataStore {
     public func save(_ value: AppMetadata) throws {
         try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let bytes = try JSONEncoder().encode(value)
+        #if os(iOS)
         try bytes.write(to: fileURL, options: [.atomic, .completeFileProtection])
+        #else
+        // iOS Data Protection is not supported by the macOS test host's filesystem.
+        try bytes.write(to: fileURL, options: .atomic)
+        #endif
         metadata = value
     }
 }

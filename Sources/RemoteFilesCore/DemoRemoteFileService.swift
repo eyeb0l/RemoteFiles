@@ -29,6 +29,8 @@ public actor DemoRemoteFileService: RemoteFileService {
             .init(name: "Reports", path: path + "/Reports", kind: .directory),
             .init(name: "Empty", path: path + "/Empty", kind: .directory),
             .init(name: "Thousand files", path: path + "/Thousand files", kind: .directory),
+            .init(name: "Navigation guide.md", path: path + "/Navigation guide.md", kind: .file, size: UInt64(Self.navigationGuide.utf8.count)),
+            .init(name: "Linked notes.md", path: path + "/Linked notes.md", kind: .file, size: UInt64(Self.linkedNotes.utf8.count)),
             .init(name: "Example.swift", path: path + "/Example.swift", kind: .file, size: UInt64(Self.sourceExample.utf8.count)),
             .init(name: "Weekly review.md", path: path + "/Weekly review.md", kind: .file, size: UInt64(Self.report.utf8.count), modifiedAt: Date(timeIntervalSince1970: 1790035200)),
             .init(name: "Notes — 東京.txt", path: path + "/Notes — 東京.txt", kind: .file, size: 92),
@@ -46,7 +48,10 @@ public actor DemoRemoteFileService: RemoteFileService {
         if path.hasSuffix("Too large.md") { throw RemoteFileError.tooLarge(limit) }
         if path.hasSuffix("Binary.txt") { return Data([0, 0xff, 0]) }
         if path.hasSuffix("Empty.txt") { return Data() }
-        let text = path.hasSuffix("Example.swift") ? Self.sourceExample : path.hasSuffix(".md") ? Self.report : "# RemoteFiles configuration\nmode = read-only\n\nSpaces and Unicode: 東京 ✨\n"
+        let text: String
+        if path.hasSuffix("Navigation guide.md") { text = Self.navigationGuide }
+        else if path.hasSuffix("Linked notes.md") { text = Self.linkedNotes }
+        else { text = path.hasSuffix("Example.swift") ? Self.sourceExample : path.hasSuffix(".md") ? Self.report : "# RemoteFiles configuration\nmode = read-only\n\nSpaces and Unicode: 東京 ✨\n" }
         let data = Data(text.utf8)
         guard data.count <= limit else { throw RemoteFileError.tooLarge(limit) }
         return data
@@ -55,7 +60,60 @@ public actor DemoRemoteFileService: RemoteFileService {
         try await pause()
         return RemoteEntry(name: "Weekly review.md", path: RemotePath.parent(of: path) + "/Weekly review.md", kind: .file)
     }
+    public func resolveDocumentLink(profile: ConnectionProfile, documentPath: String, reference: String) async throws -> RemoteEntry {
+        try await pause()
+        let root = profile.startingDirectory == "." ? "/Projects" : profile.startingDirectory
+        let path = try RemoteDocumentLinkPath.resolve(reference, relativeTo: documentPath, connectionRoot: root)
+        let name = RemotePath.name(of: path)
+        let knownFiles = ["Navigation guide.md", "Linked notes.md", "Weekly review.md", "Example.swift", "Notes — 東京.txt", ".config", "Empty.txt", "Binary.txt", "Too large.md"]
+        guard knownFiles.contains(name) else { throw RemoteFileError.unavailable("The linked file could not be found. Check the link or open its folder.") }
+        try Task.checkCancellation()
+        return RemoteEntry(name: name, path: path, kind: .file, navigationRoot: root)
+    }
+    public func readDocumentFile(profile: ConnectionProfile, path: String, allowedRoot: String, limit: Int) async throws -> Data {
+        let root = allowedRoot == "." ? "/Projects" : allowedRoot
+        let canonical = path.hasSuffix("/Latest report") ? try await resolveEntry(profile: profile, path: path).path : path
+        guard RemoteResourcePath.contains(canonical, in: root) else { throw RemoteDocumentLinkError.outsideConnection }
+        return try await readFile(profile: profile, path: canonical, limit: limit)
+    }
+    public func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String,
+                             destination: URL, limit: Int) async throws -> RemoteEntry {
+        let root = allowedRoot == "." ? "/Projects" : allowedRoot
+        let canonical = path.hasSuffix("/Latest report") ? try await resolveEntry(profile: profile, path: path).path : path
+        guard RemoteResourcePath.contains(canonical, in: root) else { throw RemoteResourceError.outsideDocument }
+        let bytes = try await readFile(profile: profile, path: canonical, limit: limit)
+        try Task.checkCancellation()
+        try bytes.write(to: destination)
+        return RemoteEntry(name: RemotePath.name(of: canonical), path: canonical, kind: .file, size: UInt64(bytes.count))
+    }
     public func disconnect() { generation += 1 }
+
+    /// Long, uniquely labelled sections make back-scroll acceptance observable on screen.
+    public static let navigationGuide = "# Navigation guide\n\n" + (1...28).map {
+        "## Reading marker \($0)\n\nThis is local demo section \($0). Scroll to the links, open a note, and return to this reading position.\n\n"
+    }.joined() + """
+    ## Navigation return marker
+
+    [Open nested note](Reports/Linked%20notes.md)
+
+    [Open source example](Example.swift)
+
+    [Heading link](Reports/Linked%20notes.md#details)
+
+    [Missing file](Reports/Missing.md)
+
+    [Outside starting folder](../outside.md)
+
+    [Unsupported archive](Archive.zip)
+    """ + "\n"
+    public static let linkedNotes = """
+    # Linked note marker
+
+    This nested note was opened through a relative document link.
+
+    [Open parent guide](../Navigation%20guide.md)
+    """ + "\n"
+
     public static let sourceExample = """
     import Foundation
 

@@ -51,11 +51,25 @@ public actor SFTPRemoteFileService: RemoteFileService {
     }
 
     public func readFile(profile: ConnectionProfile, path: String, limit: Int = 2 * 1024 * 1024) async throws -> Data {
+        try await boundedRead(profile: profile, path: path, allowedRoot: nil, limit: limit)
+    }
+
+    public func readDocumentFile(profile: ConnectionProfile, path: String, allowedRoot: String, limit: Int) async throws -> Data {
+        try await boundedRead(profile: profile, path: path, allowedRoot: allowedRoot, limit: limit)
+    }
+
+    private func boundedRead(profile: ConnectionProfile, path: String, allowedRoot: String?, limit: Int) async throws -> Data {
         guard limit >= 0, limit < Int.max else { throw RemoteFileError.tooLarge(max(0, limit)) }
         let started = Date()
         let session = try await session(for: profile)
         let result = try await perform(session: session) { sftp in
-            let file = try await sftp.openFile(filePath: Self.validated(path), flags: .read)
+            var target = try Self.validated(path)
+            if let allowedRoot {
+                let root = try await sftp.getRealPath(atPath: Self.validated(allowedRoot))
+                target = try await sftp.getRealPath(atPath: target)
+                guard RemoteResourcePath.contains(target, in: root) else { throw RemoteDocumentLinkError.outsideConnection }
+            }
+            let file = try await sftp.openFile(filePath: target, flags: .read)
             do {
                 let attributes = try await file.readAttributes()
                 let result = try await BoundedPreviewReader.read(initialSize: attributes.size, limit: limit) { offset, amount in
@@ -107,6 +121,29 @@ public actor SFTPRemoteFileService: RemoteFileService {
         }
         measurements.fileOperations += 1; measurements.bytesReceived += result.1
         return result.0
+    }
+
+    /// User-tapped document links are bounded by the connection's canonical starting folder.
+    /// Canonicalizing both source and destination also rejects symlinks escaping that root.
+    public func resolveDocumentLink(profile: ConnectionProfile, documentPath: String, reference: String) async throws -> RemoteEntry {
+        try Task.checkCancellation()
+        let session = try await session(for: profile)
+        return try await perform(session: session) { sftp in
+            let root = try await sftp.getRealPath(atPath: Self.validated(profile.startingDirectory))
+            let document = try await sftp.getRealPath(atPath: Self.validated(documentPath))
+            guard RemoteResourcePath.contains(document, in: root) else { throw RemoteDocumentLinkError.outsideConnection }
+            let requested = try RemoteDocumentLinkPath.resolve(reference, relativeTo: document, connectionRoot: root)
+            let canonical = try await sftp.getRealPath(atPath: Self.validated(requested))
+            guard RemoteResourcePath.contains(canonical, in: root) else { throw RemoteDocumentLinkError.outsideConnection }
+            let attributes = try await sftp.getAttributes(at: canonical)
+            let entry = Self.entry(name: RemotePath.name(of: canonical), path: canonical, attributes: attributes)
+            guard entry.kind == .file, DocumentPolicy.kind(filename: entry.name) != .unsupported else {
+                throw RemoteDocumentLinkError.unsupportedFile
+            }
+            try Task.checkCancellation()
+            return RemoteEntry(name: entry.name, path: entry.path, kind: entry.kind, size: entry.size,
+                               modifiedAt: entry.modifiedAt, navigationRoot: root, exportFilename: RemotePath.name(of: requested))
+        }
     }
 
     public func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {

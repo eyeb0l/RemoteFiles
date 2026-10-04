@@ -1,6 +1,32 @@
 import SwiftUI
 import XCTest
+import Textual
 @testable import RemoteFilesUI
+
+/// Completes real tokenization, then holds its first result before the highlighter
+/// can validate or cache it. No scheduler timing or unusually large input is needed.
+private actor HighlightTokenizationGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+    private(set) var calls = 0
+
+    func tokenize(_ source: String, _ language: String) async -> [SourceCodeToken] {
+        calls += 1
+        let firstCall = calls == 1
+        let tokens = await SourceCodeTokenization.tokens(for: source, language: language)
+        if firstCall && !released { await withCheckedContinuation { continuation = $0 } }
+        return tokens
+    }
+    func waitUntilSuspended() async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while continuation == nil {
+            guard ContinuousClock.now < deadline else { throw GateTimeout() }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+    func resume() { released = true; continuation?.resume(); continuation = nil }
+    private struct GateTimeout: Error {}
+}
 
 final class SourceHighlightingTests: XCTestCase {
     func testLanguageSelectionUsesFilenameAndKeepsUnknownTextPlain() {
@@ -18,7 +44,7 @@ final class SourceHighlightingTests: XCTestCase {
     }
 
     func testSwiftHighlightingPreservesUnicodeWhitespaceAndTrailingNewline() async throws {
-        let source = "// 東京 ✨\r\n\tlet message = \"Hello 🌍\"\r\nlet count = 42\r\n"
+        let source = "// 東京 ✨\r\n\tlet message = \"Hello 🌍 e\u{301} é\"  \t\r\nlet count = 42\r\n\t  \r\n"
         let highlighter = SourceHighlighting()
         let lightResult = try await highlighter.highlight(source, language: "swift", dark: false)
         let darkResult = try await highlighter.highlight(source, language: "swift", dark: true)
@@ -82,4 +108,58 @@ final class SourceHighlightingTests: XCTestCase {
         do { _ = try await task.value; XCTFail("Cancelled work must not publish") }
         catch is CancellationError { }
     }
+    private func verifyDiscardedTokenization(cancel: Bool) async throws {
+        let source = "let greeting = \"東京 🌍 e\u{301}\"  \r\n"
+        let gate = HighlightTokenizationGate()
+        let highlighter = SourceHighlighting(tokenize: { await gate.tokenize($0, $1) })
+        let task = Task { try await highlighter.highlight(source, language: "swift", dark: false) }
+        do { try await gate.waitUntilSuspended() }
+        catch {
+            task.cancel(); await gate.resume(); _ = try? await task.value
+            throw error
+        }
+        if cancel { task.cancel() } else { await highlighter.clear() }
+        await gate.resume()
+        do { _ = try await task.value; XCTFail("Discarded in-flight tokens must not publish") }
+        catch is CancellationError { }
+
+        let retry = try await highlighter.highlight(source, language: "swift", dark: false)
+        XCTAssertEqual(Data(String(try XCTUnwrap(retry).characters).utf8), Data(source.utf8))
+        let retriedCalls = await gate.calls
+        XCTAssertEqual(retriedCalls, 2, "Cancelled or cleared tokenization must not populate the cache")
+        let cached = try await highlighter.highlight(source, language: "swift", dark: true)
+        XCTAssertEqual(Data(String(try XCTUnwrap(cached).characters).utf8), Data(source.utf8))
+        let cachedCalls = await gate.calls
+        XCTAssertEqual(cachedCalls, 2, "The valid retry should be cached for the other palette")
+    }
+
+    func testCancellationDuringTokenizationCannotPublishOrCache() async throws {
+        try await verifyDiscardedTokenization(cancel: true)
+    }
+
+    func testCacheClearDuringTokenizationCannotPublishOrRepopulateCache() async throws {
+        try await verifyDiscardedTokenization(cancel: false)
+    }
+
+    func testCanonicallyEquivalentButByteChangedTokensFallBackToOriginalSource() async throws {
+        let source = "let name = \"e\u{301}\"  \r\n"
+        let normalized = source.precomposedStringWithCanonicalMapping
+        XCTAssertEqual(source, normalized, "String equality alone cannot validate lossless tokens")
+        XCTAssertNotEqual(Data(source.utf8), Data(normalized.utf8))
+        let highlighter = SourceHighlighting(tokenize: { _, language in
+            await SourceCodeTokenization.tokens(for: normalized, language: language)
+        })
+        let result = try await highlighter.highlight(source, language: "swift", dark: false)
+        XCTAssertNil(result, "Byte-changing tokens must leave the original plain source visible")
+    }
+
+    func testHighlightingByteLimitCountsMultibyteSource() async throws {
+        let highlighter = SourceHighlighting()
+        let source = "// " + String(repeating: "🌍", count: SourceHighlighting.byteLimit / 4)
+        XCTAssertLessThan(source.count, SourceHighlighting.byteLimit)
+        XCTAssertGreaterThan(source.utf8.count, SourceHighlighting.byteLimit)
+        let result = try await highlighter.highlight(source, language: "swift", dark: false)
+        XCTAssertNil(result)
+    }
+
 }

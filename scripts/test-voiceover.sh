@@ -37,7 +37,11 @@ test_identifier="${4:-RemoteFilesUITests/VoiceOverChecks}"
 # reader and image views are the current production package. It contains no
 # private files and never opens the documentation link. Tests restore the
 # simulator's original VoiceOver enabled state in an XCTest teardown block.
-xcodebuild -project "$fixture/RemoteFiles.xcodeproj" -scheme RemoteFiles \
+package_options=()
+if [ -n "${REMOTEFILES_SOURCE_PACKAGES_DIR:-}" ]; then
+  package_options=(-clonedSourcePackagesDirPath "$REMOTEFILES_SOURCE_PACKAGES_DIR" -onlyUsePackageVersionsFromResolvedFile)
+fi
+xcodebuild -jobs 2 -project "$fixture/RemoteFiles.xcodeproj" -scheme RemoteFiles "${package_options[@]}" \
   -configuration Debug -destination "platform=iOS Simulator,id=$simulator" \
   -derivedDataPath "$derived" -resultBundlePath "$output/voiceover.xcresult" \
   -only-testing:"$test_identifier" -parallel-testing-enabled NO \

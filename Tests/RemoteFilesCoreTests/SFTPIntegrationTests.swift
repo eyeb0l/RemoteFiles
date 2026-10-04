@@ -101,6 +101,101 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertEqual(metrics.connections, 1)
     }
 
+    func testRelativeDocumentsUseCanonicalConnectionRootAndRejectEscapes() async throws {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Document links")
+        try fixture.authorize(key.publicKey)
+        var profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        defer { Task { await service.disconnect() } }
+        let source = fixture.files + "/docs/source.md"
+        let parent = try await service.resolveDocumentLink(profile: profile, documentPath: source, reference: "../report.md")
+        XCTAssertEqual(parent.path, fixture.files + "/report.md")
+        let unicode = try await service.resolveDocumentLink(profile: profile, documentPath: source, reference: "../Unicode%20caf%C3%A9.txt")
+        XCTAssertEqual(unicode.name, "Unicode café.txt")
+        let symlink = try await service.resolveDocumentLink(profile: profile, documentPath: source, reference: "../report-link.md")
+        XCTAssertEqual(symlink.path, parent.path)
+        XCTAssertEqual(symlink.exportFilename, "report-link.md")
+        for reference in ["../../outside.md", "escape.md"] {
+            do {
+                _ = try await service.resolveDocumentLink(profile: profile, documentPath: source, reference: reference)
+                XCTFail("Escaping document link must not navigate: \(reference)")
+            } catch RemoteDocumentLinkError.outsideConnection { }
+        }
+        for reference in ["../binary.bin", "../empty"] {
+            do {
+                _ = try await service.resolveDocumentLink(profile: profile, documentPath: source, reference: reference)
+                XCTFail("Unsupported/directory targets must not navigate")
+            } catch RemoteDocumentLinkError.unsupportedFile { }
+        }
+        do {
+            _ = try await service.resolveDocumentLink(profile: profile, documentPath: source, reference: "missing.md")
+            XCTFail("Missing document must return a recoverable error")
+        } catch { XCTAssertFalse(error is CancellationError) }
+        profile.startingDirectory = fixture.directory + "/root-alias"
+        let alias = try await service.resolveDocumentLink(profile: profile, documentPath: fixture.directory + "/root-alias/docs/source.md", reference: "../report.md")
+        XCTAssertEqual(alias.path, parent.path, "Configured root symlinks are canonicalized before confinement")
+    }
+
+    #if os(macOS)
+    func testConfinedRefreshRejectsChangedSymlinkAndReconnectReadsChangedServerBytes() async throws {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Changed document")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        defer { Task { await service.disconnect() } }
+        let filename = fixture.files + "/docs/refresh-target.md"
+        let before = Data("first version\r\n".utf8)
+        try before.write(to: URL(fileURLWithPath: filename))
+        defer { try? FileManager.default.removeItem(atPath: filename) }
+        let target = try await service.resolveDocumentLink(profile: profile,
+            documentPath: fixture.files + "/docs/source.md", reference: "refresh-target.md")
+        let root = try XCTUnwrap(target.navigationRoot)
+        let first = try await service.readDocumentFile(profile: profile, path: target.path, allowedRoot: root, limit: 1024)
+        XCTAssertEqual(first, before)
+        await service.disconnect()
+        let after = Data("updated on server\r\n東京  \r\n".utf8)
+        try after.write(to: URL(fileURLWithPath: filename))
+        let refreshed = try await service.readDocumentFile(profile: profile, path: target.path, allowedRoot: root, limit: 1024)
+        XCTAssertEqual(refreshed, after, "A new session must read changed server bytes")
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.connections, 2, "Explicit teardown must require a new SSH connection")
+        try FileManager.default.removeItem(atPath: filename)
+        try FileManager.default.createSymbolicLink(atPath: filename, withDestinationPath: fixture.directory + "/outside.md")
+        do {
+            _ = try await service.readDocumentFile(profile: profile, path: target.path, allowedRoot: root, limit: 1024)
+            XCTFail("Refresh must recheck canonical confinement after the linked target changes")
+        } catch RemoteDocumentLinkError.outsideConnection { }
+    }
+    #endif
+
+    func testOriginalStreamingPreservesBytesAndRejectsCanonicalEscape() async throws {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Original streaming")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        defer { Task { await service.disconnect() } }
+        let target = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: target) }
+        let expected = Data("é 東京\r\n\ttrailing spaces  \r\n".utf8)
+        _ = try await service.downloadFile(profile: profile, path: fixture.files + "/original.txt", allowedRoot: profile.startingDirectory, destination: target, limit: expected.count)
+        XCTAssertEqual(try Data(contentsOf: target), expected)
+        _ = try await service.downloadFile(profile: profile, path: fixture.files + "/empty.txt", allowedRoot: profile.startingDirectory, destination: target, limit: 1)
+        XCTAssertEqual(try Data(contentsOf: target).count, 0)
+        do {
+            _ = try await service.downloadFile(profile: profile, path: fixture.files + "/outside-export.txt", allowedRoot: profile.startingDirectory, destination: target, limit: 4096)
+            XCTFail("Original export must reject symlink escape before download")
+        } catch RemoteResourceError.outsideDocument { }
+    }
+
     func testOrdinaryUnencryptedAndEncryptedOpenSSHAuthentication() async throws {
         let fixture = try Fixture()
         for (filename, passphrase) in [("plain", Optional<String>.none), ("encrypted", Optional("fixture-passphrase"))] {

@@ -36,6 +36,14 @@ actor SourceHighlighting {
     private var cache: [Key: Cached] = [:]
     private var order: [Key] = []
     private var generation = 0
+    typealias Tokenizer = @Sendable (String, String) async -> [SourceCodeToken]
+    private let tokenize: Tokenizer
+
+    init(tokenize: @escaping Tokenizer = { source, language in
+        await SourceCodeTokenization.tokens(for: source, language: language)
+    }) {
+        self.tokenize = tokenize
+    }
 
     func clear() { generation += 1; cache.removeAll(); order.removeAll() }
 
@@ -45,24 +53,18 @@ actor SourceHighlighting {
         let epoch = generation
         let key = Key(source: Data(source.utf8), language: language)
         let tokens: [SourceCodeToken]
+        var pendingCache: Cached?
         if let cached = cache[key] {
             tokens = cached.tokens
             order.removeAll { $0 == key }; order.append(key)
         } else {
-            tokens = await SourceCodeTokenization.tokens(for: source, language: language)
+            tokens = await tokenize(source, language)
             try Task.checkCancellation()
             guard epoch == generation else { throw CancellationError() }
             // Never replace the source with incomplete tokens, and bound attributed-text complexity.
             guard tokens.count <= Self.tokenLimit,
                   tokens.map(\.content).joined().utf8.elementsEqual(source.utf8) else { return nil }
-            let cost = source.utf8.count * 2 + tokens.count * 80
-            let limit = 2 * 1024 * 1024
-            if cost <= limit {
-                while !order.isEmpty && (order.count >= 2 || cache.values.reduce(cost, { $0 + $1.cost }) > limit) {
-                    cache.removeValue(forKey: order.removeFirst())
-                }
-                cache[key] = Cached(tokens: tokens, cost: cost); order.append(key)
-            }
+            pendingCache = Cached(tokens: tokens, cost: source.utf8.count * 2 + tokens.count * 80)
         }
         guard tokens.contains(where: { $0.type != .plain }) else { return nil }
         var result = AttributedString()
@@ -73,6 +75,15 @@ actor SourceHighlighting {
             result.append(run)
         }
         try Task.checkCancellation()
+        guard epoch == generation else { throw CancellationError() }
+        // A request may be cancelled while styling its tokens. Cache only after all
+        // publication checks, so discarded work cannot repopulate the token cache.
+        if let pendingCache, pendingCache.cost <= 2 * 1024 * 1024 {
+            while !order.isEmpty && (order.count >= 2 || cache.values.reduce(pendingCache.cost, { $0 + $1.cost }) > 2 * 1024 * 1024) {
+                cache.removeValue(forKey: order.removeFirst())
+            }
+            cache[key] = pendingCache; order.append(key)
+        }
         return result
     }
 

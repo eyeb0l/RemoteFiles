@@ -2,18 +2,26 @@
   import SwiftUI
 
   final class LiveTextLayoutCollection: TextLayoutCollection {
-    private(set) lazy var layouts: [any TextLayout] = makeLayouts()
+    let layouts: [any TextLayout]
 
     private let base: Text.LayoutKey.Value
-    private let geometry: GeometryProxy
 
     init(base: Text.LayoutKey.Value, geometry: GeometryProxy) {
       self.base = base
-      self.geometry = geometry
+      // Resolve origins while this overlay's geometry is current. Retaining a proxy
+      // and resolving lazily at a later tap can preserve an earlier layout's hit map.
+      self.layouts = base
+        .filter(\.layout.isTextFragment)
+        .map { LiveTextLayout(anchoredLayout: $0, geometry: geometry) }
     }
 
     func isEqual(to other: any TextLayoutCollection) -> Bool {
-      base == (other as? LiveTextLayoutCollection)?.base
+      guard let other = other as? LiveTextLayoutCollection,
+            base == other.base, layouts.count == other.layouts.count else { return false }
+      // Anchor identities can stay equal while the resolved paragraph positions move.
+      return zip(layouts, other.layouts).allSatisfy { lhs, rhs in
+        lhs.origin == rhs.origin && lhs.bounds == rhs.bounds
+      }
     }
 
     func needsPositionReconciliation(with other: any TextLayoutCollection) -> Bool {
@@ -27,17 +35,6 @@
       }
     }
 
-    private func makeLayouts() -> [any TextLayout] {
-      base
-        // We are only interested in text fragments
-        .filter(\.layout.isTextFragment)
-        .map { anchoredLayout in
-          LiveTextLayout(
-            anchoredLayout: anchoredLayout,
-            geometry: geometry
-          )
-        }
-    }
   }
 
   final class LiveTextLayout: TextLayout {

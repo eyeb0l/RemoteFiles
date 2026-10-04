@@ -15,7 +15,7 @@ ssh-keygen -q -t ed25519 -N '' -f "$fixture/plain"
 ssh-keygen -q -t ed25519 -N 'fixture-passphrase' -f "$fixture/encrypted"
 ssh-keygen -q -t ed25519 -a 32 -N 'fixture-passphrase' -f "$fixture/unsupported"
 cat "$fixture/plain.pub" "$fixture/encrypted.pub" > "$fixture/authorized_keys"
-mkdir -p "$fixture/files/empty" "$fixture/files/thousand"
+mkdir -p "$fixture/files/empty" "$fixture/files/thousand" "$fixture/files/docs"
 printf '# Fixture report\n\nRead over independent OpenSSH.\n' > "$fixture/files/report.md"
 awk 'BEGIN { print "# Representative agent report\n"; for (i=0;i<1600;i++) print "- Measurement " i ": the remote preview reads Markdown, keeps useful cached content, and refreshes on demand." }' > "$fixture/files/large-report.md"
 printf 'hello\n' > "$fixture/files/Unicode café.txt"
@@ -26,6 +26,12 @@ chmod 000 "$fixture/files/permission-denied.txt"
 printf '\377\376\000' > "$fixture/files/binary.bin"
 dd if=/dev/zero of="$fixture/files/oversized.txt" bs=1048576 count=3 2>/dev/null
 ln -s report.md "$fixture/files/report-link.md"
+printf '# Linked source\n' > "$fixture/files/docs/source.md"
+printf 'outside fixture connection root\n' > "$fixture/outside.md"
+ln -s "$fixture/outside.md" "$fixture/files/docs/escape.md"
+ln -s "$fixture/outside.md" "$fixture/files/outside-export.txt"
+ln -s "$fixture/files" "$fixture/root-alias"
+printf 'é 東京\r\n\ttrailing spaces  \r\n' > "$fixture/files/original.txt"
 for ((i=0; i<1000; i++)); do : > "$fixture/files/thousand/entry-$i.txt"; done
 cat > "$fixture/sshd_config" <<CONFIG
 Port $port

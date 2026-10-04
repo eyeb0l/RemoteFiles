@@ -22,15 +22,21 @@ struct TextSelectionInteraction: ViewModifier {
   func body(content: Content) -> some View {
     #if TEXTUAL_ENABLE_TEXT_SELECTION
       if textSelection.allowsSelection {
-        content
-          .overlayTextLayoutCollection { layoutCollection in
-            Color.clear
-              .onChange(of: AnyTextLayoutCollection(layoutCollection), initial: true) {
-                model.setCoordinator(coordinator)
-                model.setLayoutCollection(layoutCollection)
-              }
-          }
-          .modifier(PlatformTextSelectionInteraction(model: model))
+        #if canImport(UIKit)
+          // UIKit receives the current resolved layout in its representable update.
+          // A separate onChange overlay can leave a short document's model empty.
+          content.modifier(PlatformTextSelectionInteraction(model: model, coordinator: coordinator))
+        #else
+          content
+            .overlayTextLayoutCollection { layoutCollection in
+              Color.clear
+                .onChange(of: AnyTextLayoutCollection(layoutCollection), initial: true) {
+                  model.setCoordinator(coordinator)
+                  model.setLayoutCollection(layoutCollection)
+                }
+            }
+            .modifier(PlatformTextSelectionInteraction(model: model))
+        #endif
       } else {
         content
       }
