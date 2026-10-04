@@ -16,6 +16,7 @@ import SwiftUI
 // Styling is recomputed whenever the input, style, or environment snapshot changes.
 
 struct WithInlineStyle<Content: View>: View {
+  @Environment(\.overflowReadinessTracking) private var overflowReadinessTracking
   @Environment(\.inlineStyle) private var style
   @Environment(\.textEnvironment) private var environment
 
@@ -33,7 +34,10 @@ struct WithInlineStyle<Content: View>: View {
   }
 
   var body: some View {
+    let readiness = overflowReadinessTracking
+      ? OverflowContentReadiness(ready: output != nil) : OverflowContentReadiness()
     content(output ?? AttributedString())
+      .transformPreference(OverflowContentReadyKey.self) { $0.merge(readiness) }
       .onChange(of: Tuple(input, style, environment), initial: true) { _, newValue in
         resolve(
           attributedString: newValue.values.0,

@@ -17,6 +17,8 @@ import SwiftUI
   final class TextSelectionCoordinator {
     private var models: [WeakBox<TextSelectionModel>] = []
 
+    var hasActiveSelection: Bool { models.contains { $0.wrapped?.selectedRange != nil } }
+
     func register(_ model: TextSelectionModel) {
       models.append(WeakBox(model))
       compact()

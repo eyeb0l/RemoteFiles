@@ -26,6 +26,7 @@ import SwiftUI
 // attributed content with inline attachments, links, and selection.
 
 struct TextFragment<Content: AttributedStringProtocol>: View {
+  @Environment(\.overflowReadinessTracking) private var overflowReadinessTracking
   @Environment(\.textEnvironment) private var textEnvironment
   @State private var textBuilder: TextBuilder?
 
@@ -36,8 +37,11 @@ struct TextFragment<Content: AttributedStringProtocol>: View {
   }
 
   var body: some View {
+    let readiness = overflowReadinessTracking
+      ? OverflowContentReadiness(ready: textBuilder != nil) : OverflowContentReadiness()
     text
       .customAttribute(TextFragmentAttribute())
+      .transformPreference(OverflowContentReadyKey.self) { $0.merge(readiness) }
       .onGeometryChange(for: CGSize?.self, of: \.textContainerSize) { size in
         guard let size, let textBuilder else { return }
         textBuilder.sizeChanged(size, environment: textEnvironment)

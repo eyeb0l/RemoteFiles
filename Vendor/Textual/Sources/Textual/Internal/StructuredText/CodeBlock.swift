@@ -33,7 +33,7 @@ extension StructuredText {
       )
       let resolvedStyle = codeBlockStyle.resolve(configuration: configuration)
 
-      AnyView(resolvedStyle)
+      AnyView(resolvedStyle.environment(\.overflowContentRevision, AttributedString(content)))
     }
 
     private var indentationLevel: Int {

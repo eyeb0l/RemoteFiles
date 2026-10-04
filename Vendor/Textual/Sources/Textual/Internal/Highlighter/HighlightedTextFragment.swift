@@ -10,6 +10,7 @@ import SwiftUI
 // reconstruct the block structure when copying code.
 
 struct HighlightedTextFragment: View {
+  @Environment(\.overflowReadinessTracking) private var overflowReadinessTracking
   @Environment(\.textEnvironment) private var textEnvironment
 
   @State private var model = Model()
@@ -29,8 +30,12 @@ struct HighlightedTextFragment: View {
   }
 
   var body: some View {
+    let readiness = overflowReadinessTracking
+      ? OverflowContentReadiness(ready: model.tokenizationComplete && model.highlightedCode != nil)
+      : OverflowContentReadiness()
     TextFragment(model.highlightedCode ?? AttributedString(content))
       .foregroundStyle(theme.foregroundColor)
+      .transformPreference(OverflowContentReadyKey.self) { $0.merge(readiness) }
       .task(id: content) {
         await model.tokenize(
           content: content,
@@ -50,10 +55,13 @@ struct HighlightedTextFragment: View {
 
 extension HighlightedTextFragment {
   @MainActor @Observable final class Model {
+    var tokenizationComplete = false
     var tokens: [CodeToken] = []
     var highlightedCode: AttributedString?
 
     func tokenize(content: AttributedSubstring, languageHint: String?) async {
+      tokenizationComplete = false
+      defer { tokenizationComplete = true }
       let code = String(content.characters[...])
       tokens = [CodeToken(content: code, type: .plain)]
 

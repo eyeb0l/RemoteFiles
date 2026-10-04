@@ -37,7 +37,7 @@ extension StructuredText {
           spacing = $0
         }
 
-      AnyView(resolvedStyle)
+      AnyView(resolvedStyle.environment(\.overflowContentRevision, AttributedString(content)))
     }
 
     @ViewBuilder

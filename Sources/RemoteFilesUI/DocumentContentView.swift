@@ -90,6 +90,9 @@ public struct DocumentContentView: View {
                                 .padding(.top, 32)
                         }
                     }
+                    #if os(iOS)
+                    .textual.viewportOverflowRendering(in: "readerViewport", viewportHeight: viewport.size.height)
+                    #endif
                     .padding(20)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
