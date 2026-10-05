@@ -78,11 +78,12 @@ struct ReaderView: View {
                     }
                     if let loadedAt { Text("Loaded \(loadedAt.formatted(date: .omitted, time: .shortened))") }
                     Text(profile.name)
+                    Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnectAndGoHome() } }
                 } label: { Label("Document actions", systemImage: "ellipsis.circle") }
             }
         }
         .modifier(OriginalFileExportControl(profile: profile, entry: entry, allowedRoot: profile.startingDirectory,
-                                            exporter: model.originalExporter, isEnabled: model.isForeground,
+                                            exporter: model.originalExporter, isEnabled: model.isForeground && !model.isDisconnecting,
                                             onError: { error in
                                                 model.handle(error, profile: profile)
                                                 return model.sheet != nil || model.errorMessage != nil
@@ -137,10 +138,12 @@ struct ReaderView: View {
         await reload()
     }
     private func reload() async {
+        guard !model.isDisconnecting else { return }
         guard !isMedia else { return }
         guard model.isForeground else { loading = false; error = "Connection paused while the app is in the background."; return }
         guard DocumentPolicy.kind(filename: entry.name) != .unsupported else { preview = .unsupportedFileType; return }
         let token = UUID(); requestID = token
+        let revision = model.sessionRevision
         lastSessionRevision = model.sessionRevision; lastRefreshID = refreshID
         if entry.navigationRoot == nil, preview == nil, let bytes = model.cachedDocument(profile.id, path: entry.path) {
             preview = DocumentPolicy.decode(bytes, filename: entry.name)
@@ -157,7 +160,7 @@ struct ReaderView: View {
             let refreshImages = refreshID != lastImageRefresh
             let published = try await ReaderReloadPublication.perform(
                 clearImages: refreshImages,
-                isCurrent: { token == requestID },
+                isCurrent: { token == requestID && !model.isDisconnecting && model.sessionRevision == revision },
                 clearResources: { await model.resources.clearCache() },
                 clearDecoded: { await RemoteImageDecoder.shared.clear() },
                 publish: {
@@ -169,7 +172,7 @@ struct ReaderView: View {
                 })
             guard published else { return }
         } catch {
-            guard token == requestID else { return }
+            guard token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
             if !Task.isCancelled && !(error is CancellationError) {
                 self.error = error.localizedDescription
                 if model.isSecurityError(error) { preview = nil }

@@ -54,7 +54,7 @@ public struct RemoteFilesRootView: View {
     }
 }
 
-private struct AppNavigation: View {
+struct AppNavigation: View {
     @Bindable var model: AppModel
     var body: some View {
         NavigationStack(path: $model.routes) {
@@ -69,6 +69,7 @@ private struct AppNavigation: View {
                 }
         }
         .tint(.indigo)
+        .disabled(model.isDisconnecting)
         .sheet(item: $model.sheet) { sheet in
             NavigationStack {
                 switch sheet {
@@ -134,7 +135,7 @@ private struct HomeView: View {
                             Button("Edit Connection", systemImage: "pencil") { model.sheet = .connection(profile.id) }
                             Button("Delete Connection", systemImage: "trash", role: .destructive) { Task { await model.removeConnection(profile) } }
                         }
-                        Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnect() } }
+                        Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnectAndGoHome() } }
                     }
                 }
                 if !model.metadata.connections.isEmpty && !model.demo {
@@ -147,11 +148,20 @@ private struct HomeView: View {
                         NavigationLink(value: AppModel.Route.file(location.connectionID, .init(name: location.name, path: location.path, kind: .file))) {
                             LocationRow(name: location.name, subtitle: model.profile(location.connectionID)?.name ?? "Mac", symbol: "doc.text", color: .secondary)
                         }
+                        .accessibilityIdentifier("recent-\(location.id.uuidString)")
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button("Remove from Recents", systemImage: "clock.badge.xmark", role: .destructive) {
+                                Task { await model.removeRecent(location) }
+                            }
+                        }
+                        .accessibilityAction(named: Text("Remove from Recents")) {
+                            Task { await model.removeRecent(location) }
+                        }
                     }
                 }
             }
             Section {
-                Label("Read only. Your files stay on your Mac.", systemImage: "lock.shield").font(.footnote).foregroundStyle(.secondary)
+                Label("Read-only browsing. Your files stay on your Mac.", systemImage: "lock.shield").font(.footnote).foregroundStyle(.secondary)
             }.listRowBackground(Color.clear)
         }
         .navigationTitle("RemoteFiles")

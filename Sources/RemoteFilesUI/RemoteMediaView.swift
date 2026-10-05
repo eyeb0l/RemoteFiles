@@ -73,6 +73,8 @@ struct RemoteMediaView: View {
     }
 
     private func load() async {
+        guard !model.isDisconnecting else { return }
+        let revision = model.sessionRevision
         guard model.isForeground else {
             image = nil; pdf = nil; loading = false
             failure = "Connection paused while the app is in the background."
@@ -92,19 +94,21 @@ struct RemoteMediaView: View {
             if kind == .image {
                 let decoded = try await RemoteImageDecoder.shared.decode(file, maxPixel: 1600)
                 try Task.checkCancellation()
+                guard !model.isDisconnecting, model.sessionRevision == revision else { return }
                 image = decoded
             } else {
                 guard let document = PDFDocument(url: file), document.pageCount > 0 else {
                     throw MediaPreviewError.invalidPDF
                 }
                 try Task.checkCancellation()
+                guard !model.isDisconnecting, model.sessionRevision == revision else { return }
                 pdf = document
             }
             model.connectionStates[profile.id] = "Connected"
             await model.recordRecent(profile: profile, entry: entry)
         } catch is CancellationError { }
         catch {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, !model.isDisconnecting, model.sessionRevision == revision else { return }
             failure = error.localizedDescription
             if model.isSecurityError(error) { image = nil; pdf = nil }
             model.handle(error, profile: profile)

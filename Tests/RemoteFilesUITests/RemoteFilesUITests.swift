@@ -2,6 +2,45 @@ import XCTest
 
 @MainActor
 final class RemoteFilesUITests: XCTestCase {
+    func testRecentSwipeRemovesOnlyEntryAndReaderDisconnectReturnsHome() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Mac")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly review.md,")).firstMatch
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
+        for _ in 0..<5 { if report.exists && report.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(report.waitForExistence(timeout: 5) && report.isHittable); report.tap()
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+        app.buttons["Document actions"].tap(); app.buttons["Disconnect"].tap()
+        XCTAssertTrue(app.navigationBars["RemoteFiles"].waitForExistence(timeout: 10))
+        let recent = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "recent-")).firstMatch
+        XCTAssertTrue(recent.waitForExistence(timeout: 5))
+        if !recent.isHittable { app.swipeUp() }
+        recent.swipeLeft()
+        if app.buttons["Remove from Recents"].exists { app.buttons["Remove from Recents"].tap() }
+        XCTAssertTrue(recent.waitForNonExistence(timeout: 5))
+        if !projects.isHittable { app.swipeDown() }; projects.tap()
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
+        for _ in 0..<5 { if report.exists && report.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(report.waitForExistence(timeout: 5) && report.isHittable); report.tap()
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15), "Remote document must still exist after recent removal")
+    }
+    func testDisconnectFromNestedFolderClearsStackAndReconnectsFromHome() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Mac")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        let reports = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports,")).firstMatch
+        XCTAssertTrue(reports.waitForExistence(timeout: 10)); reports.tap()
+        XCTAssertTrue(app.navigationBars["Reports"].waitForExistence(timeout: 10))
+        app.buttons["Folder actions"].tap(); app.buttons["Disconnect"].tap()
+        XCTAssertTrue(app.navigationBars["RemoteFiles"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.navigationBars.buttons["Projects"].exists)
+        XCTAssertTrue(projects.isHittable); projects.tap()
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.navigationBars.buttons["RemoteFiles"].exists)
+    }
     func testSourceSyntaxHighlightingAndMarkdownSource() throws {
         continueAfterFailure = false
         let app = XCUIApplication()

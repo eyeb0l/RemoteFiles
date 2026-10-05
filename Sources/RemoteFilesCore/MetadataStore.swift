@@ -12,6 +12,7 @@ public struct AppMetadata: Codable, Sendable {
 public actor MetadataStore {
     private let fileURL: URL
     private var metadata: AppMetadata
+    private var removedRecentIDs: Set<UUID> = []
     public init(fileURL: URL) throws {
         self.fileURL = fileURL
         if FileManager.default.fileExists(atPath: fileURL.path) {
@@ -27,6 +28,10 @@ public actor MetadataStore {
         return identity
     }
     public func save(_ value: AppMetadata) throws {
+        var value = value
+        // A save captured before removal must not resurrect that same entry. Opening the
+        // file again creates a fresh ID, so legitimate new visits remain unaffected.
+        value.recents.removeAll { removedRecentIDs.contains($0.id) }
         try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let bytes = try JSONEncoder().encode(value)
         #if os(iOS)
@@ -36,5 +41,14 @@ public actor MetadataStore {
         try bytes.write(to: fileURL, options: .atomic)
         #endif
         metadata = value
+    }
+
+    /// Removes the library entry, never the remote file or a favourite pointing to it.
+    public func removeRecent(id: UUID) throws {
+        guard metadata.recents.contains(where: { $0.id == id }) else { removedRecentIDs.insert(id); return }
+        var candidate = metadata
+        candidate.recents.removeAll { $0.id == id }
+        try save(candidate)
+        removedRecentIDs.insert(id)
     }
 }

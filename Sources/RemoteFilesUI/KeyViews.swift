@@ -56,6 +56,7 @@ private struct IdentityDetailsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var copied = false
     @State private var confirmDeletion = false
+    @State private var showInstallation = false
     private var connections: [ConnectionProfile] { model.metadata.connections.filter { $0.identityID == identity.id } }
 
     var body: some View {
@@ -69,6 +70,7 @@ private struct IdentityDetailsView: View {
                     copied = true
                 } label: { Label(copied ? "Public Key Copied" : "Copy Public Key", systemImage: copied ? "checkmark" : "doc.on.doc") }
                 ShareLink(item: identity.publicKey) { Label("Share Public Key", systemImage: "square.and.arrow.up") }
+                Button("Install Public Key on Server", systemImage: "server.rack") { showInstallation = true }.disabled(model.demo)
             } header: { Text("Public identity") } footer: {
                 Text("Add this public key to the Mac account's authorized_keys file. The private key remains in this device's Keychain.")
             }
@@ -85,6 +87,9 @@ private struct IdentityDetailsView: View {
         }
         .navigationTitle(identity.name)
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showInstallation) {
+            NavigationStack { PublicKeyInstallationView(model: model, identity: identity, connection: connections.first) }
+        }
         .confirmationDialog("Delete this SSH identity from this device?", isPresented: $confirmDeletion, titleVisibility: .visible) {
             Button("Delete Identity", role: .destructive) {
                 Task {
@@ -377,7 +382,7 @@ struct UnlockKeyView: View {
     }
 }
 
-private struct FingerprintView: View {
+struct FingerprintView: View {
     let value: String
     var body: some View {
         Text(value).font(.footnote.monospaced()).textSelection(.enabled)

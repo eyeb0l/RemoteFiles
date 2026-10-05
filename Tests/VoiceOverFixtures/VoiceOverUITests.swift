@@ -183,4 +183,87 @@ import XCTest
             XCTAssertTrue(failed.contains { $0.contains("Previously loaded copy") && $0.contains("Too Large") })
         }
     }
+    func testRecentRemovalVoiceOverActionDiscoveryAndSwipeControlKeepHomeAccessible() throws {
+        let app = XCUIApplication(); app.launchArguments = ["--small-features-fixture", "--feature-case=vo-recents"]; app.launch()
+        let recent = app.buttons["recent-F3000000-0000-0000-0000-000000000001"]
+        XCTAssertTrue(recent.waitForExistence(timeout: 15))
+        try withVoiceOver {
+            try focus("Weekly review.md", name: "recent entry", limit: 35)
+            let current = try service.currentSpeech().utterance
+            XCTAssertTrue(current.localizedCaseInsensitiveContains("actions"), "Recent row must offer accessibility actions")
+            app.swipeUp()
+            let action = try service.currentSpeech().utterance
+            print("VO RECENT ACTION: \(action)")
+            XCTAssertTrue(action.localizedCaseInsensitiveContains("Remove from Recents"))
+            // XCTest exposes VoiceOver speech/focus, but has no custom-action invocation
+            // API. Validate discovery above and activate the visible native swipe control
+            // below. This does not claim that synthesized touches exercise the rotor.
+            recent.swipeLeft()
+            let remove = app.buttons["Remove from Recents"].firstMatch
+            XCTAssertTrue(remove.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(service.isEnabled)
+            remove.tap()
+            XCTAssertTrue(app.navigationBars["RemoteFiles"].waitForExistence(timeout: 5), "The removal action must keep Home visible")
+            XCTAssertTrue(recent.waitForNonExistence(timeout: 5))
+            // Relaunch also rules out a lazy/offscreen row being mistaken for removal.
+            app.terminate(); app.launch()
+            XCTAssertTrue(app.navigationBars["RemoteFiles"].waitForExistence(timeout: 10))
+            XCTAssertFalse(recent.exists)
+            try focus("Projects", name: "Home after recent removal relaunch", limit: 35)
+            capture("VoiceOver recent removal", app)
+        }
+    }
+    func testNestedDisconnectVoiceOverReturnsFocusToHome() throws {
+        let app = XCUIApplication(); app.launchArguments = ["--small-features-fixture", "--feature-case=vo-disconnect", "--feature-slow-read"]; app.launch()
+        XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 15))
+        try withVoiceOver {
+            try focus("Projects", name: "fixture Home", limit: 35)
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Fixture Mac")).firstMatch.doubleTap()
+            let reports = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports,")).firstMatch
+            XCTAssertTrue(reports.waitForExistence(timeout: 10)); try focus("Reports", name: "nested folder", limit: 35)
+            reports.doubleTap(); XCTAssertTrue(app.buttons["Folder actions"].waitForExistence(timeout: 10))
+            app.buttons["Folder actions"].doubleTap()
+            XCTAssertTrue(app.buttons["Disconnect"].waitForExistence(timeout: 5)); try focus("Disconnect", name: "folder menu", limit: 15)
+            app.buttons["Disconnect"].doubleTap()
+            XCTAssertTrue(app.navigationBars["RemoteFiles"].waitForExistence(timeout: 10))
+            try focus("Projects", name: "Home after disconnect", limit: 35)
+            XCTAssertFalse(app.navigationBars.buttons["Projects"].exists)
+            capture("VoiceOver nested Disconnect", app)
+        }
+    }
+    func testPublicKeyConfirmationVoiceOverAccountKeyCancelAndResult() throws {
+        let app = XCUIApplication(); app.launchArguments = ["--small-features-fixture", "--feature-case=vo-key-install"]; app.launch()
+        XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 15))
+        app.buttons["Settings"].tap(); app.buttons["SSH Keys"].tap()
+        let identity = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Fixture Public Identity")).firstMatch
+        XCTAssertTrue(identity.waitForExistence(timeout: 10)); identity.tap()
+        let install = app.buttons["Install Public Key on Server"]
+        XCTAssertTrue(install.waitForExistence(timeout: 10)); if !install.isHittable { app.swipeUp() }; install.tap()
+        let password = app.secureTextFields["Account password"]
+        XCTAssertTrue(password.waitForExistence(timeout: 10)); password.tap(); password.typeText("public-fixture-password")
+        let review = app.buttons["Review Installation"]
+        for _ in 0..<5 { if review.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(review.isHittable); review.tap()
+        XCTAssertTrue(app.navigationBars["Confirm Installation"].waitForExistence(timeout: 5))
+        try withVoiceOver {
+            try focus("fixture@fixture.invalid:22", name: "confirmation account", limit: 25)
+            let details = try speech("PUBLIC KEY CONFIRMATION", limit: 16)
+            XCTAssertTrue(details.contains { $0.contains("Fixture Public Identity") })
+            XCTAssertTrue(details.contains { $0.contains("SHA256:") })
+            XCTAssertTrue(details.contains { $0.contains("ssh-ed25519") })
+            try focus("Cancel", name: "cancel confirmation", limit: 35, backward: true)
+            app.navigationBars["Confirm Installation"].buttons["Cancel"].doubleTap()
+            XCTAssertTrue(app.navigationBars["Install Public Key"].waitForExistence(timeout: 5))
+            try focus("Review Installation", name: "review again", limit: 35)
+            app.buttons["Review Installation"].doubleTap()
+            XCTAssertTrue(app.navigationBars["Confirm Installation"].waitForExistence(timeout: 5))
+            try focus("Install Public Key", name: "confirm public key", limit: 35)
+            app.buttons["Install Public Key"].doubleTap()
+            let result = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Public key installed for fixture@fixture.invalid:22")).firstMatch
+            XCTAssertTrue(result.waitForExistence(timeout: 10))
+            try focus("Public key installed", name: "installation result", limit: 35)
+            capture("VoiceOver public-key installation result", app)
+        }
+    }
+
 }

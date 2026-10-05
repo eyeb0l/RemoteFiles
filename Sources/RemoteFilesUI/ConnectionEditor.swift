@@ -28,7 +28,7 @@ struct ConnectionEditor: View {
                 TextField("Display name", text: $name).textContentType(.nickname)
                 TextField("Hostname or IP address", text: $host).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
                 TextField("Mac account username", text: $username).textInputAutocapitalization(.never).autocorrectionDisabled()
-            } header: { Text("Your Mac") } footer: { Text("Connect using macOS Remote Login (SFTP). All remote operations are read only.") }
+            } header: { Text("Your Mac") } footer: { Text("Connect using macOS Remote Login (SFTP). Browsing and previews are read only.") }
             Section("SSH identity") {
                 if model.metadata.identities.isEmpty {
                     Text("Generate a dedicated key or import an OpenSSH Ed25519 private key.").foregroundStyle(.secondary)
@@ -55,7 +55,7 @@ struct ConnectionEditor: View {
                 if tailscale {
                     Text("Enable Tailscale on both devices and use the Mac’s MagicDNS name or Tailscale IP. Your tailnet must permit the SSH connection. Tailscale SSH is not required.")
                 }
-                Text("The app does not change your Mac’s settings or install keys. Verify the server fingerprint when connecting for the first time.")
+                Text("To install a public key using password login, open the identity in SSH Keys and choose Install Public Key on Server. The app does not change your Mac’s settings. Verify the server fingerprint when connecting for the first time.")
             }.font(.footnote).foregroundStyle(.secondary)
         }
         .navigationTitle(existing == nil ? "Add Connection" : "Edit Connection")
