@@ -82,7 +82,7 @@ public enum RemoteFileError: LocalizedError, Sendable {
         switch self {
         case .tooLarge(let limit): return "Too Large to Preview. The limit is \(ByteCountFormatter.string(fromByteCount: Int64(limit), countStyle: .file))."
         case .unavailable(let message): return message
-        case .timedOut: return "The connection timed out. Check the address, Mac availability, network permissions, and Tailscale connection if used."
+        case .timedOut: return "The connection timed out. Check the address, server availability, network permissions, and Tailscale connection if used."
         case .invalidPath: return "This remote path cannot be resolved."
         case .unsupportedFile: return "Preview is not available for this file type."
         }

@@ -1,6 +1,6 @@
 # RemoteFiles
 
-A native, read-only iPhone browser for a Mac’s SFTP folders and agent-produced Markdown reports. Minimum deployment target **iOS 27.0**. Open a favourite, browse a project, read a document, and refresh it after an agent changes it.
+A native, read-only iPhone browser for files on Unix systems over SFTP, including agent-produced Markdown reports. Minimum deployment target **iOS 27.0**. Open a favourite, browse a project, read a document, and refresh it after an agent changes it.
 
 ## Build and run
 
@@ -22,18 +22,18 @@ Simulator signing is ad hoc and requires no personal development team. The gener
 
 The local Swift package contains `RemoteFilesCore` and `RemoteFilesUI`. Xcode owns the runnable app, hosted iOS core-test target, and native UI-test target. The UI test uses the explicit demo workspace and exercises browsing, rendered/source reading, refresh, and back navigation without touching saved real connections. Tests use the separate minimal `RemoteFilesTestHost`. The hosted image lifecycle regressions also link `RemoteFilesUI` to check the production viewer and memory-warning handler. After adding test files, regenerate its small project with `python3 scripts/generate-project.py`; the script does not fetch packages or modify source files. Commit both `Package.resolved` and `RemoteFiles.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved` when dependency resolution changes.
 
-## Connect your Mac
+## Connect a Unix system
 
-Do these setup steps yourself on the Mac you intend to access. The app does not enable services, install keys, change permissions, or expose ports.
+Do these setup steps yourself on the server you intend to access. RemoteFiles connects over SSH/SFTP using an Ed25519 identity. The app does not enable services, install keys, change permissions, or expose ports.
 
-1. Enable **System Settings → General → Sharing → Remote Login** for the intended Mac account. Keep the Mac awake. The account must be able to read the chosen project directory.
-2. In RemoteFiles, choose **Add Connection → Generate or Import Key**. Prefer a dedicated generated Ed25519 identity; copy/share its **public** key. Append that public key to the intended account’s `~/.ssh/authorized_keys` on the Mac (directory permission 700; file permission 600). Never copy a private key into that file.
-3. If connecting away from home, install/sign in to Tailscale independently on both devices. Use the Mac’s MagicDNS hostname or Tailscale IP; ensure tailnet policy permits TCP port 22. This uses ordinary macOS OpenSSH over Tailscale, **not the separate Tailscale SSH service**. Do not forward a router port.
-4. Enter the Mac account’s short username, hostname, identity and optional absolute project directory. An empty starting directory uses the server’s default directory; literal `~` is not expanded locally.
-5. Verify the displayed server SHA-256 fingerprint using a trusted channel. On the Mac, the public host-key fingerprint can be inspected with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256` (choose the public file for the algorithm presented). Accept trust only when it matches.
+1. Enable SSH with an SFTP subsystem for the intended account using the system’s service configuration. On **macOS**, use **System Settings → General → Sharing → Remote Login**. On **Linux or another Unix system**, enable its OpenSSH server and SFTP subsystem according to that system’s documentation. Keep the server awake and reachable. The account must be able to read the chosen project directory.
+2. In RemoteFiles, choose **Add Connection → Generate or Import Key**. Prefer a dedicated generated Ed25519 identity; copy/share its **public** key. Append that public key to the intended account’s `~/.ssh/authorized_keys` on the server (directory permission 700; file permission 600). Never copy a private key into that file.
+3. If connecting away from home, install/sign in to Tailscale independently on both devices. Use the server’s MagicDNS hostname or Tailscale IP; ensure tailnet policy permits the configured SSH port (22 by default). This uses ordinary OpenSSH over Tailscale, **not the separate Tailscale SSH service**. Do not forward a router port.
+4. Enter the server account’s username, hostname, identity and optional absolute project directory. An empty starting directory uses the server’s default directory; literal `~` is not expanded locally.
+5. Verify the displayed server SHA-256 fingerprint using a trusted channel. On an OpenSSH server, the public host-key fingerprint can be inspected with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256` (choose the public file for the algorithm presented and the server’s configured host-key location). Accept trust only when it matches.
 6. Open a folder and choose **Folder actions → Add Favourite**. Open a `.md` report. Use **Rendered / Source**, **Copy Source**, and **Refresh** from its actions menu.
 
-The first connection on a local network may require iOS Local Network permission. A timeout alone does not identify whether the Mac is asleep, the tunnel is unavailable, a permission was denied, or network policy blocked access. Check these possible causes individually. Denial and Settings recovery were verified on the physical iPhone; see [device permissions and lifecycle evidence](docs/DEVICE_PERMISSIONS_LIFECYCLE.md).
+The first connection on a local network may require iOS Local Network permission. A timeout alone does not identify whether the server is asleep, the tunnel is unavailable, a permission was denied, or network policy blocked access. Check these possible causes individually. Denial and Settings recovery were verified on the physical iPhone; see [device permissions and lifecycle evidence](docs/DEVICE_PERMISSIONS_LIFECYCLE.md).
 
 ## Keys and trust
 

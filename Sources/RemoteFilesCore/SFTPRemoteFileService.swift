@@ -251,7 +251,7 @@ public actor SFTPRemoteFileService: RemoteFileService {
             }
             if Task.isCancelled { throw CancellationError() }
             if error is NIOConnectionError {
-                throw RemoteFileError.unavailable("Couldn't connect to this Mac. Check its address and network. For local Wi-Fi, allow RemoteFiles in iPhone Settings → Privacy & Security → Local Network, then try again.")
+                throw RemoteFileError.unavailable("Couldn't connect to this server. Check its address and network. For local Wi-Fi, allow RemoteFiles in iPhone Settings → Privacy & Security → Local Network, then try again.")
             }
             throw error
         }
@@ -286,7 +286,7 @@ public actor SFTPRemoteFileService: RemoteFileService {
             if let status = error as? SFTPMessage.Status {
                 switch status.errorCode {
                 case .permissionDenied:
-                    throw RemoteFileError.unavailable("Permission denied. This Mac account cannot read that location.")
+                    throw RemoteFileError.unavailable("Permission denied. This account cannot read that location on the server.")
                 case .noSuchFile:
                     throw RemoteFileError.unavailable("This file or folder no longer exists at that path. Refresh the folder and try again.")
                 case .noConnection, .connectionLost:

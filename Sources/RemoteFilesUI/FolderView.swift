@@ -102,6 +102,7 @@ struct FolderView: View {
                 List {
                     if visible.isEmpty {
                         ContentUnavailableView(filter.isEmpty ? "This folder is empty" : "No matching names", systemImage: filter.isEmpty ? "folder" : "magnifyingglass", description: Text(filter.isEmpty ? "Pull down to check for new files." : "Filtering names in this folder only."))
+                            .listRowSeparator(.hidden)
                     }
                     ForEach(visible) { row in
                         let entry = row.entry

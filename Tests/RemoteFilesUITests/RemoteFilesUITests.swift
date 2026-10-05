@@ -7,7 +7,7 @@ final class RemoteFilesUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--demo"]
         app.launch()
-        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Mac")).firstMatch
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15))
         projects.tap()
         let example = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Example.swift,")).firstMatch
@@ -45,7 +45,7 @@ final class RemoteFilesUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--demo"]
         app.launch()
-        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Mac")).firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch.tap()
         let largeFolder = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Thousand files,")).firstMatch
         XCTAssertTrue(largeFolder.waitForExistence(timeout: 10))
         largeFolder.tap()
@@ -76,7 +76,7 @@ final class RemoteFilesUITests: XCTestCase {
             app.launch()
         }
 
-        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Mac")).firstMatch
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15))
         projects.tap()
         let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Latest report")).firstMatch
@@ -219,7 +219,7 @@ final class RemoteFilesUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--demo"]
         app.launch()
-        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Mac")).firstMatch
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15))
         projects.tap()
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
@@ -314,7 +314,7 @@ extension RealServerUITests {
         let connection = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", connectionName + ",")).firstMatch
         if !connection.waitForExistence(timeout: 2) {
             app.buttons["Add Connection"].tap()
-            for (label, value) in [("Display name", connectionName), ("Hostname or IP address", host), ("Mac account username", username), ("Starting directory (optional)", directory)] {
+            for (label, value) in [("Display name", connectionName), ("Hostname or IP address", host), ("Account username", username), ("Starting directory (optional)", directory)] {
                 let field = app.textFields[label]
                 if !field.isHittable { app.swipeUp() }
                 field.tap(); field.typeText(value)
@@ -464,7 +464,7 @@ extension RealServerUITests {
             let add = app.buttons["Add Connection"]
             if !add.isHittable { app.swipeUp() }
             add.tap()
-            for (label, value) in [("Display name", "Image checks"), ("Hostname or IP address", "100.125.79.6"), ("Mac account username", "iris"), ("Starting directory (optional)", "/Users/iris/Developer/RemoteFiles/.test-server/remote-images")] {
+            for (label, value) in [("Display name", "Image checks"), ("Hostname or IP address", "100.125.79.6"), ("Account username", "iris"), ("Starting directory (optional)", "/Users/iris/Developer/RemoteFiles/.test-server/remote-images")] {
                 let field = app.textFields[label]
                 if !field.isHittable { app.swipeUp() }
                 field.tap(); field.typeText(value)
@@ -561,7 +561,7 @@ extension RealServerUITests {
             add.tap()
             for (label, value) in [("Display name", "Local network check"),
                                    ("Hostname or IP address", host),
-                                   ("Mac account username", "iris"),
+                                   ("Account username", "iris"),
                                    ("Starting directory (optional)", "/Users/iris/Developer/RemoteFiles/.test-server/remote-images")] {
                 let field = app.textFields[label]
                 if !field.isHittable { app.swipeUp() }

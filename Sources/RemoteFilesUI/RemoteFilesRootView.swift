@@ -88,23 +88,21 @@ private struct AppNavigation: View {
 
 private struct HomeView: View {
     @Bindable var model: AppModel
+    private var demoIndicator: some View {
+        Label("Demo workspace · sample files", systemImage: "sparkles")
+            .font(.caption).foregroundStyle(.indigo)
+            .textCase(nil)
+    }
     var body: some View {
         List {
-            Section {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Your Mac. Within reach.").font(.title2.bold())
-                    Text("Open a project. Pick up the story.").font(.subheadline).foregroundStyle(.secondary)
-                    if model.demo { Label("Demo workspace · sample files", systemImage: "sparkles").font(.caption).foregroundStyle(.indigo) }
-                }.padding(.vertical, 10)
-            }.listRowBackground(Color.clear).listRowSeparator(.hidden)
             if model.metadata.connections.isEmpty {
                 Section {
                     VStack(spacing: 16) {
                         Image(systemName: "folder.badge.plus")
                             .font(.system(size: 44)).foregroundStyle(.secondary)
                             .accessibilityHidden(true)
-                        Text("A place for your projects").font(.title2.bold())
-                        Text("Connect to your Mac to browse folders and read the latest reports.")
+                        Text("Browse your remote files").font(.title2.bold())
+                        Text("Add an SFTP connection to browse folders and open files.")
                             .foregroundStyle(.secondary)
                         Button("Add Connection", systemImage: "plus") { model.sheet = .connection(nil) }
                             .buttonStyle(.borderedProminent)
@@ -116,18 +114,25 @@ private struct HomeView: View {
                 }
             }
             if !model.metadata.favourites.isEmpty {
-                Section("Favourites") {
+                Section {
                     ForEach(model.metadata.favourites) { location in
                         NavigationLink(value: AppModel.Route.folder(location.connectionID, location.path)) {
-                            LocationRow(name: location.name, subtitle: "\(model.profile(location.connectionID)?.name ?? "Mac") · \(location.path)", symbol: "folder.fill", color: .indigo)
+                            LocationRow(name: location.name, subtitle: "\(model.profile(location.connectionID)?.name ?? "Server") · \(location.path)", symbol: "folder.fill", color: .indigo)
                         }
+                    }
+                } header: {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if model.demo {
+                            demoIndicator
+                        }
+                        Text("Favourites")
                     }
                 }
             }
-            Section("Machines") {
+            Section {
                 ForEach(model.metadata.connections) { profile in
                     NavigationLink(value: AppModel.Route.folder(profile.id, profile.startingDirectory)) {
-                        LocationRow(name: profile.name, subtitle: "\(profile.host) · \(model.connectionStates[profile.id] ?? "Disconnected")", symbol: "desktopcomputer", color: .secondary)
+                        LocationRow(name: profile.name, subtitle: "\(profile.host) · \(model.connectionStates[profile.id] ?? "Disconnected")", symbol: "server.rack", color: .secondary)
                     }
                     .contextMenu {
                         if !model.demo {
@@ -140,21 +145,29 @@ private struct HomeView: View {
                 if !model.metadata.connections.isEmpty && !model.demo {
                     Button("Add Connection", systemImage: "plus") { model.sheet = .connection(nil) }
                 }
+            } header: {
+                VStack(alignment: .leading, spacing: 8) {
+                    if model.demo && model.metadata.favourites.isEmpty {
+                        demoIndicator
+                    }
+                    Text("Connections")
+                }
             }
             if !model.metadata.recents.isEmpty {
                 Section("Recently opened") {
                     ForEach(model.metadata.recents) { location in
                         NavigationLink(value: AppModel.Route.file(location.connectionID, .init(name: location.name, path: location.path, kind: .file))) {
-                            LocationRow(name: location.name, subtitle: model.profile(location.connectionID)?.name ?? "Mac", symbol: "doc.text", color: .secondary)
+                            LocationRow(name: location.name, subtitle: model.profile(location.connectionID)?.name ?? "Server", symbol: "doc.text", color: .secondary)
                         }
                     }
                 }
             }
             Section {
-                Label("Read only. Your files stay on your Mac.", systemImage: "lock.shield").font(.footnote).foregroundStyle(.secondary)
+                Label("Read-only access over SFTP.", systemImage: "lock.shield").font(.footnote).foregroundStyle(.secondary)
             }.listRowBackground(Color.clear)
         }
         .navigationTitle("RemoteFiles")
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
@@ -167,16 +180,19 @@ private struct HomeView: View {
 }
 
 struct LocationRow: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let name: String
     let subtitle: String
     let symbol: String
     var color: Color = .indigo
     var body: some View {
         HStack(spacing: 14) {
-            Image(systemName: symbol).font(.title3).foregroundStyle(color).frame(width: 28)
+            Image(systemName: symbol).font(.system(size: 20)).foregroundStyle(color).frame(width: 28)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 5) {
                 Text(name).font(.body.weight(.medium)).foregroundStyle(.primary)
-                Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
             }
         }.padding(.vertical, 6).accessibilityElement(children: .combine)
     }
