@@ -62,6 +62,47 @@ final class StateAndPersistenceTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: url), futureBytes)
     }
 
+    func testRecentRemovalPersistsOnRelaunchPreservesOtherEntriesAndDoesNotRemoveFileOrFavourite() async throws {
+        let directory = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("original.txt"); let original = Data("untouched file".utf8); try original.write(to: file)
+        let url = directory.appendingPathComponent("library.json"), connection = profile()
+        let first = SavedLocation(connectionID: connection.id, path: file.path, name: "original.txt")
+        let samePathOtherAccount = SavedLocation(connectionID: UUID(), path: file.path, name: "other account")
+        let other = SavedLocation(connectionID: connection.id, path: "/other.txt", name: "other.txt")
+        var metadata = AppMetadata(); metadata.connections = [connection]; metadata.favourites = [first]; metadata.recents = [first, samePathOtherAccount, other]
+        let store = try MetadataStore(fileURL: url); try await store.save(metadata)
+        try await store.removeRecent(id: first.id)
+        let bytes = try Data(contentsOf: url)
+        try await store.removeRecent(id: first.id)
+        XCTAssertEqual(try Data(contentsOf: url), bytes, "Repeated removal is a no-op")
+        let restored = await (try MetadataStore(fileURL: url)).snapshot()
+        XCTAssertEqual(restored.recents, [samePathOtherAccount, other]); XCTAssertEqual(restored.favourites, [first]); XCTAssertEqual(restored.connections, [connection])
+        XCTAssertEqual(try Data(contentsOf: file), original)
+        var stale = metadata
+        stale.favourites.append(other)
+        try await store.save(stale)
+        let afterStaleSave = await store.snapshot()
+        XCTAssertEqual(afterStaleSave.recents, [samePathOtherAccount, other], "A concurrent save captured before removal cannot restore that ID")
+        XCTAssertEqual(afterStaleSave.favourites, [first, other], "Other metadata changes still persist")
+        var reopened = restored; let fresh = SavedLocation(connectionID: connection.id, path: file.path, name: first.name)
+        reopened.recents.insert(fresh, at: 0); try await store.save(reopened)
+        try await store.removeRecent(id: first.id)
+        let snapshot = await store.snapshot(); XCTAssertEqual(snapshot.recents.first, fresh, "A newly opened entry has a new identity")
+    }
+
+    func testFailedRecentRemovalPreservesSavedSnapshot() async throws {
+        let directory = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let parent = directory.appendingPathComponent("library"), url = parent.appendingPathComponent("state.json")
+        let store = try MetadataStore(fileURL: url)
+        let location = SavedLocation(connectionID: UUID(), path: "/report.md", name: "report.md")
+        var metadata = AppMetadata(); metadata.recents = [location]; try await store.save(metadata)
+        try FileManager.default.removeItem(at: parent)
+        try Data("owned blocker".utf8).write(to: parent)
+        do { try await store.removeRecent(id: location.id); XCTFail("Removal must report a failed persistence write") } catch { }
+        let snapshot = await store.snapshot(); XCTAssertEqual(snapshot.recents, [location])
+        XCTAssertEqual(try String(contentsOf: parent, encoding: .utf8), "owned blocker")
+    }
+
     func testFailedMetadataWriteDoesNotPublishAnUnsavedSnapshot() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -263,6 +304,23 @@ final class StateAndPersistenceTests: XCTestCase {
         XCTAssertEqual(counts.reads, 2)
     }
 
+    func testDisconnectRejectsSuccessfulLateReadAndListAndAllowsFreshRequest() async throws {
+        let base = ControlledFileService(ignoresCancellation: true)
+        let service = CoalescingFileService(base: base)
+        let connection = profile()
+        let read = Task { try await service.readFile(profile: connection, path: "/report.md", limit: 100) }
+        let list = Task { try await service.listDirectory(profile: connection, path: "/reports") }
+        try await waitForStarts(base, reads: 1, lists: 1)
+        await service.disconnect()
+        do { _ = try await read.value; XCTFail("Cancelled shared work returned late bytes") } catch is CancellationError {}
+        do { _ = try await list.value; XCTFail("Cancelled shared work returned late entries") } catch is CancellationError {}
+        await base.release()
+        let fresh = try await service.readFile(profile: connection, path: "/report.md", limit: 100)
+        XCTAssertEqual(fresh, Data("fixture".utf8))
+        let counts = await base.counts()
+        XCTAssertEqual(counts.reads, 2); XCTAssertEqual(counts.lists, 1); XCTAssertEqual(counts.disconnects, 1)
+    }
+
     private func waitForStarts(_ service: ControlledFileService, reads: Int, lists: Int = 0) async throws {
         for _ in 0..<1_000 {
             let counts = await service.counts()
@@ -283,8 +341,10 @@ private actor ControlledFileService: RemoteFileService {
     private var open = false
     private var failure = false
     private let holdCancelledRequestsUntilRelease: Bool
-    init(holdCancelledRequestsUntilRelease: Bool = false) {
+    private let ignoresCancellation: Bool
+    init(holdCancelledRequestsUntilRelease: Bool = false, ignoresCancellation: Bool = false) {
         self.holdCancelledRequestsUntilRelease = holdCancelledRequestsUntilRelease
+        self.ignoresCancellation = ignoresCancellation
     }
     func counts() -> Counts { state }
     func release(failure: Bool = false) {
@@ -309,7 +369,7 @@ private actor ControlledFileService: RemoteFileService {
     func disconnect() {
         state.disconnects += 1
         let waiters = pending.values; pending.removeAll()
-        waiters.forEach { $0.resume(throwing: CancellationError()) }
+        waiters.forEach { if ignoresCancellation { $0.resume() } else { $0.resume(throwing: CancellationError()) } }
     }
     private func pause() async throws {
         let id = UUID()
@@ -320,7 +380,7 @@ private actor ControlledFileService: RemoteFileService {
                     try await withCheckedThrowingContinuation { pending[id] = $0 }
                 } onCancel: { Task { await self.cancel(id) } }
             }
-            try Task.checkCancellation()
+            if !ignoresCancellation { try Task.checkCancellation() }
             if failure { throw FixtureError.unavailable }
         } catch {
             if error is CancellationError { state.cancellations += 1 }
@@ -328,7 +388,7 @@ private actor ControlledFileService: RemoteFileService {
         }
     }
     private func cancel(_ id: UUID) {
-        guard !holdCancelledRequestsUntilRelease else { return }
+        guard !holdCancelledRequestsUntilRelease, !ignoresCancellation else { return }
         pending.removeValue(forKey: id)?.resume(throwing: CancellationError())
     }
 }

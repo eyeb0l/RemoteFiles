@@ -315,7 +315,7 @@ public actor SFTPRemoteFileService: RemoteFileService {
                            modifiedAt: attributes.accessModificationTime?.modificationTime)
     }
 
-    private nonisolated static func deadline<T: Sendable>(seconds: UInt64,
+    nonisolated static func deadline<T: Sendable>(seconds: UInt64,
                                                          close: @escaping @Sendable () -> Void,
                                                          operation: @escaping @Sendable () async throws -> T) async throws -> T {
         let deadline = DeadlineFlag()
@@ -361,7 +361,7 @@ private final class LiveSession: @unchecked Sendable {
     }
 }
 
-private struct TrustValidator: NIOSSHClientServerAuthenticationDelegate {
+struct TrustValidator: NIOSSHClientServerAuthenticationDelegate {
     let store: HostTrustStore
     let endpoint: HostEndpoint
     func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
@@ -373,7 +373,7 @@ private struct TrustValidator: NIOSSHClientServerAuthenticationDelegate {
     }
 }
 
-private final class SocketControl: @unchecked Sendable {
+final class SocketControl: @unchecked Sendable {
     private let lock = NSLock()
     private var channel: Channel?
     private var cancelled = false

@@ -1,6 +1,7 @@
 import NIO
 import NIOSSH
 import Crypto
+import Foundation
 
 /// Represents an authentication method.
 public final class SSHAuthenticationMethod: NIOSSHClientUserAuthenticationDelegate {
@@ -11,12 +12,23 @@ public final class SSHAuthenticationMethod: NIOSSHClientUserAuthenticationDelega
     
     private let allImplementations: [Implementation]
     private var implementations: [Implementation]
+    private let passwordOfferLock = NSLock()
+    private var passwordOffered = false
+
+    /// Allows password-only callers to reject a server accepting the discovery `none` offer.
+    public var hasOfferedPassword: Bool {
+        passwordOfferLock.lock(); defer { passwordOfferLock.unlock() }
+        return passwordOffered
+    }
     
     internal init(
         username: String,
-        offer: NIOSSHUserAuthenticationOffer.Offer
+        offer: NIOSSHUserAuthenticationOffer.Offer,
+        discoverMethods: Bool = false
     ) {
-        self.allImplementations = [.user(username, offer: offer)]
+        self.allImplementations = discoverMethods
+            ? [.user(username, offer: .none), .user(username, offer: offer)]
+            : [.user(username, offer: offer)]
         self.implementations = allImplementations
     }
     
@@ -31,8 +43,9 @@ public final class SSHAuthenticationMethod: NIOSSHClientUserAuthenticationDelega
     /// - Parameters:
     ///  - username: The username to authenticate with.
     /// - password: The password to authenticate with.
-    public static func passwordBased(username: String, password: String) -> SSHAuthenticationMethod {
-        return SSHAuthenticationMethod(username: username, offer: .password(.init(password: password)))
+    /// Set `discoverMethods` to request the server's supported methods before offering a password.
+    public static func passwordBased(username: String, password: String, discoverMethods: Bool = false) -> SSHAuthenticationMethod {
+        return SSHAuthenticationMethod(username: username, offer: .password(.init(password: password)), discoverMethods: discoverMethods)
     }
     
     /// Creates a public key based authentication method.
@@ -98,6 +111,7 @@ public final class SSHAuthenticationMethod: NIOSSHClientUserAuthenticationDelega
                     nextChallengePromise.fail(SSHClientError.unsupportedPasswordAuthentication)
                     return
                 }
+                passwordOfferLock.lock(); passwordOffered = true; passwordOfferLock.unlock()
             case .hostBased:
                 guard availableMethods.contains(.hostBased) else {
                     nextChallengePromise.fail(SSHClientError.unsupportedHostBasedAuthentication)

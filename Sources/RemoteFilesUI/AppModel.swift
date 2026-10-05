@@ -20,6 +20,7 @@ final class AppModel {
     let metadataStore: MetadataStore
     let identities = IdentityStore()
     let trust: HostTrustStore
+    let publicKeyInstaller: any PublicKeyInstalling
     private(set) var service: any RemoteFileService
     let resourceDirectory: URL
     private var resourceService: RemoteResourceResolver?
@@ -44,16 +45,19 @@ final class AppModel {
     var connectionStates: [UUID: String] = [:]
     var demo = false
     var isForeground = true
+    private(set) var isDisconnecting = false
+    private var disconnectWork: Task<Void, Never>?
     private var realMetadata = AppMetadata()
     private var directories: [String: FolderListing] = [:]
     private var documents: [String: Data] = [:]
     private var directoryOrder: [String] = []
     private var documentOrder: [String] = []
 
-    init(directory: URL, fileService: (any RemoteFileService)? = nil) throws {
+    init(directory: URL, fileService: (any RemoteFileService)? = nil, publicKeyInstaller: (any PublicKeyInstalling)? = nil) throws {
         resourceDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("RemoteImages-v1")
         metadataStore = try MetadataStore(fileURL: directory.appendingPathComponent("library-v1.json"))
         trust = try HostTrustStore(fileURL: directory.appendingPathComponent("known-hosts-v1.json"))
+        self.publicKeyInstaller = publicKeyInstaller ?? SSHPublicKeyInstaller(trust: trust)
         service = fileService ?? CoalescingFileService(base: SFTPRemoteFileService(identityStore: identities, trustStore: trust, metadataStore: metadataStore))
     }
     func load() async { metadata = await metadataStore.snapshot() }
@@ -103,7 +107,14 @@ final class AppModel {
         metadata.recents.insert(.init(connectionID: profile.id, path: entry.path, name: entry.name), at: 0)
         metadata.recents = Array(metadata.recents.prefix(8)); await persist()
     }
+    func removeRecent(_ location: SavedLocation) async {
+        do {
+            if !demo { try await metadataStore.removeRecent(id: location.id) }
+            metadata.recents.removeAll { $0.id == location.id }
+        } catch { errorMessage = "Couldn’t remove this recent entry. \(error.localizedDescription)" }
+    }
     func handle(_ error: Error, profile: ConnectionProfile) {
+        guard !isDisconnecting else { return }
         connectionStates[profile.id] = "Disconnected"
         if let trustError = error as? HostTrustError {
             switch trustError {
@@ -123,12 +134,30 @@ final class AppModel {
         return false
     }
     func disconnect() async {
+        if let disconnectWork { await disconnectWork.value; return }
+        let task = Task { await closeSession() }
+        disconnectWork = task
+        await task.value
+        disconnectWork = nil
+    }
+    /// Explicit Disconnect differs from background suspension: discard the whole route stack.
+    func disconnectAndGoHome() async {
+        guard !isDisconnecting else { return }
+        isDisconnecting = true
+        sessionRevision += 1
+        routes = []; sheet = nil; errorMessage = nil
+        connectionStates = [:]; clearCaches()
+        await disconnect()
+        isDisconnecting = false
+    }
+    private func closeSession() async {
         let previousExporter = exportService
         await previousExporter?.cancelAll()
         await resourceService?.cancelAll(); resourceService = nil
+        await publicKeyInstaller.cancelAll()
+        await service.disconnect()
         await RemoteImageDecoder.shared.clear()
         await SourceHighlighting.shared.clear()
-        await service.disconnect()
         await previousExporter?.cancelAndDrain()
         exportService = nil
         await identities.clearSession()

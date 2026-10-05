@@ -129,7 +129,7 @@ struct FolderView: View {
                     Button("Refresh", systemImage: "arrow.clockwise") { refreshID += 1 }
                     Toggle("Show Hidden Files", isOn: $showHidden)
                     Toggle("Newest First", isOn: $dateSort)
-                    Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnect(); error = "Disconnected. Refresh to reconnect." } }
+                    Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnectAndGoHome() } }
                 } label: { Label("Folder actions", systemImage: "ellipsis.circle") }
             }
         }
@@ -161,17 +161,20 @@ struct FolderView: View {
         entry.kind == .directory ? .folder(profile.id, entry.path) : .file(profile.id, entry)
     }
     private func resolve(_ entry: RemoteEntry) {
+        guard !model.isDisconnecting else { return }
+        let revision = model.sessionRevision
         resolving = entry.path
         resolveTask = Task {
             defer { resolving = nil }
             do {
                 let target = try await model.service.resolveEntry(profile: profile, path: entry.path)
                 try Task.checkCancellation()
+                guard !model.isDisconnecting, model.sessionRevision == revision else { return }
                 let routed = RemoteEntry(name: target.name, path: target.path, kind: target.kind,
                                          size: target.size, modifiedAt: target.modifiedAt,
                                          navigationRoot: target.navigationRoot, exportFilename: entry.name)
                 model.routes.append(route(routed))
-            } catch { if !Task.isCancelled { self.error = error.localizedDescription; model.handle(error, profile: profile) } }
+            } catch { if !Task.isCancelled, !model.isDisconnecting, model.sessionRevision == revision { self.error = error.localizedDescription; model.handle(error, profile: profile) } }
         }
     }
     private func reloadIfNeeded() async {
@@ -179,8 +182,10 @@ struct FolderView: View {
         await reload()
     }
     private func reload() async {
+        guard !model.isDisconnecting else { return }
         guard model.isForeground else { loading = false; error = "Connection paused while the app is in the background."; return }
         let token = UUID(); requestID = token
+        let revision = model.sessionRevision
         lastSessionRevision = model.sessionRevision; lastRefreshID = refreshID
         loading = true; error = nil
         model.connectionStates[profile.id] = "Connecting…"
@@ -192,7 +197,7 @@ struct FolderView: View {
                 prepared.visible(query: query, showHidden: hidden, newestFirst: byDate)
             }.value
             try Task.checkCancellation()
-            guard token == requestID else { return }
+            guard token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
             sortID = UUID() // Supersede a filter task based on the previous listing.
             listing = prepared; visible = rows
             appliedFilter = query; appliedShowHidden = hidden; appliedDateSort = byDate
@@ -200,7 +205,7 @@ struct FolderView: View {
             model.connectionStates[profile.id] = "Connected"
             if query != filter || hidden != showHidden || byDate != dateSort { await updateVisible() }
         } catch {
-            guard token == requestID else { return }
+            guard token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
             if !Task.isCancelled && !(error is CancellationError) {
                 self.error = error.localizedDescription
                 if model.isSecurityError(error) { listing = nil; visible = [] }

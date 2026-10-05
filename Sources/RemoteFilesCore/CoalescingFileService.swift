@@ -32,6 +32,9 @@ public actor CoalescingFileService: RemoteFileService {
         try await withTaskCancellationHandler {
             let result = try await task.value
             try Task.checkCancellation()
+            // A transport can finish successfully while its cancellation is draining.
+            // Disconnect retires the shared task even when its callers remain alive.
+            guard !task.isCancelled else { throw CancellationError() }
             return result
         } onCancel: { task.cancel() }
     }

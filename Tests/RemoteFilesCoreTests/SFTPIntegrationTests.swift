@@ -9,6 +9,27 @@ import NIOPosix
 /// Real OpenSSH checks are opt-in; the isolated launcher supplies temporary paths.
 /// A skip without that fixture must never be reported as an authentication pass.
 final class SFTPIntegrationTests: XCTestCase {
+    func testPasswordInstallerRetainsHostVerificationAndRejectsDisabledPasswordWithoutWrites() async throws {
+        let fixture = try Fixture(), stores = try Stores(fixture: Fixture())
+        let key = try await stores.identity.generate(name: "Public-only installer fixture")
+        let request = try PublicKeyInstallationRequest(host: "127.0.0.1", port: fixture.port, username: fixture.username, identity: key)
+        let file = URL(fileURLWithPath: fixture.directory + "/authorized_keys"), before = try Data(contentsOf: URL(fileURLWithPath: fixture.directory + "/authorized_keys"))
+        let installer = SSHPublicKeyInstaller(trust: stores.trust, timeoutSeconds: 5)
+        do { _ = try await installer.install(request, password: "not-a-real-password"); XCTFail("Unknown host must block before password login") }
+        catch HostTrustError.unknown { }
+        try await stores.trustFixtureHost()
+        do { _ = try await installer.install(request, password: "not-a-real-password"); XCTFail("Fixture password login is disabled") }
+        catch PublicKeyInstallationError.passwordUnavailable { }
+        XCTAssertEqual(try Data(contentsOf: file), before, "No authorized key is added during this transport check")
+        let changed = try HostTrustStore(fileURL: URL(fileURLWithPath: fixture.directory + "/installer-changed-\(UUID().uuidString).json"))
+        let wrongHost = try HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: key.publicKey))
+        try await changed.trustUnknown(endpoint: fixture.endpoint, key: wrongHost)
+        let changedInstaller = SSHPublicKeyInstaller(trust: changed, timeoutSeconds: 5)
+        do { _ = try await changedInstaller.install(request, password: "not-a-real-password"); XCTFail("Changed host must block") }
+        catch HostTrustError.changed { }
+        XCTAssertEqual(try Data(contentsOf: file), before)
+        await installer.cancelAll(); await changedInstaller.cancelAll()
+    }
     func testGeneratedEd25519AndReadOnlyJourney() async throws {
         let fixture = try Fixture()
         let stores = try Stores(fixture: fixture)

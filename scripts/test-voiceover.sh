@@ -25,7 +25,7 @@ replacements = {
 }
 def absolute_source(m):
     relative = m.group(1).strip('"')
-    if relative.endswith('.swift'):
+    if relative.endswith(('.swift', '.icon')):
         return 'path = ' + json.dumps(str(repo / replacements.get(relative, relative))) + '; sourceTree = SOURCE_ROOT;'
     return m.group(0)
 s = re.sub(r'path = ("[^"]+"|[^;]+); sourceTree = SOURCE_ROOT;', absolute_source, s)
