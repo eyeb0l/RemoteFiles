@@ -51,7 +51,7 @@ struct ReaderView: View {
                 } else if let preview {
                     switch preview {
                     case .text(let text, let markdown): DocumentContentView(text: text, markdown: markdown, source: source, filename: entry.name, location: .init(profile: profile, path: entry.path), resolver: model.resources, readingPosition: readingPosition, openDocumentLink: openLink).id(imageVersion)
-                    case .empty: ContentUnavailableView("This file is empty", systemImage: "doc", description: Text("Refresh after it has been updated on your Mac."))
+                    case .empty: ContentUnavailableView("This file is empty", systemImage: "doc", description: Text("Refresh after it has been updated on the server."))
                     case .unsupportedFileType: infoView("Preview not available", detail: "This file type is not supported for preview.")
                     case .unsupportedEncodingOrBinary: infoView("Can’t display this file", detail: "This file contains binary data or text that is not UTF-8.")
                     case .tooLarge: infoView("Too Large to Preview", detail: "The document exceeds the 2 MiB preview limit.")

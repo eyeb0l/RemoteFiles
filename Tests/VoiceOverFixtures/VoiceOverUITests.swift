@@ -67,7 +67,7 @@ import XCTest
         XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 10))
         try withVoiceOver {
             try focus("Projects", name: "home")
-            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Mac")).firstMatch.doubleTap()
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch.doubleTap()
             let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Latest report")).firstMatch
             XCTAssertTrue(report.waitForExistence(timeout: 10), app.debugDescription)
             print("VO FOLDER CURRENT: \(try service.currentSpeech().utterance)")

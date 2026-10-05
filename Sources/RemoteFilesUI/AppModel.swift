@@ -159,7 +159,7 @@ final class AppModel {
         if enabled {
             realMetadata = metadata
             metadata = AppMetadata()
-            let profile = ConnectionProfile(name: "Studio Mac · Demo", host: "demo.invalid", username: "demo", identityID: UUID(), startingDirectory: "/Projects")
+            let profile = ConnectionProfile(name: "Studio Server · Demo", host: "demo.invalid", username: "demo", identityID: UUID(), startingDirectory: "/Projects")
             metadata.connections = [profile]
             metadata.favourites = [.init(connectionID: profile.id, path: "/Projects", name: "Projects"), .init(connectionID: profile.id, path: "/Projects/Reports", name: "Reports")]
             service = CoalescingFileService(base: DemoRemoteFileService())

@@ -14,6 +14,9 @@ source = obj('source', 'isa = PBXFileReference; lastKnownFileType = sourcecode.s
 hostsource = obj('hostsource', 'isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/RemoteFilesTestHost.swift; sourceTree = SOURCE_ROOT;')
 hostbuild = obj('hostbuild', f'isa = PBXBuildFile; fileRef = {hostsource};')
 sourcebuild = obj('sourcebuild', f'isa = PBXBuildFile; fileRef = {source};')
+icon = obj('icon', 'isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = App/AppIcon.icon; sourceTree = SOURCE_ROOT;')
+iconbuild = obj('iconbuild', f'isa = PBXBuildFile; fileRef = {icon};')
+resources = obj('resources', f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ({iconbuild},); runOnlyForDeploymentPostprocessing = 0;')
 local = obj('package', 'isa = XCLocalSwiftPackageReference; relativePath = .;')
 ui = obj('ui', 'isa = XCSwiftPackageProductDependency; productName = RemoteFilesUI;')
 core = obj('core', 'isa = XCSwiftPackageProductDependency; productName = RemoteFilesCore;')
@@ -30,7 +33,7 @@ testsources = obj('testsources', 'isa = PBXSourcesBuildPhase; buildActionMask = 
 frameworks = obj('frameworks', f'isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ({uibuild},); runOnlyForDeploymentPostprocessing = 0;')
 testframeworks = obj('testframeworks', f'isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ({corebuild},{uibuild},); runOnlyForDeploymentPostprocessing = 0;')
 common = 'DEVELOPMENT_TEAM = 359794K46A; CODE_SIGN_STYLE = Automatic; CLANG_ENABLE_MODULES = YES; IPHONEOS_DEPLOYMENT_TARGET = 27.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2";'
-appsettings = 'PRODUCT_BUNDLE_IDENTIFIER = dev.iris.RemoteFiles; PRODUCT_NAME = "$(TARGET_NAME)"; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = RemoteFiles; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity"; INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connect to the Mac you choose to browse files over SSH."; INFOPLIST_KEY_UILaunchScreen_Generation = YES; INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES; INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; MARKETING_VERSION = 0.1.0;'
+appsettings = 'PRODUCT_BUNDLE_IDENTIFIER = dev.iris.RemoteFiles; PRODUCT_NAME = "$(TARGET_NAME)"; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = RemoteFiles; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity"; INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connect to the server you choose to browse files over SSH."; INFOPLIST_KEY_UILaunchScreen_Generation = YES; INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES; INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; MARKETING_VERSION = 0.1.0;'
 testsettings = 'PRODUCT_BUNDLE_IDENTIFIER = dev.iris.RemoteFilesTests; PRODUCT_NAME = "$(TARGET_NAME)"; GENERATE_INFOPLIST_FILE = YES; BUNDLE_LOADER = "$(TEST_HOST)"; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/RemoteFilesTestHost.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/RemoteFilesTestHost";'
 def configs(name, settings):
     ids=[]
@@ -46,15 +49,15 @@ uc = configs('uitest', 'PRODUCT_BUNDLE_IDENTIFIER = dev.iris.RemoteFilesUITests;
 pc = configs('project','')
 ac = configs('app',appsettings)
 tc = configs('test',testsettings)
-hc = configs('host',appsettings.replace('dev.iris.RemoteFiles;', 'dev.iris.RemoteFilesTestHost;'))
+hc = configs('host',appsettings.replace('dev.iris.RemoteFiles;', 'dev.iris.RemoteFilesTestHost;').replace('ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;', ''))
 ht = obj('hosttarget', f'isa = PBXNativeTarget; buildConfigurationList = {hc}; buildPhases = ({hostsources},); buildRules = (); dependencies = (); name = RemoteFilesTestHost; productName = RemoteFilesTestHost; productReference = {hostapp}; productType = "com.apple.product-type.application"; packageProductDependencies = ();')
-at = obj('apptarget', f'isa = PBXNativeTarget; buildConfigurationList = {ac}; buildPhases = ({sources}, {frameworks},); buildRules = (); dependencies = (); name = RemoteFiles; productName = RemoteFiles; productReference = {app}; productType = "com.apple.product-type.application"; packageProductDependencies = ({ui},);')
+at = obj('apptarget', f'isa = PBXNativeTarget; buildConfigurationList = {ac}; buildPhases = ({sources}, {frameworks}, {resources},); buildRules = (); dependencies = (); name = RemoteFiles; productName = RemoteFiles; productReference = {app}; productType = "com.apple.product-type.application"; packageProductDependencies = ({ui},);')
 dep = obj('dependency', f'isa = PBXTargetDependency; target = {ht};')
 tt = obj('testtarget', f'isa = PBXNativeTarget; buildConfigurationList = {tc}; buildPhases = ({testsources}, {testframeworks},); buildRules = (); dependencies = ({dep},); name = RemoteFilesTests; productName = RemoteFilesTests; productReference = {test}; productType = "com.apple.product-type.bundle.unit-test"; packageProductDependencies = ({core},{ui},);')
 uidep = obj('uidependency', f'isa = PBXTargetDependency; target = {at};')
 ut = obj('uitarget', f'isa = PBXNativeTarget; buildConfigurationList = {uc}; buildPhases = ({uitestsources},); buildRules = (); dependencies = ({uidep},); name = RemoteFilesUITests; productName = RemoteFilesUITests; productReference = {uitestproduct}; productType = "com.apple.product-type.bundle.ui-testing";')
 products = obj('products',f'isa = PBXGroup; children = ({app},{hostapp},{test},{uitestproduct},); name = Products; sourceTree = "<group>";')
-group = obj('group','isa = PBXGroup; children = ('+','.join([source,hostsource,uitestsource,*refs,products])+',); sourceTree = "<group>";')
+group = obj('group','isa = PBXGroup; children = ('+','.join([source,hostsource,icon,uitestsource,*refs,products])+',); sourceTree = "<group>";')
 project = obj('project',f'isa = PBXProject; attributes = {{ BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 2700; }}; buildConfigurationList = {pc}; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; knownRegions = (en,Base,); mainGroup = {group}; productRefGroup = {products}; projectDirPath = ""; projectRoot = ""; targets = ({at},{ht},{tt},{ut},); packageReferences = ({local},);')
 pbx = '// !$*UTF8*$!\n{ archiveVersion = 1; classes = {}; objectVersion = 56; objects = {\n'
 pbx += '\n'.join(f'{i} = {{ {v} }};' for i,v in objects.values())

@@ -1,0 +1,41 @@
+{
+  "fill": {
+    "automatic-gradient": "extended-srgb:0.14,0.20,0.74,1"
+  },
+  "fill-specializations": [
+    {
+      "appearance": "dark",
+      "value": {
+        "automatic-gradient": "extended-srgb:0.055,0.07,0.18,1"
+      }
+    }
+  ],
+  "groups": [
+    {
+      "name": "Linked folder",
+      "layers": [
+        {
+          "name": "Linked folder",
+          "image-name": "linked-folder.png",
+          "glass-specializations": [
+            { "value": false },
+            { "appearance": "tinted", "value": true }
+          ]
+        }
+      ],
+      "lighting": "individual",
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0
+      },
+      "translucency": {
+        "enabled": false,
+        "value": 0.5
+      },
+      "specular": false
+    }
+  ],
+  "supported-platforms": {
+    "squares": ["iOS"]
+  }
+}

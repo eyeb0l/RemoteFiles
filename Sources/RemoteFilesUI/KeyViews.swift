@@ -70,7 +70,7 @@ private struct IdentityDetailsView: View {
                 } label: { Label(copied ? "Public Key Copied" : "Copy Public Key", systemImage: copied ? "checkmark" : "doc.on.doc") }
                 ShareLink(item: identity.publicKey) { Label("Share Public Key", systemImage: "square.and.arrow.up") }
             } header: { Text("Public identity") } footer: {
-                Text("Add this public key to the Mac account's authorized_keys file. The private key remains in this device's Keychain.")
+                Text("Add this public key to the server account's ~/.ssh/authorized_keys file. The private key remains in this device's Keychain.")
             }
             if !connections.isEmpty {
                 Section {
@@ -140,7 +140,7 @@ private struct KeyCreationView: View {
             } else {
                 Section {
                     Label("Ed25519", systemImage: "key.fill")
-                    Text("The private key is generated on this device and kept in Keychain. After creating it, copy or share its public key to authorise access on your Mac.")
+                    Text("The private key is generated on this device and kept in Keychain. After creating it, copy or share its public key to authorise access on the server.")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -257,7 +257,7 @@ struct TrustView: View {
                 LabeledContent("Algorithm", value: key.algorithm)
             }
             Section { FingerprintView(value: key.fingerprint) } header: { Text("Host fingerprint") } footer: {
-                Text("Compare this fingerprint with one obtained directly from the Mac or its administrator. Trust it only when they match.")
+                Text("Compare this fingerprint with one obtained directly from the server or its administrator. Trust it only when they match.")
             }
             if let message { Section { Text(message).foregroundStyle(.red) } }
             Section {
@@ -291,7 +291,7 @@ struct ChangedHostView: View {
         Form {
             Section {
                 Label("Connection Blocked", systemImage: "exclamationmark.shield.fill").foregroundStyle(.red)
-                Text("The host key for \(endpoint.host):\(endpoint.port) differs from the saved key. Verify the change directly with the Mac or its administrator before resetting trust.")
+                Text("The host key for \(endpoint.host):\(endpoint.port) differs from the saved key. Verify the change directly with the server or its administrator before resetting trust.")
             }
             Section("Previously trusted · \(previous.algorithm)") { FingerprintView(value: previous.fingerprint) }
             Section("Presented now · \(current.algorithm)") { FingerprintView(value: current.fingerprint) }

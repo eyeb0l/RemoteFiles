@@ -27,8 +27,8 @@ struct ConnectionEditor: View {
             Section {
                 TextField("Display name", text: $name).textContentType(.nickname)
                 TextField("Hostname or IP address", text: $host).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                TextField("Mac account username", text: $username).textInputAutocapitalization(.never).autocorrectionDisabled()
-            } header: { Text("Your Mac") } footer: { Text("Connect using macOS Remote Login (SFTP). All remote operations are read only.") }
+                TextField("Account username", text: $username).textInputAutocapitalization(.never).autocorrectionDisabled()
+            } header: { Text("Server") } footer: { Text("Connect to a Unix system over SFTP. Remote files are read only.") }
             Section("SSH identity") {
                 if model.metadata.identities.isEmpty {
                     Text("Generate a dedicated key or import an OpenSSH Ed25519 private key.").foregroundStyle(.secondary)
@@ -44,18 +44,18 @@ struct ConnectionEditor: View {
                 TextField("Starting directory (optional)", text: $directory).textInputAutocapitalization(.never).autocorrectionDisabled()
                 Toggle("Connect through Tailscale", isOn: $tailscale)
             } footer: {
-                Text("Leave the directory blank for the server’s home directory. Use an absolute path for a project folder; tilde expansion is not assumed.")
+                Text("Leave blank to use the server’s default directory, or enter an absolute path. Paths starting with ~ are not expanded.")
             }
             Section("Advanced") {
                 TextField("SSH port", text: $port).keyboardType(.numberPad)
                 if existing != nil { Button("Reset Trusted Host Key", role: .destructive) { resetTrust = true } }
             }
             Section("Before you connect") {
-                Text("Your Mac must be awake and reachable, with Remote Login enabled for this account. Add the identity’s public key to that account’s authorized_keys file.")
+                Text("The server must be reachable, with SSH and SFTP enabled for this account. Add the identity’s public key to the account’s ~/.ssh/authorized_keys file.")
                 if tailscale {
-                    Text("Enable Tailscale on both devices and use the Mac’s MagicDNS name or Tailscale IP. Your tailnet must permit the SSH connection. Tailscale SSH is not required.")
+                    Text("Enable Tailscale on both devices and use the server’s MagicDNS name or Tailscale IP. Your tailnet must permit the SSH connection. Tailscale SSH is not required.")
                 }
-                Text("The app does not change your Mac’s settings or install keys. Verify the server fingerprint when connecting for the first time.")
+                Text("The app does not configure the server or install keys. Verify its fingerprint when connecting for the first time.")
             }.font(.footnote).foregroundStyle(.secondary)
         }
         .navigationTitle(existing == nil ? "Add Connection" : "Edit Connection")
