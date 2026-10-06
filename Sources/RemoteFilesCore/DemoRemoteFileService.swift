@@ -33,6 +33,7 @@ public actor DemoRemoteFileService: RemoteFileService {
             .init(name: "Linked notes.md", path: path + "/Linked notes.md", kind: .file, size: UInt64(Self.linkedNotes.utf8.count)),
             .init(name: "Example.swift", path: path + "/Example.swift", kind: .file, size: UInt64(Self.sourceExample.utf8.count)),
             .init(name: "Long lines.json", path: path + "/Long lines.json", kind: .file, size: UInt64(Self.longLineJSON.utf8.count)),
+            .init(name: "Preview.html", path: path + "/Preview.html", kind: .file, size: UInt64(Self.htmlExample.utf8.count)),
             .init(name: "Icon.svg", path: path + "/Icon.svg", kind: .file, size: UInt64(Self.svgExample.utf8.count)),
             .init(name: "Sample audio.m4a", path: path + "/Sample audio.m4a", kind: .file, size: Self.mediaSize("Sample audio.m4a")),
             .init(name: "Sample video.mp4", path: path + "/Sample video.mp4", kind: .file, size: Self.mediaSize("Sample video.mp4")),
@@ -61,6 +62,7 @@ public actor DemoRemoteFileService: RemoteFileService {
         if path.hasSuffix("Navigation guide.md") { text = Self.navigationGuide }
         else if path.hasSuffix("Linked notes.md") { text = Self.linkedNotes }
         else if path.hasSuffix("Long lines.json") { text = Self.longLineJSON }
+        else if path.hasSuffix("Preview.html") { text = Self.htmlExample }
         else if path.hasSuffix("Icon.svg") { text = Self.svgExample }
         else { text = path.hasSuffix("Example.swift") ? Self.sourceExample : path.hasSuffix(".md") ? Self.report : "# RemoteFiles configuration\nmode = read-only\n\nSpaces and Unicode: 東京 ✨\n" }
         let data = Data(text.utf8)
@@ -231,5 +233,28 @@ public actor DemoRemoteFileService: RemoteFileService {
     Images stay private: ![A project diagram](https://example.invalid/never-requested.png)
 
     [Open Apple documentation](https://developer.apple.com/documentation/)
+    """
+}
+
+public extension DemoRemoteFileService {
+    static let htmlExample = """
+    <!doctype html>
+    <html lang="en"><head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>HTML preview</title>
+      <style>
+        :root { color-scheme: light dark; }
+        body { font: 18px -apple-system, sans-serif; padding: 24px; line-height: 1.5; }
+        h1 { color: #716cff; } .card { border: 2px solid #716cff; border-radius: 16px; padding: 20px; }
+        table { border-collapse: collapse; width: 100%; } td, th { padding: 8px; text-align: left; border-bottom: 1px solid #999; }
+      </style>
+    </head><body>
+      <h1>HTML preview</h1>
+      <div class="card"><p>A styled document with <strong>bold text</strong> and Unicode: café 東京 🌍.</p>
+      <ul><li>Rendered page</li><li>Original source</li></ul></div>
+      <h2>Sample table</h2><table><tr><th>Format</th><th>View</th></tr><tr><td>HTML</td><td>Rendered + Source</td></tr></table>
+      <p><a href="https://example.com">External link</a> · <a href="Linked%20notes.md">Linked notes</a></p>
+    </body></html>
     """
 }

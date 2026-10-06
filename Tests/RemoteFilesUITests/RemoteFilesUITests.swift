@@ -3,6 +3,35 @@ import UIKit
 
 @MainActor
 final class RemoteFilesUITests: XCTestCase {
+    func testHTMLRenderedSourceAndRefresh() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Preview.html,")).firstMatch
+        for _ in 0..<8 { if row.exists && row.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(row.exists && row.isHittable, app.debugDescription); row.tap()
+        XCTAssertTrue(app.buttons["Source"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.webViews.staticTexts["HTML preview"].waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.webViews.staticTexts["Sample table"].exists, app.debugDescription)
+        attachScreenshot("HTML rendered page")
+        app.buttons["Source"].tap()
+        let source = app.staticTexts["Syntax highlighted source"]
+        XCTAssertTrue(source.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(source.label.hasPrefix("<!doctype html>"))
+        XCTAssertTrue(source.label.contains("café 東京 🌍"))
+        XCTAssertTrue(source.label.hasSuffix("</body></html>"))
+        attachScreenshot("HTML original highlighted source")
+        app.buttons["Document actions"].tap(); app.buttons["Copy Source"].tap()
+        app.buttons["Document actions"].tap()
+        XCTAssertTrue(app.buttons["Source Copied"].waitForExistence(timeout: 5))
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        app.buttons["Rendered"].tap()
+        XCTAssertTrue(app.webViews.staticTexts["HTML preview"].waitForExistence(timeout: 15))
+        app.buttons["Document actions"].tap(); app.buttons["Refresh"].tap()
+        XCTAssertTrue(app.webViews.staticTexts["HTML preview"].waitForExistence(timeout: 15))
+    }
+
     func testDemoAudioAndVideoHaveNativePlaybackControls() throws {
         continueAfterFailure = false
         let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()

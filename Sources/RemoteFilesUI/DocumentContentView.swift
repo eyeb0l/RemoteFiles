@@ -31,7 +31,9 @@ public struct DocumentContentView: View {
         @Bindable var position = readingPosition ?? localReadingPosition
         Group {
             #if os(iOS)
-            if !source, let filename, DocumentPolicy.kind(filename: filename) == .svg {
+            if !source, let filename, DocumentPolicy.kind(filename: filename) == .html {
+                HTMLContentView(text: text, filename: filename, readingPosition: position)
+            } else if !source, let filename, DocumentPolicy.kind(filename: filename) == .svg {
                 SVGContentView(text: text, filename: filename)
             } else if (!markdown || source), SourceLayout.needsBoundedLayout(text) {
                 SourceCodeView(text: text, language: markdown ? "markdown" : SourceLanguage.forFilename(filename),

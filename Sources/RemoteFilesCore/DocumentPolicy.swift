@@ -1,7 +1,7 @@
 import Foundation
 
 public enum DocumentKind: Equatable, Sendable {
-    case markdown, plainText, svg, image, pdf, video, audio, unsupported
+    case markdown, plainText, html, svg, image, pdf, video, audio, unsupported
 }
 
 public enum DocumentPreview: Equatable, Sendable {
@@ -25,6 +25,7 @@ public enum DocumentPolicy {
         if ["mp4", "m4v", "mov", "3gp", "3g2"].contains(suffix) { return .video }
         if ["mp3", "m4a", "m4b", "aac", "wav", "wave", "aif", "aiff", "aifc", "caf", "flac", "ac3", "eac3"].contains(suffix) { return .audio }
         if suffix == "svg" { return .svg }
+        if ["html", "htm"].contains(suffix) { return .html }
         let textExtensions: Set<String> = [
             "txt", "text", "log", "json", "jsonl", "ndjson", "yaml", "yml", "toml", "ini", "conf", "config",
             "env", "properties", "csv", "tsv", "xml", "html", "htm", "css", "scss", "less", "svg", "sql",
@@ -42,7 +43,7 @@ public enum DocumentPolicy {
         guard data.count <= max(0, maxBytes) else { return .tooLarge }
         guard !data.isEmpty else { return .empty }
         let kind = kind(filename: filename)
-        guard kind == .plainText || kind == .markdown || kind == .svg else { return .unsupportedFileType }
+        guard kind == .plainText || kind == .markdown || kind == .html || kind == .svg else { return .unsupportedFileType }
         // NUL and other non-whitespace C0 controls are a deliberate binary signal even in valid UTF-8.
         guard !data.contains(where: { ($0 < 0x20 && ![0x09, 0x0A, 0x0D].contains($0)) || $0 == 0x7F }),
               var text = String(data: data, encoding: .utf8) else { return .unsupportedEncodingOrBinary }

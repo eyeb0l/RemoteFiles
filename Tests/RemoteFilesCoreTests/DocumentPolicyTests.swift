@@ -11,6 +11,17 @@ final class DocumentPolicyTests: XCTestCase {
         XCTAssertEqual(DocumentPolicy.decode(Data("%PDF text".utf8), filename: "report.pdf"), .unsupportedFileType)
     }
 
+    func testHTMLRoutingPreservesOriginalSourceAndLimits() {
+        let source = "<!doctype html>\r\n<h1>café 東京</h1>\n<script>example()</script>\n"
+        for name in ["index.html", "PAGE.HTM", "preview.HTML"] {
+            XCTAssertEqual(DocumentPolicy.kind(filename: name), .html)
+            XCTAssertEqual(DocumentPolicy.decode(Data(source.utf8), filename: name), .text(source, markdown: false))
+            XCTAssertEqual(DocumentPolicy.decode(Data(source.utf8), filename: name, maxBytes: 4), .tooLarge)
+            XCTAssertEqual(DocumentPolicy.decode(Data([0xff, 0xfe]), filename: name), .unsupportedEncodingOrBinary)
+        }
+        XCTAssertEqual(DocumentPolicy.kind(filename: "index.html.exe"), .unsupported)
+    }
+
     func testStandaloneImagePDFAndAdditionalTextKinds() {
         for name in ["photo.JPG", "shot.png", "phone.HEIC", "animation.gif", "scan.tiff", "web.webp", "bitmap.bmp"] {
             XCTAssertEqual(DocumentPolicy.kind(filename: name), .image, name)
@@ -122,7 +133,7 @@ final class DocumentPolicyTests: XCTestCase {
         XCTAssertTrue(kinds.contains(where: { if case .thematicBreak = $0 { return true }; return false }))
     }
 
-    func testHTMLIsNeverConvertedToActiveContent() throws {
+    func testHTMLInsideMarkdownRemainsInactiveText() throws {
         let prepared = try DocumentPolicy.prepareMarkdown("<script>alert('never')</script>\n\n<iframe src=\"https://example.invalid\"></iframe>\n\n<img src=\"https://example.invalid/pixel.png\">")
         XCTAssertFalse(prepared.runs.contains(where: { $0.imageURL != nil || $0.link != nil }))
         // Textual renders attributed text, never an HTML document or a web view.

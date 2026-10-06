@@ -191,3 +191,27 @@ build log `/private/tmp/RemoteFiles-download-progress-device-build.log`. The
 signed Debug app was installed on the paired iPhone 17 Pro.
 Launch was verified separately: the installed app was running on the iPhone
 with PID 64005 and an executable path matching its new installation.
+
+## Static HTML Rendered/Source — 6 October
+
+HTML and HTM now have Rendered and Source modes. Rendered uses an ephemeral
+WebKit document for static structure and inline CSS; scripts and automatic
+resource loads remain disabled, matching the user's selected static-preview scope.
+Source retains highlighting, selection, Copy Source and original export. Empty
+script-driven app entries show an explanation instead of a blank success state.
+The existing UTF-8 validation and 2 MiB document bound remain in force.
+
+The final code passed 17 unique focused Simulator checks across the final
+combined run (15 passes) and two clean reruns after a Simulator shutdown/stall.
+Checks covered HTML classification/source preservation, styled DOM and pixels,
+inactive scripts/resources, empty React-style entries, existing bounded-source
+and SVG behavior, and Rendered → Source → Copy Source → Rendered → Refresh.
+Both demo screenshots were inspected. See [HTML preview evidence](docs/HTML_PREVIEWS.md).
+
+The signed Debug build passed signature verification, was installed on the
+paired iPhone 17 Pro, and launched normally. A separate process check confirmed
+PID 64188 running from the new app bundle. Device evidence is in
+`/private/tmp/RemoteFiles-html-device-build.log` and the corresponding
+`RemoteFiles-html-install.json`, `RemoteFiles-html-launch.json` and
+`RemoteFiles-html-processes.json` files. HTML interaction was verified in
+Simulator; physical-device HTML interaction was not separately exercised.
