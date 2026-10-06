@@ -1,7 +1,7 @@
 import Foundation
 
 public enum DocumentKind: Equatable, Sendable {
-    case markdown, plainText, image, pdf, unsupported
+    case markdown, plainText, svg, image, pdf, unsupported
 }
 
 public enum DocumentPreview: Equatable, Sendable {
@@ -22,6 +22,7 @@ public enum DocumentPolicy {
         if ["md", "markdown"].contains(suffix) { return .markdown }
         if ["jpg", "jpeg", "png", "heic", "heif", "gif", "tif", "tiff", "webp", "bmp"].contains(suffix) { return .image }
         if suffix == "pdf" { return .pdf }
+        if suffix == "svg" { return .svg }
         let textExtensions: Set<String> = [
             "txt", "text", "log", "json", "jsonl", "ndjson", "yaml", "yml", "toml", "ini", "conf", "config",
             "env", "properties", "csv", "tsv", "xml", "html", "htm", "css", "scss", "less", "svg", "sql",
@@ -39,7 +40,7 @@ public enum DocumentPolicy {
         guard data.count <= max(0, maxBytes) else { return .tooLarge }
         guard !data.isEmpty else { return .empty }
         let kind = kind(filename: filename)
-        guard kind == .plainText || kind == .markdown else { return .unsupportedFileType }
+        guard kind == .plainText || kind == .markdown || kind == .svg else { return .unsupportedFileType }
         // NUL and other non-whitespace C0 controls are a deliberate binary signal even in valid UTF-8.
         guard !data.contains(where: { ($0 < 0x20 && ![0x09, 0x0A, 0x0D].contains($0)) || $0 == 0x7F }),
               var text = String(data: data, encoding: .utf8) else { return .unsupportedEncodingOrBinary }

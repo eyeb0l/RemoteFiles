@@ -26,7 +26,7 @@ struct ReaderView: View {
     @State private var linkError: String?
     var body: some View {
         VStack(spacing: 0) {
-            if DocumentPolicy.kind(filename: entry.name) == .markdown {
+            if [.markdown, .svg].contains(DocumentPolicy.kind(filename: entry.name)) {
                 Picker("Reading mode", selection: $source) {
                     Text("Rendered").tag(false)
                     Text("Source").tag(true)

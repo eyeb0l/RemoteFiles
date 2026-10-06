@@ -28,7 +28,7 @@ import XCTest
         let before = image.frame
         for iteration in 0..<3 {
             app.buttons["Source"].tap()
-            XCTAssertTrue(app.scrollViews["Markdown source"].waitForExistence(timeout: 15))
+            XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 15))
             app.buttons["Rendered"].tap()
             XCTAssertTrue(image.waitForExistence(timeout: 15))
             Thread.sleep(forTimeInterval: 1)

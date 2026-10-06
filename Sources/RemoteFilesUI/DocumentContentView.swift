@@ -30,6 +30,27 @@ public struct DocumentContentView: View {
     public var body: some View {
         @Bindable var position = readingPosition ?? localReadingPosition
         Group {
+            #if os(iOS)
+            if !source, let filename, DocumentPolicy.kind(filename: filename) == .svg {
+                SVGContentView(text: text, filename: filename)
+            } else if (!markdown || source), SourceLayout.needsBoundedLayout(text) {
+                SourceCodeView(text: text, language: markdown ? "markdown" : SourceLanguage.forFilename(filename),
+                               bounded: true, readingPosition: position)
+            } else {
+                ordinaryContent(position: position)
+            }
+            #else
+            ordinaryContent(position: position)
+            #endif
+        }
+        .task(id: markdown ? text : "") {
+            await prepareMarkdownIfNeeded()
+        }
+    }
+
+    @ViewBuilder private func ordinaryContent(position: DocumentReadingPosition) -> some View {
+        @Bindable var position = position
+        Group {
             if !markdown || source {
                 ScrollView([.horizontal, .vertical]) {
                     SourceCodeView(text: text, language: markdown ? "markdown" : SourceLanguage.forFilename(filename))
@@ -109,25 +130,26 @@ public struct DocumentContentView: View {
                 }
             }
         }
-        .task(id: markdown ? text : "") {
-            guard markdown, preparedSource != text else { return }
-            let input = text
-            (readingPosition ?? localReadingPosition).overflowGeometry.documentDidChange(input)
-            // Small documents and coordinate restoration keep precise eager layout.
-            // Freeze this choice for the mount; ordinary scrolling must not switch renderers.
-            deferInitialOverflow = input.utf8.count >= 64 * 1024 &&
-                (readingPosition ?? localReadingPosition).rendered == .zero
+    }
+
+    private func prepareMarkdownIfNeeded() async {
+        guard markdown, preparedSource != text else { return }
+        let input = text
+        (readingPosition ?? localReadingPosition).overflowGeometry.documentDidChange(input)
+        // Small documents and coordinate restoration keep precise eager layout.
+        // Freeze this choice for the mount; ordinary scrolling must not switch renderers.
+        deferInitialOverflow = input.utf8.count >= 64 * 1024 &&
+            (readingPosition ?? localReadingPosition).rendered == .zero
+        preparationFailed = false
+        do {
+            let result = try await MarkdownPreparation.shared.prepare(input)
+            guard !Task.isCancelled else { return }
+            prepared = result
+            preparedSource = input
             preparationFailed = false
-            do {
-                let result = try await MarkdownPreparation.shared.prepare(input)
-                guard !Task.isCancelled else { return }
-                prepared = result
-                preparedSource = input
-                preparationFailed = false
-            } catch {
-                guard !Task.isCancelled else { return }
-                preparationFailed = true
-            }
+        } catch {
+            guard !Task.isCancelled else { return }
+            preparationFailed = true
         }
     }
 }

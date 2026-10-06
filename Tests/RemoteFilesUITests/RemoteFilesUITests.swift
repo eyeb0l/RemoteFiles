@@ -1,7 +1,52 @@
 import XCTest
+import UIKit
 
 @MainActor
 final class RemoteFilesUITests: XCTestCase {
+    func testLongJSONAndSVGRenderedSourcePreview() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        let json = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Long lines.json,")).firstMatch
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
+        for _ in 0..<6 { if json.exists && json.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(json.exists && json.isHittable); json.tap()
+        let source = app.textViews["Bounded source text"]
+        XCTAssertTrue(source.waitForExistence(timeout: 15))
+        XCTAssertTrue((source.value as? String)?.hasPrefix("{\n  \"version\": 1,") == true)
+        XCTAssertTrue((source.value as? String)?.hasSuffix("\"ready\": true\n}\n") == true)
+        attachScreenshot("Long JSON bounded source")
+        app.buttons["Document actions"].tap(); app.buttons["Copy Source"].tap()
+        app.buttons["Document actions"].tap()
+        XCTAssertTrue(app.buttons["Source Copied"].waitForExistence(timeout: 5))
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+        app.navigationBars.buttons["Projects"].tap()
+        let svg = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Icon.svg,")).firstMatch
+        if !svg.isHittable { app.swipeUp() }; XCTAssertTrue(svg.waitForExistence(timeout: 10)); svg.tap()
+        let image = app.descendants(matching: .any).matching(identifier: "Rendered SVG image").firstMatch
+        XCTAssertTrue(image.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.activityIndicators.firstMatch.waitForNonExistence(timeout: 20), app.debugDescription)
+        XCTAssertTrue(image.exists && image.isHittable, app.debugDescription)
+        let pixels = try XCTUnwrap(app.screenshot().image.cgImage)
+        let width = pixels.width, height = pixels.height
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        let context = try XCTUnwrap(CGContext(data: &bytes, width: width, height: height, bitsPerComponent: 8,
+            bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.draw(pixels, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let purple = stride(from: width * (height / 4) * 4, to: width * (height * 3 / 4) * 4, by: 4).filter {
+            bytes[$0+2] > 180 && bytes[$0] > 60 && bytes[$0] < 180 && bytes[$0+1] < 120
+        }.count
+        XCTAssertGreaterThan(purple, 5_000, "Wait for visible SVG pixels, not just a WebKit accessibility element")
+        attachScreenshot("SVG rendered image")
+        app.buttons["Source"].tap()
+        let xml = app.staticTexts["Syntax highlighted source"]
+        XCTAssertTrue(xml.waitForExistence(timeout: 10))
+        XCTAssertTrue(xml.label.hasPrefix("<svg xmlns="))
+        attachScreenshot("SVG original source")
+        app.buttons["Rendered"].tap()
+        XCTAssertTrue(image.waitForExistence(timeout: 10))
+    }
     func testRecentSwipeRemovesOnlyEntryAndReaderDisconnectReturnsHome() throws {
         continueAfterFailure = false
         let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()

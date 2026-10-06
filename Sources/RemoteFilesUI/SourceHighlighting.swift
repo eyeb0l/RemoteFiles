@@ -109,6 +109,8 @@ actor SourceHighlighting {
 struct SourceCodeView: View {
     let text: String
     let language: String?
+    var bounded = false
+    var readingPosition: DocumentReadingPosition? = nil
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @State private var highlighted: AttributedString?
@@ -124,13 +126,16 @@ struct SourceCodeView: View {
 
     var body: some View {
         Group {
-            if let highlighted, highlightedRequest == request {
-                Text(highlighted).accessibilityIdentifier("Syntax highlighted source")
-            } else { Text(verbatim: text).accessibilityIdentifier("Source text") }
+            #if os(iOS)
+            if bounded {
+                BoundedSourceTextView(text: text,
+                    highlighted: highlightedRequest == request ? highlighted : nil,
+                    readingPosition: readingPosition)
+            } else { ordinaryText }
+            #else
+            ordinaryText
+            #endif
         }
-        .font(.body.monospaced()).foregroundStyle(.primary)
-        .textSelection(.enabled).padding(20)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
         .task(id: Work(request: request, phase: scenePhase)) {
             guard scenePhase == .active else { return }
             let input = request
@@ -141,5 +146,16 @@ struct SourceCodeView: View {
             } catch is CancellationError { }
             catch { highlighted = nil }
         }
+    }
+
+    private var ordinaryText: some View {
+        Group {
+            if let highlighted, highlightedRequest == request {
+                Text(highlighted).accessibilityIdentifier("Syntax highlighted source")
+            } else { Text(verbatim: text).accessibilityIdentifier("Source text") }
+        }
+        .font(.body.monospaced()).foregroundStyle(.primary)
+        .textSelection(.enabled).padding(20)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 }

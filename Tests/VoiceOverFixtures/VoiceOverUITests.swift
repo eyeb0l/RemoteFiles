@@ -1,6 +1,40 @@
 import XCTest
 
 @MainActor final class VoiceOverChecks: XCTestCase {
+    func testLongJSONAndSVGHaveReadOnlyVoiceOverPreviews() throws {
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        let json = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Long lines.json,")).firstMatch
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
+        for _ in 0..<6 { if json.exists && json.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(json.exists && json.isHittable); json.tap()
+        XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 15))
+        try withVoiceOver {
+            let utterances = try speech("LONG JSON", limit: 15)
+            XCTAssertTrue(utterances.contains { $0.contains("Local preview sample") || $0.contains("Source text") })
+            XCTAssertFalse(utterances.contains { $0.localizedCaseInsensitiveContains("double-tap to edit") })
+            capture("VoiceOver bounded JSON", app)
+        }
+        app.navigationBars.buttons["Projects"].tap()
+        let svg = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Icon.svg,")).firstMatch
+        XCTAssertTrue(svg.waitForExistence(timeout: 10)); if !svg.isHittable { app.swipeUp() }; svg.tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "Rendered SVG image").firstMatch.waitForExistence(timeout: 15))
+        XCTAssertTrue(app.activityIndicators.firstMatch.waitForNonExistence(timeout: 20), app.debugDescription)
+        try withVoiceOver {
+            let utterances = try speech("SVG", limit: 15)
+            XCTAssertTrue(utterances.contains { $0.contains("Rendered SVG image") && $0.contains("Icon.svg") })
+            XCTAssertTrue(utterances.contains { $0.contains("Source") && $0.contains("Button") })
+            capture("VoiceOver SVG rendered preview", app)
+        }
+        app.buttons["Source"].tap()
+        XCTAssertTrue(app.staticTexts["Syntax highlighted source"].waitForExistence(timeout: 10))
+        try withVoiceOver {
+            let utterances = try speech("SVG SOURCE", limit: 15)
+            XCTAssertFalse(utterances.contains { $0.localizedCaseInsensitiveContains("double-tap to edit") })
+            capture("VoiceOver SVG source", app)
+        }
+    }
     private var originalVoiceOver = false
     private var service: XCUIVoiceOverService { XCUIDevice.shared.voiceOverService }
     override func setUpWithError() throws {

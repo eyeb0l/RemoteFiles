@@ -15,7 +15,7 @@ struct FolderRow: Identifiable, Sendable {
         case .symlink: symbol = "link"; subtitle = "Symbolic link"
         case .file, .other:
             switch DocumentPolicy.kind(filename: entry.name) {
-            case .markdown, .pdf: symbol = "doc.richtext"
+            case .markdown, .pdf, .svg: symbol = "doc.richtext"
             case .image: symbol = "photo"
             case .plainText, .unsupported: symbol = "doc.text"
             }

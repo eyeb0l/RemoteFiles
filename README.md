@@ -96,3 +96,24 @@ requires all macOS/OpenSSH, signed hosted/demo UI, actual VoiceOver and Release
 compile lanes, and reports missing tests or unexpected skips as failures.
 [Automated acceptance](docs/AUTOMATED_ACCEPTANCE.md) distinguishes these results
 from the physical-device and human checks that remain.
+
+### JSON and SVG previews
+
+Long source lines use a width-bounded, read-only TextKit view on iOS. Lines wrap
+visually to avoid an oversized SwiftUI text surface; selection, Copy Source and
+original export retain the original characters and bytes. Smaller documents
+keep horizontal source scrolling. The 2 MiB text limit still applies, and
+malformed JSON remains readable source rather than becoming an empty preview.
+
+SVG files have **Rendered / Source** modes. Rendering supports a static subset
+(paths, shapes, groups, gradients, local references and text) up to 512 KiB,
+10,000 elements and 64 levels. Unsupported, malformed or overly complex SVGs
+show a source-accessible explanation. Scripts, event handlers, animation,
+embedded images, HTML and external resources are rejected. Only reserialized,
+allowlisted SVG enters a nonpersistent WebKit view with content JavaScript
+disabled, a restrictive content security policy, all-resource blocking and
+external navigation denied. Source and Save Original do not use that rendering
+copy. SVG rendering does not fetch images, stylesheets, fonts or other files.
+
+Synthetic long-line JSON and SVG examples in Explore Demo support regression
+checks. Private user attachments and screenshots are not bundled or committed.

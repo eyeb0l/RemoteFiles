@@ -32,6 +32,8 @@ public actor DemoRemoteFileService: RemoteFileService {
             .init(name: "Navigation guide.md", path: path + "/Navigation guide.md", kind: .file, size: UInt64(Self.navigationGuide.utf8.count)),
             .init(name: "Linked notes.md", path: path + "/Linked notes.md", kind: .file, size: UInt64(Self.linkedNotes.utf8.count)),
             .init(name: "Example.swift", path: path + "/Example.swift", kind: .file, size: UInt64(Self.sourceExample.utf8.count)),
+            .init(name: "Long lines.json", path: path + "/Long lines.json", kind: .file, size: UInt64(Self.longLineJSON.utf8.count)),
+            .init(name: "Icon.svg", path: path + "/Icon.svg", kind: .file, size: UInt64(Self.svgExample.utf8.count)),
             .init(name: "Weekly review.md", path: path + "/Weekly review.md", kind: .file, size: UInt64(Self.report.utf8.count), modifiedAt: Date(timeIntervalSince1970: 1790035200)),
             .init(name: "Notes — 東京.txt", path: path + "/Notes — 東京.txt", kind: .file, size: 92),
             .init(name: ".config", path: path + "/.config", kind: .file, size: 18),
@@ -51,6 +53,8 @@ public actor DemoRemoteFileService: RemoteFileService {
         let text: String
         if path.hasSuffix("Navigation guide.md") { text = Self.navigationGuide }
         else if path.hasSuffix("Linked notes.md") { text = Self.linkedNotes }
+        else if path.hasSuffix("Long lines.json") { text = Self.longLineJSON }
+        else if path.hasSuffix("Icon.svg") { text = Self.svgExample }
         else { text = path.hasSuffix("Example.swift") ? Self.sourceExample : path.hasSuffix(".md") ? Self.report : "# RemoteFiles configuration\nmode = read-only\n\nSpaces and Unicode: 東京 ✨\n" }
         let data = Data(text.utf8)
         guard data.count <= limit else { throw RemoteFileError.tooLarge(limit) }
@@ -65,7 +69,7 @@ public actor DemoRemoteFileService: RemoteFileService {
         let root = profile.startingDirectory == "." ? "/Projects" : profile.startingDirectory
         let path = try RemoteDocumentLinkPath.resolve(reference, relativeTo: documentPath, connectionRoot: root)
         let name = RemotePath.name(of: path)
-        let knownFiles = ["Navigation guide.md", "Linked notes.md", "Weekly review.md", "Example.swift", "Notes — 東京.txt", ".config", "Empty.txt", "Binary.txt", "Too large.md"]
+        let knownFiles = ["Navigation guide.md", "Linked notes.md", "Weekly review.md", "Example.swift", "Long lines.json", "Icon.svg", "Notes — 東京.txt", ".config", "Empty.txt", "Binary.txt", "Too large.md"]
         guard knownFiles.contains(name) else { throw RemoteFileError.unavailable("The linked file could not be found. Check the link or open its folder.") }
         try Task.checkCancellation()
         return RemoteEntry(name: name, path: path, kind: .file, navigationRoot: root)
@@ -113,6 +117,17 @@ public actor DemoRemoteFileService: RemoteFileService {
 
     [Open parent guide](../Navigation%20guide.md)
     """ + "\n"
+
+    // Synthetic regressions; no user document content is bundled.
+    public static let longLineJSON = "{\n  \"version\": 1,\n  \"prompt\": \"" +
+        String(repeating: "Local preview sample 東京 🌍. ", count: 180) + "\",\n  \"ready\": true\n}\n"
+    public static let svgExample = """
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+    <rect width="512" height="512" rx="80" fill="#7047eb"/>
+    <path d="M128 160h160v192H128z" fill="#fff"/>
+    <path d="M320 160h64v192h-64z" fill="#24b4aa"/>
+    </svg>
+    """
 
     public static let sourceExample = """
     import Foundation
