@@ -98,7 +98,7 @@ struct ReaderView: View {
     }
     private var isMedia: Bool {
         let kind = DocumentPolicy.kind(filename: entry.name)
-        return kind == .image || kind == .pdf
+        return [.image, .pdf, .video, .audio].contains(kind)
     }
     private func infoView(_ title: String, detail: String) -> some View {
         ContentUnavailableView(title, systemImage: "doc", description: Text("\(detail)\n\n\(entry.name)\n\(entry.size.map { ByteCountFormatter.string(fromByteCount: Int64(clamping: $0), countStyle: .file) } ?? "Size unavailable")"))

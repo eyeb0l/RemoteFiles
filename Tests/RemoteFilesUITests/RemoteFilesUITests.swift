@@ -3,6 +3,38 @@ import UIKit
 
 @MainActor
 final class RemoteFilesUITests: XCTestCase {
+    func testDemoAudioAndVideoHaveNativePlaybackControls() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        for filename in ["Sample audio.m4a", "Sample video.mp4"] {
+            let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", filename + ",")).firstMatch
+            for _ in 0..<8 { if row.exists && row.isHittable { break }; app.swipeUp() }
+            XCTAssertTrue(row.exists && row.isHittable, app.debugDescription); row.tap()
+            let video = filename.hasSuffix(".mp4")
+            XCTAssertTrue(app.sliders["Playback position"].waitForExistence(timeout: 20), app.debugDescription)
+            let play = app.buttons["Play"]
+            XCTAssertTrue(play.waitForExistence(timeout: 20), app.debugDescription)
+            XCTAssertTrue(play.isHittable, app.debugDescription)
+            attachScreenshot(filename + " native controls")
+            play.tap()
+            XCTAssertTrue(app.buttons["Pause"].waitForExistence(timeout: 5), app.debugDescription)
+            app.buttons["Pause"].tap()
+            if video {
+                app.buttons["Full Screen"].tap()
+                XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 10), app.debugDescription)
+                XCTAssertTrue(app.buttons["Play"].exists, app.debugDescription)
+                attachScreenshot("Fullscreen video controls")
+                app.buttons["Done"].tap()
+                XCTAssertTrue(app.buttons["Full Screen"].waitForExistence(timeout: 10), app.debugDescription)
+            }
+            app.buttons["Document actions"].tap(); app.buttons["Refresh"].tap()
+            XCTAssertTrue(play.waitForExistence(timeout: 10), app.debugDescription)
+            app.navigationBars.buttons["Projects"].tap()
+        }
+    }
+
     func testLongJSONAndSVGRenderedSourcePreview() throws {
         continueAfterFailure = false
         let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()

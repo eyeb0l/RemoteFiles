@@ -24,7 +24,7 @@ let package = Package(
             .product(name: "NIOPosix", package: "swift-nio"),
             .product(name: "Logging", package: "swift-log"),
             .product(name: "Crypto", package: "swift-crypto")
-        ]),
+        ], resources: [.process("Resources")]),
         .target(name: "RemoteFilesUI", dependencies: ["RemoteFilesCore", .product(name: "Textual", package: "textual")]),
         .testTarget(name: "RemoteFilesCoreTests", dependencies: ["RemoteFilesCore", "RemoteFilesUI"])
     ],

@@ -1,7 +1,7 @@
 import Foundation
 
 public enum DocumentKind: Equatable, Sendable {
-    case markdown, plainText, svg, image, pdf, unsupported
+    case markdown, plainText, svg, image, pdf, video, audio, unsupported
 }
 
 public enum DocumentPreview: Equatable, Sendable {
@@ -22,6 +22,8 @@ public enum DocumentPolicy {
         if ["md", "markdown"].contains(suffix) { return .markdown }
         if ["jpg", "jpeg", "png", "heic", "heif", "gif", "tif", "tiff", "webp", "bmp"].contains(suffix) { return .image }
         if suffix == "pdf" { return .pdf }
+        if ["mp4", "m4v", "mov", "3gp", "3g2"].contains(suffix) { return .video }
+        if ["mp3", "m4a", "m4b", "aac", "wav", "wave", "aif", "aiff", "aifc", "caf", "flac", "ac3", "eac3"].contains(suffix) { return .audio }
         if suffix == "svg" { return .svg }
         let textExtensions: Set<String> = [
             "txt", "text", "log", "json", "jsonl", "ndjson", "yaml", "yml", "toml", "ini", "conf", "config",

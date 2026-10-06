@@ -1,5 +1,13 @@
 # RemoteFiles preview status
 
+**6 October 2026: audio/video previews added.** The final signed iPhone 18 Pro /
+iOS 27 Simulator run passed nine playback regressions and one demo UI check,
+including visible controls, refresh and fullscreen video. Nine document-policy
+and seven resource-cache checks passed in an earlier focused run for this
+change. MP4, MOV, M4A, MP3, WAV, FLAC, AIFF and AAC playback were exercised;
+other recognized extensions depend on device codecs. Physical-device media
+acceptance remains unverified. See [audio/video scope and evidence](docs/AUDIO_VIDEO.md).
+
 Recorded **22 September 2026**, with folder-navigation results updated **27 September 2026**. The runnable iOS 27 preview implements saved connections, dedicated SSH identities, explicit host trust, real read-only SFTP browsing, favourites, recent references, Markdown/source/plain-text and standalone image/PDF reading, refresh, cancellation, and bounded caching. **Real-server browsing, reading and changed-file refresh now pass on the physical iPhone via Tailscale. Locked-device, encrypted-key, accessibility, and broader performance checks remain outstanding.**
 
 ## Tested environment and dependency pins

@@ -17,6 +17,8 @@ struct FolderRow: Identifiable, Sendable {
             switch DocumentPolicy.kind(filename: entry.name) {
             case .markdown, .pdf, .svg: symbol = "doc.richtext"
             case .image: symbol = "photo"
+            case .video: symbol = "film"
+            case .audio: symbol = "waveform"
             case .plainText, .unsupported: symbol = "doc.text"
             }
             var pieces: [String] = []

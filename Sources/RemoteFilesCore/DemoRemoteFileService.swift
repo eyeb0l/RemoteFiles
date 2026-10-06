@@ -34,6 +34,8 @@ public actor DemoRemoteFileService: RemoteFileService {
             .init(name: "Example.swift", path: path + "/Example.swift", kind: .file, size: UInt64(Self.sourceExample.utf8.count)),
             .init(name: "Long lines.json", path: path + "/Long lines.json", kind: .file, size: UInt64(Self.longLineJSON.utf8.count)),
             .init(name: "Icon.svg", path: path + "/Icon.svg", kind: .file, size: UInt64(Self.svgExample.utf8.count)),
+            .init(name: "Sample audio.m4a", path: path + "/Sample audio.m4a", kind: .file, size: Self.mediaSize("Sample audio.m4a")),
+            .init(name: "Sample video.mp4", path: path + "/Sample video.mp4", kind: .file, size: Self.mediaSize("Sample video.mp4")),
             .init(name: "Weekly review.md", path: path + "/Weekly review.md", kind: .file, size: UInt64(Self.report.utf8.count), modifiedAt: Date(timeIntervalSince1970: 1790035200)),
             .init(name: "Notes — 東京.txt", path: path + "/Notes — 東京.txt", kind: .file, size: 92),
             .init(name: ".config", path: path + "/.config", kind: .file, size: 18),
@@ -47,6 +49,11 @@ public actor DemoRemoteFileService: RemoteFileService {
     }
     public func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data {
         try await pause()
+        if let file = Self.mediaFile(RemotePath.name(of: path)) {
+            let bytes = try Data(contentsOf: file)
+            guard bytes.count <= limit else { throw RemoteFileError.tooLarge(limit) }
+            return bytes
+        }
         if path.hasSuffix("Too large.md") { throw RemoteFileError.tooLarge(limit) }
         if path.hasSuffix("Binary.txt") { return Data([0, 0xff, 0]) }
         if path.hasSuffix("Empty.txt") { return Data() }
@@ -69,8 +76,8 @@ public actor DemoRemoteFileService: RemoteFileService {
         let root = profile.startingDirectory == "." ? "/Projects" : profile.startingDirectory
         let path = try RemoteDocumentLinkPath.resolve(reference, relativeTo: documentPath, connectionRoot: root)
         let name = RemotePath.name(of: path)
-        let knownFiles = ["Navigation guide.md", "Linked notes.md", "Weekly review.md", "Example.swift", "Long lines.json", "Icon.svg", "Notes — 東京.txt", ".config", "Empty.txt", "Binary.txt", "Too large.md"]
-        guard knownFiles.contains(name) else { throw RemoteFileError.unavailable("The linked file could not be found. Check the link or open its folder.") }
+        let knownFiles = ["Navigation guide.md", "Linked notes.md", "Weekly review.md", "Example.swift", "Long lines.json", "Icon.svg", "Sample audio.m4a", "Sample video.mp4", "Notes — 東京.txt", ".config", "Empty.txt", "Binary.txt", "Too large.md"]
+        guard knownFiles.contains(name) || Self.mediaFile(name) != nil else { throw RemoteFileError.unavailable("The linked file could not be found. Check the link or open its folder.") }
         try Task.checkCancellation()
         return RemoteEntry(name: name, path: path, kind: .file, navigationRoot: root)
     }
@@ -91,6 +98,21 @@ public actor DemoRemoteFileService: RemoteFileService {
         return RemoteEntry(name: RemotePath.name(of: canonical), path: canonical, kind: .file, size: UInt64(bytes.count))
     }
     public func disconnect() { generation += 1 }
+
+    private static func mediaFile(_ name: String) -> URL? {
+        let ext = (name as NSString).pathExtension
+        if name == "Sample audio." + ext, ["m4a", "mp3", "wav", "flac", "aiff", "aac"].contains(ext) {
+            return Bundle.module.url(forResource: "sample-audio", withExtension: ext)
+        }
+        if name == "Sample video." + ext, ["mp4", "mov"].contains(ext) {
+            return Bundle.module.url(forResource: "sample-video", withExtension: ext)
+        }
+        return nil
+    }
+    private static func mediaSize(_ name: String) -> UInt64? {
+        guard let url = mediaFile(name), let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize else { return nil }
+        return UInt64(size)
+    }
 
     /// Long, uniquely labelled sections make back-scroll acceptance observable on screen.
     public static let navigationGuide = "# Navigation guide\n\n" + (1...28).map {

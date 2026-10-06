@@ -23,6 +23,21 @@ final class DocumentPolicyTests: XCTestCase {
         }
     }
 
+    func testAudioVideoRoutingAndNoTextOrPlaylistFallback() {
+        for name in ["clip.MP4", "clip.m4v", "clip.mov", "clip.3gp", "clip.3g2"] {
+            XCTAssertEqual(DocumentPolicy.kind(filename: name), .video, name)
+            XCTAssertEqual(DocumentPolicy.decode(Data("text".utf8), filename: name), .unsupportedFileType)
+        }
+        for ext in ["mp3", "m4a", "m4b", "aac", "wav", "wave", "aif", "aiff", "aifc", "caf", "flac", "ac3", "eac3"] {
+            let name = "Recording.\(ext.uppercased())"
+            XCTAssertEqual(DocumentPolicy.kind(filename: name), .audio, name)
+            XCTAssertEqual(DocumentPolicy.decode(Data("text".utf8), filename: name), .unsupportedFileType)
+        }
+        for name in ["clip.mp4.exe", "audio.mp3.zip", "stream.m3u8", "stream.m3u", "list.pls"] {
+            XCTAssertEqual(DocumentPolicy.kind(filename: name), .unsupported, name)
+        }
+    }
+
     func testEmptyBOMBinaryAndInvalidEncodingAreDeliberateStates() {
         XCTAssertEqual(DocumentPolicy.decode(Data(), filename: "empty.md"), .empty)
         XCTAssertEqual(DocumentPolicy.decode(Data([0xEF, 0xBB, 0xBF]), filename: "empty.txt"), .empty)
