@@ -130,6 +130,39 @@ final class SFTPIntegrationTests: XCTestCase {
         let metrics = await service.metrics()
         XCTAssertEqual(metrics.connections, 1)
     }
+    func testOpenFileDistinguishesMissingReferencesFromExistingOutsideFiles() async throws {
+        let fixture = try Fixture(), stores = try Stores(fixture: Fixture())
+        let key = try await stores.identity.generate(name: "Image existence test")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory); Task { await service.disconnect() } }
+        let resolver = RemoteResourceResolver(service: service, directory: directory)
+        let document = RemoteDocumentLocation(profile: profile, path: fixture.files + "/docs/source.md")
+        for missing in [fixture.directory + "/old/missing.png", fixture.files + "/docs/missing.png"] {
+            do {
+                _ = try await resolver.localFileForOpening(for: missing, in: document)
+                XCTFail("Real SFTP NO_SUCH_FILE must identify the missing linked path")
+            } catch RemoteResourceError.missingFile(let path) {
+                XCTAssertEqual(path, missing)
+            }
+        }
+        do {
+            _ = try await resolver.localFile(for: "missing.png", in: document)
+            XCTFail("Missing automatic resources must use the same file-not-found error")
+        } catch RemoteResourceError.missingFile(let path) {
+            XCTAssertEqual(path, document.resourceRoot + "/missing.png")
+        }
+        do {
+            _ = try await resolver.localFileForOpening(for: fixture.files + "/report.md", in: document)
+            XCTFail("An existing file outside the document tree still cannot be downloaded")
+        } catch RemoteResourceError.outsideDocument { }
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.bytesReceived, 0)
+        XCTAssertEqual(metrics.connections, 1)
+    }
 
     func testRelativeDocumentsUseCanonicalConnectionRootAndRejectEscapes() async throws {
         let fixture = try Fixture()

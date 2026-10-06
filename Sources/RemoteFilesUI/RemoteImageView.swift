@@ -83,7 +83,8 @@ struct RemoteInlineImage: View {
     }
     private func open(from action: ImageAction) {
         invokingAction = action
-        viewer = ImagePresentation(reference: reference, filename: filename, location: location, alt: alt)
+        viewer = ImagePresentation(reference: reference, filename: filename, location: location, alt: alt,
+                                   checkExistence: action == .openFile)
     }
 }
 
@@ -93,6 +94,7 @@ struct ImagePresentation: Identifiable {
     let filename: String
     let location: RemoteDocumentLocation
     var alt: String = ""
+    var checkExistence = false
     var accessibilityDescription: String {
         alt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? filename : alt
     }
@@ -114,7 +116,12 @@ struct RemoteImageViewer: View {
                 else if let failure {
                     ContentUnavailableView {
                         Label(item.filename, systemImage: "photo")
-                    } description: { Text(failure) } actions: { Button("Tap to retry") { retry += 1 } }
+                    } description: {
+                        Text(failure).accessibilityIdentifier("remote-image-viewer-error")
+                    } actions: {
+                        Button("Tap to retry") { retry += 1 }
+                            .accessibilityIdentifier("remote-image-viewer-retry")
+                    }
                 } else { ProgressView("Loading image…") }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -130,7 +137,12 @@ struct RemoteImageViewer: View {
                 failure = nil
                 do {
                     if retry > 0 { await resolver.invalidate(item.reference, in: item.location) }
-                    let file = try await resolver.localFile(for: item.reference, in: item.location)
+                    let file: URL
+                    if item.checkExistence {
+                        file = try await resolver.localFileForOpening(for: item.reference, in: item.location)
+                    } else {
+                        file = try await resolver.localFile(for: item.reference, in: item.location)
+                    }
                     let result = try await RemoteImageDecoder.shared.decode(file, maxPixel: 3072)
                     try Task.checkCancellation(); image = result
                 } catch is CancellationError { }

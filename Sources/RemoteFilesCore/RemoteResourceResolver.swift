@@ -11,28 +11,48 @@ public struct RemoteDocumentLocation: Hashable, Sendable {
 
 public enum RemoteResourcePath {
     public static func resolve(_ reference: String, relativeTo document: RemoteDocumentLocation) throws -> String {
-        guard let components = URLComponents(string: reference), components.scheme == nil,
-              components.host == nil, components.query == nil, components.fragment == nil,
-              !reference.hasPrefix("//"), !reference.hasPrefix("\\"),
-              let decoded = components.percentEncodedPath.removingPercentEncoding,
-              !decoded.isEmpty, !decoded.contains("\\"),
-              !decoded.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
-              document.path.hasPrefix("/") else { throw RemoteResourceError.outsideDocument }
+        let decoded = try decodedPath(reference, in: document)
         var relative = decoded
         if decoded.hasPrefix("/") {
             guard contains(decoded, in: document.resourceRoot) else { throw RemoteResourceError.outsideDocument }
             relative = String(decoded.dropFirst(document.resourceRoot == "/" ? 1 : document.resourceRoot.count + 1))
         }
-        var parts: [String] = []
-        for part in relative.split(separator: "/") {
+        let parts = try normalizedParts(relative, startingAt: [])
+        guard !parts.isEmpty else { throw RemoteResourceError.outsideDocument }
+        return RemotePath.appending(parts.joined(separator: "/"), to: document.resourceRoot)
+    }
+
+    /// Metadata lookup only, after an explicit Open file action. The returned path
+    /// does not grant permission to download outside the document's directory tree.
+    public static func pathForExistenceCheck(_ reference: String, relativeTo document: RemoteDocumentLocation) throws -> String {
+        let decoded = try decodedPath(reference, in: document)
+        let base = decoded.hasPrefix("/") ? [] : document.resourceRoot.split(separator: "/").map(String.init)
+        let parts = try normalizedParts(decoded, startingAt: base)
+        guard !parts.isEmpty else { throw RemoteResourceError.outsideDocument }
+        return "/" + parts.joined(separator: "/")
+    }
+
+    private static func decodedPath(_ reference: String, in document: RemoteDocumentLocation) throws -> String {
+        guard let components = URLComponents(string: reference), components.scheme == nil,
+              components.host == nil, components.query == nil, components.fragment == nil,
+              !reference.hasPrefix("//"), !reference.hasPrefix("\\"),
+              let decoded = components.percentEncodedPath.removingPercentEncoding,
+              !decoded.isEmpty, !decoded.hasPrefix("//"), !decoded.contains("\\"),
+              !decoded.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
+              document.path.hasPrefix("/") else { throw RemoteResourceError.outsideDocument }
+        return decoded
+    }
+
+    private static func normalizedParts(_ path: String, startingAt base: [String]) throws -> [String] {
+        var parts = base
+        for part in path.split(separator: "/") {
             if part == "." { continue }
             if part == ".." {
                 guard !parts.isEmpty else { throw RemoteResourceError.outsideDocument }
                 parts.removeLast()
             } else { parts.append(String(part)) }
         }
-        guard !parts.isEmpty else { throw RemoteResourceError.outsideDocument }
-        return RemotePath.appending(parts.joined(separator: "/"), to: document.resourceRoot)
+        return parts
     }
     public static func contains(_ path: String, in root: String) -> Bool {
         // SFTP paths are UTF-8 byte names; String equality folds Unicode normalization.
@@ -43,10 +63,12 @@ public enum RemoteResourcePath {
 
 public enum RemoteResourceError: LocalizedError, Sendable {
     case outsideDocument, notImage
+    case missingFile(String)
     public var errorDescription: String? {
         switch self {
-        case .outsideDocument: return "This image is outside the document’s folder. Open its folder directly to access it."
+        case .outsideDocument: return "This image link points outside the document’s folder. Open its folder directly to access it."
         case .notImage: return "This file is not a supported image, or its image data is damaged."
+        case .missingFile(let path): return "File not found at:\n\(path)\n\nIt may have been moved or deleted."
         }
     }
 }
@@ -56,10 +78,14 @@ public enum RemoteResourceError: LocalizedError, Sendable {
 public protocol RemoteResourceResolving: Sendable {
     func localFile(for reference: String, in document: RemoteDocumentLocation) async throws -> URL
     func localFile(for reference: String, in document: RemoteDocumentLocation, progress: @escaping DownloadProgressHandler) async throws -> URL
+    func localFileForOpening(for reference: String, in document: RemoteDocumentLocation) async throws -> URL
     func invalidate(_ reference: String, in document: RemoteDocumentLocation) async
 }
 public extension RemoteResourceResolving {
     func localFile(for reference: String, in document: RemoteDocumentLocation, progress: @escaping DownloadProgressHandler) async throws -> URL {
+        try await localFile(for: reference, in: document)
+    }
+    func localFileForOpening(for reference: String, in document: RemoteDocumentLocation) async throws -> URL {
         try await localFile(for: reference, in: document)
     }
     func invalidate(_ reference: String, in document: RemoteDocumentLocation) async {}
@@ -113,6 +139,19 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
                 flights[key] = Flight(id: id, task: task, waiters: [waiter: continuation], observers: [waiter: progress])
             }
         } onCancel: { Task { await self.cancel(key: key, waiter: waiter) } }
+    }
+    public func localFileForOpening(for reference: String, in document: RemoteDocumentLocation) async throws -> URL {
+        try Task.checkCancellation()
+        let path = try RemoteResourcePath.pathForExistenceCheck(reference, relativeTo: document)
+        do {
+            _ = try await service.resolveEntry(profile: document.profile, path: path)
+        } catch RemoteFileError.notFound {
+            throw RemoteResourceError.missingFile(path)
+        }
+        try Task.checkCancellation()
+        // Existence is checked even for stale absolute links. Bytes still use the
+        // original boundary and canonical server check; this is not a bypass.
+        return try await localFile(for: reference, in: document)
     }
     private func cacheKey(path: String, document: RemoteDocumentLocation) throws -> String {
         let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
@@ -173,10 +212,14 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         defer { transfers -= 1 }
         let temp = directory.appendingPathComponent(UUID().uuidString + ".partial")
         defer { try? fm.removeItem(at: temp) }
-        _ = try await service.downloadFile(profile: document.profile, path: path, allowedRoot: document.resourceRoot,
-                                           destination: temp, limit: fileLimit, progress: { update in
-                                               await self.report(update, key: key, id: id)
-                                           })
+        do {
+            _ = try await service.downloadFile(profile: document.profile, path: path, allowedRoot: document.resourceRoot,
+                                               destination: temp, limit: fileLimit, progress: { update in
+                                                   await self.report(update, key: key, id: id)
+                                               })
+        } catch RemoteFileError.notFound {
+            throw RemoteResourceError.missingFile(path)
+        }
         try Task.checkCancellation()
         let size = (try fm.attributesOfItem(atPath: temp.path)[.size] as? NSNumber)?.intValue ?? 0
         guard size <= diskLimit else { throw RemoteFileError.tooLarge(diskLimit) }

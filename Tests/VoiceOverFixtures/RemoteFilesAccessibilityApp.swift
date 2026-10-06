@@ -68,6 +68,37 @@ private struct ImageFixture: View {
     }
 }
 
+private actor ImageExistenceFixtureService: RemoteFileService {
+    let exists: Bool
+    init(exists: Bool) { self.exists = exists }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
+        if !exists { throw RemoteFileError.notFound }
+        return .init(name: RemotePath.name(of: path), path: path, kind: .file)
+    }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
+    func disconnect() async {}
+}
+
+private struct MissingImageFixture: View {
+    let resolver: RemoteResourceResolver
+    let location: RemoteDocumentLocation
+    init() {
+        let profile = ConnectionProfile(name: "Moved audit fixture", host: "fixture.invalid", username: "fixture", identityID: UUID())
+        location = .init(profile: profile, path: "/new/wardrobe/audit.md")
+        resolver = RemoteResourceResolver(
+            service: ImageExistenceFixtureService(exists: ProcessInfo.processInfo.arguments.contains("--image-exists")),
+            directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    }
+    var body: some View {
+        NavigationStack {
+            DocumentContentView(text: "# Moved audit\n\n![Audit screenshot](/old/wardrobe/02-item-before.png)",
+                                markdown: true, source: false, filename: "audit.md", location: location, resolver: resolver)
+                .navigationTitle("audit.md")
+        }
+    }
+}
+
 private struct StaleReaderFixture: View {
     @State private var model: AppModel?
     var body: some View {
@@ -100,6 +131,7 @@ private struct StaleReaderFixture: View {
     var body: some Scene {
         WindowGroup {
             if ProcessInfo.processInfo.arguments.contains("--small-features-fixture") { SmallFeatureFixture() }
+            else if ProcessInfo.processInfo.arguments.contains("--missing-image-fixture") { MissingImageFixture() }
             else if ProcessInfo.processInfo.arguments.contains("--voiceover-image-fixture") { ImageFixture() }
             else if ProcessInfo.processInfo.arguments.contains("--voiceover-stale-fixture") { StaleReaderFixture() }
             else if ProcessInfo.processInfo.arguments.contains("--voiceover-table-links-fixture") {
