@@ -288,7 +288,7 @@ public actor SFTPRemoteFileService: RemoteFileService {
                 case .permissionDenied:
                     throw RemoteFileError.unavailable("Permission denied. This account cannot read that location on the server.")
                 case .noSuchFile:
-                    throw RemoteFileError.unavailable("This file or folder no longer exists at that path. Refresh the folder and try again.")
+                    throw RemoteFileError.notFound
                 case .noConnection, .connectionLost:
                     throw RemoteFileError.unavailable("The SSH connection ended. Refresh to reconnect.")
                 default: break

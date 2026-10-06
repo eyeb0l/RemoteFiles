@@ -72,7 +72,15 @@ pixel size, orientation transform and immediate thumbnail decode.
 
 Failure is local to the image: filename, reason, **Tap to retry**, and **Open file**.
 Open file presents the focused image viewer and retries the same safely resolved
-resource; it cannot bypass path restrictions. Images open full-screen on tap, with
+resource; it cannot bypass path restrictions. On an explicit **Open file** action,
+the resolver first checks the exact referenced path through SFTP metadata, including
+an absolute path outside the document folder. A missing target shows **File not found**
+with the expected path, so moved/deleted files are distinguished from existing files
+blocked by the folder boundary. That metadata lookup rejects web/file/data URLs,
+does not enumerate siblings or download outside-folder bytes, and is cancellable.
+An explicit opening rechecks existence even when image bytes are cached; automatic
+inline loading does not probe outside-folder paths. Retry repeats the same check.
+Images open full-screen on tap, with
 native scroll/pinch zoom and Share. A failed full-screen reload discards the previous image, shows the error and retry action, and disables Share until an image loads successfully. **Share exports the displayed downsampled image**,
 not the potentially enormous original source. The system share sheet is shown only
 on an explicit tap; nothing is sent automatically.
@@ -99,7 +107,12 @@ previews use the filename and return focus to their full-screen opener.
 Generate disposable large/missing/duplicate/nested fixtures with
 `python3 scripts/generate-image-fixture.py`. They are ignored under `.test-server`;
 no 70 MB binary is committed. Run `scripts/test-openssh.sh swift test` for the core
-checks. Physical tests remain opt-in using `TEST_RUNNER_REMOTEFILES_REAL_SERVER=1`;
+checks. `scripts/test-image-open.sh SIMULATOR_UDID FRESH_OUTPUT_DIRECTORY` runs
+the two synthetic **Open file** UI regressions, using a temporary project and the
+production Markdown/image views. Optional third/fourth arguments reuse DerivedData
+and locked dependency checkouts. The real OpenSSH existence regression is
+`SFTPIntegrationTests.testOpenFileDistinguishesMissingReferencesFromExistingOutsideFiles`.
+Physical tests remain opt-in using `TEST_RUNNER_REMOTEFILES_REAL_SERVER=1`;
 `testAuditRemoteInlineImages` uses the saved audit recent, and
 `testRelativeLargeAndMissingImages` uses the dedicated fixture connection.
 

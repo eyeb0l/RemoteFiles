@@ -110,6 +110,117 @@ final class RemoteResourceTests: XCTestCase {
             }
         }
     }
+    func testOpenFileReportsMissingStaleAbsolutePathBeforeFolderRestriction() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = ImageExistenceTransportMock(lookupError: .notFound)
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        let doc = RemoteDocumentLocation(profile: location.profile,
+            path: "/Users/iris/Developer/wardrobe/data/ui-audit-2026-09-21/audit.md")
+        let stalePath = "/Users/iris/wardrobe/data/ui-audit-2026-09-21/02-item-before.png"
+        do {
+            _ = try await resolver.localFile(for: stalePath, in: doc)
+            XCTFail("Automatic loading must still reject the stale outside-folder reference")
+        } catch RemoteResourceError.outsideDocument { }
+        let automaticLookups = await service.lookups
+        XCTAssertTrue(automaticLookups.isEmpty, "Automatic previews must not probe other folders")
+        do {
+            _ = try await resolver.localFileForOpening(for: stalePath, in: doc)
+            XCTFail("An explicit opening must identify the missing target")
+        } catch RemoteResourceError.missingFile(let path) {
+            XCTAssertEqual(path, stalePath)
+            XCTAssertTrue(RemoteResourceError.missingFile(path).localizedDescription.contains("File not found"))
+        }
+        let lookups = await service.lookups, downloads = await service.downloads
+        XCTAssertEqual(lookups, [stalePath])
+        XCTAssertEqual(downloads, 0)
+    }
+    func testOpenFileCannotDownloadAnExistingFileOutsideDocumentFolder() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = ImageExistenceTransportMock()
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        do {
+            _ = try await resolver.localFileForOpening(for: "/other/image.png", in: location)
+            XCTFail("A metadata lookup must not widen download access")
+        } catch RemoteResourceError.outsideDocument { }
+        let lookups = await service.lookups, downloads = await service.downloads
+        XCTAssertEqual(lookups, ["/other/image.png"])
+        XCTAssertEqual(downloads, 0)
+    }
+    func testOpenFileRejectsUnsafeReferencesWithoutServerAccess() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = ImageExistenceTransportMock()
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        for reference in ["https://host/a.png", "file:///a.png", "data:image/png,a", "//host/a.png", "%2F%2Fhost/a.png",
+                          "a.png?q=1", "a.png#x", "%00.png", "a%5Cb.png", "/../a.png"] {
+            do {
+                _ = try await resolver.localFileForOpening(for: reference, in: location)
+                XCTFail("Unsafe reference accepted: \(reference)")
+            } catch RemoteResourceError.outsideDocument { }
+        }
+        let lookups = await service.lookups, downloads = await service.downloads
+        XCTAssertTrue(lookups.isEmpty)
+        XCTAssertEqual(downloads, 0)
+    }
+    func testExistenceCheckUsesExactDecodedRemotePath() throws {
+        let doc = location
+        XCTAssertEqual(try RemoteResourcePath.pathForExistenceCheck("images/../caf%C3%A9%20one.png", relativeTo: doc),
+                       doc.resourceRoot + "/café one.png")
+        XCTAssertEqual(try RemoteResourcePath.pathForExistenceCheck("../outside.png", relativeTo: doc),
+                       RemotePath.parent(of: doc.resourceRoot) + "/outside.png")
+        XCTAssertEqual(try RemoteResourcePath.pathForExistenceCheck("/old/./images/../one.png", relativeTo: doc), "/old/one.png")
+        XCTAssertEqual(try RemoteResourcePath.pathForExistenceCheck("%252e%252e.png", relativeTo: doc),
+                       doc.resourceRoot + "/%2e%2e.png")
+    }
+    func testOpenFileChecksExistenceEvenWhenImageBytesAreCached() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = ImageExistenceTransportMock()
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        let doc = location
+        _ = try await resolver.localFileForOpening(for: "a.png", in: doc)
+        await service.setLookupError(.notFound)
+        do {
+            _ = try await resolver.localFileForOpening(for: "a.png", in: doc)
+            XCTFail("Cached bytes must not hide a missing remote target during explicit opening")
+        } catch RemoteResourceError.missingFile(let path) {
+            XCTAssertEqual(path, doc.resourceRoot + "/a.png")
+        }
+        let downloads = await service.downloads
+        XCTAssertEqual(downloads, 1)
+    }
+    func testOpenFilePreservesPermissionErrors() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = ImageExistenceTransportMock(lookupError: .unavailable("Permission denied."))
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        do {
+            _ = try await resolver.localFileForOpening(for: "/other/image.png", in: location)
+            XCTFail()
+        } catch RemoteFileError.unavailable(let message) {
+            XCTAssertEqual(message, "Permission denied.")
+        }
+        let downloads = await service.downloads
+        XCTAssertEqual(downloads, 0)
+    }
+    func testOpenFileCancelsPendingMetadataLookup() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = ImageExistenceTransportMock(lookupDelay: .seconds(10))
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        let doc = location
+        let task = Task { try await resolver.localFileForOpening(for: "a.png", in: doc) }
+        for _ in 0..<100 {
+            if await !service.lookups.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        task.cancel()
+        do { _ = try await task.value; XCTFail() } catch is CancellationError { }
+        let downloads = await service.downloads
+        XCTAssertEqual(downloads, 0)
+    }
     func testDedupAndIndependentCancellationAndDiskHit() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -155,6 +266,30 @@ final class RemoteResourceTests: XCTestCase {
         let count = await service.downloads
         XCTAssertEqual(count, 3, "Different connection identities must never share cached bytes")
     }
+}
+private actor ImageExistenceTransportMock: RemoteFileService {
+    private var lookupError: RemoteFileError?
+    private let lookupDelay: Duration
+    private(set) var lookups: [String] = []
+    private(set) var downloads = 0
+    init(lookupError: RemoteFileError? = nil, lookupDelay: Duration = .zero) {
+        self.lookupError = lookupError; self.lookupDelay = lookupDelay
+    }
+    func setLookupError(_ error: RemoteFileError?) { lookupError = error }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
+        lookups.append(path)
+        try await Task.sleep(for: lookupDelay)
+        if let lookupError { throw lookupError }
+        return .init(name: RemotePath.name(of: path), path: path, kind: .file)
+    }
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
+        downloads += 1
+        try Data("image bytes".utf8).write(to: destination)
+        return .init(name: RemotePath.name(of: path), path: path, kind: .file)
+    }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
+    func disconnect() async {}
 }
 private actor ImageTransportMock: RemoteFileService {
     var downloads = 0
