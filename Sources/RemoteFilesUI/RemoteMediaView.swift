@@ -14,6 +14,7 @@ struct RemoteMediaView: View {
     @State private var image: DisplayImage?
     @State private var pdf: PDFDocument?
     @State private var loading = false
+    @State private var downloadProgress = DownloadProgress()
     @State private var failure: String?
     @State private var lastRefreshID = 0
     @State private var retryID = 0
@@ -38,6 +39,7 @@ struct RemoteMediaView: View {
         }
     }
     private var loadingMessage: String {
+        if downloadProgress.isComplete { return "Preparing preview…" }
         switch kind {
         case .pdf: return "Loading PDF…"
         case .video: return "Downloading video…"
@@ -56,7 +58,10 @@ struct RemoteMediaView: View {
             if let failure = previewFailure {
                 StatusBanner(message: hasContent ? "Previously loaded copy · \(failure)" : failure, error: true)
             } else if loading && hasContent {
-                StatusBanner(message: "Previously loaded copy · refreshing…")
+                VStack(spacing: 8) {
+                    StatusBanner(message: "Previously loaded copy · refreshing…")
+                    downloadStatus.padding(.horizontal).padding(.bottom, 8)
+                }
             }
             Group {
                 if kind == .image, let image {
@@ -97,9 +102,10 @@ struct RemoteMediaView: View {
                     }
                 } else if loading {
                     VStack(spacing: 12) {
-                        ProgressView(loadingMessage)
+                        Text(loadingMessage).font(.headline)
+                        downloadStatus.frame(maxWidth: 320)
                         if kind == .video || kind == .audio {
-                            Text("Playback is available when the download finishes. Up to 128 MiB per file.")
+                            Text("You can play this file once the download finishes.")
                                 .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
                         }
                     }.padding()
@@ -127,6 +133,19 @@ struct RemoteMediaView: View {
         }
     }
 
+    private var downloadStatus: some View {
+        VStack(spacing: 8) {
+            if let fraction = downloadProgress.fraction {
+                ProgressView(value: fraction).accessibilityLabel("Download progress")
+            } else {
+                ProgressView().accessibilityLabel(loadingMessage)
+            }
+            Text(downloadProgress.sizeLabel())
+                .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                .accessibilityIdentifier("Download size")
+        }
+    }
+
     private func load() async {
         guard !model.isDisconnecting else { return }
         if model.isForeground, playback.player != nil, lastLoadedSession == model.sessionRevision,
@@ -146,10 +165,17 @@ struct RemoteMediaView: View {
             lastRefreshID = refreshID
             lastRetryID = retryID
         }
+        downloadProgress = DownloadProgress(totalBytes: entry.size)
         loading = true; failure = nil
         defer { if requestID == token { loading = false } }
         do {
-            let file = try await model.resources.localFile(for: reference, in: location)
+            let file = try await model.resources.localFile(for: reference, in: location, progress: { update in
+                await MainActor.run {
+                    guard requestID == token, !model.isDisconnecting, model.isForeground,
+                          model.sessionRevision == revision else { return }
+                    downloadProgress = update
+                }
+            })
             try Task.checkCancellation()
             guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else { return }
             if kind == .image {

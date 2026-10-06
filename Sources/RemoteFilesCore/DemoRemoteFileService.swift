@@ -89,12 +89,31 @@ public actor DemoRemoteFileService: RemoteFileService {
     }
     public func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String,
                              destination: URL, limit: Int) async throws -> RemoteEntry {
+        try await downloadFile(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination, limit: limit, progress: { _ in })
+    }
+    public func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String,
+                             destination: URL, limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
         let root = allowedRoot == "." ? "/Projects" : allowedRoot
         let canonical = path.hasSuffix("/Latest report") ? try await resolveEntry(profile: profile, path: path).path : path
         guard RemoteResourcePath.contains(canonical, in: root) else { throw RemoteResourceError.outsideDocument }
+        let token = generation
         let bytes = try await readFile(profile: profile, path: canonical, limit: limit)
         try Task.checkCancellation()
-        try bytes.write(to: destination)
+        await progress(.init(totalBytes: UInt64(bytes.count)))
+        FileManager.default.createFile(atPath: destination.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: destination)
+        defer { try? handle.close() }
+        let chunkSize = max(1, (bytes.count + 3) / 4)
+        for offset in stride(from: 0, to: bytes.count, by: chunkSize) {
+            try Task.checkCancellation()
+            if delayNanoseconds > 0 { try await Task.sleep(nanoseconds: delayNanoseconds) }
+            guard token == generation else { throw CancellationError() }
+            let end = min(bytes.count, offset + chunkSize)
+            try handle.write(contentsOf: bytes[offset..<end])
+            await progress(.init(receivedBytes: UInt64(end), totalBytes: UInt64(bytes.count)))
+        }
+        try Task.checkCancellation()
+        await progress(.init(receivedBytes: UInt64(bytes.count), totalBytes: UInt64(bytes.count), isComplete: true))
         return RemoteEntry(name: RemotePath.name(of: canonical), path: canonical, kind: .file, size: UInt64(bytes.count))
     }
     public func disconnect() { generation += 1 }

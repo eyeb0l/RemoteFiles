@@ -55,9 +55,13 @@ public enum RemoteResourceError: LocalizedError, Sendable {
 /// use the same normalized remote address without granting web/file URLs network access.
 public protocol RemoteResourceResolving: Sendable {
     func localFile(for reference: String, in document: RemoteDocumentLocation) async throws -> URL
+    func localFile(for reference: String, in document: RemoteDocumentLocation, progress: @escaping DownloadProgressHandler) async throws -> URL
     func invalidate(_ reference: String, in document: RemoteDocumentLocation) async
 }
 public extension RemoteResourceResolving {
+    func localFile(for reference: String, in document: RemoteDocumentLocation, progress: @escaping DownloadProgressHandler) async throws -> URL {
+        try await localFile(for: reference, in: document)
+    }
     func invalidate(_ reference: String, in document: RemoteDocumentLocation) async {}
 }
 
@@ -69,6 +73,7 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         let id: UUID
         let task: Task<Void, Never>
         var waiters: [UUID: CheckedContinuation<URL, Error>]
+        var observers: [UUID: DownloadProgressHandler]
     }
     private let service: any RemoteFileService
     private let directory: URL
@@ -83,6 +88,9 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         self.fileLimit = fileLimit; self.freshness = freshness
     }
     public func localFile(for reference: String, in document: RemoteDocumentLocation) async throws -> URL {
+        try await localFile(for: reference, in: document, progress: { _ in })
+    }
+    public func localFile(for reference: String, in document: RemoteDocumentLocation, progress: @escaping DownloadProgressHandler) async throws -> URL {
         try Task.checkCancellation()
         let path = try RemoteResourcePath.resolve(reference, relativeTo: document)
         let key = try cacheKey(path: path, document: document)
@@ -90,15 +98,19 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 if Task.isCancelled { continuation.resume(throwing: CancellationError()); return }
-                if flights[key] != nil { flights[key]!.waiters[waiter] = continuation; return }
+                if flights[key] != nil {
+                    flights[key]!.waiters[waiter] = continuation
+                    flights[key]!.observers[waiter] = progress
+                    return
+                }
                 let id = UUID()
                 let task = Task {
                     let result: Result<URL, Error>
-                    do { result = .success(try await self.fetch(key: key, path: path, document: document)) }
+                    do { result = .success(try await self.fetch(key: key, id: id, path: path, document: document)) }
                     catch { result = .failure(error) }
                     self.finish(key: key, id: id, result: result)
                 }
-                flights[key] = Flight(id: id, task: task, waiters: [waiter: continuation])
+                flights[key] = Flight(id: id, task: task, waiters: [waiter: continuation], observers: [waiter: progress])
             }
         } onCancel: { Task { await self.cancel(key: key, waiter: waiter) } }
     }
@@ -118,6 +130,7 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
     }
     private func cancel(key: String, waiter: UUID) {
         guard let continuation = flights[key]?.waiters.removeValue(forKey: waiter) else { return }
+        flights[key]?.observers.removeValue(forKey: waiter)
         continuation.resume(throwing: CancellationError())
         if flights[key]?.waiters.isEmpty == true { flights.removeValue(forKey: key)?.task.cancel() }
     }
@@ -132,7 +145,14 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
             for waiter in flight.waiters.values { waiter.resume(throwing: CancellationError()) }
         }
     }
-    private func fetch(key: String, path: String, document: RemoteDocumentLocation) async throws -> URL {
+    private func report(_ progress: DownloadProgress, key: String, id: UUID) async {
+        guard let flight = flights[key], flight.id == id else { return }
+        for (waiter, observer) in flight.observers {
+            guard flights[key]?.id == id, flights[key]?.observers[waiter] != nil else { continue }
+            await observer(progress)
+        }
+    }
+    private func fetch(key: String, id: UUID, path: String, document: RemoteDocumentLocation) async throws -> URL {
         let fm = FileManager.default
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
         var excluded = URLResourceValues(); excluded.isExcludedFromBackup = true
@@ -142,6 +162,9 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
            let modified = attrs[.modificationDate] as? Date,
            Date().timeIntervalSince(modified) < freshness {
             try? fm.setAttributes([.creationDate: Date()], ofItemAtPath: target.path)
+            let size = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
+            await report(.init(receivedBytes: size, totalBytes: size, isComplete: true), key: key, id: id)
+            try Task.checkCancellation()
             return target
         }
         while transfers >= 2 { try await Task.sleep(for: .milliseconds(25)) }
@@ -151,7 +174,9 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         let temp = directory.appendingPathComponent(UUID().uuidString + ".partial")
         defer { try? fm.removeItem(at: temp) }
         _ = try await service.downloadFile(profile: document.profile, path: path, allowedRoot: document.resourceRoot,
-                                           destination: temp, limit: fileLimit)
+                                           destination: temp, limit: fileLimit, progress: { update in
+                                               await self.report(update, key: key, id: id)
+                                           })
         try Task.checkCancellation()
         let size = (try fm.attributesOfItem(atPath: temp.path)[.size] as? NSNumber)?.intValue ?? 0
         guard size <= diskLimit else { throw RemoteFileError.tooLarge(diskLimit) }

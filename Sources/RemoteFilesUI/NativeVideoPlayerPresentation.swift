@@ -37,10 +37,23 @@ struct NativeVideoPlayerPresentation: UIViewControllerRepresentable {
         private var presentation: Binding<Bool>?
         private var player: AVPlayer?
         private var controller: AVPlayerViewController?
+        private var itemObservation: NSKeyValueObservation?
         private var presenting = false
         private var dismissing = false
 
         func update(player: AVPlayer?, presentation: Binding<Bool>, host: UIViewController) {
+            if self.player !== player || itemObservation == nil {
+                itemObservation = player?.observe(\.currentItem, options: [.new]) { [weak self, weak host, weak player] observed, _ in
+                    guard observed.currentItem == nil else { return }
+                    Task { @MainActor [weak self, weak host, weak player] in
+                        guard let self, let host, self.player === player, player?.currentItem == nil else { return }
+                        // SwiftUI may defer updates to the hidden inline view while AVKit
+                        // is fullscreen. Teardown must still dismiss the native controller.
+                        self.player = nil
+                        self.synchronize(host)
+                    }
+                }
+            }
             self.player = player
             self.presentation = presentation
             synchronize(host)
@@ -59,9 +72,9 @@ struct NativeVideoPlayerPresentation: UIViewControllerRepresentable {
         private func synchronize(_ host: UIViewController) {
             guard !presenting, !dismissing else { return }
             guard presentation?.wrappedValue == true, let player else {
-                if controller != nil {
+                if let controller {
                     dismissing = true
-                    host.dismiss(animated: false) { [weak self] in self?.finished() }
+                    controller.dismiss(animated: false) { [weak self] in self?.finished() }
                 }
                 return
             }
@@ -89,6 +102,7 @@ struct NativeVideoPlayerPresentation: UIViewControllerRepresentable {
         func presentationControllerDidDismiss(_ presentationController: UIPresentationController) { finished() }
 
         private func finished() {
+            itemObservation = nil
             controller?.player = nil
             controller = nil
             presenting = false; dismissing = false
@@ -97,6 +111,7 @@ struct NativeVideoPlayerPresentation: UIViewControllerRepresentable {
 
         func remove(from host: UIViewController) {
             presentation = nil
+            itemObservation = nil
             controller?.player = nil
             controller = nil
             player = nil

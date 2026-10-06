@@ -110,6 +110,44 @@ final class RemoteResourceTests: XCTestCase {
             }
         }
     }
+    func testDownloadSizeFormattingAndUnknownTotals() {
+        let locale = Locale(identifier: "en_GB")
+        let progress = DownloadProgress(receivedBytes: 18_400_000, totalBytes: 63_100_000)
+        XCTAssertEqual(progress.sizeLabel(locale: locale), "18.4 MB / 63.1 MB")
+        XCTAssertEqual(progress.fraction!, 18.4 / 63.1, accuracy: 0.0001)
+        XCTAssertEqual(DownloadProgress(receivedBytes: 18_400_000).sizeLabel(locale: locale), "18.4 MB downloaded")
+        XCTAssertNil(DownloadProgress(receivedBytes: 20, totalBytes: 10).fraction)
+        XCTAssertEqual(DownloadProgress(totalBytes: 0).sizeLabel(locale: locale), "0 bytes / 0 bytes")
+        XCTAssertEqual(DownloadProgress(totalBytes: 0, isComplete: true).fraction, 1)
+    }
+    func testChunkProgressSharedCancellationAndCacheCompletion() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = ProgressTransportMock()
+        let resolver = RemoteResourceResolver(service: CoalescingFileService(base: service), directory: dir)
+        let doc = location
+        let cancelled = ProgressRecorder(), surviving = ProgressRecorder()
+        let first = Task { try await resolver.localFile(for: "a.mp4", in: doc, progress: { await cancelled.record($0) }) }
+        let second = Task { try await resolver.localFile(for: "a.mp4", in: doc, progress: { await surviving.record($0) }) }
+        try await Task.sleep(for: .milliseconds(150))
+        first.cancel()
+        do { _ = try await first.value; XCTFail("Cancelled waiter must leave") } catch is CancellationError { }
+        let atCancellation = await cancelled.values
+        XCTAssertFalse(atCancellation.isEmpty)
+        let file = try await second.value
+        let updates = await surviving.values
+        XCTAssertTrue(updates.contains { $0.receivedBytes > 0 && !$0.isComplete }, "Forward live progress, not only final size")
+        XCTAssertEqual(updates.last, .init(receivedBytes: 12, totalBytes: 12, isComplete: true))
+        let after = await cancelled.values
+        XCTAssertEqual(after, atCancellation, "Cancelled observers cannot receive later chunk updates")
+        XCTAssertEqual(try Data(contentsOf: file).count, 12)
+        let cached = ProgressRecorder()
+        _ = try await resolver.localFile(for: "a.mp4", in: doc, progress: { await cached.record($0) })
+        let cacheUpdates = await cached.values, downloads = await service.downloads
+        XCTAssertEqual(cacheUpdates, [.init(receivedBytes: 12, totalBytes: 12, isComplete: true)])
+        XCTAssertEqual(downloads, 1)
+    }
+
     func testDedupAndIndependentCancellationAndDiskHit() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -167,6 +205,34 @@ private actor ImageTransportMock: RemoteFileService {
         return .init(name: "a.png", path: path, kind: .file, size: 11)
     }
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { listings += 1; throw RemoteFileError.unsupportedFile }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.unsupportedFile }
+    func disconnect() async {}
+}
+
+actor ProgressRecorder {
+    var values: [DownloadProgress] = []
+    func record(_ value: DownloadProgress) { values.append(value) }
+}
+private actor ProgressTransportMock: RemoteFileService {
+    var downloads = 0
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL,
+                      limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        downloads += 1
+        await progress(.init(totalBytes: 12))
+        FileManager.default.createFile(atPath: destination.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: destination)
+        defer { try? handle.close() }
+        for count in [4, 8, 12] {
+            try await Task.sleep(for: .milliseconds(100))
+            try Task.checkCancellation()
+            try handle.write(contentsOf: Data(repeating: 1, count: 4))
+            await progress(.init(receivedBytes: UInt64(count), totalBytes: 12))
+        }
+        await progress(.init(receivedBytes: 12, totalBytes: 12, isComplete: true))
+        return .init(name: "a.mp4", path: path, kind: .file, size: 12)
+    }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
     func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.unsupportedFile }
     func disconnect() async {}

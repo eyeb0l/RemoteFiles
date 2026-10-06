@@ -184,6 +184,27 @@ private struct NativeVideoFixture: View {
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
         XCTAssertTrue(controller.failure?.contains("save the original") == true)
     }
+    func testMediaDownloadShowsProgressBeforePlayback() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try AppModel(directory: directory, fileService: DemoRemoteFileService(delayNanoseconds: 500_000_000))
+        let profile = ConnectionProfile(name: "Progress UI", host: "fixture.invalid", username: "fixture", identityID: UUID())
+        let entry = RemoteEntry(name: "Sample video.mp4", path: "/Projects/Sample video.mp4", kind: .file)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: RemoteMediaView(model: model, profile: profile,
+            entry: entry, kind: .video, refreshID: 0).environment(\.scenePhase, .active))
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previousWindow?.makeKey() }
+        try await Task.sleep(for: .milliseconds(1250))
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "Video download with received and total bytes"; attachment.lifetime = .keepAlways
+        add(attachment)
+        model.isForeground = false
+        await model.disconnect()
+    }
     func testMediaViewStopsWhenAppBackgrounds() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

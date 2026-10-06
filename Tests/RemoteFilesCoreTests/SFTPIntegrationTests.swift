@@ -118,6 +118,15 @@ final class SFTPIntegrationTests: XCTestCase {
             XCTFail("Symlink escape must be rejected before download")
         } catch RemoteResourceError.outsideDocument { }
         #endif
+        let progress = ProgressRecorder()
+        _ = try await service.downloadFile(profile: profile, path: fixture.files + "/oversized.txt", allowedRoot: fixture.files,
+            destination: temp, limit: 3 * 1024 * 1024, progress: { await progress.record($0) })
+        let updates = await progress.values
+        XCTAssertEqual(updates.first, .init(totalBytes: 3 * 1024 * 1024))
+        XCTAssertGreaterThan(updates.filter { $0.receivedBytes > 0 && !$0.isComplete }.count, 1)
+        XCTAssertEqual(updates.last, .init(receivedBytes: 3 * 1024 * 1024, totalBytes: 3 * 1024 * 1024, isComplete: true))
+        for pair in zip(updates, updates.dropFirst()) { XCTAssertLessThanOrEqual(pair.0.receivedBytes, pair.1.receivedBytes) }
+        XCTAssertEqual(try Data(contentsOf: temp).count, 3 * 1024 * 1024)
         let metrics = await service.metrics()
         XCTAssertEqual(metrics.connections, 1)
     }

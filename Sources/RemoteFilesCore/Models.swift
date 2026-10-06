@@ -60,10 +60,20 @@ public protocol RemoteFileService: Sendable {
     func readDocumentFile(profile: ConnectionProfile, path: String, allowedRoot: String, limit: Int) async throws -> Data
     func resolveDocumentLink(profile: ConnectionProfile, documentPath: String, reference: String) async throws -> RemoteEntry
     func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry
     func disconnect() async
 }
 
 public extension RemoteFileService {
+    /// Older adapters can finish without chunk progress. Read the actual local size at completion.
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL,
+                      limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        let entry = try await downloadFile(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination, limit: limit)
+        try Task.checkCancellation()
+        let size = try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        await progress(.init(receivedBytes: UInt64(size), totalBytes: UInt64(size), isComplete: true))
+        return entry
+    }
     func readDocumentFile(profile: ConnectionProfile, path: String, allowedRoot: String, limit: Int) async throws -> Data {
         throw RemoteFileError.unsupportedFile
     }

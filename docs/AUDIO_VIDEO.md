@@ -8,7 +8,14 @@ unsupported codec shows a retryable explanation with the option to use
 network playlists are outside the native preview scope.
 
 Opening a file downloads it through the existing authenticated, cancellable
-SFTP resource pipeline, capped at 128 MiB per file. Playback starts only when
+SFTP resource pipeline, capped at 128 MiB per file. While downloading, a progress
+bar and live received/total sizes are shown (for example, `18.4 MB / 63.1 MB`).
+The sizes use decimal KB/MB/GB and a shared unit. The SFTP file handle supplies
+the total; if it is unavailable or a growing file exceeds it, the UI reports only
+bytes downloaded. EOF supplies the actual final size. Cache hits report completion
+immediately, and the screen switches to preparing the preview after transfer.
+Refreshes also show transfer progress above the previously loaded copy.
+Playback starts only when
 the user presses Play after the download finishes. Video renders through AVKit
 and has a solid fullscreen button beside the inline playback controls, outside
 the video. Fullscreen presents the native iOS AVPlayerViewController directly,
@@ -75,3 +82,31 @@ Native fullscreen interaction was exercised in Simulator.
 
 Result bundle: `test_sim_2026-10-06T20-27-34-513Z_pid8837_225407e8.xcresult` in the
 same XcodeBuildMCP result-bundles workspace as above.
+
+## Download progress update, 6 October 2026
+
+Chunk progress propagates through the file-service adapter and coalesced resource
+resolver to each active consumer. Cancellation removes its progress observer;
+retired transfers cannot update a replacement request. Existing size limits,
+canonical path checks and local-file cleanup remain in the streaming path.
+The demo streams its synthetic bytes in chunks to exercise the visible loading state.
+
+The broader regression run caught an intermittent native fullscreen teardown
+failure while SwiftUI deferred updates to the covered inline view. The native
+presentation coordinator now observes removal of the player's current item and
+dismisses its AVKit controller directly when playback stops.
+
+The final Simulator run passed 21 tests with no failures or skips: 11 hosted
+playback/loading checks, nine resource/formatting/cache/cancellation checks and
+the demo audio/video UI journey. The loading screenshot was inspected for the
+size pair, progress bar and legible caption.
+Result: `test_sim_2026-10-06T20-41-50-842Z_pid8837_08065e24.xcresult` in the same
+XcodeBuildMCP workspace above.
+
+The isolated real OpenSSH streaming check also passed, verifying multiple live
+chunk updates, monotonic byte counts and the exact final 3 MiB file size, with
+canonical-root and size-limit rejection retained. Evidence:
+`/private/tmp/RemoteFiles-download-progress-sftp.xcresult`. The signed device
+build passed signature verification and was installed on the paired iPhone 17 Pro.
+Launch was verified separately: the installed app was running on the iPhone
+with PID 64005 and an executable path matching its new installation.

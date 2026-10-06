@@ -169,3 +169,25 @@ Code/text files and the Markdown Source tab now reuse the bundled Prism tokenize
 Six focused tests passed on macOS and on the physical iPhone, covering language detection, common grammars, exact Unicode/whitespace/trailing-newline preservation, both palettes, cancellation and fallback limits. The final signed Release build passed the demo Swift-source → Copy Source action → folder → Markdown Rendered/Source/Rendered journey on the iPhone. The preceding device run also passed the 1,000-file scroll/open/back regression. [Swift source](docs/screenshots/source-syntax-swift-iphone.png) and [scrolled Markdown source](docs/screenshots/source-syntax-markdown-iphone.png) were inspected in light appearance. Dark colors were checked at the attributed-text level; native selection gestures and exact system-clipboard bytes were not separately tested in this pass. These UI tests use explicit demo content, not a new real-SFTP acceptance run.
 
 Evidence: `/private/tmp/remotefiles-syntax-unit.log`, `/private/tmp/remotefiles-syntax-device.xcresult` (folder regression), and `/private/tmp/remotefiles-syntax-final.xcresult` (six checks and one UI test, zero failures). The verified app was then launched normally on the iPhone with saved connections.
+
+## Download progress — 6 October
+
+Media previews and refreshes now show actual SFTP bytes received, total size when
+available, and a determinate progress bar. Unknown totals retain a byte count;
+completed downloads show preparation while decoding/loading. Formatting uses
+matching decimal units, such as `18.4 MB / 63.1 MB`. Observer cancellation and
+request/session guards prevent old transfers from updating a replacement view.
+
+The final iOS 27 Simulator run passed **21 checks, zero failures or skips**,
+including the captured loading screen and native playback UI. One additional
+isolated real OpenSSH check passed, validating live chunk counts and exact final
+bytes alongside canonical-path and transfer-limit checks. The broader run also
+exposed and fixed native fullscreen teardown when SwiftUI defers covered-view
+updates: the coordinator observes AVPlayer current-item removal directly.
+
+Evidence: XcodeBuildMCP result `test_sim_2026-10-06T20-41-50-842Z_pid8837_08065e24.xcresult`,
+`/private/tmp/RemoteFiles-download-progress-sftp.xcresult` and the signed-device
+build log `/private/tmp/RemoteFiles-download-progress-device-build.log`. The
+signed Debug app was installed on the paired iPhone 17 Pro.
+Launch was verified separately: the installed app was running on the iPhone
+with PID 64005 and an executable path matching its new installation.
