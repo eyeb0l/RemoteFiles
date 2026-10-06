@@ -22,12 +22,19 @@ final class RemoteFilesUITests: XCTestCase {
             XCTAssertTrue(app.buttons["Pause"].waitForExistence(timeout: 5), app.debugDescription)
             app.buttons["Pause"].tap()
             if video {
+                let fullscreen = app.buttons["Full Screen"]
+                XCTAssertGreaterThanOrEqual(fullscreen.frame.minY, app.sliders["Playback position"].frame.maxY,
+                                            "Fullscreen belongs with transport controls, outside the video")
                 app.buttons["Full Screen"].tap()
-                XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 10), app.debugDescription)
-                XCTAssertTrue(app.buttons["Play"].exists, app.debugDescription)
-                attachScreenshot("Fullscreen video controls")
-                app.buttons["Done"].tap()
+                let close = app.buttons.matching(NSPredicate(format: "label IN %@", ["Close", "Done"])).firstMatch
+                XCTAssertTrue(close.waitForExistence(timeout: 10), app.debugDescription)
+                XCTAssertFalse(app.sliders["Playback position"].exists, "Fullscreen must use native iOS transport controls")
+                attachScreenshot("Native iOS fullscreen player")
+                close.tap()
                 XCTAssertTrue(app.buttons["Full Screen"].waitForExistence(timeout: 10), app.debugDescription)
+                app.buttons["Full Screen"].tap()
+                XCTAssertTrue(close.waitForExistence(timeout: 10), "Native dismissal must allow opening fullscreen again")
+                close.tap()
             }
             app.buttons["Document actions"].tap(); app.buttons["Refresh"].tap()
             XCTAssertTrue(play.waitForExistence(timeout: 10), app.debugDescription)

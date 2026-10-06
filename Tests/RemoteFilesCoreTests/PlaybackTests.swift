@@ -5,7 +5,63 @@ import SwiftUI
 import RemoteFilesCore
 @testable import RemoteFilesUI
 
+@MainActor @Observable private final class NativeVideoState { var presented = false }
+private struct NativeVideoFixture: View {
+    let playback: RemotePlaybackController
+    @Bindable var state: NativeVideoState
+    var body: some View {
+        Color.clear.background {
+            NativeVideoPlayerPresentation(player: playback.player, isPresented: $state.presented)
+                .frame(width: 0, height: 0)
+        }
+    }
+}
+
 @MainActor final class PlaybackTests: XCTestCase {
+    func testFullscreenPresentsNativeControllerAndRestoresSamePlayer() async throws {
+        let source = try await downloaded("Sample video.mp4")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let playback = RemotePlaybackController()
+        defer { playback.stop() }
+        try await playback.prepare(source, filename: "clip.mp4")
+        let player = try XCTUnwrap(playback.player)
+        await player.seek(to: CMTime(seconds: 0.5, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        let state = NativeVideoState()
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: NativeVideoFixture(playback: playback, state: state))
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previousWindow?.makeKey() }
+        func native(_ root: UIViewController) -> AVPlayerViewController? {
+            if let value = root as? AVPlayerViewController { return value }
+            if let presented = root.presentedViewController, let value = native(presented) { return value }
+            return root.children.lazy.compactMap(native).first
+        }
+        state.presented = true
+        try await waitUntil { native(window.rootViewController!)?.view.window != nil }
+        let fullscreen = try XCTUnwrap(native(window.rootViewController!))
+        XCTAssertEqual(fullscreen.modalPresentationStyle, .fullScreen)
+        XCTAssertTrue(fullscreen.showsPlaybackControls)
+        XCTAssertFalse(fullscreen.allowsPictureInPicturePlayback)
+        XCTAssertTrue(fullscreen.player === player)
+        XCTAssertEqual(player.currentTime().seconds, 0.5, accuracy: 0.1)
+        try await waitUntil { !fullscreen.isBeingPresented }
+        fullscreen.dismiss(animated: false)
+        try await waitUntil { !state.presented }
+        XCTAssertTrue(playback.player === player)
+        XCTAssertNotNil(player.currentItem)
+        XCTAssertNil(fullscreen.player, "Dismissal must release the fullscreen attachment, not the playback session")
+        state.presented = true
+        try await waitUntil { native(window.rootViewController!)?.view.window != nil }
+        let reopened = try XCTUnwrap(native(window.rootViewController!))
+        try await waitUntil { !reopened.isBeingPresented }
+        playback.stop()
+        try await waitUntil { !state.presented }
+        XCTAssertNil(native(window.rootViewController!))
+        XCTAssertNil(player.currentItem)
+    }
+
     private func downloaded(_ name: String) async throws -> URL {
         let profile = ConnectionProfile(name: "Playback fixture", host: "fixture.invalid", username: "fixture", identityID: UUID())
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".resource")

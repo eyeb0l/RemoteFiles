@@ -10,9 +10,12 @@ network playlists are outside the native preview scope.
 Opening a file downloads it through the existing authenticated, cancellable
 SFTP resource pipeline, capped at 128 MiB per file. Playback starts only when
 the user presses Play after the download finishes. Video renders through AVKit
-and has an explicit fullscreen action. Both video
-and audio have visible Play/Pause controls and an accessible seek bar, backed
-by a local AVPlayer. Audio has a filename and waveform presentation. Refresh pauses the old copy and replaces
+and has a solid fullscreen button beside the inline playback controls, outside
+the video. Fullscreen presents the native iOS AVPlayerViewController directly,
+with system controls and dismissal, using the same player and playback position.
+Both inline video and audio have visible Play/Pause controls and an accessible
+seek bar, backed by a local AVPlayer. Audio has a filename and waveform
+presentation. Refresh pauses the old copy and replaces
 it only after the new file passes playback validation; failed refreshes label
 the previous copy. Runtime playback failures show the same recovery guidance.
 
@@ -52,3 +55,23 @@ On iPhone 18 Pro Simulator / iOS 27.0 with Xcode 27.0:
 
 Final media evidence: `test_sim_2026-10-06T19-18-47-805Z_pid8837_be5413d9.xcresult`
 under the XcodeBuildMCP `RemoteFiles-4cb9c1492648/result-bundles` workspace.
+
+
+## Native fullscreen update, 6 October 2026
+
+The fullscreen action now uses an opaque system-colored button beside Play/Pause,
+outside the image. It presents the native iOS AVPlayerViewController directly,
+with system playback, seeking, speed, mute and dismissal controls. The custom
+fullscreen layout has been removed. Returning restores the inline video display;
+the player, playback position and paused/playing state are retained.
+
+Ten hosted playback tests and the demo UI test passed (11 total, no failures or
+skips), including direct native-controller presentation, retained playback
+position, Close and reopening, and dismissal when the playback session stops.
+Captured screenshots confirm the button placement and native fullscreen chrome.
+The signed iOS device build passed with a valid code signature. The revision
+was installed on the paired iPhone 17 Pro / iOS 27.0 and its launch was verified.
+Native fullscreen interaction was exercised in Simulator.
+
+Result bundle: `test_sim_2026-10-06T20-27-34-513Z_pid8837_225407e8.xcresult` in the
+same XcodeBuildMCP result-bundles workspace as above.

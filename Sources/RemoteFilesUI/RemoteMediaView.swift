@@ -90,11 +90,9 @@ struct RemoteMediaView: View {
                         if kind == .audio {
                             PlaybackControls(playback: playback).id(ObjectIdentifier(player))
                         } else {
-                            NativePlaybackView(player: player).overlay(alignment: .topTrailing) {
-                                Button("Full Screen", systemImage: "arrow.up.left.and.arrow.down.right") { fullScreenPlayback = true }
-                                    .buttonStyle(.bordered).padding()
-                            }
-                            PlaybackControls(playback: playback).id(ObjectIdentifier(player))
+                            NativePlaybackView(player: player).id(fullScreenPlayback)
+                            PlaybackControls(playback: playback, openFullScreen: { fullScreenPlayback = true })
+                                .id(ObjectIdentifier(player))
                         }
                     }
                 } else if loading {
@@ -123,7 +121,10 @@ struct RemoteMediaView: View {
         .onChange(of: model.isForeground) { _, active in if !active { playback.stop() } }
         .onChange(of: model.isDisconnecting) { _, disconnecting in if disconnecting { playback.stop() } }
         .fullScreenCover(item: $viewer, onDismiss: { imageFocused = true }) { item in RemoteImageViewer(item: item, resolver: model.resources) }
-        .fullScreenCover(isPresented: $fullScreenPlayback) { FullScreenPlaybackView(playback: playback, filename: entry.name) }
+        .background {
+            NativeVideoPlayerPresentation(player: playback.player, isPresented: $fullScreenPlayback)
+                .frame(width: 0, height: 0)
+        }
     }
 
     private func load() async {
@@ -186,6 +187,7 @@ struct RemoteMediaView: View {
 
 private struct PlaybackControls: View {
     let playback: RemotePlaybackController
+    var openFullScreen: (() -> Void)? = nil
     @State private var scrubbing = false
     @State private var position: Double = 0
     var body: some View {
@@ -204,37 +206,25 @@ private struct PlaybackControls: View {
                 Spacer()
                 Text(time(playback.duration))
             }.font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-            Button(playback.isPlaying ? "Pause" : "Play", systemImage: playback.isPlaying ? "pause.fill" : "play.fill") {
-                playback.togglePlayback()
-            }.buttonStyle(.borderedProminent).controlSize(.large)
+            HStack(spacing: 16) {
+                Button(playback.isPlaying ? "Pause" : "Play", systemImage: playback.isPlaying ? "pause.fill" : "play.fill") {
+                    playback.togglePlayback()
+                }.buttonStyle(.borderedProminent).controlSize(.large)
+                if let openFullScreen {
+                    Button(action: openFullScreen) {
+                        Label("Full Screen", systemImage: "arrow.up.left.and.arrow.down.right")
+                            .font(.body.weight(.semibold)).foregroundStyle(.primary)
+                            .padding(.horizontal, 16).frame(minHeight: 50)
+                            .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
+                    }.buttonStyle(.plain)
+                }
+            }
         }.padding(24).accessibilityIdentifier("Playback controls")
     }
     private func time(_ seconds: Double) -> String {
         let value = Int(max(0, min(seconds.isFinite ? seconds : 0, Double(Int.max / 2))))
         return value >= 3600 ? String(format: "%d:%02d:%02d", value / 3600, value / 60 % 60, value % 60)
                              : String(format: "%d:%02d", value / 60, value % 60)
-    }
-}
-
-private struct FullScreenPlaybackView: View {
-    let playback: RemotePlaybackController
-    let filename: String
-    @Environment(\.dismiss) private var dismiss
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text(filename).lineLimit(1).truncationMode(.middle)
-                Spacer()
-                Button("Done", systemImage: "xmark") { dismiss() }
-            }.padding()
-            if let player = playback.player {
-                NativePlaybackView(player: player).frame(maxHeight: .infinity)
-                PlaybackControls(playback: playback)
-            } else {
-                ContentUnavailableView("Playback paused", systemImage: "film", description: Text(playback.failure ?? "Close this view to reload the preview."))
-                    .frame(maxHeight: .infinity)
-            }
-        }.background(Color(uiColor: .systemBackground))
     }
 }
 
