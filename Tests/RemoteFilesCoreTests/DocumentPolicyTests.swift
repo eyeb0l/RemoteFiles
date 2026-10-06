@@ -11,6 +11,17 @@ final class DocumentPolicyTests: XCTestCase {
         XCTAssertEqual(DocumentPolicy.decode(Data("%PDF text".utf8), filename: "report.pdf"), .unsupportedFileType)
     }
 
+    func testHTMLRoutingPreservesOriginalSourceAndLimits() {
+        let source = "<!doctype html>\r\n<h1>café 東京</h1>\n<script>example()</script>\n"
+        for name in ["index.html", "PAGE.HTM", "preview.HTML"] {
+            XCTAssertEqual(DocumentPolicy.kind(filename: name), .html)
+            XCTAssertEqual(DocumentPolicy.decode(Data(source.utf8), filename: name), .text(source, markdown: false))
+            XCTAssertEqual(DocumentPolicy.decode(Data(source.utf8), filename: name, maxBytes: 4), .tooLarge)
+            XCTAssertEqual(DocumentPolicy.decode(Data([0xff, 0xfe]), filename: name), .unsupportedEncodingOrBinary)
+        }
+        XCTAssertEqual(DocumentPolicy.kind(filename: "index.html.exe"), .unsupported)
+    }
+
     func testStandaloneImagePDFAndAdditionalTextKinds() {
         for name in ["photo.JPG", "shot.png", "phone.HEIC", "animation.gif", "scan.tiff", "web.webp", "bitmap.bmp"] {
             XCTAssertEqual(DocumentPolicy.kind(filename: name), .image, name)
@@ -20,6 +31,21 @@ final class DocumentPolicyTests: XCTestCase {
         XCTAssertEqual(DocumentPolicy.kind(filename: "report.pdf.exe"), .unsupported)
         for name in ["changes.diff", "fix.patch", "notebook.ipynb", "settings.cfg", "main.tf"] {
             XCTAssertEqual(DocumentPolicy.decode(Data("text".utf8), filename: name), .text("text", markdown: false), name)
+        }
+    }
+
+    func testAudioVideoRoutingAndNoTextOrPlaylistFallback() {
+        for name in ["clip.MP4", "clip.m4v", "clip.mov", "clip.3gp", "clip.3g2"] {
+            XCTAssertEqual(DocumentPolicy.kind(filename: name), .video, name)
+            XCTAssertEqual(DocumentPolicy.decode(Data("text".utf8), filename: name), .unsupportedFileType)
+        }
+        for ext in ["mp3", "m4a", "m4b", "aac", "wav", "wave", "aif", "aiff", "aifc", "caf", "flac", "ac3", "eac3"] {
+            let name = "Recording.\(ext.uppercased())"
+            XCTAssertEqual(DocumentPolicy.kind(filename: name), .audio, name)
+            XCTAssertEqual(DocumentPolicy.decode(Data("text".utf8), filename: name), .unsupportedFileType)
+        }
+        for name in ["clip.mp4.exe", "audio.mp3.zip", "stream.m3u8", "stream.m3u", "list.pls"] {
+            XCTAssertEqual(DocumentPolicy.kind(filename: name), .unsupported, name)
         }
     }
 
@@ -107,7 +133,7 @@ final class DocumentPolicyTests: XCTestCase {
         XCTAssertTrue(kinds.contains(where: { if case .thematicBreak = $0 { return true }; return false }))
     }
 
-    func testHTMLIsNeverConvertedToActiveContent() throws {
+    func testHTMLInsideMarkdownRemainsInactiveText() throws {
         let prepared = try DocumentPolicy.prepareMarkdown("<script>alert('never')</script>\n\n<iframe src=\"https://example.invalid\"></iframe>\n\n<img src=\"https://example.invalid/pixel.png\">")
         XCTAssertFalse(prepared.runs.contains(where: { $0.imageURL != nil || $0.link != nil }))
         // Textual renders attributed text, never an HTML document or a web view.

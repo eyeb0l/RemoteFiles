@@ -107,6 +107,82 @@ import RemoteFilesCore
     }
 }
 
+@MainActor final class HTMLDisplayTests: XCTestCase {
+    private func wait(_ ready: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(15)
+        while !ready(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(25)) }
+        XCTAssertTrue(ready(), "HTML renderer must finish loading")
+    }
+    func testStyledHTMLRendersDOMAndVisiblePixels() async throws {
+        let rules = try await SVGResourceBlocker.rules()
+        let source = "<!doctype html><html><head><style>h1{color:rgb(90,40,220)}</style></head><body><h1>café 東京</h1><table><tr><td>Rendered cell</td></tr></table></body></html>"
+        let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 360, height: 400), configuration: StaticHTMLWebView.configuration(rules: rules))
+        let probe = SVGAttackProbe(); view.navigationDelegate = probe
+        view.loadHTMLString(StaticHTMLWebView.html(source), baseURL: nil)
+        try await wait { probe.finished }
+        let body = try await view.evaluateJavaScript("document.body.innerText") as? String
+        XCTAssertTrue(body?.contains("café 東京") == true)
+        XCTAssertTrue(body?.contains("Rendered cell") == true)
+        let color = try await view.evaluateJavaScript("getComputedStyle(document.querySelector('h1')).color") as? String
+        XCTAssertEqual(color, "rgb(90, 40, 220)")
+        let snapshot = try await view.takeSnapshot(configuration: nil)
+        let pixels = try XCTUnwrap(snapshot.cgImage)
+        var bytes = [UInt8](repeating: 0, count: pixels.width * pixels.height * 4)
+        let context = try XCTUnwrap(CGContext(data: &bytes, width: pixels.width, height: pixels.height, bitsPerComponent: 8,
+            bytesPerRow: pixels.width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.draw(pixels, in: CGRect(x: 0, y: 0, width: pixels.width, height: pixels.height))
+        let purple = stride(from: 0, to: bytes.count, by: 4).filter { bytes[$0+2] > 160 && bytes[$0] < 140 && bytes[$0+1] < 110 }.count
+        XCTAssertGreaterThan(purple, 100, "Actual styled pixels must be drawn, not only exposed to accessibility")
+        XCTAssertFalse(view.configuration.defaultWebpagePreferences.allowsContentJavaScript)
+        XCTAssertFalse(view.configuration.websiteDataStore.isPersistent)
+        view.stopLoading(); view.navigationDelegate = nil
+    }
+    func testHTMLCannotRunDocumentScriptsOrLoadResources() async throws {
+        let rules = try await SVGResourceBlocker.rules()
+        let config = StaticHTMLWebView.configuration(rules: rules)
+        let probe = SVGAttackProbe()
+        config.setURLSchemeHandler(probe, forURLScheme: "fixture")
+        config.userContentController.add(probe, name: "securityProbe")
+        let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 320), configuration: config)
+        view.navigationDelegate = probe
+        let source = """
+        <html><head><base href="fixture://blocked/"><link rel="stylesheet" href="fixture://blocked/style">
+        <style>@import url('fixture://blocked/import');body{background-image:url('fixture://blocked/background')}</style></head>
+        <body onload="window.webkit.messageHandlers.securityProbe.postMessage('event')">
+        <h1>Static HTML remains visible</h1>
+        <script>window.webkit.messageHandlers.securityProbe.postMessage('script')</script>
+        <script src="fixture://blocked/script"></script><img src="fixture://blocked/image">
+        <iframe src="fixture://blocked/frame"></iframe><object data="fixture://blocked/object"></object>
+        <form action="fixture://blocked/form"><input autofocus onfocus="window.webkit.messageHandlers.securityProbe.postMessage('focus')"></form>
+        </body></html>
+        """
+        view.loadHTMLString(StaticHTMLWebView.html(source), baseURL: nil)
+        try await wait { probe.finished }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(probe.scripts, 0)
+        XCTAssertEqual(probe.resources, 0)
+        let content = try await view.evaluateJavaScript("document.body.innerText") as? String
+        XCTAssertTrue(content?.contains("Static HTML remains visible") == true)
+        view.stopLoading(); view.navigationDelegate = nil
+        config.userContentController.removeScriptMessageHandler(forName: "securityProbe")
+    }
+    func testScriptOnlyEntryExplainsEmptyPreview() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        let rules = try await SVGResourceBlocker.rules()
+        var finished = false, needsScripts = false
+        let source = "<!doctype html><html><body><div id='root'></div><script type='module' src='/src/main.tsx'></script></body></html>"
+        window.rootViewController = UIHostingController(rootView: StaticHTMLWebView(text: source, filename: "index.html", rules: rules,
+            readingPosition: DocumentReadingPosition(), onFinish: { needsScripts = $0; finished = true },
+            onFailure: { XCTFail($0) }, openExternalLink: { _ in XCTFail("No automatic browser navigation") }))
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        try await wait { finished }
+        XCTAssertTrue(needsScripts, "An app entry file must not be presented as a successfully rendered blank page")
+    }
+}
+
 @MainActor private final class SVGAttackProbe: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKURLSchemeHandler {
     var finished = false, scripts = 0, resources = 0
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finished = true }

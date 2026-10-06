@@ -26,7 +26,7 @@ struct ReaderView: View {
     @State private var linkError: String?
     var body: some View {
         VStack(spacing: 0) {
-            if [.markdown, .svg].contains(DocumentPolicy.kind(filename: entry.name)) {
+            if [.markdown, .html, .svg].contains(DocumentPolicy.kind(filename: entry.name)) {
                 Picker("Reading mode", selection: $source) {
                     Text("Rendered").tag(false)
                     Text("Source").tag(true)
@@ -98,7 +98,7 @@ struct ReaderView: View {
     }
     private var isMedia: Bool {
         let kind = DocumentPolicy.kind(filename: entry.name)
-        return kind == .image || kind == .pdf
+        return [.image, .pdf, .video, .audio].contains(kind)
     }
     private func infoView(_ title: String, detail: String) -> some View {
         ContentUnavailableView(title, systemImage: "doc", description: Text("\(detail)\n\n\(entry.name)\n\(entry.size.map { ByteCountFormatter.string(fromByteCount: Int64(clamping: $0), countStyle: .file) } ?? "Size unavailable")"))

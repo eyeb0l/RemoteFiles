@@ -3,6 +3,74 @@ import UIKit
 
 @MainActor
 final class RemoteFilesUITests: XCTestCase {
+    func testHTMLRenderedSourceAndRefresh() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Preview.html,")).firstMatch
+        for _ in 0..<8 { if row.exists && row.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(row.exists && row.isHittable, app.debugDescription); row.tap()
+        XCTAssertTrue(app.buttons["Source"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.webViews.staticTexts["HTML preview"].waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.webViews.staticTexts["Sample table"].exists, app.debugDescription)
+        attachScreenshot("HTML rendered page")
+        app.buttons["Source"].tap()
+        let source = app.staticTexts["Syntax highlighted source"]
+        XCTAssertTrue(source.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(source.label.hasPrefix("<!doctype html>"))
+        XCTAssertTrue(source.label.contains("café 東京 🌍"))
+        XCTAssertTrue(source.label.hasSuffix("</body></html>"))
+        attachScreenshot("HTML original highlighted source")
+        app.buttons["Document actions"].tap(); app.buttons["Copy Source"].tap()
+        app.buttons["Document actions"].tap()
+        XCTAssertTrue(app.buttons["Source Copied"].waitForExistence(timeout: 5))
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        app.buttons["Rendered"].tap()
+        XCTAssertTrue(app.webViews.staticTexts["HTML preview"].waitForExistence(timeout: 15))
+        app.buttons["Document actions"].tap(); app.buttons["Refresh"].tap()
+        XCTAssertTrue(app.webViews.staticTexts["HTML preview"].waitForExistence(timeout: 15))
+    }
+
+    func testDemoAudioAndVideoHaveNativePlaybackControls() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        for filename in ["Sample audio.m4a", "Sample video.mp4"] {
+            let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", filename + ",")).firstMatch
+            for _ in 0..<8 { if row.exists && row.isHittable { break }; app.swipeUp() }
+            XCTAssertTrue(row.exists && row.isHittable, app.debugDescription); row.tap()
+            let video = filename.hasSuffix(".mp4")
+            XCTAssertTrue(app.sliders["Playback position"].waitForExistence(timeout: 20), app.debugDescription)
+            let play = app.buttons["Play"]
+            XCTAssertTrue(play.waitForExistence(timeout: 20), app.debugDescription)
+            XCTAssertTrue(play.isHittable, app.debugDescription)
+            attachScreenshot(filename + " native controls")
+            play.tap()
+            XCTAssertTrue(app.buttons["Pause"].waitForExistence(timeout: 5), app.debugDescription)
+            app.buttons["Pause"].tap()
+            if video {
+                let fullscreen = app.buttons["Full Screen"]
+                XCTAssertGreaterThanOrEqual(fullscreen.frame.minY, app.sliders["Playback position"].frame.maxY,
+                                            "Fullscreen belongs with transport controls, outside the video")
+                app.buttons["Full Screen"].tap()
+                let close = app.buttons.matching(NSPredicate(format: "label IN %@", ["Close", "Done"])).firstMatch
+                XCTAssertTrue(close.waitForExistence(timeout: 10), app.debugDescription)
+                XCTAssertFalse(app.sliders["Playback position"].exists, "Fullscreen must use native iOS transport controls")
+                attachScreenshot("Native iOS fullscreen player")
+                close.tap()
+                XCTAssertTrue(app.buttons["Full Screen"].waitForExistence(timeout: 10), app.debugDescription)
+                app.buttons["Full Screen"].tap()
+                XCTAssertTrue(close.waitForExistence(timeout: 10), "Native dismissal must allow opening fullscreen again")
+                close.tap()
+            }
+            app.buttons["Document actions"].tap(); app.buttons["Refresh"].tap()
+            XCTAssertTrue(play.waitForExistence(timeout: 10), app.debugDescription)
+            app.navigationBars.buttons["Projects"].tap()
+        }
+    }
+
     func testLongJSONAndSVGRenderedSourcePreview() throws {
         continueAfterFailure = false
         let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()

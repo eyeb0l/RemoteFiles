@@ -1,5 +1,15 @@
 # RemoteFiles preview status
 
+**6 October 2026: audio/video previews added.** The final signed iPhone 18 Pro /
+iOS 27 Simulator run passed nine playback regressions and one demo UI check,
+including visible controls, refresh and fullscreen video. Nine document-policy
+and seven resource-cache checks passed in an earlier focused run for this
+change. MP4, MOV, M4A, MP3, WAV, FLAC, AIFF and AAC playback were exercised;
+other recognized extensions depend on device codecs. A subsequent native fullscreen revision passed ten playback tests and one
+demo UI check, then was installed and launched on the paired iPhone 17 Pro.
+Native fullscreen interaction was verified in Simulator; broader physical-device
+media acceptance remains unverified. See [audio/video scope and evidence](docs/AUDIO_VIDEO.md).
+
 Recorded **22 September 2026**, with folder-navigation results updated **27 September 2026**. The runnable iOS 27 preview implements saved connections, dedicated SSH identities, explicit host trust, real read-only SFTP browsing, favourites, recent references, Markdown/source/plain-text and standalone image/PDF reading, refresh, cancellation, and bounded caching. **Real-server browsing, reading and changed-file refresh now pass on the physical iPhone via Tailscale. Locked-device, encrypted-key, accessibility, and broader performance checks remain outstanding.**
 
 ## Tested environment and dependency pins
@@ -159,3 +169,49 @@ Code/text files and the Markdown Source tab now reuse the bundled Prism tokenize
 Six focused tests passed on macOS and on the physical iPhone, covering language detection, common grammars, exact Unicode/whitespace/trailing-newline preservation, both palettes, cancellation and fallback limits. The final signed Release build passed the demo Swift-source → Copy Source action → folder → Markdown Rendered/Source/Rendered journey on the iPhone. The preceding device run also passed the 1,000-file scroll/open/back regression. [Swift source](docs/screenshots/source-syntax-swift-iphone.png) and [scrolled Markdown source](docs/screenshots/source-syntax-markdown-iphone.png) were inspected in light appearance. Dark colors were checked at the attributed-text level; native selection gestures and exact system-clipboard bytes were not separately tested in this pass. These UI tests use explicit demo content, not a new real-SFTP acceptance run.
 
 Evidence: `/private/tmp/remotefiles-syntax-unit.log`, `/private/tmp/remotefiles-syntax-device.xcresult` (folder regression), and `/private/tmp/remotefiles-syntax-final.xcresult` (six checks and one UI test, zero failures). The verified app was then launched normally on the iPhone with saved connections.
+
+## Download progress — 6 October
+
+Media previews and refreshes now show actual SFTP bytes received, total size when
+available, and a determinate progress bar. Unknown totals retain a byte count;
+completed downloads show preparation while decoding/loading. Formatting uses
+matching decimal units, such as `18.4 MB / 63.1 MB`. Observer cancellation and
+request/session guards prevent old transfers from updating a replacement view.
+
+The final iOS 27 Simulator run passed **21 checks, zero failures or skips**,
+including the captured loading screen and native playback UI. One additional
+isolated real OpenSSH check passed, validating live chunk counts and exact final
+bytes alongside canonical-path and transfer-limit checks. The broader run also
+exposed and fixed native fullscreen teardown when SwiftUI defers covered-view
+updates: the coordinator observes AVPlayer current-item removal directly.
+
+Evidence: XcodeBuildMCP result `test_sim_2026-10-06T20-41-50-842Z_pid8837_08065e24.xcresult`,
+`/private/tmp/RemoteFiles-download-progress-sftp.xcresult` and the signed-device
+build log `/private/tmp/RemoteFiles-download-progress-device-build.log`. The
+signed Debug app was installed on the paired iPhone 17 Pro.
+Launch was verified separately: the installed app was running on the iPhone
+with PID 64005 and an executable path matching its new installation.
+
+## Static HTML Rendered/Source — 6 October
+
+HTML and HTM now have Rendered and Source modes. Rendered uses an ephemeral
+WebKit document for static structure and inline CSS; scripts and automatic
+resource loads remain disabled, matching the user's selected static-preview scope.
+Source retains highlighting, selection, Copy Source and original export. Empty
+script-driven app entries show an explanation instead of a blank success state.
+The existing UTF-8 validation and 2 MiB document bound remain in force.
+
+The final code passed 17 unique focused Simulator checks across the final
+combined run (15 passes) and two clean reruns after a Simulator shutdown/stall.
+Checks covered HTML classification/source preservation, styled DOM and pixels,
+inactive scripts/resources, empty React-style entries, existing bounded-source
+and SVG behavior, and Rendered → Source → Copy Source → Rendered → Refresh.
+Both demo screenshots were inspected. See [HTML preview evidence](docs/HTML_PREVIEWS.md).
+
+The signed Debug build passed signature verification, was installed on the
+paired iPhone 17 Pro, and launched normally. A separate process check confirmed
+PID 64188 running from the new app bundle. Device evidence is in
+`/private/tmp/RemoteFiles-html-device-build.log` and the corresponding
+`RemoteFiles-html-install.json`, `RemoteFiles-html-launch.json` and
+`RemoteFiles-html-processes.json` files. HTML interaction was verified in
+Simulator; physical-device HTML interaction was not separately exercised.

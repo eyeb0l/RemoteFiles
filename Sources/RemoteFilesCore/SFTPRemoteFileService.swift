@@ -92,6 +92,10 @@ public actor SFTPRemoteFileService: RemoteFileService {
 
     public func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String,
                              destination: URL, limit: Int) async throws -> RemoteEntry {
+        try await downloadFile(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination, limit: limit, progress: { _ in })
+    }
+    public func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String,
+                             destination: URL, limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
         guard limit > 0, limit < Int.max else { throw RemoteFileError.tooLarge(limit) }
         let session = try await session(for: profile)
         let result = try await perform(session: session, timeout: 180) { sftp in
@@ -107,6 +111,7 @@ public actor SFTPRemoteFileService: RemoteFileService {
             let handle = try FileHandle(forWritingTo: destination)
             defer { try? handle.close() }
             var count = 0
+            await progress(.init(totalBytes: attributes.size))
             while true {
                 try Task.checkCancellation()
                 let amount = min(256 * 1024, limit - count + 1)
@@ -115,8 +120,11 @@ public actor SFTPRemoteFileService: RemoteFileService {
                 guard chunk.readableBytes <= amount, chunk.readableBytes <= limit - count else { throw RemoteFileError.tooLarge(limit) }
                 try handle.write(contentsOf: Data(chunk.readableBytesView))
                 count += chunk.readableBytes
+                await progress(.init(receivedBytes: UInt64(count), totalBytes: attributes.size))
             }
             try await file.close()
+            try Task.checkCancellation()
+            await progress(.init(receivedBytes: UInt64(count), totalBytes: UInt64(count), isComplete: true))
             return (entry, count)
         }
         measurements.fileOperations += 1; measurements.bytesReceived += result.1

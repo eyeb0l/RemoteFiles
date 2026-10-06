@@ -33,7 +33,10 @@ public actor DemoRemoteFileService: RemoteFileService {
             .init(name: "Linked notes.md", path: path + "/Linked notes.md", kind: .file, size: UInt64(Self.linkedNotes.utf8.count)),
             .init(name: "Example.swift", path: path + "/Example.swift", kind: .file, size: UInt64(Self.sourceExample.utf8.count)),
             .init(name: "Long lines.json", path: path + "/Long lines.json", kind: .file, size: UInt64(Self.longLineJSON.utf8.count)),
+            .init(name: "Preview.html", path: path + "/Preview.html", kind: .file, size: UInt64(Self.htmlExample.utf8.count)),
             .init(name: "Icon.svg", path: path + "/Icon.svg", kind: .file, size: UInt64(Self.svgExample.utf8.count)),
+            .init(name: "Sample audio.m4a", path: path + "/Sample audio.m4a", kind: .file, size: Self.mediaSize("Sample audio.m4a")),
+            .init(name: "Sample video.mp4", path: path + "/Sample video.mp4", kind: .file, size: Self.mediaSize("Sample video.mp4")),
             .init(name: "Weekly review.md", path: path + "/Weekly review.md", kind: .file, size: UInt64(Self.report.utf8.count), modifiedAt: Date(timeIntervalSince1970: 1790035200)),
             .init(name: "Notes — 東京.txt", path: path + "/Notes — 東京.txt", kind: .file, size: 92),
             .init(name: ".config", path: path + "/.config", kind: .file, size: 18),
@@ -47,6 +50,11 @@ public actor DemoRemoteFileService: RemoteFileService {
     }
     public func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data {
         try await pause()
+        if let file = Self.mediaFile(RemotePath.name(of: path)) {
+            let bytes = try Data(contentsOf: file)
+            guard bytes.count <= limit else { throw RemoteFileError.tooLarge(limit) }
+            return bytes
+        }
         if path.hasSuffix("Too large.md") { throw RemoteFileError.tooLarge(limit) }
         if path.hasSuffix("Binary.txt") { return Data([0, 0xff, 0]) }
         if path.hasSuffix("Empty.txt") { return Data() }
@@ -54,6 +62,7 @@ public actor DemoRemoteFileService: RemoteFileService {
         if path.hasSuffix("Navigation guide.md") { text = Self.navigationGuide }
         else if path.hasSuffix("Linked notes.md") { text = Self.linkedNotes }
         else if path.hasSuffix("Long lines.json") { text = Self.longLineJSON }
+        else if path.hasSuffix("Preview.html") { text = Self.htmlExample }
         else if path.hasSuffix("Icon.svg") { text = Self.svgExample }
         else { text = path.hasSuffix("Example.swift") ? Self.sourceExample : path.hasSuffix(".md") ? Self.report : "# RemoteFiles configuration\nmode = read-only\n\nSpaces and Unicode: 東京 ✨\n" }
         let data = Data(text.utf8)
@@ -69,8 +78,8 @@ public actor DemoRemoteFileService: RemoteFileService {
         let root = profile.startingDirectory == "." ? "/Projects" : profile.startingDirectory
         let path = try RemoteDocumentLinkPath.resolve(reference, relativeTo: documentPath, connectionRoot: root)
         let name = RemotePath.name(of: path)
-        let knownFiles = ["Navigation guide.md", "Linked notes.md", "Weekly review.md", "Example.swift", "Long lines.json", "Icon.svg", "Notes — 東京.txt", ".config", "Empty.txt", "Binary.txt", "Too large.md"]
-        guard knownFiles.contains(name) else { throw RemoteFileError.unavailable("The linked file could not be found. Check the link or open its folder.") }
+        let knownFiles = ["Navigation guide.md", "Linked notes.md", "Weekly review.md", "Example.swift", "Long lines.json", "Icon.svg", "Sample audio.m4a", "Sample video.mp4", "Notes — 東京.txt", ".config", "Empty.txt", "Binary.txt", "Too large.md"]
+        guard knownFiles.contains(name) || Self.mediaFile(name) != nil else { throw RemoteFileError.unavailable("The linked file could not be found. Check the link or open its folder.") }
         try Task.checkCancellation()
         return RemoteEntry(name: name, path: path, kind: .file, navigationRoot: root)
     }
@@ -82,15 +91,49 @@ public actor DemoRemoteFileService: RemoteFileService {
     }
     public func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String,
                              destination: URL, limit: Int) async throws -> RemoteEntry {
+        try await downloadFile(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination, limit: limit, progress: { _ in })
+    }
+    public func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String,
+                             destination: URL, limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
         let root = allowedRoot == "." ? "/Projects" : allowedRoot
         let canonical = path.hasSuffix("/Latest report") ? try await resolveEntry(profile: profile, path: path).path : path
         guard RemoteResourcePath.contains(canonical, in: root) else { throw RemoteResourceError.outsideDocument }
+        let token = generation
         let bytes = try await readFile(profile: profile, path: canonical, limit: limit)
         try Task.checkCancellation()
-        try bytes.write(to: destination)
+        await progress(.init(totalBytes: UInt64(bytes.count)))
+        FileManager.default.createFile(atPath: destination.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: destination)
+        defer { try? handle.close() }
+        let chunkSize = max(1, (bytes.count + 3) / 4)
+        for offset in stride(from: 0, to: bytes.count, by: chunkSize) {
+            try Task.checkCancellation()
+            if delayNanoseconds > 0 { try await Task.sleep(nanoseconds: delayNanoseconds) }
+            guard token == generation else { throw CancellationError() }
+            let end = min(bytes.count, offset + chunkSize)
+            try handle.write(contentsOf: bytes[offset..<end])
+            await progress(.init(receivedBytes: UInt64(end), totalBytes: UInt64(bytes.count)))
+        }
+        try Task.checkCancellation()
+        await progress(.init(receivedBytes: UInt64(bytes.count), totalBytes: UInt64(bytes.count), isComplete: true))
         return RemoteEntry(name: RemotePath.name(of: canonical), path: canonical, kind: .file, size: UInt64(bytes.count))
     }
     public func disconnect() { generation += 1 }
+
+    private static func mediaFile(_ name: String) -> URL? {
+        let ext = (name as NSString).pathExtension
+        if name == "Sample audio." + ext, ["m4a", "mp3", "wav", "flac", "aiff", "aac"].contains(ext) {
+            return Bundle.module.url(forResource: "sample-audio", withExtension: ext)
+        }
+        if name == "Sample video." + ext, ["mp4", "mov"].contains(ext) {
+            return Bundle.module.url(forResource: "sample-video", withExtension: ext)
+        }
+        return nil
+    }
+    private static func mediaSize(_ name: String) -> UInt64? {
+        guard let url = mediaFile(name), let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize else { return nil }
+        return UInt64(size)
+    }
 
     /// Long, uniquely labelled sections make back-scroll acceptance observable on screen.
     public static let navigationGuide = "# Navigation guide\n\n" + (1...28).map {
@@ -190,5 +233,28 @@ public actor DemoRemoteFileService: RemoteFileService {
     Images stay private: ![A project diagram](https://example.invalid/never-requested.png)
 
     [Open Apple documentation](https://developer.apple.com/documentation/)
+    """
+}
+
+public extension DemoRemoteFileService {
+    static let htmlExample = """
+    <!doctype html>
+    <html lang="en"><head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>HTML preview</title>
+      <style>
+        :root { color-scheme: light dark; }
+        body { font: 18px -apple-system, sans-serif; padding: 24px; line-height: 1.5; }
+        h1 { color: #716cff; } .card { border: 2px solid #716cff; border-radius: 16px; padding: 20px; }
+        table { border-collapse: collapse; width: 100%; } td, th { padding: 8px; text-align: left; border-bottom: 1px solid #999; }
+      </style>
+    </head><body>
+      <h1>HTML preview</h1>
+      <div class="card"><p>A styled document with <strong>bold text</strong> and Unicode: café 東京 🌍.</p>
+      <ul><li>Rendered page</li><li>Original source</li></ul></div>
+      <h2>Sample table</h2><table><tr><th>Format</th><th>View</th></tr><tr><td>HTML</td><td>Rendered + Source</td></tr></table>
+      <p><a href="https://example.com">External link</a> · <a href="Linked%20notes.md">Linked notes</a></p>
+    </body></html>
     """
 }
