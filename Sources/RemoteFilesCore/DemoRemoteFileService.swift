@@ -176,6 +176,7 @@ public actor DemoRemoteFileService: RemoteFileService {
     import Foundation
 
     // Keep remote files within reach. 東京 ✨
+    // This deliberately long comment demonstrates visual line wrapping in the source reader. Turning Wrap Lines off keeps it on one line so you can scroll sideways to read the end. End of wrapping sample.
     struct Workspace {
         let name = "RemoteFiles"
         let fileLimit = 2_097_152

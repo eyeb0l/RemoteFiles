@@ -105,10 +105,13 @@ from the physical-device and human checks that remain.
 
 ### JSON and SVG previews
 
-Long source lines use a width-bounded, read-only TextKit view on iOS. Lines wrap
-visually to avoid an oversized SwiftUI text surface; selection, Copy Source and
-original export retain the original characters and bytes. Smaller documents
-keep horizontal source scrolling. The 2 MiB text limit still applies, and
+Source lines wrap visually by default; **Document actions → Wrap Lines** turns
+wrapping off for horizontal scrolling and remembers your preference. Scroll
+indicators flash when opening an unwrapped source view. Very long lines and
+large documents always use a width-bounded, read-only TextKit view on iOS to
+avoid an oversized layout surface; the actions menu explains this limit.
+Selection, Copy Source and original export retain the original characters and
+bytes. The 2 MiB text limit still applies, and
 malformed JSON remains readable source rather than becoming an empty preview.
 
 SVG files have **Rendered / Source** modes. Rendering supports a static subset

@@ -10,6 +10,7 @@ public struct DocumentContentView: View {
     public let filename: String?
     public let openDocumentLink: ((URL) -> Void)?
     public let readingPosition: DocumentReadingPosition?
+    public let wrapLines: Bool
     @State private var localReadingPosition = DocumentReadingPosition()
     @State private var prepared: [MarkdownPart]?
     public let location: RemoteDocumentLocation?
@@ -18,13 +19,14 @@ public struct DocumentContentView: View {
     @State private var preparationFailed = false
     @State private var deferInitialOverflow = false
 
-    public init(text: String, markdown: Bool, source: Bool, filename: String? = nil, location: RemoteDocumentLocation? = nil, resolver: (any RemoteResourceResolving)? = nil, readingPosition: DocumentReadingPosition? = nil, openDocumentLink: ((URL) -> Void)? = nil) {
+    public init(text: String, markdown: Bool, source: Bool, filename: String? = nil, location: RemoteDocumentLocation? = nil, resolver: (any RemoteResourceResolving)? = nil, readingPosition: DocumentReadingPosition? = nil, openDocumentLink: ((URL) -> Void)? = nil, wrapLines: Bool = true) {
         self.text = text
         self.markdown = markdown
         self.source = source
         self.filename = filename
         self.location = location; self.resolver = resolver
         self.readingPosition = readingPosition; self.openDocumentLink = openDocumentLink
+        self.wrapLines = wrapLines
     }
 
     public var body: some View {
@@ -54,10 +56,15 @@ public struct DocumentContentView: View {
         @Bindable var position = position
         Group {
             if !markdown || source {
-                ScrollView([.horizontal, .vertical]) {
+                ScrollView(wrapLines ? .vertical : [.horizontal, .vertical]) {
                     SourceCodeView(text: text, language: markdown ? "markdown" : SourceLanguage.forFilename(filename))
                 }
-                .modifier(DocumentScrollPreservation(saved: $position.source, ready: true))
+                .modifier(DocumentScrollPreservation(saved: Binding(
+                    get: { CGPoint(x: wrapLines ? 0 : position.source.x, y: position.source.y) },
+                    set: { position.source = $0 }), ready: true))
+                .scrollIndicators(.visible)
+                .scrollIndicatorsFlash(onAppear: !wrapLines)
+                .id(wrapLines)
                 .accessibilityLabel(markdown ? "Markdown source" : "Plain text document")
             } else {
                 GeometryReader { viewport in

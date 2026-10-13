@@ -20,6 +20,34 @@ import WebKit
 import RemoteFilesCore
 
 @MainActor final class BoundedSourceDisplayTests: XCTestCase {
+    func testSmallJSONWrapsByDefaultAndCanScrollHorizontally() async throws {
+        // Below every bounded-layout threshold: this reproduces ordinary JSON
+        // lines extending past an iPhone viewport, rather than the huge-file path.
+        let source = "{\n  \"description\": \"" + String(repeating: "sample東京🌍", count: 20) + "\",\n  \"ready\": true\n}\n"
+        XCTAssertFalse(SourceLayout.needsBoundedLayout(source))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        let host = UIHostingController(rootView: DocumentContentView(text: source, markdown: false, source: true, filename: "package.json"))
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        func scroll(_ view: UIView) -> UIScrollView? {
+            if let value = view as? UIScrollView { return value }
+            return view.subviews.lazy.compactMap { scroll($0) }.first
+        }
+        try await Task.sleep(for: .seconds(1))
+        let wrapped = try XCTUnwrap(scroll(window))
+        XCTAssertLessThanOrEqual(wrapped.contentSize.width, wrapped.bounds.width + 1)
+        let wrappedHeight = wrapped.contentSize.height
+        host.rootView = DocumentContentView(text: source, markdown: false, source: true, filename: "package.json", wrapLines: false)
+        try await Task.sleep(for: .seconds(1))
+        let unwrapped = try XCTUnwrap(scroll(window))
+        XCTAssertGreaterThan(unwrapped.contentSize.width, unwrapped.bounds.width + 100)
+        XCTAssertLessThan(unwrapped.contentSize.height, wrappedHeight)
+        unwrapped.setContentOffset(CGPoint(x: 200, y: 0), animated: false)
+        XCTAssertGreaterThan(unwrapped.contentOffset.x, 100)
+    }
+
     func testLongJSONActuallyDrawsAndKeepsExactSelectableText() async throws {
         let source = "{\n  \"prompt\": \"" + String(repeating: "safe sample 東京 🌍 e\u{301} ", count: 180) + "\",\r\n  \"ready\": true\n}\n"
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)

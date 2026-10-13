@@ -9,6 +9,7 @@ struct ReaderView: View {
     let entry: RemoteEntry
     @State private var preview: DocumentPreview?
     @State private var source = false
+    @AppStorage("readerWrapLines") private var wrapLines = true
     @State private var imageVersion = 0
     @State private var lastImageRefresh = 0
     @State private var loading = false
@@ -50,7 +51,7 @@ struct ReaderView: View {
                                     kind: DocumentPolicy.kind(filename: entry.name), refreshID: refreshID)
                 } else if let preview {
                     switch preview {
-                    case .text(let text, let markdown): DocumentContentView(text: text, markdown: markdown, source: source, filename: entry.name, location: .init(profile: profile, path: entry.path), resolver: model.resources, readingPosition: readingPosition, openDocumentLink: openLink).id(imageVersion)
+                    case .text(let text, let markdown): DocumentContentView(text: text, markdown: markdown, source: source, filename: entry.name, location: .init(profile: profile, path: entry.path), resolver: model.resources, readingPosition: readingPosition, openDocumentLink: openLink, wrapLines: wrapLines).id(imageVersion)
                     case .empty: ContentUnavailableView("This file is empty", systemImage: "doc", description: Text("Refresh after it has been updated on the server."))
                     case .unsupportedFileType: infoView("Preview not available", detail: "This file type is not supported for preview.")
                     case .unsupportedEncodingOrBinary: infoView("Can’t display this file", detail: "This file contains binary data or text that is not UTF-8.")
@@ -74,6 +75,13 @@ struct ReaderView: View {
                 Menu {
                     Button("Refresh", systemImage: "arrow.clockwise") { refreshID += 1 }
                     if case .text(let text, _) = preview {
+                        if showsSource {
+                            if SourceLayout.needsBoundedLayout(text) {
+                                Label("Long documents always wrap", systemImage: "arrow.turn.down.left")
+                            } else {
+                                Toggle("Wrap Lines", systemImage: "arrow.turn.down.left", isOn: $wrapLines)
+                            }
+                        }
                         Button(copied ? "Source Copied" : "Copy Source", systemImage: "doc.on.doc") { SourceClipboard.copy(text); copied = true }
                     }
                     if let loadedAt { Text("Loaded \(loadedAt.formatted(date: .omitted, time: .shortened))") }
@@ -99,6 +107,9 @@ struct ReaderView: View {
     private var isMedia: Bool {
         let kind = DocumentPolicy.kind(filename: entry.name)
         return [.image, .pdf, .video, .audio].contains(kind)
+    }
+    private var showsSource: Bool {
+        source || ![.markdown, .html, .svg].contains(DocumentPolicy.kind(filename: entry.name))
     }
     private func infoView(_ title: String, detail: String) -> some View {
         ContentUnavailableView(title, systemImage: "doc", description: Text("\(detail)\n\n\(entry.name)\n\(entry.size.map { ByteCountFormatter.string(fromByteCount: Int64(clamping: $0), countStyle: .file) } ?? "Size unavailable")"))

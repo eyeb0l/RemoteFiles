@@ -3,6 +3,45 @@ import UIKit
 
 @MainActor
 final class RemoteFilesUITests: XCTestCase {
+    func testWrapLinesToggleAndPreferenceSurviveReopeningSource() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        func openExample() {
+            let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+            XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+            let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Example.swift,")).firstMatch
+            XCTAssertTrue(row.waitForExistence(timeout: 10))
+            if !row.isHittable { app.swipeUp() }; row.tap()
+            XCTAssertTrue(app.staticTexts["Syntax highlighted source"].waitForExistence(timeout: 15))
+        }
+        let toggle = app.descendants(matching: .any).matching(identifier: "Wrap Lines").firstMatch
+        openExample()
+        let source = app.staticTexts["Syntax highlighted source"]
+        // Normalize a preference from a previous run through the production menu.
+        let wasUnwrapped = source.frame.width > app.frame.width
+        app.buttons["Document actions"].tap()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5), app.debugDescription)
+        if wasUnwrapped {
+            toggle.tap(); app.buttons["Document actions"].tap()
+        }
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+        let original = source.label
+        let wrappedHeight = source.frame.height
+        XCTAssertLessThanOrEqual(source.frame.width, app.frame.width)
+        attachScreenshot("Source with wrapped lines")
+        app.buttons["Document actions"].tap(); toggle.tap()
+        XCTAssertLessThan(source.frame.height, wrappedHeight)
+        XCTAssertGreaterThan(source.frame.width, app.frame.width)
+        XCTAssertEqual(source.label, original)
+        attachScreenshot("Source with horizontal scrolling")
+        app.terminate(); app.launch(); openExample()
+        XCTAssertGreaterThan(source.frame.width, app.frame.width, "Preference must survive app relaunch")
+        app.buttons["Document actions"].tap()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        toggle.tap() // Leave subsequent demo tests with the default wrapping mode.
+        XCTAssertEqual(source.label, original)
+    }
+
     func testHTMLRenderedSourceAndRefresh() throws {
         continueAfterFailure = false
         let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
@@ -91,7 +130,10 @@ final class RemoteFilesUITests: XCTestCase {
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
         app.navigationBars.buttons["Projects"].tap()
         let svg = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Icon.svg,")).firstMatch
-        if !svg.isHittable { app.swipeUp() }; XCTAssertTrue(svg.waitForExistence(timeout: 10)); svg.tap()
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
+        // Back preserves the folder position at Long lines.json; Icon.svg is above it.
+        for _ in 0..<6 { if svg.exists && svg.isHittable { break }; app.swipeDown() }
+        XCTAssertTrue(svg.exists && svg.isHittable); svg.tap()
         let image = app.descendants(matching: .any).matching(identifier: "Rendered SVG image").firstMatch
         XCTAssertTrue(image.waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertTrue(app.activityIndicators.firstMatch.waitForNonExistence(timeout: 20), app.debugDescription)
@@ -179,8 +221,9 @@ final class RemoteFilesUITests: XCTestCase {
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
         app.navigationBars.buttons["Projects"].tap()
         let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly review.md,")).firstMatch
-        if !report.isHittable { app.swipeUp() }
-        XCTAssertTrue(report.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
+        for _ in 0..<6 { if report.exists && report.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(report.exists && report.isHittable)
         report.tap()
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
         app.buttons["Source"].tap()
