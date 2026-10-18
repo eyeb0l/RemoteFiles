@@ -31,6 +31,7 @@ public actor DemoRemoteFileService: RemoteFileService {
             .init(name: "Thousand files", path: path + "/Thousand files", kind: .directory),
             .init(name: "Navigation guide.md", path: path + "/Navigation guide.md", kind: .file, size: UInt64(Self.navigationGuide.utf8.count)),
             .init(name: "Linked notes.md", path: path + "/Linked notes.md", kind: .file, size: UInt64(Self.linkedNotes.utf8.count)),
+            .init(name: "Heading notes.md", path: path + "/Heading notes.md", kind: .file, size: UInt64(Self.headingNotes.utf8.count)),
             .init(name: "Example.swift", path: path + "/Example.swift", kind: .file, size: UInt64(Self.sourceExample.utf8.count)),
             .init(name: "Long lines.json", path: path + "/Long lines.json", kind: .file, size: UInt64(Self.longLineJSON.utf8.count)),
             .init(name: "Preview.html", path: path + "/Preview.html", kind: .file, size: UInt64(Self.htmlExample.utf8.count)),
@@ -61,6 +62,7 @@ public actor DemoRemoteFileService: RemoteFileService {
         let text: String
         if path.hasSuffix("Navigation guide.md") { text = Self.navigationGuide }
         else if path.hasSuffix("Linked notes.md") { text = Self.linkedNotes }
+        else if path.hasSuffix("Heading notes.md") { text = Self.headingNotes }
         else if path.hasSuffix("Long lines.json") { text = Self.longLineJSON }
         else if path.hasSuffix("Preview.html") { text = Self.htmlExample }
         else if path.hasSuffix("Icon.svg") { text = Self.svgExample }
@@ -78,7 +80,7 @@ public actor DemoRemoteFileService: RemoteFileService {
         let root = profile.startingDirectory == "." ? "/Projects" : profile.startingDirectory
         let path = try RemoteDocumentLinkPath.resolve(reference, relativeTo: documentPath, connectionRoot: root)
         let name = RemotePath.name(of: path)
-        let knownFiles = ["Navigation guide.md", "Linked notes.md", "Weekly review.md", "Example.swift", "Long lines.json", "Icon.svg", "Sample audio.m4a", "Sample video.mp4", "Notes — 東京.txt", ".config", "Empty.txt", "Binary.txt", "Too large.md"]
+        let knownFiles = ["Navigation guide.md", "Linked notes.md", "Heading notes.md", "Weekly review.md", "Example.swift", "Long lines.json", "Icon.svg", "Sample audio.m4a", "Sample video.mp4", "Notes — 東京.txt", ".config", "Empty.txt", "Binary.txt", "Too large.md"]
         guard knownFiles.contains(name) || Self.mediaFile(name) != nil else { throw RemoteFileError.unavailable("The linked file could not be found. Check the link or open its folder.") }
         try Task.checkCancellation()
         return RemoteEntry(name: name, path: path, kind: .file, navigationRoot: root)
@@ -136,7 +138,7 @@ public actor DemoRemoteFileService: RemoteFileService {
     }
 
     /// Long, uniquely labelled sections make back-scroll acceptance observable on screen.
-    public static let navigationGuide = "# Navigation guide\n\n" + (1...28).map {
+    public static let navigationGuide = "# Navigation guide\n\n[Jump to marker 20](#reading-marker-20)\n\n" + (1...28).map {
         "## Reading marker \($0)\n\nThis is local demo section \($0). Scroll to the links, open a note, and return to this reading position.\n\n"
     }.joined() + """
     ## Navigation return marker
@@ -145,7 +147,9 @@ public actor DemoRemoteFileService: RemoteFileService {
 
     [Open source example](Example.swift)
 
-    [Heading link](Reports/Linked%20notes.md#details)
+    [Heading link](Reports/Heading%20notes.md#details)
+
+    [Missing heading](#missing-heading)
 
     [Missing file](Reports/Missing.md)
 
@@ -160,6 +164,10 @@ public actor DemoRemoteFileService: RemoteFileService {
 
     [Open parent guide](../Navigation%20guide.md)
     """ + "\n"
+
+    public static let headingNotes = "# Heading notes\n\n" + (1...18).map {
+        "This is introductory paragraph \($0). Follow the heading link to jump past this introduction.\n\n"
+    }.joined() + "## Details\n\nHeading navigation reached the linked details section.\n"
 
     // Synthetic regressions; no user document content is bundled.
     public static let longLineJSON = "{\n  \"version\": 1,\n  \"prompt\": \"" +

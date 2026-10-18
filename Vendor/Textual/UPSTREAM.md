@@ -6,6 +6,20 @@ The MIT license is retained. The Markdown parser and visual rendering policies a
 
 Local changes:
 
+- `StructuredText.swift`: a direct `AttributedString` initializer renders an
+  already prepared document without a parsing state transition. Attribute-only
+  navigation updates and refreshed text retain the same rendering subtree,
+  avoiding an intermediate empty layout that can reset the reader's scroll.
+
+- `NavigationTarget.swift`, `TextBuilder.swift`, `TextFragment.swift` and
+  `BlockContent.swift`: a public UUID attribute and one-shot reveal modifier let
+  the reader navigate to a selected range using its resolved text geometry.
+  A noninteractive iOS bridge reveals the range through nested scroll views;
+  offscreen code/table placeholders are staged into view before exact reveal.
+  Other platforms retain normal rendering. `HighlightedTextFragment.swift`
+  preserves the active target and its contrast colors across lossless code
+  tokenization. No link, selection or gesture behavior is replaced.
+
 - `SourceCodeTokenization.swift`: a small public, lossless token API exposes the
   existing actor-isolated Prism tokenizer to the app's source reader. It does not
   add grammars, execute source files, or interpret them as Markdown. The app owns

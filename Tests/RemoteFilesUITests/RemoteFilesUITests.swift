@@ -3,6 +3,35 @@ import UIKit
 
 @MainActor
 final class RemoteFilesUITests: XCTestCase {
+    func testFindHeadingsAndHeadingLinksInReader() throws {
+        continueAfterFailure = false
+        let app = launchDemoReader(filename: "Navigation guide.md")
+        let localHeading = try revealDocumentLink("Jump to marker 20", in: app, scroll: app.scrollViews["Rendered Markdown document"])
+        localHeading.tap()
+        XCTAssertTrue(app.staticTexts["Reading marker 20"].waitForExistence(timeout: 5) && app.staticTexts["Reading marker 20"].isHittable,
+                      "A same-document heading link must reveal its heading without pushing another reader")
+        app.buttons["Document actions"].tap(); app.buttons["Find in Document"].tap()
+        let query = app.textFields["reader-find-query"]
+        XCTAssertTrue(query.waitForExistence(timeout: 5)); query.tap(); query.typeText("Reading marker 20")
+        let status = app.staticTexts["reader-find-status"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        let matchFound = expectation(for: NSPredicate(format: "label == %@", "1 of 1"), evaluatedWith: status)
+        wait(for: [matchFound], timeout: 10)
+        app.buttons["Next result"].tap() // Dismiss keyboard and reveal the active match.
+        XCTAssertTrue(app.staticTexts["Reading marker 20"].isHittable, app.debugDescription)
+        attachScreenshot("Find matching rendered heading")
+        app.buttons["Done"].tap()
+        app.buttons["Document actions"].tap(); app.buttons["Headings"].tap()
+        let last = app.buttons["Navigation return marker, heading level 2"]
+        for _ in 0..<10 { if last.exists && last.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(last.waitForExistence(timeout: 5) && last.isHittable, app.debugDescription); last.tap()
+        let link = try revealDocumentLink("Heading link", in: app, scroll: app.scrollViews["Rendered Markdown document"])
+        link.tap()
+        XCTAssertTrue(app.navigationBars["Heading notes.md"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Details"].waitForExistence(timeout: 10) && app.staticTexts["Details"].isHittable, app.debugDescription)
+        attachScreenshot("Linked document heading navigation")
+    }
+
     func testWrapLinesToggleAndPreferenceSurviveReopeningSource() throws {
         continueAfterFailure = false
         let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
@@ -355,7 +384,7 @@ final class RemoteFilesUITests: XCTestCase {
         let app = launchDemoReader(filename: "Navigation guide.md")
         let scroll = app.scrollViews["Rendered Markdown document"]
         for (label, explanation) in [
-            ("Heading link", "Links to headings aren’t supported yet"),
+            ("Missing heading", "could not be found"),
             ("Missing file", "could not be found"),
             ("Outside starting folder", "leaves the connection’s starting folder"),
             ("Unsupported archive", "isn’t a supported document, image, or PDF")

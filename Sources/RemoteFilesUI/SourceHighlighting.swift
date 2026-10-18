@@ -111,6 +111,10 @@ struct SourceCodeView: View {
     let language: String?
     var bounded = false
     var readingPosition: DocumentReadingPosition? = nil
+    var reveal: ReaderTextReveal? = nil
+    var wrapLines = true
+    var revealPending = true
+    var onReveal: ((UUID) -> Void)? = nil
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @State private var highlighted: AttributedString?
@@ -130,7 +134,8 @@ struct SourceCodeView: View {
             if bounded {
                 BoundedSourceTextView(text: text,
                     highlighted: highlightedRequest == request ? highlighted : nil,
-                    readingPosition: readingPosition)
+                    readingPosition: readingPosition, reveal: reveal, wrapLines: wrapLines,
+                    revealPending: revealPending, onReveal: onReveal)
             } else { ordinaryText }
             #else
             ordinaryText

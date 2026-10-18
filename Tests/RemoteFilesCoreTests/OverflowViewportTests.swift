@@ -134,16 +134,34 @@ private struct OverflowFixtureView: View {
         try await Task.sleep(for: .seconds(2))
         let scroll = try XCTUnwrap(outer(window)); let first = try XCTUnwrap(horizontal(window).first)
         let oldHeight = scroll.contentSize.height
+        let oldBlockHeight = first.bounds.height
         scroll.setContentOffset(CGPoint(x: 0, y: scroll.bounds.height * 8), animated: false)
         try await wait { !self.views(first).contains { $0 is UITextInteractionView } }
+        let offscreenOffset = scroll.contentOffset
         state.text = state.text.replacingOccurrences(of: "second_line_0", with:
             (0..<20).map { "updated_offscreen_code_\($0)" }.joined(separator: "\n"))
-        try await wait { scroll.contentSize.height > oldHeight + 200 }
+        try await wait {
+            scroll.contentSize.height > oldHeight + 200 && self.horizontal(window).count == 48 &&
+                self.horizontal(window).first === first
+        }
+        XCTAssertTrue(first.window === window, "Keep the original horizontal container mounted while its text changes")
+        XCTAssertGreaterThan(first.bounds.height, oldBlockHeight + 200,
+                             "The changed code block must measure its added lines before retiring")
         try await Task.sleep(for: .seconds(1))
-        try await wait { !self.views(first).contains { $0 is UITextInteractionView } }
+        do {
+            try await wait { !self.views(first).contains { $0 is UITextInteractionView } }
+        } catch {
+            let interactions = views(first).compactMap { $0 as? UITextInteractionView }.map {
+                "frame=\($0.frame) hasText=\($0.model.hasText) selection=\(String(describing: $0.model.selectedRange))"
+            }.joined(separator: "; ")
+            print("OVERFLOW CHANGED RETIREMENT beforeOffset=\(offscreenOffset) currentOffset=\(scroll.contentOffset) saved=\(state.position.rendered) outerSize=\(scroll.contentSize) viewport=\(scroll.convert(scroll.bounds, to: window)) block=\(first.convert(first.bounds, to: window)) blockSize=\(first.contentSize) attached=\(first.window === window) currentFirst=\(horizontal(window).first === first) currentOuter=\(outer(window) === scroll) restoring=\(state.position.overflowGeometry.isRestoringReadingAnchor) hasAnchor=\(state.position.overflowGeometry.hasReadingAnchor) interactions=[\(interactions)]")
+            throw error
+        }
+        XCTAssertTrue(views(window).contains { $0 === first }, "Keep the original horizontal container mounted after retirement")
         let updatedHeight = scroll.contentSize.height
         scroll.setContentOffset(.zero, animated: false)
         try await wait { self.views(first).contains { ($0 as? UITextInteractionView)?.model.hasText == true } }
+        XCTAssertTrue(horizontal(window).first === first, "Remount the changed label inside its retained horizontal container")
         let interaction = try XCTUnwrap(views(first).compactMap { $0 as? UITextInteractionView }.first { $0.model.hasText })
         XCTAssertTrue(selectedText(interaction.model).string.contains("updated_offscreen_code_19"))
         try await Task.sleep(for: .milliseconds(500))

@@ -93,6 +93,10 @@ extension Text {
         text = text.customAttribute(LinkAttribute(link))
       }
 
+      if let id = run[TextualNavigationTarget.self] {
+        text = text.customAttribute(NavigationTargetAttribute(id: id))
+      }
+
       return text
     }
 

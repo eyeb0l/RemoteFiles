@@ -30,9 +30,20 @@ public struct RemoteEntry: Identifiable, Hashable, Sendable {
     public let navigationRoot: String?
     /// The tapped alias name, retained for exporting the original after canonical resolution.
     public let exportFilename: String?
+    /// A user-tapped heading link; never part of the remote filesystem path.
+    public let headingFragment: String?
     public init(name: String, path: String, kind: Kind, size: UInt64? = nil, modifiedAt: Date? = nil, navigationRoot: String? = nil, exportFilename: String? = nil) {
         self.name = name; self.path = path; self.kind = kind; self.size = size; self.modifiedAt = modifiedAt
         self.navigationRoot = navigationRoot; self.exportFilename = exportFilename
+        self.headingFragment = nil
+    }
+    public func openingHeading(_ fragment: String) -> RemoteEntry {
+        RemoteEntry(copying: self, headingFragment: fragment)
+    }
+    private init(copying entry: RemoteEntry, headingFragment: String) {
+        name = entry.name; path = entry.path; kind = entry.kind; size = entry.size; modifiedAt = entry.modifiedAt
+        navigationRoot = entry.navigationRoot; exportFilename = entry.exportFilename
+        self.headingFragment = headingFragment
     }
 }
 

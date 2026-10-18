@@ -18,6 +18,7 @@ final class AppModel {
         }
     }
     let metadataStore: MetadataStore
+    let readingPositions: ReadingPositionStore
     let identities = IdentityStore()
     let trust: HostTrustStore
     let publicKeyInstaller: any PublicKeyInstalling
@@ -56,11 +57,15 @@ final class AppModel {
     init(directory: URL, fileService: (any RemoteFileService)? = nil, publicKeyInstaller: (any PublicKeyInstalling)? = nil) throws {
         resourceDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("RemoteImages-v1")
         metadataStore = try MetadataStore(fileURL: directory.appendingPathComponent("library-v1.json"))
+        readingPositions = ReadingPositionStore(fileURL: directory.appendingPathComponent("reading-positions-v1.json"))
         trust = try HostTrustStore(fileURL: directory.appendingPathComponent("known-hosts-v1.json"))
         self.publicKeyInstaller = publicKeyInstaller ?? SSHPublicKeyInstaller(trust: trust)
         service = fileService ?? CoalescingFileService(base: SFTPRemoteFileService(identityStore: identities, trustStore: trust, metadataStore: metadataStore))
     }
     func load() async { metadata = await metadataStore.snapshot() }
+    func prepareReadingPosition(_ position: DocumentReadingPosition, text: String, profile: ConnectionProfile, path: String) async {
+        await position.prepare(text: text, store: demo ? nil : readingPositions, connectionID: profile.id, path: path)
+    }
     func profile(_ id: UUID) -> ConnectionProfile? { metadata.connections.first { $0.id == id } }
     func persist() async {
         guard !demo else { return }
@@ -77,6 +82,10 @@ final class AppModel {
         metadata.connections.removeAll { $0.id == profile.id }
         metadata.favourites.removeAll { $0.connectionID == profile.id }
         metadata.recents.removeAll { $0.connectionID == profile.id }
+        if !demo {
+            do { try await readingPositions.remove(connectionID: profile.id) }
+            catch { errorMessage = error.localizedDescription }
+        }
         await persist()
     }
     func addIdentity(_ value: IdentityMetadata) async throws {

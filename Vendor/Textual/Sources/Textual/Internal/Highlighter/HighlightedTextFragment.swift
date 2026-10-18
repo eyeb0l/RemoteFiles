@@ -33,8 +33,9 @@ struct HighlightedTextFragment: View {
     let readiness = overflowReadinessTracking
       ? OverflowContentReadiness(ready: model.tokenizationComplete && model.highlightedCode != nil)
       : OverflowContentReadiness()
-    TextFragment(model.highlightedCode ?? AttributedString(content))
+    TextFragment(navigationMarked(model.highlightedCode ?? AttributedString(content)))
       .foregroundStyle(theme.foregroundColor)
+      .environment(\.navigationRevealGeometryReady, model.tokenizationComplete && model.highlightedCode != nil)
       .transformPreference(OverflowContentReadyKey.self) { $0.merge(readiness) }
       .task(id: content) {
         await model.tokenize(
@@ -50,6 +51,25 @@ struct HighlightedTextFragment: View {
           environment: newValue.values.1
         )
       }
+  }
+
+  // Highlighting rebuilds the attributed string from lossless tokens. Preserve
+  // only the caller's active navigation range and its contrast colors, leaving
+  // the syntax theme and pasteboard presentation intent intact elsewhere.
+  private func navigationMarked(_ highlighted: AttributedString) -> AttributedString {
+    let marked = content.runs.filter { $0[TextualNavigationTarget.self] != nil }
+    guard !marked.isEmpty, highlighted.characters.elementsEqual(content.characters) else { return highlighted }
+    var result = highlighted
+    for run in marked {
+      let start = content.characters.distance(from: content.startIndex, to: run.range.lowerBound)
+      let length = content.characters.distance(from: run.range.lowerBound, to: run.range.upperBound)
+      let lower = result.characters.index(result.startIndex, offsetBy: start)
+      let upper = result.characters.index(lower, offsetBy: length)
+      result[lower..<upper][TextualNavigationTarget.self] = run[TextualNavigationTarget.self]
+      result[lower..<upper].backgroundColor = run.backgroundColor
+      result[lower..<upper].foregroundColor = run.foregroundColor
+    }
+    return result
   }
 }
 

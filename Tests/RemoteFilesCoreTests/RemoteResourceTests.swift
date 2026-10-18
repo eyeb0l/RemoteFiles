@@ -290,6 +290,93 @@ final class RemoteResourceTests: XCTestCase {
         let count = await service.downloads
         XCTAssertEqual(count, 2)
     }
+    func testScopedRefreshPreservesUnrelatedDocumentsAndConnections() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = ScopedResourceTransportMock()
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        let doc = location
+        let sibling = RemoteDocumentLocation(profile: doc.profile, path: doc.resourceRoot + "/other.md")
+        let otherConnection = location
+        _ = try await resolver.localFile(for: "a.png", in: doc)
+        let unrelated = try await resolver.localFile(for: "b.png", in: sibling)
+        let otherProfile = try await resolver.localFile(for: "a.png", in: otherConnection)
+        await service.setBytes(Data("updated".utf8))
+        let invalidated = await resolver.invalidateResources(["a.png", "./a.png", "../outside.png"], in: doc)
+        XCTAssertEqual(invalidated.count, 1, "Normalize aliases and reject outside-folder references")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unrelated.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: otherProfile.path))
+        let refreshed = try await resolver.localFile(for: "a.png", in: doc)
+        XCTAssertEqual(try Data(contentsOf: refreshed), Data("updated".utf8))
+        _ = try await resolver.localFile(for: "b.png", in: sibling)
+        _ = try await resolver.localFile(for: "a.png", in: otherConnection)
+        let count = await service.downloads.count
+        XCTAssertEqual(count, 4, "Only the refreshed document resource downloads again")
+        // Explicit references invalidate disk entries even after a resolver restart.
+        let restarted = RemoteResourceResolver(service: service, directory: dir)
+        await restarted.invalidateResources(["b.png"], in: sibling)
+        _ = try await restarted.localFile(for: "b.png", in: sibling)
+        let afterRestart = await service.downloads.count
+        XCTAssertEqual(afterRestart, 5)
+    }
+    func testScopedRefreshKeepsSharedAndUnrelatedFlightsAliveWithoutPublishingStaleBytes() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = ScopedResourceTransportMock(blockDownloads: true)
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        let doc = location
+        let sibling = RemoteDocumentLocation(profile: doc.profile, path: doc.resourceRoot + "/other.md")
+        let old = Task { try await resolver.localFile(for: "a.png", in: doc) }
+        try await service.waitForDownloads(1)
+        let shared = Task { try await resolver.localFile(for: "./a.png", in: sibling) }
+        let unrelated = Task { try await resolver.localFile(for: "b.png", in: sibling) }
+        try await service.waitForDownloads(2)
+        // Let the shared consumer join before advancing the generation.
+        try await Task.sleep(for: .milliseconds(30))
+        await resolver.invalidateResources(["a.png"], in: doc)
+        await service.setBytes(Data("updated".utf8))
+        let refreshed = Task { try await resolver.localFile(for: "a.png", in: doc) }
+        await service.release(path: doc.resourceRoot + "/b.png", occurrence: 1)
+        let unrelatedFile = try await unrelated.value
+        XCTAssertEqual(try Data(contentsOf: unrelatedFile), Data("original".utf8))
+        try await service.waitForDownloads(3)
+        await service.release(path: doc.resourceRoot + "/a.png", occurrence: 2)
+        let freshFile = try await refreshed.value
+        XCTAssertEqual(try Data(contentsOf: freshFile), Data("updated".utf8))
+        await service.release(path: doc.resourceRoot + "/a.png", occurrence: 1)
+        let oldFile = try await old.value, sharedFile = try await shared.value
+        XCTAssertEqual(oldFile, sharedFile, "Documents sharing an asset still share their original transfer")
+        XCTAssertNotEqual(oldFile, freshFile)
+        XCTAssertEqual(try Data(contentsOf: oldFile), Data("original".utf8))
+        let current = try await resolver.localFile(for: "a.png", in: sibling)
+        XCTAssertEqual(try Data(contentsOf: current), Data("updated".utf8), "An older flight must not overwrite the refreshed cache")
+        let count = await service.downloads.count
+        XCTAssertEqual(count, 3)
+    }
+    func testDecoderInvalidationPreservesUnrelatedImagesEvenWithIdenticalFileTimestamps() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let first = dir.appendingPathComponent("first.png"), second = dir.appendingPathComponent("second.png")
+        func writeImage(_ file: URL, width: Int) throws {
+            let context = try XCTUnwrap(CGContext(data: nil, width: width, height: 2, bitsPerComponent: 8,
+                bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            let destination = try XCTUnwrap(CGImageDestinationCreateWithURL(file as CFURL, "public.png" as CFString, 1, nil))
+            CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()), nil)
+            XCTAssertTrue(CGImageDestinationFinalize(destination))
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1000)], ofItemAtPath: file.path)
+        }
+        try writeImage(first, width: 2); try writeImage(second, width: 3)
+        let decoder = RemoteImageDecoder()
+        _ = try await decoder.decode(first, maxPixel: 100)
+        let unrelated = try await decoder.decode(second, maxPixel: 100)
+        try writeImage(first, width: 5)
+        await decoder.invalidate(files: [first])
+        let refreshed = try await decoder.decode(first, maxPixel: 100)
+        let retained = try await decoder.decode(second, maxPixel: 100)
+        XCTAssertEqual(refreshed.image.width, 5)
+        XCTAssertTrue(unrelated.image === retained.image, "Scoped invalidation retains unrelated decoded pixels")
+    }
     func testDiskBudgetAndProfileIsolation() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -366,6 +453,39 @@ private actor ProgressTransportMock: RemoteFileService {
         }
         await progress(.init(receivedBytes: 12, totalBytes: 12, isComplete: true))
         return .init(name: "a.mp4", path: path, kind: .file, size: 12)
+    }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.unsupportedFile }
+    func disconnect() async {}
+}
+
+/// Controlled transfers let refresh tests finish an old generation after the new one.
+private actor ScopedResourceTransportMock: RemoteFileService {
+    private var bytes = Data("original".utf8)
+    private let blockDownloads: Bool
+    private var gates: [String: CheckedContinuation<Void, Never>] = [:]
+    private(set) var downloads: [String] = []
+    init(blockDownloads: Bool = false) { self.blockDownloads = blockDownloads }
+    func setBytes(_ value: Data) { bytes = value }
+    func waitForDownloads(_ count: Int) async throws {
+        for _ in 0..<200 {
+            if downloads.count >= count { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw RemoteFileError.unavailable("Timed out waiting for controlled resource transfers")
+    }
+    func release(path: String, occurrence: Int) { gates.removeValue(forKey: path + ":" + String(occurrence))?.resume() }
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
+        let snapshot = bytes
+        downloads.append(path)
+        let occurrence = downloads.filter { $0 == path }.count
+        if blockDownloads {
+            await withCheckedContinuation { gates[path + ":" + String(occurrence)] = $0 }
+        }
+        try Task.checkCancellation()
+        try snapshot.write(to: destination)
+        return .init(name: RemotePath.name(of: path), path: path, kind: .file, size: UInt64(snapshot.count))
     }
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }

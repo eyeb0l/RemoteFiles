@@ -8,7 +8,7 @@ The preview stays read only. These are deliberate future decisions, not hidden o
 - Complete physical acceptance of relative Markdown links, back reading position and original Save to Files; the implementation and automated checks are described in [document links](docs/DOCUMENT_LINKS.md), [original export](docs/ORIGINAL_EXPORT.md), and [acceptance](docs/AUTOMATED_ACCEPTANCE.md). Image Share continues to export display pixels; Save Original to Files preserves the original bytes.
 - Broader **verified** SSH key formats and optional passphrase conveniences.
 - Richer sorting and advanced symlink behavior.
-- Cached parsed-document eviction and stronger scroll restoration across app termination.
+- Cached parsed-document eviction and layout-independent reading anchors (cross-launch Rendered/Source pixel positions are now saved for unchanged text).
 - Upstream the small Citadel cancellation hooks and remove vendoring when a verified release contains them.
 
 ## Separate write-capable iteration

@@ -64,6 +64,7 @@ scripts/test-openssh.sh xcodebuild -project RemoteFiles.xcodeproj \
   -scheme RemoteFiles -destination 'platform=iOS Simulator,name=iPhone 18 Pro' \
   -derivedDataPath DerivedData -collect-test-diagnostics never \
   -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- test
+python3 -B scripts/test_runner_finalization.py -v  # runner failure/cleanup regressions
 python3 Fixtures/generate-fixtures.py /private/tmp/remotefiles-fixtures
 # Optional actual iOS VoiceOver speech/focus checks (Xcode 27, local fixtures):
 scripts/test-voiceover.sh SIMULATOR_UDID /private/tmp/remotefiles-voiceover-run
@@ -83,9 +84,23 @@ Textual is locally vendored at the original pinned revision with focused startup
 
 ### Document navigation and original export
 
+**Document actions → Find in Document** searches visible Markdown or plain text,
+highlights the current result, and offers previous/next navigation. Source mode
+searches the literal source; HTML/SVG offer **Find in Source**. Searches are local,
+case/diacritic insensitive and capped at 1,000 results. **Headings** lists parsed
+Markdown headings; same-document and relative-file `#heading` links jump to them.
+Repeated headings use suffixes such as `details-1`.
+
+Text readers remember separate Rendered and Source positions across launches.
+History stores coordinates and a content fingerprint, never document contents,
+for up to 200 connection/path pairs. Changed text starts at the top. Positions
+save after scrolling pauses and when leaving the reader or backgrounding; Demo
+does not write reading history. Pixel positions are approximate if the screen
+size or text settings change.
+
 Rendered Markdown can open relative Markdown/text/image/PDF/audio/video links within the
 connection’s canonical starting folder. Native Back keeps separate Rendered and
-Source reading positions. Fragment/query links show an actionable explanation.
+Source reading positions. Missing headings and unsupported query links show an actionable explanation.
 See [document links](docs/DOCUMENT_LINKS.md).
 
 The reader’s **Save Original to Files** toolbar action streams the original file

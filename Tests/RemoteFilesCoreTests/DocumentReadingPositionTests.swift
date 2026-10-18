@@ -9,6 +9,7 @@ import RemoteFilesCore
 @MainActor @Observable private final class ReadingFixtureState {
     var path: [Int] = []
     var source = false
+    var wrapLines = true
     var version = 0
     var text = DemoRemoteFileService.navigationGuide
     var paragraphGap: CGFloat?
@@ -33,7 +34,7 @@ private struct ReadingPositionFixture: View {
     var body: some View {
         NavigationStack(path: $state.path) {
             DocumentContentView(text: state.text, markdown: true,
-                                source: state.source, filename: "guide.md", readingPosition: state.position)
+                                source: state.source, filename: "guide.md", readingPosition: state.position, wrapLines: state.wrapLines)
                 .id(state.version)
                 .textual.paragraphStyle(ReadingFixtureParagraphStyle(gap: state.paragraphGap))
                 .navigationTitle("Reading fixture")
@@ -43,6 +44,41 @@ private struct ReadingPositionFixture: View {
 }
 
 @MainActor final class DocumentReadingPositionTests: XCTestCase {
+    func testPersistenceRecreatesModesAndResetsForChangedContent() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("positions.json"), id = UUID()
+        let original = DocumentReadingPosition()
+        await original.prepare(text: "original report", store: ReadingPositionStore(fileURL: file), connectionID: id, path: "/report.md")
+        original.rendered = CGPoint(x: 0, y: 720)
+        original.source = CGPoint(x: 12, y: 280)
+        await original.flush()
+        let recreated = DocumentReadingPosition()
+        await recreated.prepare(text: "original report", store: ReadingPositionStore(fileURL: file), connectionID: id, path: "/report.md")
+        XCTAssertEqual(recreated.rendered, original.rendered)
+        XCTAssertEqual(recreated.source, original.source)
+        await recreated.prepare(text: "changed report", store: ReadingPositionStore(fileURL: file), connectionID: id, path: "/report.md")
+        XCTAssertEqual(recreated.rendered, .zero)
+        XCTAssertEqual(recreated.source, .zero)
+        await recreated.flush()
+        let changed = DocumentReadingPosition()
+        await changed.prepare(text: "changed report", store: ReadingPositionStore(fileURL: file), connectionID: id, path: "/report.md")
+        XCTAssertEqual(changed.rendered, .zero)
+    }
+
+    func testDemoReadingDoesNotCreatePersistentHistory() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try AppModel(directory: directory)
+        await model.setDemo(true)
+        let profile = try XCTUnwrap(model.metadata.connections.first)
+        let position = DocumentReadingPosition()
+        await model.prepareReadingPosition(position, text: "demo", profile: profile, path: "/Projects/report.md")
+        position.rendered = CGPoint(x: 0, y: 420)
+        await position.flush()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("reading-positions-v1.json").path))
+    }
+
     private func views(_ root: UIView) -> [UIView] { [root] + root.subviews.flatMap(views) }
     private func scrollView(_ window: UIWindow) -> UIScrollView? {
         views(window).compactMap { $0 as? UIScrollView }.filter {
@@ -104,6 +140,81 @@ private struct ReadingPositionFixture: View {
         // scroll view can remain in the hierarchy during the source mode transition.
         try await waitUntil({ self.scrollView(window).map { $0 !== previous } ?? false },
                             diagnostics: { self.describeScrollViews(window) })
+    }
+
+    func testRecreatedReaderRestoresActualRenderedAndSourceViewportsFromDisk() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("positions.json"), id = UUID()
+        let previousWindow = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first { $0.isKeyWindow }
+        let first = ReadingFixtureState()
+        await first.position.prepare(text: first.text, store: ReadingPositionStore(fileURL: file), connectionID: id, path: "/guide.md")
+        let firstWindow = try host(first)
+        defer { firstWindow.isHidden = true; firstWindow.rootViewController = nil; previousWindow?.makeKey() }
+        let rendered = CGPoint(x: 0, y: 980), source = CGPoint(x: 0, y: 420)
+        try await scroll(firstWindow, to: rendered, saved: { first.position.rendered })
+        try await switchMode(first, toSource: true, in: firstWindow)
+        try await scroll(firstWindow, to: source, saved: { first.position.source })
+        await first.position.flush()
+        firstWindow.isHidden = true; firstWindow.rootViewController = nil
+        // A fresh route, position object, store and native viewport imitate a later launch.
+        let recreated = ReadingFixtureState()
+        let recreatedStore = ReadingPositionStore(fileURL: file)
+        let persisted = await recreatedStore.restore(connectionID: id, path: "/guide.md", revision: SavedReadingPosition.revision(for: recreated.text))
+        XCTAssertEqual(try XCTUnwrap(persisted).rendered.y, Double(rendered.y), accuracy: 2, "Disk restoration must succeed before the cold viewport mounts")
+        XCTAssertEqual(try XCTUnwrap(persisted).source.y, Double(source.y), accuracy: 2)
+        await recreated.position.prepare(text: recreated.text, store: recreatedStore, connectionID: id, path: "/guide.md")
+        XCTAssertEqual(recreated.position.rendered.y, rendered.y, accuracy: 2, "The cold reader must mount with the restored coordinate")
+        XCTAssertEqual(recreated.position.source.y, source.y, accuracy: 2)
+        let secondWindow = try host(recreated)
+        defer {
+            firstWindow.isHidden = true; firstWindow.rootViewController = nil
+            secondWindow.isHidden = true; secondWindow.rootViewController = nil; previousWindow?.makeKey()
+        }
+        try await waitUntil({
+            guard let scroll = self.scrollView(secondWindow) else { return false }
+            return abs(self.offset(scroll).y - rendered.y) < 2
+        }, diagnostics: {
+            "Cold restore expected=\(rendered), saved=\(recreated.position.rendered)\n" + self.describeScrollViews(secondWindow)
+        })
+        XCTAssertEqual(recreated.position.rendered.y, rendered.y, accuracy: 2)
+        try await switchMode(recreated, toSource: true, in: secondWindow)
+        try await assertRestored(secondWindow, to: source)
+        await recreated.position.flush()
+    }
+
+    func testRecreatedShortUnwrappedSourceRestoresActualHorizontalAndVerticalOffsets() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("positions.json"), id = UUID()
+        let text = (0..<120).map { "row \($0) " + String(repeating: "1234567890 ", count: 25) }.joined(separator: "\r\n")
+        XCTAssertFalse(SourceLayout.needsBoundedLayout(text), "This must exercise ordinary short unwrapped source")
+        let previousWindow = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first { $0.isKeyWindow }
+        let first = ReadingFixtureState()
+        first.text = text; first.source = true; first.wrapLines = false
+        await first.position.prepare(text: text, store: ReadingPositionStore(fileURL: file), connectionID: id, path: "/guide.md")
+        let firstWindow = try host(first)
+        defer { firstWindow.isHidden = true; firstWindow.rootViewController = nil; previousWindow?.makeKey() }
+        let expected = CGPoint(x: 900, y: 600)
+        try await waitUntil({
+            guard let scroll = self.scrollView(firstWindow) else { return false }
+            return scroll.contentSize.width > expected.x + scroll.bounds.width
+        }, diagnostics: { self.describeScrollViews(firstWindow) })
+        try await scroll(firstWindow, to: expected, saved: { first.position.source })
+        XCTAssertEqual(first.position.source.x, expected.x, accuracy: 2)
+        await first.position.flush()
+        firstWindow.isHidden = true; firstWindow.rootViewController = nil
+        let recreated = ReadingFixtureState()
+        recreated.text = text; recreated.source = true; recreated.wrapLines = false
+        await recreated.position.prepare(text: text, store: ReadingPositionStore(fileURL: file), connectionID: id, path: "/guide.md")
+        XCTAssertEqual(recreated.position.source.x, expected.x, accuracy: 2)
+        XCTAssertEqual(recreated.position.source.y, expected.y, accuracy: 2)
+        let secondWindow = try host(recreated)
+        defer { secondWindow.isHidden = true; secondWindow.rootViewController = nil; previousWindow?.makeKey() }
+        try await assertRestored(secondWindow, to: expected)
+        XCTAssertEqual(recreated.position.source.x, expected.x, accuracy: 2)
+        XCTAssertEqual(recreated.position.source.y, expected.y, accuracy: 2)
+        await recreated.position.flush()
     }
 
     func testRenderedReaderPreservesActualScrollAcrossPushBackAndContentRemount() async throws {

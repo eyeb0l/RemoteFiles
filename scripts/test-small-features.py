@@ -13,6 +13,7 @@ import sys
 import time
 
 sys.dont_write_bytecode = True
+from runner_finalization import finalize_report
 import argparse
 parser = argparse.ArgumentParser(description="Signed disposable Simulator recent removal, nested disconnect and public-key installation regressions")
 parser.add_argument('--output', required=True, type=Path)
@@ -144,14 +145,25 @@ except BaseException as error:
     report['status']='blocked' if any(x['status']=='blocked' for x in report['lanes']) else 'failed'
     report['blocker']=str(error);print('BLOCKER '+str(error),flush=True)
 finally:
+    cleanup_checks = []
     if sim:
-        shutdown=command('shutdown-owned-simulator',['xcrun','simctl','shutdown',sim],total=45)
-        deleted=command('delete-owned-simulator',['xcrun','simctl','delete',sim],total=45)
-        report['cleanup']['owned_simulator_deleted']=deleted['status']=='passed'
-    frozen=json.loads((OUT/'source-manifest.json').read_text())
-    report['cleanup']['frozen_source_unchanged']=a.manifest(ROOT,[x['path'] for x in frozen])==frozen
-    report['cleanup']['isolated_source_unchanged']=a.manifest(REPO,a.source_files(REPO))==frozen and a.capture(['git','rev-parse','HEAD'],REPO)==EXPECTED
-    report['cleanup']['canonical_head_unchanged']=a.capture(['git','rev-parse','HEAD'],canonical)==canonical_head
-    report['cleanup']['canonical_status_unchanged']=subprocess.check_output(['git','status','--porcelain=v1','--untracked-files=all'],cwd=canonical,text=True)==canonical_before
+        cleanup_checks += [
+            ('owned_simulator_shutdown', lambda: command('shutdown-owned-simulator',['xcrun','simctl','shutdown',sim],total=45)['status']=='passed'),
+            ('owned_simulator_deleted', lambda: command('delete-owned-simulator',['xcrun','simctl','delete',sim],total=45)['status']=='passed'),
+        ]
+    def frozen_source_unchanged():
+        frozen=json.loads((OUT/'source-manifest.json').read_text())
+        return a.manifest(ROOT,[x['path'] for x in frozen])==frozen
+    def isolated_source_unchanged():
+        frozen=json.loads((OUT/'source-manifest.json').read_text())
+        return a.manifest(REPO,a.source_files(REPO))==frozen and a.capture(['git','rev-parse','HEAD'],REPO)==EXPECTED
+    cleanup_checks += [
+        ('frozen_source_unchanged', frozen_source_unchanged),
+        ('isolated_source_unchanged', isolated_source_unchanged),
+        ('canonical_head_unchanged', lambda: a.capture(['git','rev-parse','HEAD'],canonical)==canonical_head),
+        ('canonical_status_unchanged', lambda: subprocess.check_output(['git','status','--porcelain=v1','--untracked-files=all'],cwd=canonical,text=True)==canonical_before),
+    ]
+    exit_code = finalize_report(report, cleanup_checks)
     report['finished_utc']=datetime.datetime.now(datetime.timezone.utc).isoformat();save()
     print('TERMINAL '+str(OUT/'summary.json'),flush=True)
+sys.exit(exit_code)

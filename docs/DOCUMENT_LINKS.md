@@ -21,9 +21,16 @@ resource-download policy. Automatic Markdown image paths remain confined to the
 source document's own directory tree; enabling document parent links does not
 widen image access.
 
-Heading fragments (`#heading`) and queries (`?download=1`) are deliberately not
-implemented. Tapping these relative links explains the limitation and tells the
-reader to use a plain file link. Missing files, unsupported types and confinement
+Heading fragments (`#heading`) navigate locally or accompany a relative Markdown
+file link. The reader separates the fragment before asking the existing confined
+transport to resolve the file; fragments never enter filesystem paths. Parsed
+heading titles produce lowercase slugs, retaining letters, numbers, hyphens and
+underscores and replacing whitespace with hyphens. Duplicate slugs gain `-1`,
+`-2`, etc. Inline image alt text contributes to a heading's title and slug; its
+outline entry reveals the first available text in that heading. Image-only
+headings are omitted because they have no selectable text to reveal. Fragments
+decode once; missing headings explain how to use Headings or
+Find. Queries (`?download=1`) remain unsupported. Missing files, unsupported types and confinement
 failures show an alert while retaining the current document. A second link,
 Cancel, navigation away, session change or backgrounding cancels an in-flight
 request; request IDs and session checks prevent late publication from a transport
@@ -34,14 +41,18 @@ Every reader route owns separate Rendered and Source scroll coordinates.
 push/back, mode changes and content remounts. Restoration waits for the rendered
 text geometry instead of treating Textual's initial empty layout as the saved
 position. Returning to an unchanged reader does not refetch its text; Refresh or
-a new connection session still reloads it. A user scroll takes over restoration
+a new connection session still reloads it. Reading coordinates are additionally
+saved in a separate bounded, atomic, protected history file after a 600 ms pause
+and on leaving/backgrounding. A content fingerprint prevents restoring an old
+offset into changed text. Demo never writes this history. Deleting a connection
+removes its positions and rejects late saves from its previous reader. A user scroll takes over restoration
 if an updated document has become shorter.
 
 ## Automated acceptance
 
 - `DocumentNavigationTests` covers normalized parent/nested paths, exact-once
   percent decoding, Unicode, root confinement, unsafe references, actionable
-  fragment/query errors, missing Demo files, cancellation, and unchanged image
+  transport fragment/query rejection, missing Demo files, cancellation, and unchanged image
   boundaries.
 - `DocumentReadingPositionTests` uses the production `DocumentContentView` in a
   hosted iOS `NavigationStack`, reads actual native scroll offsets, and verifies

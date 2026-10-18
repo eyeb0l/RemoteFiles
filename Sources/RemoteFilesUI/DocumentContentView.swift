@@ -11,6 +11,8 @@ public struct DocumentContentView: View {
     public let openDocumentLink: ((URL) -> Void)?
     public let readingPosition: DocumentReadingPosition?
     public let wrapLines: Bool
+    private let navigation: ReaderNavigationState?
+    @State private var usesNativeSource = false
     @State private var localReadingPosition = DocumentReadingPosition()
     @State private var prepared: [MarkdownPart]?
     public let location: RemoteDocumentLocation?
@@ -19,7 +21,7 @@ public struct DocumentContentView: View {
     @State private var preparationFailed = false
     @State private var deferInitialOverflow = false
 
-    public init(text: String, markdown: Bool, source: Bool, filename: String? = nil, location: RemoteDocumentLocation? = nil, resolver: (any RemoteResourceResolving)? = nil, readingPosition: DocumentReadingPosition? = nil, openDocumentLink: ((URL) -> Void)? = nil, wrapLines: Bool = true) {
+    public init(text: String, markdown: Bool, source: Bool, filename: String? = nil, location: RemoteDocumentLocation? = nil, resolver: (any RemoteResourceResolving)? = nil, readingPosition: DocumentReadingPosition? = nil, openDocumentLink: ((URL) -> Void)? = nil, wrapLines: Bool = true, navigation: ReaderNavigationState? = nil) {
         self.text = text
         self.markdown = markdown
         self.source = source
@@ -27,6 +29,7 @@ public struct DocumentContentView: View {
         self.location = location; self.resolver = resolver
         self.readingPosition = readingPosition; self.openDocumentLink = openDocumentLink
         self.wrapLines = wrapLines
+        self.navigation = navigation
     }
 
     public var body: some View {
@@ -37,9 +40,12 @@ public struct DocumentContentView: View {
                 HTMLContentView(text: text, filename: filename, readingPosition: position)
             } else if !source, let filename, DocumentPolicy.kind(filename: filename) == .svg {
                 SVGContentView(text: text, filename: filename)
-            } else if (!markdown || source), SourceLayout.needsBoundedLayout(text) {
+            } else if (!markdown || source), SourceLayout.needsBoundedLayout(text) || usesNativeSource || navigation?.reveal?.inSource == true {
                 SourceCodeView(text: text, language: markdown ? "markdown" : SourceLanguage.forFilename(filename),
-                               bounded: true, readingPosition: position)
+                               bounded: true, readingPosition: position, reveal: navigation?.reveal,
+                               wrapLines: SourceLayout.needsBoundedLayout(text) || wrapLines,
+                               revealPending: navigation?.pendingRevealID != nil,
+                               onReveal: { navigation?.didReveal($0) })
             } else {
                 ordinaryContent(position: position)
             }
@@ -49,6 +55,11 @@ public struct DocumentContentView: View {
         }
         .task(id: markdown ? text : "") {
             await prepareMarkdownIfNeeded()
+        }
+        .onChange(of: navigation?.reveal?.inSource, initial: true) { _, value in
+            // Keep the native source viewport after Find closes, avoiding a second
+            // renderer/layout swap at the newly selected reading position.
+            if value == true { usesNativeSource = true }
         }
     }
 
@@ -61,7 +72,7 @@ public struct DocumentContentView: View {
                 }
                 .modifier(DocumentScrollPreservation(saved: Binding(
                     get: { CGPoint(x: wrapLines ? 0 : position.source.x, y: position.source.y) },
-                    set: { position.source = $0 }), ready: true))
+                    set: { position.source = $0 }), ready: true, navigationID: navigation?.pendingRevealID))
                 .scrollIndicators(.visible)
                 .scrollIndicatorsFlash(onAppear: !wrapLines)
                 .id(wrapLines)
@@ -85,7 +96,11 @@ public struct DocumentContentView: View {
                             ForEach(prepared) { part in
                                 switch part.content {
                                 case .text(let attributed):
-                                    StructuredText(String(attributed.characters), parser: PreparedDocumentParser(document: attributed))
+                                    let decorated = navigation?.decorated(attributed, partID: part.id) ?? attributed
+                                    StructuredText(decorated)
+                                        .id(part.id)
+                                        .textual.revealNavigationTarget(navigation?.reveal?.inSource == false ? navigation?.pendingRevealID : nil,
+                                            onReveal: { navigation?.didReveal($0) })
                                         .textual.textSelection(.enabled)
                                         .textual.tableStyle(.overflow(relativeWidth: 3))
                                         .textual.overflowMode(.scroll)
@@ -130,7 +145,8 @@ public struct DocumentContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .modifier(DocumentScrollPreservation(saved: $position.rendered, ready: prepared != nil,
-                                                     overflowGeometry: position.overflowGeometry))
+                                                     overflowGeometry: position.overflowGeometry,
+                                                     navigationID: navigation?.pendingRevealID))
                 .coordinateSpace(name: "readerViewport")
                 .accessibilityLabel("Rendered Markdown document")
                 .onAppear {
@@ -151,7 +167,9 @@ public struct DocumentContentView: View {
             (readingPosition ?? localReadingPosition).rendered == .zero
         preparationFailed = false
         do {
-            let result = try await MarkdownPreparation.shared.prepare(input)
+            let result: [MarkdownPart]
+            if let index = navigation?.index, index.source.utf8.elementsEqual(input.utf8) { result = index.parts }
+            else { result = try await MarkdownPreparation.shared.prepare(input) }
             guard !Task.isCancelled else { return }
             prepared = result
             preparedSource = input
@@ -161,11 +179,6 @@ public struct DocumentContentView: View {
             preparationFailed = true
         }
     }
-}
-
-private struct PreparedDocumentParser: MarkupParser {
-    let document: AttributedString
-    func attributedString(for input: String) throws -> AttributedString { document }
 }
 
 private actor MarkdownPreparation {

@@ -25,6 +25,7 @@ extension StructuredText {
 
 extension StructuredText {
   struct Block: View {
+    @Environment(\.navigationRevealID) private var navigationRevealID
     private let intent: PresentationIntent.IntentType?
     private let content: AttributedSubstring
 
@@ -38,7 +39,7 @@ extension StructuredText {
     var body: AnyView {
       switch intent?.kind {
       case .paragraph where content.isMathBlock:
-        return AnyView(MathBlock(content))
+        return AnyView(MathBlock(content).modifier(NavigationBlockReveal(target: navigationTarget, isFinal: true)))
       case .paragraph:
         return AnyView(Paragraph(content))
       case .header(let level):
@@ -48,18 +49,23 @@ extension StructuredText {
       case .unorderedList:
         return AnyView(UnorderedList(intent: intent, content: content))
       case .codeBlock(let languageHint) where languageHint?.lowercased() == "math":
-        return AnyView(MathCodeBlock(content))
+        return AnyView(MathCodeBlock(content).modifier(NavigationBlockReveal(target: navigationTarget, isFinal: true)))
       case .codeBlock(let languageHint):
-        return AnyView(CodeBlock(content, languageHint: languageHint))
+        return AnyView(CodeBlock(content, languageHint: languageHint).modifier(NavigationBlockReveal(target: navigationTarget, isFinal: false)))
       case .blockQuote:
         return AnyView(BlockQuote(intent: intent, content: content))
       case .thematicBreak:
         return AnyView(ThematicBreak(content))
       case .table(let columns):
-        return AnyView(Table(intent: intent, content: content, columns: columns))
+        return AnyView(Table(intent: intent, content: content, columns: columns).modifier(NavigationBlockReveal(target: navigationTarget, isFinal: false)))
       default:
         return AnyView(Paragraph(content))
       }
+    }
+
+    private var navigationTarget: UUID? {
+      guard let navigationRevealID else { return nil }
+      return content.runs.lazy.compactMap { $0[TextualNavigationTarget.self] }.first { $0 == navigationRevealID }
     }
   }
 }

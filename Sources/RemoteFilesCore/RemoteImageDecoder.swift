@@ -12,6 +12,14 @@ public actor RemoteImageDecoder {
     private var images: [String: DisplayImage] = [:]
     private var order: [String] = []
     public func clear() { images.removeAll(); order.removeAll() }
+    /// Decode is synchronous within this actor, so invalidation also runs after
+    /// any in-progress decode and cannot be undone by its publication.
+    public func invalidate(files: [URL]) {
+        let prefixes = files.map { $0.path + ":" }
+        let invalidated = Set(images.keys.filter { key in prefixes.contains { key.hasPrefix($0) } })
+        for key in invalidated { images.removeValue(forKey: key) }
+        order.removeAll { invalidated.contains($0) }
+    }
     public func decode(_ file: URL, maxPixel: Int) throws -> DisplayImage {
         try Task.checkCancellation()
         let stamp = (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)?.timeIntervalSince1970 ?? 0

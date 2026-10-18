@@ -107,6 +107,8 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
     private let fileLimit: Int
     private let freshness: TimeInterval
     private var flights: [String: Flight] = [:]
+    // A refresh separates new consumers from an older transfer without cancelling it.
+    private var generations: [String: UUID] = [:]
     private var transfers = 0
     public init(service: any RemoteFileService, directory: URL, diskLimit: Int = 256 * 1024 * 1024,
                 fileLimit: Int = 128 * 1024 * 1024, freshness: TimeInterval = 300) {
@@ -120,25 +122,27 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         try Task.checkCancellation()
         let path = try RemoteResourcePath.resolve(reference, relativeTo: document)
         let key = try cacheKey(path: path, document: document)
+        let generation = generations[key]
+        let flightKey = key + ":" + (generation?.uuidString ?? "initial")
         let waiter = UUID()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 if Task.isCancelled { continuation.resume(throwing: CancellationError()); return }
-                if flights[key] != nil {
-                    flights[key]!.waiters[waiter] = continuation
-                    flights[key]!.observers[waiter] = progress
+                if flights[flightKey] != nil {
+                    flights[flightKey]!.waiters[waiter] = continuation
+                    flights[flightKey]!.observers[waiter] = progress
                     return
                 }
                 let id = UUID()
                 let task = Task {
                     let result: Result<URL, Error>
-                    do { result = .success(try await self.fetch(key: key, id: id, path: path, document: document)) }
+                    do { result = .success(try await self.fetch(key: key, flightKey: flightKey, generation: generation, id: id, path: path, document: document)) }
                     catch { result = .failure(error) }
-                    self.finish(key: key, id: id, result: result)
+                    self.finish(key: flightKey, id: id, result: result)
                 }
-                flights[key] = Flight(id: id, task: task, waiters: [waiter: continuation], observers: [waiter: progress])
+                flights[flightKey] = Flight(id: id, task: task, waiters: [waiter: continuation], observers: [waiter: progress])
             }
-        } onCancel: { Task { await self.cancel(key: key, waiter: waiter) } }
+        } onCancel: { Task { await self.cancel(key: flightKey, waiter: waiter) } }
     }
     public func localFileForOpening(for reference: String, in document: RemoteDocumentLocation) async throws -> URL {
         try Task.checkCancellation()
@@ -159,9 +163,29 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         return SHA256.hash(data: data + Data(("\n" + document.resourceRoot + "\n" + path).utf8)).map { String(format: "%02x", $0) }.joined()
     }
     public func invalidate(_ reference: String, in document: RemoteDocumentLocation) {
-        guard let path = try? RemoteResourcePath.resolve(reference, relativeTo: document),
-              let key = try? cacheKey(path: path, document: document) else { return }
-        try? FileManager.default.removeItem(at: directory.appendingPathComponent(key).appendingPathExtension("resource"))
+        _ = invalidateResources([reference], in: document)
+    }
+    /// Invalidates only the supplied document references. Supply all references in the
+    /// refreshed document, including resources not yet displayed in this process.
+    /// Shared resources refresh for future readers, while existing transfers finish
+    /// for their consumers and cannot publish stale bytes over a newer generation.
+    /// Returned URLs identify decoded-image cache entries to invalidate as well.
+    @discardableResult
+    public func invalidateResources(_ references: [String], in document: RemoteDocumentLocation) -> [URL] {
+        var invalidated = Set<String>()
+        var files: [URL] = []
+        for reference in references {
+            guard let path = try? RemoteResourcePath.resolve(reference, relativeTo: document),
+                  let key = try? cacheKey(path: path, document: document),
+                  invalidated.insert(key).inserted else { continue }
+            // Generation metadata is needed only while an older flight can publish.
+            // Idle resources use their stable on-disk key across resolver launches.
+            generations[key] = flights.keys.contains { $0.hasPrefix(key + ":") } ? UUID() : nil
+            let file = directory.appendingPathComponent(key).appendingPathExtension("resource")
+            try? FileManager.default.removeItem(at: file)
+            files.append(file)
+        }
+        return files
     }
     public func clearCache() {
         cancelAll()
@@ -171,14 +195,23 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         guard let continuation = flights[key]?.waiters.removeValue(forKey: waiter) else { return }
         flights[key]?.observers.removeValue(forKey: waiter)
         continuation.resume(throwing: CancellationError())
-        if flights[key]?.waiters.isEmpty == true { flights.removeValue(forKey: key)?.task.cancel() }
+        if flights[key]?.waiters.isEmpty == true {
+            flights.removeValue(forKey: key)?.task.cancel()
+            removeGenerationIfIdle(for: key)
+        }
     }
     private func finish(key: String, id: UUID, result: Result<URL, Error>) {
         guard flights[key]?.id == id, let flight = flights.removeValue(forKey: key) else { return }
         for waiter in flight.waiters.values { waiter.resume(with: result) }
+        removeGenerationIfIdle(for: key)
+    }
+    private func removeGenerationIfIdle(for flightKey: String) {
+        guard let key = flightKey.split(separator: ":").first.map(String.init),
+              !flights.keys.contains(where: { $0.hasPrefix(key + ":") }) else { return }
+        generations.removeValue(forKey: key)
     }
     public func cancelAll() {
-        let old = flights; flights.removeAll()
+        let old = flights; flights.removeAll(); generations.removeAll()
         for flight in old.values {
             flight.task.cancel()
             for waiter in flight.waiters.values { waiter.resume(throwing: CancellationError()) }
@@ -191,7 +224,7 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
             await observer(progress)
         }
     }
-    private func fetch(key: String, id: UUID, path: String, document: RemoteDocumentLocation) async throws -> URL {
+    private func fetch(key: String, flightKey: String, generation: UUID?, id: UUID, path: String, document: RemoteDocumentLocation) async throws -> URL {
         let fm = FileManager.default
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
         var excluded = URLResourceValues(); excluded.isExcludedFromBackup = true
@@ -202,9 +235,9 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
            Date().timeIntervalSince(modified) < freshness {
             try? fm.setAttributes([.creationDate: Date()], ofItemAtPath: target.path)
             let size = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
-            await report(.init(receivedBytes: size, totalBytes: size, isComplete: true), key: key, id: id)
+            await report(.init(receivedBytes: size, totalBytes: size, isComplete: true), key: flightKey, id: id)
             try Task.checkCancellation()
-            return target
+            if generations[key] == generation, fm.fileExists(atPath: target.path) { return target }
         }
         while transfers >= 2 { try await Task.sleep(for: .milliseconds(25)) }
         try Task.checkCancellation()
@@ -215,7 +248,7 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         do {
             _ = try await service.downloadFile(profile: document.profile, path: path, allowedRoot: document.resourceRoot,
                                                destination: temp, limit: fileLimit, progress: { update in
-                                                   await self.report(update, key: key, id: id)
+                                                   await self.report(update, key: flightKey, id: id)
                                                })
         } catch RemoteFileError.notFound {
             throw RemoteResourceError.missingFile(path)
@@ -223,13 +256,17 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         try Task.checkCancellation()
         let size = (try fm.attributesOfItem(atPath: temp.path)[.size] as? NSNumber)?.intValue ?? 0
         guard size <= diskLimit else { throw RemoteFileError.tooLarge(diskLimit) }
-        try? fm.removeItem(at: target)
+        // An invalidated transfer still belongs to its original consumers. Keep its
+        // result at a separate URL so it cannot replace the current cached resource.
+        let destination = generations[key] == generation ? target :
+            directory.appendingPathComponent(key + "-" + id.uuidString).appendingPathExtension("resource")
+        try? fm.removeItem(at: destination)
         trim(reserving: size)
-        try fm.moveItem(at: temp, to: target)
+        try fm.moveItem(at: temp, to: destination)
         #if os(iOS)
-        try? fm.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: target.path)
+        try? fm.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: destination.path)
         #endif
-        return target
+        return destination
     }
     private func trim(reserving size: Int) {
         let fm = FileManager.default

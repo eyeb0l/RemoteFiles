@@ -1,5 +1,20 @@
 # RemoteFiles preview status
 
+**17 October 2026: reader navigation, saved positions, scoped refresh and runner fixes.**
+
+- Both Python UI runners now preserve failure status, attempt all cleanup/integrity checks, save their summary and return a nonzero exit code on failure. Four regression tests inject runner success, failure, timeout, mutation and cleanup errors.
+- Document refresh invalidates only its old/new image references and corresponding decoded images. Unrelated cached resources and in-flight work survive; superseded downloads cannot overwrite newer cached bytes.
+- Document actions now offer local Find with highlighting and next/previous navigation, plus a Markdown heading list. Same-document and relative-file heading links work. Find also reveals offscreen code/table matches. Prepared attributed text updates retain the renderer's native views.
+- Text readers save independent Rendered and Source coordinates across launches for the exact connection, path and UTF-8 content revision. Changed text starts at the top; demo mode writes no reading history. Positions remain layout-dependent coordinates, so changes in screen width or text size can alter their meaning.
+
+Current validation: **118 macOS core tests**, **177 signed hosted iOS tests**, **4 end-to-end reader UI tests** and **4 Python runner tests passed**, with no failures. Both Swift suites used the isolated loopback OpenSSH fixture, with no skipped server tests. The final unsigned generic iOS **Release build passed**.
+
+Local evidence: `/private/tmp/remotefiles-batch-prepared-core.log`, `/private/tmp/remotefiles-batch-prepared-final.log`, `/private/tmp/remotefiles-batch-prepared-final.xcresult` and `/private/tmp/remotefiles-batch-prepared-device-build.log`. The combined iOS run includes all hosted tests and four reader UI journeys. Earlier failed runs led to fixes for cold restoration, horizontal Source Find and preserving offscreen code containers on attributed-content updates; the final combined hosted/UI run passed with no failures.
+
+The latest working tree was subsequently rebuilt as a signed **Release** app, passed `codesign --verify --deep --strict`, and was installed on the paired physical **iPhone 17 Pro, iOS 27.0.1**. CoreDevice confirmed a foreground launch of `dev.iris.RemoteFiles`; a later process query confirmed **PID 48826**, with its executable inside the newly installed bundle. Build, signature, installation, launch and continuing process presence were verified separately. Find, heading navigation and cross-launch reading-position behavior still await hands-on physical-device acceptance; their automated checks above ran in Simulator. No new runtime performance profile was captured.
+
+Device-deployment evidence: `/private/tmp/remotefiles-20261017-iphone-build.log`, `/private/tmp/remotefiles-20261017-iphone-install.json`, `/private/tmp/remotefiles-20261017-iphone-app.json`, `/private/tmp/remotefiles-20261017-iphone-launch.json` and `/private/tmp/remotefiles-20261017-iphone-processes.json`. The signed executable SHA-256 was `fa4f47027be4f47e4fbb1d14300e34f78fb368afcaab5307c585d042a3100567`.
+
 **6 October 2026: audio/video previews added.** The final signed iPhone 18 Pro /
 iOS 27 Simulator run passed nine playback regressions and one demo UI check,
 including visible controls, refresh and fullscreen video. Nine document-policy
