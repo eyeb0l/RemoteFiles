@@ -57,7 +57,7 @@ The evidence produced during this run is local and temporary:
 - Final iOS tests: `/private/tmp/remotefiles-ios-signed-tests.log` and `/private/tmp/remotefiles-ios-signed-results.xcresult`.
 - macOS tests: `/private/tmp/remotefiles-core-final.log` and `/private/tmp/remotefiles-growth-tests.log`.
 
-Exact repeatable commands are in [README.md](README.md). Running `swift test` without the OpenSSH fixture explicitly skips real-server cases; those skips do not establish SFTP success.
+Exact repeatable commands are in [Build and test](docs/DEVELOPMENT.md#reproducible-verification). Running `swift test` without the OpenSSH fixture explicitly skips real-server cases; those skips do not establish SFTP success.
 
 ## What those checks establish
 

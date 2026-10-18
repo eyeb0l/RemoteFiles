@@ -1,143 +1,33 @@
 # RemoteFiles
 
-A native, read-only iPhone browser for files on Unix systems over SFTP, including agent-produced Markdown reports. Minimum deployment target **iOS 27.0**. Open a favourite, browse a project, read a document, and refresh it after an agent changes it.
+A native iPhone app for browsing and reading files on your Mac or Unix server over SFTP. Open a favourite folder, read a Markdown report, inspect source code, or preview media—and refresh when the remote file changes.
 
-## Build and run
+## A look inside
 
-1. Open `RemoteFiles.xcodeproj` in Xcode 27.0 or newer.
-2. Select the shared **RemoteFiles** scheme and an iOS 27 simulator. Dependencies resolve from the checked-in lockfile.
-3. Run. The app starts with an empty real library. **Settings → Explore Demo** is an explicit sample workspace; it is never used as a connection-error fallback. The `--demo` launch argument also selects that mode.
-4. The project uses the Iris Giertuga development team for this workspace. For another developer, select your own signing team under Signing & Capabilities and set an available bundle ID if necessary. Keep the paired iPhone unlocked with Developer Mode enabled when installing or running tests.
+| Browse folders | Read Markdown | Inspect source |
+| --- | --- | --- |
+| <img src="docs/screenshots/browser.jpg" width="240" alt="Demo project folder with reports, files, and search"> | <img src="docs/screenshots/reader.jpg" width="240" alt="Rendered Markdown report with headings and a checklist"> | <img src="docs/screenshots/source-syntax-swift-iphone.png" width="240" alt="Swift source displayed with syntax highlighting"> |
 
-```sh
-xcodebuild -project RemoteFiles.xcodeproj -scheme RemoteFiles \
-  -destination 'platform=iOS Simulator,name=iPhone 18 Pro' \
-  -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- build
-xcodebuild -project RemoteFiles.xcodeproj -scheme RemoteFiles \
-  -destination 'generic/platform=iOS' -derivedDataPath DerivedData-device \
-  CODE_SIGNING_ALLOWED=NO build
-```
+*Screenshots from the demo workspace.*
 
-Simulator signing is ad hoc and requires no personal development team. The generic device command checks compilation; it does not produce an installable signed iPhone build.
+## What you can do
 
-The local Swift package contains `RemoteFilesCore` and `RemoteFilesUI`. Xcode owns the runnable app, hosted iOS core-test target, and native UI-test target. The UI test uses the explicit demo workspace and exercises browsing, rendered/source reading, refresh, and back navigation without touching saved real connections. Tests use the separate minimal `RemoteFilesTestHost`. The hosted image lifecycle regressions also link `RemoteFilesUI` to check the production viewer and memory-warning handler. After adding test files, regenerate its small project with `python3 scripts/generate-project.py`; the script does not fetch packages or modify source files. Commit both `Package.resolved` and `RemoteFiles.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved` when dependency resolution changes.
+- Browse remote folders, save favourites, and return to recent files.
+- Read Markdown or highlighted source, find text, jump to headings, and remember your reading position.
+- Preview images, PDFs, audio, video, and static HTML/SVG.
+- Copy source or save an original file to Files.
+- Connect with SSH keys and explicit host verification. Browsing is read only.
 
-## Connect a Unix system
+## Get started
 
-Do these setup steps yourself on the server you intend to access. RemoteFiles connects over SSH/SFTP using an Ed25519 identity. The app does not enable services or expose ports. Browsing is read only. The optional public-key installer writes only the selected account’s `~/.ssh/authorized_keys` after you confirm the account and public key; see [public-key installation](docs/PUBLIC_KEY_INSTALLATION.md).
+Requires **iOS 27.0** and **Xcode 27.0 or newer** to build. Open `RemoteFiles.xcodeproj`, select the **RemoteFiles** scheme, and run on an iOS 27 simulator or your iPhone. Choose **Settings → Explore Demo** to try sample files, or [connect your server](docs/CONNECTIONS.md).
 
-1. Enable SSH with an SFTP subsystem for the intended account using the system’s service configuration. On **macOS**, use **System Settings → General → Sharing → Remote Login**. On **Linux or another Unix system**, enable its OpenSSH server and SFTP subsystem according to that system’s documentation. Keep the server awake and reachable. The account must be able to read the chosen project directory.
-2. In RemoteFiles, choose **Add Connection → Generate or Import Key**. Prefer a dedicated generated Ed25519 identity; copy/share its **public** key. Append that public key to the intended account’s `~/.ssh/authorized_keys` on the server (directory permission 700; file permission 600). Never copy a private key into that file. If the server already supports SSH password authentication, **Settings → SSH Keys → select identity → Install Public Key on Server** can append the public key after host verification and explicit confirmation.
-3. If connecting away from home, install/sign in to Tailscale independently on both devices. Use the server’s MagicDNS hostname or Tailscale IP; ensure tailnet policy permits the configured SSH port (22 by default). This uses ordinary OpenSSH over Tailscale, **not the separate Tailscale SSH service**. Do not forward a router port.
-4. Enter the server account’s username, hostname, identity and optional absolute project directory. An empty starting directory uses the server’s default directory; literal `~` is not expanded locally.
-5. Verify the displayed server SHA-256 fingerprint using a trusted channel. On an OpenSSH server, the public host-key fingerprint can be inspected with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256` (choose the public file for the algorithm presented and the server’s configured host-key location). Accept trust only when it matches.
-6. Open a folder and choose **Folder actions → Add Favourite**. Open a `.md` report. Use **Rendered / Source**, **Copy Source**, and **Refresh** from its actions menu.
+See [build and test instructions](docs/DEVELOPMENT.md) for signing, command-line builds, and verification.
 
-The first connection on a local network may require iOS Local Network permission. A timeout alone does not identify whether the server is asleep, the tunnel is unavailable, a permission was denied, or network policy blocked access. Check these possible causes individually. Denial and Settings recovery were verified on the physical iPhone; see [device permissions and lifecycle evidence](docs/DEVICE_PERMISSIONS_LIFECYCLE.md).
+## Documentation
 
-## Keys and trust
-
-Generated Ed25519 keys and verified OpenSSH Ed25519 import formats are documented in [KEY_SUPPORT.md](docs/KEY_SUPPORT.md). Imports accept extensionless files and explicit paste. Encrypted originals remain encrypted in Keychain; an unlocked key is retained only for the foreground session. Passphrases are never persisted. Keychain uses `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, with synchronisation disabled. This does not imply hardware-backed Ed25519 protection.
-
-Unknown hosts require explicit trust. Changed host keys block before account authentication. The reset flow removes trust and requires another verification; it does not silently accept the new key. A key used by a saved connection cannot be deleted.
-
-Profiles, favourites, recent references, and public identity metadata are stored atomically in Application Support. Private material stays in Keychain. Recent files are references, not persistent offline copies. Swipe a recent entry and choose **Remove from Recents** to remove its saved reference; the remote file and favourites remain. The same action is available to VoiceOver. **Disconnect** returns Home, clears the navigation stack and cancels pending session work. In-memory cache is bounded to ten prepared directory listings and at most four documents / 6 MiB, and cleared on memory warnings or disconnect. Returning to a cached folder preserves its scroll position without a new listing; use pull-to-refresh or **Refresh** to check for remote changes. Networking and unlocked keys are retired on backgrounding.
-
-## Reader scope
-
-Markdown and UTF-8 text/config/code use a 2 MiB receive-time bound and explicit empty/binary/unsupported states. Standalone JPEG, PNG, HEIC/HEIF, GIF, TIFF, WebP and BMP images open with bounded SFTP caching and downsampled display; tap for full-screen zoom and Share. Animated images show their first frame. PDFs open in a native scrolling, zoomable reader. Common video and audio files open with playback and seeking controls after a bounded download. MP4/MOV/M4V/3GP video and MP3/M4A/AAC/WAV/AIFF/CAF/FLAC audio are recognized; codec compatibility depends on the device. Playback stops when leaving the preview or backgrounding. Image/PDF/audio/video transfers are capped at 128 MiB per file. See [audio and video previews](docs/AUDIO_VIDEO.md) for the full format list and lifecycle policy. Markdown images load lazily through SFTP relative to the document directory, with bounded disk/pixel caches, retry, zoom and Share. Web/file/data image URLs never load. See [remote image policy](docs/REMOTE_IMAGES.md). Tapped HTTP/HTTPS links may open externally; relative document links resolve within the canonical connection starting folder, and unsafe schemes remain disabled. Tables/code scroll within the rendered document. Markdown source and plain text remain read only. A failed refresh labels the previous content as previously loaded.
-
-HTML/HTM files open with **Rendered** and **Source** modes. Rendered is a static,
-local WebKit preview of document content and inline styles; scripts and linked
-resources are not loaded. Script-only app entry pages explain why there is no
-static content to display. Source keeps the original highlighted HTML and the
-existing copy/export actions. See [HTML previews](docs/HTML_PREVIEWS.md).
-
-Source files and the Markdown **Source** tab have automatic syntax highlighting in light and dark appearances, using the filename to select the bundled grammar (including Swift, JavaScript/TypeScript, Python, JSON, YAML, shell, HTML/CSS and SQL). Plain source appears immediately; tokenization and color preparation happen off the main actor. Selection and **Copy Source** retain the original text. Unknown formats, sources above 256 KiB, and results above 16,000 tokens stay plain to bound rendering work; the existing 2 MiB text-preview limit is unchanged. The tokenizer runs locally and loads no remote scripts. Its token cache holds at most two documents within an estimated 2 MiB budget and clears on disconnect/background or memory warning. Leaving the source view cancels publication of unfinished highlighting.
-
-## Reproducible verification
-
-```sh
-swift test                         # unit tests; real-server cases explicitly skip without a fixture
-scripts/test-openssh.sh swift test  # isolated real OpenSSH fixture, generated temporary keys
-scripts/test-openssh.sh xcodebuild -project RemoteFiles.xcodeproj \
-  -scheme RemoteFiles -destination 'platform=iOS Simulator,name=iPhone 18 Pro' \
-  -derivedDataPath DerivedData -collect-test-diagnostics never \
-  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- test
-python3 -B scripts/test_runner_finalization.py -v  # runner failure/cleanup regressions
-python3 Fixtures/generate-fixtures.py /private/tmp/remotefiles-fixtures
-# Optional actual iOS VoiceOver speech/focus checks (Xcode 27, local fixtures):
-scripts/test-voiceover.sh SIMULATOR_UDID /private/tmp/remotefiles-voiceover-run
-```
-
-The optional VoiceOver runner copies the project into its output directory and substitutes a local fixture entry point. It tests the current production reader/image views, records actual `XCUIVoiceOverService` utterances and screenshots, and restores the original Simulator VoiceOver enabled state after each test. Use a fresh output directory. It does not install on a physical phone or open external links. Simulator speech/focus checks do not establish touch gestures, rotor behaviour, Braille, or physical-device acceptance.
-
-Use the signed simulator test command for the actual Keychain tests: an unsigned simulator test host returns Keychain error `-34018`. The fixture launcher forwards its environment into iOS XCTest through `TEST_RUNNER_REMOTEFILES_*`; do not run the integration test command without the launcher and count skipped server tests as passed. `-collect-test-diagnostics never` avoids diagnostic collection unrelated to this bounded test run.
-
-The OpenSSH fixture binds loopback port 22222 (override `REMOTEFILES_TEST_PORT`), authorises only generated test keys in a temporary file, uses its own host keys/config, disables passwords/PAM, and cleans up on exit. It does not edit the Mac’s SSH configuration or existing keys. It runs under the current account, so tests intentionally touch only its generated fixture directory. Starting this fixture requires permission to run local loopback networking in restricted environments.
-
-See [PREVIEW_STATUS.md](PREVIEW_STATUS.md) for **actual** results and outstanding acceptance, [SSH_SPIKE.md](docs/SSH_SPIKE.md) for the dependency decision, [RENDERER_SPIKE.md](docs/RENDERER_SPIKE.md) for rendering evidence, and [ROADMAP.md](ROADMAP.md) for deferred scope. Citadel is vendored from an exact upstream commit with a narrow cancellation patch and original license; see [its provenance](Vendor/Citadel/UPSTREAM.md).
-
-## Renderer performance
-
-Textual is locally vendored at the original pinned revision with focused startup and reader accessibility fixes. [Provenance](Vendor/Textual/UPSTREAM.md) records the changes and license; [performance evidence](docs/READER_PERFORMANCE.md) records simulator and physical-iPhone measurements, tests, and remaining limits.
-
-### Document navigation and original export
-
-**Document actions → Find in Document** searches visible Markdown or plain text,
-highlights the current result, and offers previous/next navigation. Source mode
-searches the literal source; HTML/SVG offer **Find in Source**. Searches are local,
-case/diacritic insensitive and capped at 1,000 results. **Headings** lists parsed
-Markdown headings; same-document and relative-file `#heading` links jump to them.
-Repeated headings use suffixes such as `details-1`.
-
-Text readers remember separate Rendered and Source positions across launches.
-History stores coordinates and a content fingerprint, never document contents,
-for up to 200 connection/path pairs. Changed text starts at the top. Positions
-save after scrolling pauses and when leaving the reader or backgrounding; Demo
-does not write reading history. Pixel positions are approximate if the screen
-size or text settings change.
-
-Rendered Markdown can open relative Markdown/text/image/PDF/audio/video links within the
-connection’s canonical starting folder. Native Back keeps separate Rendered and
-Source reading positions. Missing headings and unsupported query links show an actionable explanation.
-See [document links](docs/DOCUMENT_LINKS.md).
-
-The reader’s **Save Original to Files** toolbar action streams the original file
-(up to 128 MiB), preserving exact bytes and the selected filename/extension. It
-works for files without a supported preview. Preparation can be cancelled; the
-native Files picker saves a copy. Temporary exports expire after ten minutes
-and are removed on dismissal, navigation away, disconnect or backgrounding.
-See [original export](docs/ORIGINAL_EXPORT.md).
-
-For repeatable verification of the current source, use
-[scripts/test-acceptance.py](scripts/test-acceptance.py) with an available iOS 27
-Simulator and a fresh evidence directory. It records the exact source snapshot,
-requires all macOS/OpenSSH, signed hosted/demo UI, actual VoiceOver and Release
-compile lanes, and reports missing tests or unexpected skips as failures.
-[Automated acceptance](docs/AUTOMATED_ACCEPTANCE.md) distinguishes these results
-from the physical-device and human checks that remain.
-
-### JSON and SVG previews
-
-Source lines wrap visually by default; **Document actions → Wrap Lines** turns
-wrapping off for horizontal scrolling and remembers your preference. Scroll
-indicators flash when opening an unwrapped source view. Very long lines and
-large documents always use a width-bounded, read-only TextKit view on iOS to
-avoid an oversized layout surface; the actions menu explains this limit.
-Selection, Copy Source and original export retain the original characters and
-bytes. The 2 MiB text limit still applies, and
-malformed JSON remains readable source rather than becoming an empty preview.
-
-SVG files have **Rendered / Source** modes. Rendering supports a static subset
-(paths, shapes, groups, gradients, local references and text) up to 512 KiB,
-10,000 elements and 64 levels. Unsupported, malformed or overly complex SVGs
-show a source-accessible explanation. Scripts, event handlers, animation,
-embedded images, HTML and external resources are rejected. Only reserialized,
-allowlisted SVG enters a nonpersistent WebKit view with content JavaScript
-disabled, a restrictive content security policy, all-resource blocking and
-external navigation denied. Source and Save Original do not use that rendering
-copy. SVG rendering does not fetch images, stylesheets, fonts or other files.
-
-Synthetic long-line JSON and SVG examples in Explore Demo support regression
-checks. Private user attachments and screenshots are not bundled or committed.
+- [Connections and security](docs/CONNECTIONS.md) — server setup, SSH keys, host trust, and local storage.
+- [Reader and previews](docs/READER.md) — supported formats, navigation, export, and limits.
+- [Build and test](docs/DEVELOPMENT.md) — development setup and reproducible checks.
+- [All documentation](docs/README.md) — feature guides, architecture notes, and acceptance evidence.
+- [Project status](PREVIEW_STATUS.md) · [Roadmap](ROADMAP.md) · [Contributor guide](AGENTS.md)
