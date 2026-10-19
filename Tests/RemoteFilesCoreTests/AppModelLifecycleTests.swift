@@ -121,6 +121,25 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
         XCTAssertNil(model.errorMessage)
         let disconnects = await service.disconnects; XCTAssertEqual(disconnects, 1)
     }
+    func testBreadcrumbsPopToAnExistingFolderAndPushOnlyNewOnes() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try AppModel(directory: directory, fileService: BackgroundExportService())
+        let id = UUID(), other = UUID()
+        let report = RemoteEntry(name: "report.md", path: "/Projects/Reports/report.md", kind: .file)
+        // The starting folder was requested as "." and canonicalized by its listing.
+        model.cache(FolderListing(DirectorySnapshot(path: "/Projects", entries: [])), id: id, requestedPath: ".")
+        let stack: [AppModel.Route] = [.folder(id, "."), .folder(other, "/Projects"), .folder(id, "/Projects/Reports"), .file(id, report)]
+        model.routes = stack
+        model.showFolder(id, path: "/Projects/Reports")
+        XCTAssertEqual(model.routes, Array(stack.prefix(3)), "An ancestor already in the stack is popped to")
+        model.showFolder(id, path: "/Projects")
+        XCTAssertEqual(model.routes, [.folder(id, ".")], "A canonical match pops past another connection's route")
+        model.showFolder(id, path: "/Projects")
+        XCTAssertEqual(model.routes, [.folder(id, ".")], "Choosing the current folder is a no-op")
+        model.showFolder(id, path: "/")
+        XCTAssertEqual(model.routes, [.folder(id, "."), .folder(id, "/")], "A folder not in the stack is pushed")
+    }
     func testBackgroundPreservesNestedRoutesWhileExplicitDisconnectClearsThem() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

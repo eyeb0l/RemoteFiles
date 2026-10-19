@@ -182,6 +182,16 @@ final class AppModel {
         sheet = nil
         await disconnect()
     }
+    /// Breadcrumb navigation: pop back to a folder already in the stack instead of pushing a
+    /// duplicate. A route may hold a non-canonical request such as ".", so its cached listing's
+    /// canonical path also counts as a match.
+    func showFolder(_ id: UUID, path: String) {
+        let existing = routes.lastIndex { route in
+            guard case .folder(let routeID, let requested) = route, routeID == id else { return false }
+            return requested == path || cachedListing(id, path: requested)?.path == path
+        }
+        if let existing { routes.removeSubrange((existing + 1)...) } else { routes.append(.folder(id, path)) }
+    }
     func clearCaches() { directories.removeAll(); documents.removeAll(); directoryOrder.removeAll(); documentOrder.removeAll() }
     private func key(_ id: UUID, _ path: String) -> String { "\(id.uuidString):\(path)" }
     func cachedListing(_ id: UUID, path: String) -> FolderListing? { directories[key(id, path)] }
