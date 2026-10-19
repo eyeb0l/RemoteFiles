@@ -277,6 +277,39 @@ final class RemoteResourceTests: XCTestCase {
         let listed = await service.listings
         XCTAssertEqual(listed, 0, "Image resolution must not download/list sibling directories")
     }
+    func testStaleCopyRevalidatesWithMetadataBeforeTransferringAgain() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = VersionedResourceTransportMock()
+        let resolver = RemoteResourceResolver(service: service, directory: dir, freshness: 0)
+        let doc = location
+        let first = try await resolver.localFile(for: "a.png", in: doc)
+        let unchanged = try await resolver.localFile(for: "a.png", in: doc)
+        XCTAssertEqual(unchanged, first)
+        XCTAssertEqual(try Data(contentsOf: unchanged), Data("version one".utf8))
+        var downloads = await service.downloads, lookups = await service.lookups
+        XCTAssertEqual(downloads, 1, "A matching size and modification time must reuse the cached bytes")
+        XCTAssertEqual(lookups, 1)
+        await service.update(Data("version two".utf8), modifiedAt: Date(timeIntervalSince1970: 2_000))
+        let changed = try await resolver.localFile(for: "a.png", in: doc)
+        XCTAssertEqual(try Data(contentsOf: changed), Data("version two".utf8))
+        downloads = await service.downloads; lookups = await service.lookups
+        XCTAssertEqual(downloads, 2)
+        XCTAssertEqual(lookups, 2)
+    }
+    func testRevalidationDownloadsWhenMetadataPointsOutsideDocumentFolder() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = VersionedResourceTransportMock()
+        let resolver = RemoteResourceResolver(service: service, directory: dir, freshness: 0)
+        let doc = location
+        _ = try await resolver.localFile(for: "a.png", in: doc)
+        // Same size and time, but the link now resolves elsewhere: only a full download rechecks the boundary.
+        await service.redirectLookups(to: "/etc/a.png")
+        _ = try await resolver.localFile(for: "a.png", in: doc)
+        let downloads = await service.downloads
+        XCTAssertEqual(downloads, 2)
+    }
     func testLastWaiterCancelsTransferAndCanRetry() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -490,5 +523,28 @@ private actor ScopedResourceTransportMock: RemoteFileService {
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
     func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.unsupportedFile }
+    func disconnect() async {}
+}
+
+private actor VersionedResourceTransportMock: RemoteFileService {
+    private var bytes = Data("version one".utf8)
+    private var modifiedAt = Date(timeIntervalSince1970: 1_000)
+    private var lookupPath: String?
+    private(set) var downloads = 0
+    private(set) var lookups = 0
+    func update(_ value: Data, modifiedAt date: Date) { bytes = value; modifiedAt = date }
+    func redirectLookups(to path: String) { lookupPath = path }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
+        lookups += 1
+        let canonical = lookupPath ?? path
+        return .init(name: RemotePath.name(of: canonical), path: canonical, kind: .file, size: UInt64(bytes.count), modifiedAt: modifiedAt)
+    }
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
+        downloads += 1
+        try bytes.write(to: destination)
+        return .init(name: RemotePath.name(of: path), path: path, kind: .file, size: UInt64(bytes.count), modifiedAt: modifiedAt)
+    }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
     func disconnect() async {}
 }

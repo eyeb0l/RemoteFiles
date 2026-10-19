@@ -92,6 +92,8 @@ public extension RemoteResourceResolving {
 }
 
 /// Disk bytes only: 256 MiB LRU, 24-hour retention, 5-minute freshness, 128 MiB per file.
+/// After the freshness window, a copy whose remote size and modification time still match is
+/// revalidated with one metadata request instead of being transferred again.
 /// At most two streaming transfers. A flight owns multiple cancellable consumers; the last
 /// consumer leaving cancels that flight. The transport owns its SFTP operation channel.
 public actor RemoteResourceResolver: RemoteResourceResolving {
@@ -238,6 +240,19 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
             await report(.init(receivedBytes: size, totalBytes: size, isComplete: true), key: flightKey, id: id)
             try Task.checkCancellation()
             if generations[key] == generation, fm.fileExists(atPath: target.path) { return target }
+        } else if let cached = Self.storedVersion(at: target),
+                  let current = try? await service.resolveEntry(profile: document.profile, path: path),
+                  current.kind == .file, RemoteResourcePath.contains(current.path, in: document.resourceRoot),
+                  RemoteFileVersion(size: current.size, modifiedAt: current.modifiedAt) == cached {
+            // A canonical path outside the non-canonical root simply downloads, which rechecks the boundary.
+            try Task.checkCancellation()
+            if generations[key] == generation, fm.fileExists(atPath: target.path) {
+                try? fm.setAttributes([.modificationDate: Date(), .creationDate: Date()], ofItemAtPath: target.path)
+                let size = (try? fm.attributesOfItem(atPath: target.path)[.size] as? NSNumber)?.uint64Value ?? 0
+                await report(.init(receivedBytes: size, totalBytes: size, isComplete: true), key: flightKey, id: id)
+                try Task.checkCancellation()
+                return target
+            }
         }
         while transfers >= 2 { try await Task.sleep(for: .milliseconds(25)) }
         try Task.checkCancellation()
@@ -245,11 +260,12 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         defer { transfers -= 1 }
         let temp = directory.appendingPathComponent(UUID().uuidString + ".partial")
         defer { try? fm.removeItem(at: temp) }
+        let downloaded: RemoteEntry
         do {
-            _ = try await service.downloadFile(profile: document.profile, path: path, allowedRoot: document.resourceRoot,
-                                               destination: temp, limit: fileLimit, progress: { update in
-                                                   await self.report(update, key: flightKey, id: id)
-                                               })
+            downloaded = try await service.downloadFile(profile: document.profile, path: path, allowedRoot: document.resourceRoot,
+                                                        destination: temp, limit: fileLimit, progress: { update in
+                                                            await self.report(update, key: flightKey, id: id)
+                                                        })
         } catch RemoteFileError.notFound {
             throw RemoteResourceError.missingFile(path)
         }
@@ -262,12 +278,37 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
             directory.appendingPathComponent(key + "-" + id.uuidString).appendingPathExtension("resource")
         try? fm.removeItem(at: destination)
         trim(reserving: size)
+        if let version = RemoteFileVersion(size: downloaded.size, modifiedAt: downloaded.modifiedAt) {
+            Self.storeVersion(version, at: temp)
+        }
         try fm.moveItem(at: temp, to: destination)
         #if os(iOS)
         try? fm.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: destination.path)
         #endif
         return destination
     }
+    private static let versionAttribute = "dev.iris.RemoteFiles.remote-version"
+
+    /// The remote version travels with the cached file as an extended attribute, so a rename keeps it.
+    private static func storeVersion(_ version: RemoteFileVersion, at url: URL) {
+        let value = Array("\(version.size) \(version.modifiedAt.timeIntervalSince1970)".utf8)
+        _ = url.withUnsafeFileSystemRepresentation { path in
+            setxattr(path, versionAttribute, value, value.count, 0, 0)
+        }
+    }
+
+    private static func storedVersion(at url: URL) -> RemoteFileVersion? {
+        var buffer = [UInt8](repeating: 0, count: 64)
+        let length = url.withUnsafeFileSystemRepresentation { path -> Int in
+            guard let path else { return -1 }
+            return getxattr(path, versionAttribute, &buffer, buffer.count, 0, 0)
+        }
+        guard length > 0 else { return nil }
+        let fields = String(decoding: buffer.prefix(length), as: UTF8.self).split(separator: " ")
+        guard fields.count == 2, let size = UInt64(fields[0]), let seconds = Double(fields[1]) else { return nil }
+        return RemoteFileVersion(size: size, modifiedAt: Date(timeIntervalSince1970: seconds))
+    }
+
     private func trim(reserving size: Int) {
         let fm = FileManager.default
         let urls = (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []

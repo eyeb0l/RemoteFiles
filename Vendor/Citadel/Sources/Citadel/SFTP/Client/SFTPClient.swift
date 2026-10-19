@@ -170,18 +170,8 @@ public final class SFTPClient: Sendable {
         }
         
         var names = [SFTPMessage.Name]()
-        var response = try await sendRequest(
-            .readdir(
-                .init(
-                    requestId: self.allocateRequestId(),
-                    handle: handle.handle
-                )
-            )
-        )
-        
-        while case .name(let name) = response {
-            names.append(name)
-            response = try await sendRequest(
+        do {
+            var response = try await sendRequest(
                 .readdir(
                     .init(
                         requestId: self.allocateRequestId(),
@@ -189,8 +179,28 @@ public final class SFTPClient: Sendable {
                     )
                 )
             )
+
+            while case .name(let name) = response {
+                names.append(name)
+                response = try await sendRequest(
+                    .readdir(
+                        .init(
+                            requestId: self.allocateRequestId(),
+                            handle: handle.handle
+                        )
+                    )
+                )
+            }
+        } catch {
+            _ = try? await sendRequest(.closeFile(.init(requestId: self.allocateRequestId(), handle: handle.handle)))
+            throw error
         }
-        
+
+        // RemoteFiles: close the directory handle so a reused SFTP channel does not accumulate handles.
+        guard case .status = try await sendRequest(.closeFile(.init(requestId: self.allocateRequestId(), handle: handle.handle))) else {
+            throw SFTPError.invalidResponse
+        }
+
         return names
     }
     

@@ -40,8 +40,11 @@ Every reader route owns separate Rendered and Source scroll coordinates.
 `ScrollPosition` and `onScrollGeometryChange` restore those coordinates after
 push/back, mode changes and content remounts. Restoration waits for the rendered
 text geometry instead of treating Textual's initial empty layout as the saved
-position. Returning to an unchanged reader does not refetch its text; Refresh or
-a new connection session still reloads it. Reading coordinates are additionally
+position. Returning to an unchanged reader does not refetch its text. Reopening a
+cached document, returning to the foreground or unlocking a key first compares the
+remote size and modification time with the displayed copy, and transfers the text
+only when they differ. Root confinement is still checked before that comparison.
+SFTP times have one-second resolution, so **Refresh** always reads the full file. Reading coordinates are additionally
 saved in a separate bounded, atomic, protected history file after a 600 ms pause
 and on leaving/backgrounding. A content fingerprint prevents restoring an old
 offset into changed text. Demo never writes this history. Deleting a connection

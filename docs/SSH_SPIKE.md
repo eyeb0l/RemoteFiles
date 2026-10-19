@@ -21,15 +21,22 @@ algorithm defaults were changed. Deprecated algorithm collections are never enab
 The unused upstream example/test targets and example-only ColorizeSwift dependency were
 removed from the vendored package manifest.
 
-Citadel's directory helper also leaves its directory handle open. The adapter scopes each
-operation to an SFTP child channel and closes that channel when complete, releasing remote
-handles while reusing the authenticated SSH connection. This avoids growing handle use
-without patching the SFTP protocol implementation. The application only exposes realpath,
-stat, readdir, and read operations; it does not issue remote writes or shell commands.
+Upstream Citadel's directory helper leaves its directory handle open. The vendored copy now
+closes it (see [source provenance](../Vendor/Citadel/UPSTREAM.md)), so listings, metadata and
+document reads share one SFTP channel per SSH session instead of paying the channel-open,
+subsystem and version round trips on every operation. A cancelled caller returns immediately
+while its operation drains the in-flight request and closes its handles. Any failed or
+cancelled operation retires the shared channel once its other users finish; the next operation
+opens a fresh one. Image, media and export transfers keep their own child channel, closed on
+completion, cancellation or timeout, so bulk reads never queue ahead of browsing requests.
+The application only exposes realpath, stat, readdir, and read operations; it does not issue
+remote writes or shell commands.
 
-Citadel's `readAll` trusts the initial stat size. The adapter instead reads in up-to-64 KiB
-chunks, applies the configured limit to every response, and probes one byte beyond the limit
-to detect growth. It closes the SFTP channel on error/cancellation. An explicit 15-second
+Citadel's `readAll` trusts the initial stat size. The adapter instead keeps up to eight 64 KiB
+reads in flight (sixteen for transfers), delivers bytes strictly in file order, applies the
+configured limit to every response, and probes one byte beyond the limit to detect growth. A
+short read is treated as a gap to fill, not EOF; once a filled gap confirms the server's
+maximum read size, later requests use that size. An explicit 15-second
 operation deadline bounds connection/list/read operations; the dependency also has a
 10-second login timeout. Requests reuse an existing SSH connection without automatic
 reconnect loops. A deliberate next request reconnects if the connection has ended.

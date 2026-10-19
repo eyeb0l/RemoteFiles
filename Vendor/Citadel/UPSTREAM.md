@@ -28,3 +28,9 @@ unknown/changed host rejection, password-disabled refusal without key writes, an
 password-offer and rejected-password transitions. This does not change server authentication settings.
 The synchronized `hasOfferedPassword` flag lets the installer also refuse a connection that
 authenticates using the discovery `none` offer alone, before any remote command is executed.
+
+`Sources/Citadel/SFTP/Client/SFTPClient.swift` makes `listDirectory` send `SSH_FXP_CLOSE` for its directory
+handle after the final `readdir` (and best-effort when a `readdir` fails). Upstream leaves the handle open,
+which forced RemoteFiles to open a fresh SFTP channel per operation. With the handle closed, RemoteFiles
+reuses one SFTP channel per SSH session for listings, metadata and document reads. A non-`ok` close status
+fails the listing, so the caller retires that channel instead of reusing it.

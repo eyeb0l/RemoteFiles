@@ -4,9 +4,11 @@ import Foundation
 /// all its waiters observe cancellation, and the next explicit request starts fresh work.
 public actor CoalescingFileService: RemoteFileService {
     private struct Key: Hashable { let profile: ConnectionProfile; let path: String; let limit: Int }
+    private struct VersionedKey: Hashable { let read: Key; let allowedRoot: String?; let since: RemoteFileVersion? }
     private let base: any RemoteFileService
     private var lists: [Key: (UUID, Task<DirectorySnapshot, Error>)] = [:]
     private var reads: [Key: (UUID, Task<Data, Error>)] = [:]
+    private var versionedReads: [VersionedKey: (UUID, Task<RemoteFileRead, Error>)] = [:]
     public init(base: any RemoteFileService) { self.base = base }
     public func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
         try Task.checkCancellation()
@@ -26,6 +28,16 @@ public actor CoalescingFileService: RemoteFileService {
         let task = Task { try await base.readFile(profile: profile, path: path, limit: limit) }
         reads[key] = (id, task)
         defer { if reads[key]?.0 == id { reads[key] = nil } }
+        return try await waiting(task)
+    }
+    public func readFileIfChanged(profile: ConnectionProfile, path: String, allowedRoot: String?, limit: Int, since: RemoteFileVersion?) async throws -> RemoteFileRead {
+        try Task.checkCancellation()
+        let key = VersionedKey(read: Key(profile: profile, path: path, limit: limit), allowedRoot: allowedRoot, since: since)
+        if let (_, task) = versionedReads[key], !task.isCancelled { return try await waiting(task) }
+        let id = UUID()
+        let task = Task { try await base.readFileIfChanged(profile: profile, path: path, allowedRoot: allowedRoot, limit: limit, since: since) }
+        versionedReads[key] = (id, task)
+        defer { if versionedReads[key]?.0 == id { versionedReads[key] = nil } }
         return try await waiting(task)
     }
     private func waiting<T: Sendable>(_ task: Task<T, Error>) async throws -> T {
@@ -63,7 +75,8 @@ public actor CoalescingFileService: RemoteFileService {
     }
     public func disconnect() async {
         lists.values.forEach { $0.1.cancel() }; reads.values.forEach { $0.1.cancel() }
-        lists.removeAll(); reads.removeAll()
+        versionedReads.values.forEach { $0.1.cancel() }
+        lists.removeAll(); reads.removeAll(); versionedReads.removeAll()
         await base.disconnect()
     }
 }

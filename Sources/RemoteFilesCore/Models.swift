@@ -47,6 +47,22 @@ public struct RemoteEntry: Identifiable, Hashable, Sendable {
     }
 }
 
+/// Size and modification time observed when a file's bytes were read. SFTP v3 reports whole
+/// seconds, so a same-size rewrite within one second looks unchanged; explicit refreshes always read.
+public struct RemoteFileVersion: Hashable, Sendable {
+    public let size: UInt64
+    public let modifiedAt: Date
+    public init?(size: UInt64?, modifiedAt: Date?) {
+        guard let size, let modifiedAt else { return nil }
+        self.size = size; self.modifiedAt = modifiedAt
+    }
+}
+
+public enum RemoteFileRead: Sendable {
+    case unchanged
+    case contents(Data, RemoteFileVersion?)
+}
+
 public struct DirectorySnapshot: Sendable {
     public let path: String
     public let entries: [RemoteEntry]
@@ -69,6 +85,9 @@ public protocol RemoteFileService: Sendable {
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data
     func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry
     func readDocumentFile(profile: ConnectionProfile, path: String, allowedRoot: String, limit: Int) async throws -> Data
+    /// Returns `.unchanged` without transferring bytes when `since` still matches the file.
+    /// A non-nil `allowedRoot` applies the same canonical confinement as `readDocumentFile`.
+    func readFileIfChanged(profile: ConnectionProfile, path: String, allowedRoot: String?, limit: Int, since: RemoteFileVersion?) async throws -> RemoteFileRead
     func resolveDocumentLink(profile: ConnectionProfile, documentPath: String, reference: String) async throws -> RemoteEntry
     func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry
     func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry
@@ -87,6 +106,13 @@ public extension RemoteFileService {
     }
     func readDocumentFile(profile: ConnectionProfile, path: String, allowedRoot: String, limit: Int) async throws -> Data {
         throw RemoteFileError.unsupportedFile
+    }
+    /// Adapters without file versions always transfer the bytes.
+    func readFileIfChanged(profile: ConnectionProfile, path: String, allowedRoot: String?, limit: Int, since: RemoteFileVersion?) async throws -> RemoteFileRead {
+        if let allowedRoot {
+            return .contents(try await readDocumentFile(profile: profile, path: path, allowedRoot: allowedRoot, limit: limit), nil)
+        }
+        return .contents(try await readFile(profile: profile, path: path, limit: limit), nil)
     }
     /// Adapters must opt in with canonical connection-root confinement.
     func resolveDocumentLink(profile: ConnectionProfile, documentPath: String, reference: String) async throws -> RemoteEntry {

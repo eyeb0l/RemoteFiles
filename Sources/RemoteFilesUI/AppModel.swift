@@ -50,7 +50,7 @@ final class AppModel {
     private var disconnectWork: Task<Void, Never>?
     private var realMetadata = AppMetadata()
     private var directories: [String: FolderListing] = [:]
-    private var documents: [String: Data] = [:]
+    private var documents: [String: (bytes: Data, version: RemoteFileVersion?)] = [:]
     private var directoryOrder: [String] = []
     private var documentOrder: [String] = []
 
@@ -184,11 +184,13 @@ final class AppModel {
         directories[k] = value; directoryOrder.removeAll { $0 == k }; directoryOrder.append(k)
         while directoryOrder.count > 10 { directories.removeValue(forKey: directoryOrder.removeFirst()) }
     }
-    func cachedDocument(_ id: UUID, path: String) -> Data? { documents[key(id, path)] }
-    func cache(_ value: Data, id: UUID, path: String) {
+    func cachedDocument(_ id: UUID, path: String) -> Data? { documents[key(id, path)]?.bytes }
+    /// The remote version the cached bytes were read at, when the transport reports one.
+    func cachedDocumentVersion(_ id: UUID, path: String) -> RemoteFileVersion? { documents[key(id, path)]?.version }
+    func cache(_ value: Data, version: RemoteFileVersion? = nil, id: UUID, path: String) {
         let k = key(id, path)
-        documents[k] = value; documentOrder.removeAll { $0 == k }; documentOrder.append(k)
-        while documentOrder.count > 4 || documents.values.reduce(0, { $0 + $1.count }) > 6 * 1024 * 1024 {
+        documents[k] = (value, version); documentOrder.removeAll { $0 == k }; documentOrder.append(k)
+        while documentOrder.count > 4 || documents.values.reduce(0, { $0 + $1.bytes.count }) > 6 * 1024 * 1024 {
             documents.removeValue(forKey: documentOrder.removeFirst())
         }
     }
