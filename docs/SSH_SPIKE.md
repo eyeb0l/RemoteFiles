@@ -5,6 +5,13 @@ Citadel is retained behind `SFTPRemoteFileService`. Its exact upstream source re
 `Vendor/Citadel` with two small connection-lifecycle patches recorded in `UPSTREAM.md`.
 Transitive dependency versions are recorded in the checked-in package resolution files.
 
+The SSH protocol implementation is `NIOSSH` from `github.com/Wellz26/swift-nio-ssh`, a GitHub fork of
+`Joannis/swift-nio-ssh`. Upstream Citadel depends on this fork
+with a `0.3.4..<0.4.0` range. Because this package handles host-key verification and authentication, the
+root manifest pins the exact revision `d88989f3d3bb1dfb2a38ce4af598afbf7fc3095c`, which the fork's
+annotated `0.3.7` tag pointed to when checked on 19 October 2026. A dependency update, or a retargeted
+tag, cannot change this code without an explicit, reviewable manifest change.
+
 ## Why the local patch exists
 
 The upstream `SSHClient.connect(on:settings:)` route crashed a real OpenSSH test at

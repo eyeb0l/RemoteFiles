@@ -159,10 +159,15 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         // original boundary and canonical server check; this is not a bypass.
         return try await localFile(for: reference, in: document)
     }
+    /// Keys on what determines the bytes: the account that read them and the remote location.
+    /// Renaming a connection or editing its starting folder keeps its cached resources, while a
+    /// different endpoint, account or identity never shares them. JSON keeps fields unambiguous.
     private func cacheKey(path: String, document: RemoteDocumentLocation) throws -> String {
-        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
-        let data = try encoder.encode(document.profile)
-        return SHA256.hash(data: data + Data(("\n" + document.resourceRoot + "\n" + path).utf8)).map { String(format: "%02x", $0) }.joined()
+        let profile = document.profile
+        let endpoint = HostEndpoint(host: profile.host, port: profile.port)
+        let fields = [endpoint.host, String(endpoint.port), profile.username, profile.identityID.uuidString,
+                      document.resourceRoot, path]
+        return SHA256.hash(data: try JSONEncoder().encode(fields)).map { String(format: "%02x", $0) }.joined()
     }
     public func invalidate(_ reference: String, in document: RemoteDocumentLocation) {
         _ = invalidateResources([reference], in: document)

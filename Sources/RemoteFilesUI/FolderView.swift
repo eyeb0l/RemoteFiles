@@ -143,10 +143,10 @@ struct FolderView: View {
         HStack {
             Menu {
                 let components = path.split(separator: "/")
-                Button("/", systemImage: "externaldrive") { model.routes.append(.folder(profile.id, "/")) }
+                Button("/", systemImage: "externaldrive") { model.showFolder(profile.id, path: "/") }
                 ForEach(0..<components.count, id: \.self) { index in
                     let ancestor = "/" + components.prefix(index + 1).joined(separator: "/")
-                    Button(ancestor) { model.routes.append(.folder(profile.id, ancestor)) }
+                    Button(ancestor) { model.showFolder(profile.id, path: ancestor) }
                 }
             } label: {
                 Label(path, systemImage: "folder").font(.caption).lineLimit(1).truncationMode(.middle)

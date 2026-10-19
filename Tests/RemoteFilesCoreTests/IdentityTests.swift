@@ -106,6 +106,31 @@ final class IdentityTests: XCTestCase {
     }
 
     #if os(iOS)
+    func testTrustStoreWritesUseCompleteFileProtection() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("known-hosts-v1.json")
+        let store = try HostTrustStore(fileURL: url)
+        let endpoint = HostEndpoint(host: "protected.example", port: 22)
+        let key = try HostKeyDetails(publicKey: NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey)
+        func protection(_ file: URL = url) throws -> FileProtectionType? {
+            try FileManager.default.attributesOfItem(atPath: file.path)[.protectionKey] as? FileProtectionType
+        }
+        // The Simulator's filesystem reports no Data Protection class even for explicitly protected
+        // writes, so this assertion is only meaningful on a physical device.
+        let control = folder.appendingPathComponent("control")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("control".utf8).write(to: control, options: [.atomic, .completeFileProtection])
+        guard try protection(control) != nil else {
+            throw XCTSkip("This platform does not report Data Protection classes; run on a physical device.")
+        }
+        try await store.trustUnknown(endpoint: endpoint, key: key)
+        XCTAssertEqual(try protection(), .complete)
+        // Reset rewrites the file atomically, which must not drop the protection class.
+        try await store.reset(endpoint: endpoint)
+        XCTAssertEqual(try protection(), .complete)
+    }
+
     func testDeviceKeychainPersistenceAndAccessibility() async throws {
         let service = "app.remotefiles.tests." + UUID().uuidString
         let secrets = KeychainIdentitySecretStore(service: service)

@@ -88,6 +88,12 @@ final class AppModel {
         }
         await persist()
     }
+    /// Forgets the trusted key of the saved endpoint, never unsaved edits in the connection form.
+    func resetTrust(for profile: ConnectionProfile) async {
+        await disconnect()
+        do { try await trust.reset(endpoint: HostEndpoint(host: profile.host, port: profile.port)) }
+        catch { errorMessage = error.localizedDescription }
+    }
     func addIdentity(_ value: IdentityMetadata) async throws {
         guard !demo else { throw RemoteFileError.unavailable("Leave Demo before saving keys.") }
         var candidate = metadata
@@ -175,6 +181,16 @@ final class AppModel {
     func background() async {
         sheet = nil
         await disconnect()
+    }
+    /// Breadcrumb navigation: pop back to a folder already in the stack instead of pushing a
+    /// duplicate. A route may hold a non-canonical request such as ".", so its cached listing's
+    /// canonical path also counts as a match.
+    func showFolder(_ id: UUID, path: String) {
+        let existing = routes.lastIndex { route in
+            guard case .folder(let routeID, let requested) = route, routeID == id else { return false }
+            return requested == path || cachedListing(id, path: requested)?.path == path
+        }
+        if let existing { routes.removeSubrange((existing + 1)...) } else { routes.append(.folder(id, path)) }
     }
     func clearCaches() { directories.removeAll(); documents.removeAll(); directoryOrder.removeAll(); documentOrder.removeAll() }
     private func key(_ id: UUID, _ path: String) -> String { "\(id.uuidString):\(path)" }

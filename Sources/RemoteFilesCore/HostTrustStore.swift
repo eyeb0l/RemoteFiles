@@ -102,6 +102,12 @@ public actor HostTrustStore {
             .sorted { ($0.endpoint.host, $0.endpoint.port) < ($1.endpoint.host, $1.endpoint.port) }
         let bytes = try JSONEncoder().encode(Document(version: 1, records: records))
         try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        #if os(iOS)
+        // Matches the library: trust is read at launch and written on acceptance, both while unlocked.
+        try bytes.write(to: fileURL, options: [.atomic, .completeFileProtection])
+        #else
+        // iOS Data Protection is not supported by the macOS test host's filesystem.
         try bytes.write(to: fileURL, options: .atomic)
+        #endif
     }
 }
