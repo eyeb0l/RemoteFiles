@@ -163,15 +163,24 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(image.waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertTrue(app.activityIndicators.firstMatch.waitForNonExistence(timeout: 20), app.debugDescription)
         XCTAssertTrue(image.exists && image.isHittable, app.debugDescription)
-        let pixels = try XCTUnwrap(app.screenshot().image.cgImage)
-        let width = pixels.width, height = pixels.height
-        var bytes = [UInt8](repeating: 0, count: width * height * 4)
-        let context = try XCTUnwrap(CGContext(data: &bytes, width: width, height: height, bitsPerComponent: 8,
-            bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue))
-        context.draw(pixels, in: CGRect(x: 0, y: 0, width: width, height: height))
-        let purple = stride(from: width * (height / 4) * 4, to: width * (height * 3 / 4) * 4, by: 4).filter {
-            bytes[$0+2] > 180 && bytes[$0] > 60 && bytes[$0] < 180 && bytes[$0+1] < 120
-        }.count
+        // WebKit can expose the element before its first paint, so sample until the SVG is visible.
+        func purplePixels() throws -> Int {
+            let pixels = try XCTUnwrap(app.screenshot().image.cgImage)
+            let width = pixels.width, height = pixels.height
+            var bytes = [UInt8](repeating: 0, count: width * height * 4)
+            let context = try XCTUnwrap(CGContext(data: &bytes, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.draw(pixels, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return stride(from: width * (height / 4) * 4, to: width * (height * 3 / 4) * 4, by: 4).filter {
+                bytes[$0+2] > 180 && bytes[$0] > 60 && bytes[$0] < 180 && bytes[$0+1] < 120
+            }.count
+        }
+        var purple = try purplePixels()
+        let paintDeadline = Date().addingTimeInterval(10)
+        while purple <= 5_000, Date() < paintDeadline {
+            Thread.sleep(forTimeInterval: 0.25)
+            purple = try purplePixels()
+        }
         XCTAssertGreaterThan(purple, 5_000, "Wait for visible SVG pixels, not just a WebKit accessibility element")
         attachScreenshot("SVG rendered image")
         app.buttons["Source"].tap()
