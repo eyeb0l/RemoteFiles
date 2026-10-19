@@ -32,8 +32,9 @@ authenticates using the discovery `none` offer alone, before any remote command 
 `Sources/Citadel/SFTP/Client/SFTPClient.swift` makes `listDirectory` send `SSH_FXP_CLOSE` for its directory
 handle after the final `readdir` (and best-effort when a `readdir` fails). Upstream leaves the handle open,
 which forced RemoteFiles to open a fresh SFTP channel per operation. With the handle closed, RemoteFiles
-reuses one SFTP channel per SSH session for listings, metadata and document reads. A non-`ok` close status
-fails the listing, so the caller retires that channel instead of reusing it.
+reuses one SFTP channel per SSH session for listings, metadata and document reads. Any close status other
+than `ok` (including `eof`, which the inbound handler otherwise passes through) fails the listing, so the
+caller retires that channel instead of reusing it.
 
 The same method gains an optional `resolvingPath` argument (default `true`, the upstream behaviour).
 Upstream repeats `realpath` until the path stops changing, which costs at least one round trip even for

@@ -200,8 +200,12 @@ public final class SFTPClient: Sendable {
         }
 
         // RemoteFiles: close the directory handle so a reused SFTP channel does not accumulate handles.
-        guard case .status = try await sendRequest(.closeFile(.init(requestId: self.allocateRequestId(), handle: handle.handle))) else {
+        // The inbound handler passes `.eof` statuses through as responses, so require `.ok` explicitly.
+        guard case .status(let status) = try await sendRequest(.closeFile(.init(requestId: self.allocateRequestId(), handle: handle.handle))) else {
             throw SFTPError.invalidResponse
+        }
+        guard status.errorCode == .ok else {
+            throw SFTPError.errorStatus(status)
         }
 
         return names
