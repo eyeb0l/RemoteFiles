@@ -31,12 +31,22 @@ public actor SFTPRemoteFileService: RemoteFileService {
 
     public func metrics() -> TransportMetrics { measurements }
 
+    /// Most READDIR requests a listing keeps in flight. OpenSSH answers up to 100 names each, so
+    /// eight keep its sequential server busy across a cellular round trip.
+    static let directoryReadWindow = 8
+
     public func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
         let started = Date()
         let session = try await session(for: profile)
         let result = try await perform(session: session) { sftp in
-            let canonical = try await sftp.getRealPath(atPath: Self.validated(path))
-            let groups = try await sftp.listDirectory(atPath: canonical, resolvingPath: false)
+            // REALPATH and OPENDIR go out together, saving a round trip; the server resolves both from the
+            // same path. If REALPATH fails, the cancelled listing still drains and closes its handle.
+            let requested = try Self.validated(path)
+            async let resolved = sftp.getRealPath(atPath: requested)
+            async let listed = sftp.listDirectory(atPath: requested, resolvingPath: false,
+                                                  concurrentReads: Self.directoryReadWindow)
+            let canonical = try await resolved
+            let groups = try await listed
             let entries = groups.flatMap(\.components).filter {
                 $0.filename != "." && $0.filename != ".."
             }.map { component in

@@ -398,6 +398,64 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(metrics.sftpChannels, 2)
     }
 
+    func testPipelinedListingIsCompleteInServerOrderAndAlwaysClosesItsHandle() async throws {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Pipelined listing")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        defer { Task { await service.disconnect() } }
+        let folder = fixture.files + "/thousand"
+        // OpenSSH answers at most 100 names per READDIR, so this listing pipelines eleven reads.
+        let expected = try Self.directoryOrder(folder)
+        XCTAssertEqual(expected.count, 1000)
+        for _ in 0..<5 {
+            let listing = try await service.listDirectory(profile: profile, path: fixture.directory + "/root-alias/thousand")
+            XCTAssertEqual(listing.path, folder, "Entries are reported under the canonical path")
+            XCTAssertEqual(listing.entries.map(\.name), expected, "Every name once, in the server's readdir order")
+            XCTAssertEqual(listing.entries.first?.path, folder + "/" + expected[0])
+        }
+        XCTAssertEqual(try Self.openDescriptors(on: folder), 0)
+
+        let locked = fixture.files + "/locked"
+        try FileManager.default.createDirectory(atPath: locked, withIntermediateDirectories: false, attributes: [.posixPermissions: 0])
+        defer { try? FileManager.default.removeItem(atPath: locked) }
+        do {
+            _ = try await service.listDirectory(profile: profile, path: locked)
+            XCTFail("An unreadable folder must fail after its path resolves")
+        } catch RemoteFileError.unavailable(let message) { XCTAssertTrue(message.contains("Permission denied")) }
+        do {
+            _ = try await service.listDirectory(profile: profile, path: fixture.files + "/missing-folder")
+            XCTFail("A missing folder must fail")
+        } catch RemoteFileError.notFound { }
+        do {
+            _ = try await service.listDirectory(profile: profile, path: fixture.files + "/report.md")
+            XCTFail("A file cannot be listed")
+        } catch { XCTAssertFalse(error is CancellationError) }
+        let empty = try await service.listDirectory(profile: profile, path: fixture.files + "/empty")
+        XCTAssertTrue(empty.entries.isEmpty)
+        let again = try await service.listDirectory(profile: profile, path: folder)
+        XCTAssertEqual(again.entries.map(\.name), expected)
+        XCTAssertEqual(try Self.openDescriptors(on: folder), 0)
+        XCTAssertEqual(try Self.openDescriptors(on: fixture.files + "/empty"), 0)
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.connections, 1)
+    }
+
+    /// Names in local `readdir` order, the order OpenSSH's sftp-server reads the same folder in.
+    private static func directoryOrder(_ path: String) throws -> [String] {
+        guard let directory = opendir(path) else { throw POSIXError(.ENOENT) }
+        defer { closedir(directory) }
+        var names: [String] = []
+        while let entry = readdir(directory) {
+            let name = withUnsafeBytes(of: entry.pointee.d_name) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+            if name != "." && name != ".." { names.append(name) }
+        }
+        return names
+    }
+
     /// Descriptors any process holds on `path`; only the fixture's sftp-server opens this folder.
     private static func openDescriptors(on path: String) throws -> Int {
         let process = Process()

@@ -40,6 +40,29 @@ A listing canonicalizes its path once and skips Citadel's repeated `realpath`, s
 trip per folder. The application only exposes realpath, stat, readdir, and read operations; it
 does not issue remote writes or shell commands.
 
+Listings used to cost one round trip per request: `realpath`, `opendir`, one `readdir` per batch, a
+final `readdir` for EOF and `close`. OpenSSH's sftp-server returns at most 100 names per `readdir`, and
+on this Mac each full batch also costs about 25–35 ms of server time (an `lstat` and `ls -l` line per
+entry), so 1,000 entries took 14 sequential round trips plus that server time. Now `realpath` and
+`opendir` on the requested path go out together, eight `readdir` requests stay in flight, and `close`
+follows the last of them without waiting. Any folder within one batch takes three round trips instead of
+five, and a large folder is paced by the server instead of the RTT. The server resolves both opening
+requests from the same path back to back; a symlink swapped between them could label a listing with its
+previous target, as could a swap during the full round trip between the old sequential requests.
+Pipelining does not rely on the server answering one handle's requests in order, which SFTP v3 does not
+promise; see the [provenance](../Vendor/Citadel/UPSTREAM.md) for the EOF, error and cancellation rules.
+Interleaved runs of `scripts/benchmark-latency.sh` (median of seven, two rounds each) against the
+revision before this change measured:
+
+| Operation | 40 ms RTT before → after | 150 ms RTT, 20 Mbit/s before → after |
+| --- | --- | --- |
+| List folder (14 entries) | 221–228 → 140–144 ms | 780–787 → 466–476 ms |
+| List 1,000 entries | 974–982 → 385–401 ms | 2,759–2,781 → 733–797 ms |
+| Connect + list folder (cold) | 534–540 → 460–475 ms | 1,862–1,876 → 1,545–1,580 ms |
+
+Up to eight queued `readdir` replies can delay another request on the shared channel by that much server
+time, about 0.2–0.3 s for full OpenSSH batches on this Mac.
+
 Citadel's `readAll` trusts the initial stat size. The adapter instead keeps up to eight 64 KiB
 reads in flight (sixteen for transfers), delivers bytes strictly in file order, applies the
 configured limit to every response, and probes one byte beyond the limit to detect growth. A
