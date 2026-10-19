@@ -1,0 +1,103 @@
+name: Validate one lane
+description: Run an inventoried lane with isolated evidence, shared build caches and bounded cleanup
+inputs:
+  lane:
+    description: Lane from scripts/test-acceptance.py
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Identify toolchain and cache family
+      id: build
+      shell: bash
+      env:
+        LANE: ${{ inputs.lane }}
+      run: |
+        xcodebuild -version
+        swift --version
+        plutil -lint RemoteFiles.xcodeproj/project.pbxproj
+        toolchain=$(xcodebuild -version | shasum -a 256 | cut -d ' ' -f 1)
+        family=ios
+        if [[ "$LANE" == macos-openssh ]]; then family=macos; fi
+        echo "prefix=xcode-$toolchain-${{ runner.arch }}-$family" >> "$GITHUB_OUTPUT"
+    - name: Restore dependency and build caches
+      id: cache
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+      with:
+        path: ${{ env.CI_CACHE }}
+        key: ${{ steps.build.outputs.prefix }}-${{ hashFiles('**/Package.resolved', '**/Package.swift') }}-${{ hashFiles('App/**', 'Sources/**', 'Tests/**', 'Vendor/**', 'RemoteFiles.xcodeproj/project.pbxproj') }}-${{ inputs.lane }}
+        restore-keys: |
+          ${{ steps.build.outputs.prefix }}-${{ hashFiles('**/Package.resolved', '**/Package.swift') }}-${{ hashFiles('App/**', 'Sources/**', 'Tests/**', 'Vendor/**', 'RemoteFiles.xcodeproj/project.pbxproj') }}-
+          ${{ steps.build.outputs.prefix }}-${{ hashFiles('**/Package.resolved', '**/Package.swift') }}-
+    - name: Create and boot iOS 27 simulator
+      id: simulator
+      if: inputs.lane != 'macos-openssh' && inputs.lane != 'release-device-compile'
+      shell: bash
+      run: |
+        simulator=$(xcrun simctl create 'RemoteFiles CI' \
+          com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro \
+          com.apple.CoreSimulator.SimRuntime.iOS-27-0)
+        echo "udid=$simulator" >> "$GITHUB_OUTPUT"
+        xcrun simctl boot "$simulator"
+        xcrun simctl bootstatus "$simulator" -b
+    - name: Run selected validation lane
+      shell: bash
+      env:
+        LANE: ${{ inputs.lane }}
+        SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+      run: |
+        simulator_options=()
+        if [[ -n "$SIMULATOR_UDID" ]]; then simulator_options=(--simulator "$SIMULATOR_UDID"); fi
+        python3 -B scripts/test-acceptance.py --use-checkout --lane "$LANE" "${simulator_options[@]}" \
+          --output "$EVIDENCE" --source-packages "$CI_CACHE/SourcePackages" \
+          --swift-scratch "$CI_CACHE/SwiftBuild" --derived-data "$CI_CACHE/DerivedData"
+    - name: Publish lane summary
+      if: always()
+      shell: bash
+      run: |
+        if [[ -f "$EVIDENCE/SUMMARY.md" ]]; then
+          cat "$EVIDENCE/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY"
+        elif [[ -f "$EVIDENCE/BLOCKER.txt" ]]; then
+          cat "$EVIDENCE/BLOCKER.txt" >> "$GITHUB_STEP_SUMMARY"
+        fi
+    - name: Remove disposable simulator
+      if: always() && steps.simulator.outputs.udid != ''
+      shell: bash
+      env:
+        SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+      run: |
+        # Bound native shutdown separately so a stalled service cannot block evidence upload.
+        python3 - <<'PYTHON'
+        import os, subprocess
+        simulator = os.environ["SIMULATOR_UDID"]
+        for command in ("shutdown", "delete"):
+            try:
+                subprocess.run(["xcrun", "simctl", command, simulator], check=command == "delete", timeout=45)
+            except subprocess.TimeoutExpired:
+                print("Simulator " + command + " timed out", flush=True)
+        PYTHON
+    - name: Retain lane logs and result bundles
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      with:
+        name: validation-${{ inputs.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: warn
+        path: |
+          ${{ env.EVIDENCE }}/SUMMARY.md
+          ${{ env.EVIDENCE }}/summary.json
+          ${{ env.EVIDENCE }}/BLOCKER.txt
+          ${{ env.EVIDENCE }}/*.log
+          ${{ env.EVIDENCE }}/*-xcresult-*.json
+          ${{ env.EVIDENCE }}/source-manifest.json
+          ${{ env.EVIDENCE }}/source-status.txt
+          ${{ env.EVIDENCE }}/simulator-*.json
+          ${{ env.EVIDENCE }}/*.xcresult
+          ${{ env.EVIDENCE }}/voiceover/voiceover.log
+          ${{ env.EVIDENCE }}/voiceover/voiceover.xcresult
+    - name: Save build progress even when tests fail
+      if: always() && !cancelled() && steps.cache.outputs.cache-hit != 'true' && steps.cache.outputs.cache-primary-key != ''
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+      with:
+        path: ${{ env.CI_CACHE }}
+        key: ${{ steps.cache.outputs.cache-primary-key }}

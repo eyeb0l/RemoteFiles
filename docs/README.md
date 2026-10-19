@@ -24,6 +24,7 @@
 
 ## Verification and project status
 
+- [CI policy and timing](CI.md): quick PR checks, broader acceptance triggers and build caches.
 - [Automated acceptance](AUTOMATED_ACCEPTANCE.md): runner usage, required test lanes, and retained evidence.
 - [Manual acceptance](MANUAL_ACCEPTANCE.md), [real-server acceptance](REAL_SERVER_ACCEPTANCE.md), and [device permissions/lifecycle](DEVICE_PERMISSIONS_LIFECYCLE.md).
 - [Project status](../PREVIEW_STATUS.md): recorded results and outstanding acceptance.

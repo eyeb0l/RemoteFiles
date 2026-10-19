@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Acceptance environment and skip-policy regressions; no builds or server needed."""
 import importlib.util
+import contextlib
+import io
 import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -35,7 +39,10 @@ class AcceptanceRunnerTests(unittest.TestCase):
             run = acceptance.Run(root, root, {"commit": "fixture", "mode": "test", "source_tree_sha256": "fixture"})
             lane = {"name": "fixture", "status": "passed", "errors": [], "log": str(log)}
             run.lanes.append(lane)
-            run.tests(lane, {identifier}, allowed_skips)
+            with contextlib.redirect_stdout(io.StringIO()) as console:
+                run.tests(lane, {identifier}, allowed_skips)
+            if expected_status == "failed":
+                self.assertIn("ERROR: Unexpected skips:", console.getvalue())
             self.assertEqual(lane["status"], expected_status, lane["errors"])
             self.assertEqual(lane["counts"], {"skipped": 1})
 
@@ -49,6 +56,116 @@ class AcceptanceRunnerTests(unittest.TestCase):
 
     def test_benchmark_skip_still_fails_host_acceptance(self):
         self.check_skipped_result("LatencyBenchmarkTests/testRoundTripSensitiveOperations", (), "failed")
+
+
+class LaneSelectionTests(unittest.TestCase):
+    def test_default_keeps_full_acceptance_and_rejects_overlapping_inventories(self):
+        self.assertEqual(acceptance.selected_lanes(None), acceptance.DEFAULT_LANES)
+        with self.assertRaises(ValueError):
+            acceptance.selected_lanes(["simulator", "simulator-core"])
+
+    def run_lane(self, lane):
+        class Recorder:
+            root = Path(__file__).resolve().parents[1]
+            output = Path("/tmp/unused-evidence")
+            env = {}
+            commands = []
+            inventories = []
+            def command(self, name, command):
+                self.commands.append((name, command))
+                return {"name": name, "log": "unused"}
+            def tests(self, lane, expected, allowed_skips=(), xcresult=None):
+                self.inventories.append(expected)
+        run = Recorder()
+        acceptance.execute_lanes(run, [lane], Path("packages"), Path("scratch"), Path("derived"), "simulator-id")
+        return run
+
+    def test_quick_ios_runs_the_complete_hosted_core_inventory_without_ui_journeys(self):
+        run = self.run_lane("simulator-core")
+        self.assertEqual(len(run.commands), 1)
+        self.assertIn("-only-testing:RemoteFilesTests", run.commands[0][1])
+        expected = run.inventories[0]
+        self.assertIn("OverflowViewportTests/testLargeFastJumpKeepsVisibleProseAnchorAndSourceReturnRestoresSameCharacter", expected)
+        self.assertIn("IdentityTests/testDeviceKeychainPersistenceAndAccessibility", expected)
+        self.assertFalse(any(name.startswith(("RealServerUITests/", "RemoteFilesUITests/")) for name in expected))
+
+    def test_ui_acceptance_does_not_repeat_the_core_tests(self):
+        run = self.run_lane("simulator-ui")
+        self.assertIn("-only-testing:RemoteFilesUITests", run.commands[0][1])
+        self.assertTrue(any(name.startswith("RealServerUITests/") for name in run.inventories[0]))
+        self.assertFalse(any(name.startswith("IdentityTests/") for name in run.inventories[0]))
+
+    def test_mac_lane_never_invokes_xcode_or_a_simulator(self):
+        run = self.run_lane("macos-openssh")
+        self.assertEqual(len(run.commands), 1)
+        self.assertEqual(run.commands[0][1][:3], ["scripts/test-openssh.sh", "swift", "test"])
+
+
+class DedicatedCheckoutTests(unittest.TestCase):
+    def check_build_mutation(self, mutate, dirty=False, escape=False, changed_head=False):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary).resolve()
+            repo = parent / "repo"
+            repo.mkdir()
+            source = repo / "input.swift"
+            source.write_text("original")
+            def git(*args):
+                return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+            git("init", "-q")
+            if escape:
+                (parent / "outside.swift").write_text("outside input")
+                (repo / "link.swift").symlink_to(parent / "outside.swift")
+            git("add", ".")
+            git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                "-c", "commit.gpgsign=false", "commit", "-qm", "Fixture")
+            if dirty:
+                source.write_text("uncommitted")
+            output = parent / "evidence"
+            original_capture = acceptance.capture
+            def capture(command, cwd=None):
+                if command[0] in ("xcodebuild", "swift"):
+                    return "fixture toolchain"
+                return original_capture(command, cwd)
+            def build(run, *args):
+                self.assertEqual(run.root, repo)
+                self.assertFalse((output / "source").exists(), "CI must not recopy thousands of source files")
+                if mutate:
+                    source.write_text("unexpected build mutation")
+                if changed_head:
+                    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                        "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "Unexpected commit")
+            argv = ["test-acceptance.py", "--lane", "macos-openssh", "--use-checkout", "--output", str(output)]
+            with patch.object(acceptance, "__file__", str(repo / "scripts/test-acceptance.py")), \
+                 patch.object(acceptance, "capture", side_effect=capture), \
+                 patch.object(acceptance, "execute_lanes", side_effect=build), \
+                 patch.object(sys, "argv", argv):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(acceptance.main(), 1 if mutate or dirty or escape or changed_head else 0)
+            if not dirty and not escape:
+                self.assertTrue((output / "source-manifest.json").exists())
+            if dirty:
+                self.assertIn("clean, dedicated checkout", (output / "BLOCKER.txt").read_text())
+            if escape:
+                self.assertIn("symlink escapes", (output / "BLOCKER.txt").read_text())
+            if changed_head:
+                self.assertIn("Git state", (output / "BLOCKER.txt").read_text())
+            if mutate:
+                self.assertIn("changed captured source", (output / "BLOCKER.txt").read_text())
+
+    def test_dirty_dedicated_checkout_is_rejected(self):
+        self.check_build_mutation(False, dirty=True)
+
+    def test_source_symlink_cannot_escape_direct_checkout(self):
+        self.check_build_mutation(False, escape=True)
+
+    def test_same_source_with_changed_commit_still_fails_identity_validation(self):
+        self.check_build_mutation(False, changed_head=True)
+
+    def test_clean_dedicated_checkout_keeps_source_identity_without_copying(self):
+        self.check_build_mutation(False)
+
+    def test_build_mutation_still_fails_direct_checkout_validation(self):
+        self.check_build_mutation(True)
 
 
 if __name__ == "__main__":

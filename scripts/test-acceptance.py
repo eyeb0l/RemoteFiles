@@ -22,6 +22,15 @@ import time
 
 # Simulator filesystems cannot establish physical-device Data Protection classes.
 SIMULATOR_ALLOWED_SKIPS = {"IdentityTests/testTrustStoreWritesUseCompleteFileProtection"}
+DEFAULT_LANES = ("macos-openssh", "simulator", "voiceover", "release-device-compile")
+AVAILABLE_LANES = DEFAULT_LANES + ("simulator-core", "simulator-ui")
+
+
+def selected_lanes(requested):
+    lanes = tuple(dict.fromkeys(requested or DEFAULT_LANES))
+    if "simulator" in lanes and any(lane in lanes for lane in ("simulator-core", "simulator-ui")):
+        raise ValueError("Choose the combined simulator lane or its core/UI lanes, not both")
+    return lanes
 
 
 def capture(command, cwd=None):
@@ -59,28 +68,30 @@ def tree_hash(entries):
     return hashlib.sha256(json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def snapshot(repo, output, allow_dirty):
+def snapshot(repo, output, allow_dirty, use_checkout=False):
     head = capture(["git", "rev-parse", "HEAD"], repo)
     status = capture(["git", "status", "--porcelain=v1", "--untracked-files=all"], repo)
+    if use_checkout and (status or allow_dirty):
+        raise RuntimeError("Direct checkout validation requires a clean, dedicated checkout; do not use --allow-dirty")
     if status and not allow_dirty:
         raise RuntimeError("Working tree is dirty. Commit tested changes or pass --allow-dirty to identify the exact snapshot.")
     files = source_files(repo)
     before = manifest(repo, files)
-    target = output / "source"
-    target.mkdir()
     for entry in before:
-        src, dst = repo / entry["path"], target / entry["path"]
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if entry["kind"] == "symlink":
-            # Build inputs may not escape the captured source.
-            resolved = src.resolve()
-            if not resolved.is_relative_to(repo):
-                raise RuntimeError("Source symlink escapes repository: " + entry["path"])
-            dst.symlink_to(os.readlink(src))
-        else:
-            shutil.copy2(src, dst)
+        if entry["kind"] == "symlink" and not (repo / entry["path"]).resolve().is_relative_to(repo):
+            raise RuntimeError("Source symlink escapes repository: " + entry["path"])
+    target = repo if use_checkout else output / "source"
+    if not use_checkout:
+        target.mkdir()
+        for entry in before:
+            src, dst = repo / entry["path"], target / entry["path"]
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if entry["kind"] == "symlink":
+                dst.symlink_to(os.readlink(src))
+            else:
+                shutil.copy2(src, dst)
     after = manifest(repo, source_files(repo))
-    if before != after or manifest(target, files) != before or capture(["git", "rev-parse", "HEAD"], repo) != head:
+    if before != after or (not use_checkout and manifest(target, files) != before) or capture(["git", "rev-parse", "HEAD"], repo) != head:
         raise RuntimeError("Source changed during snapshot. Re-run after concurrent edits finish.")
     patch = subprocess.check_output(["git", "diff", "--binary", "HEAD"], cwd=repo)
     (output / "source.patch").write_bytes(patch)
@@ -89,7 +100,8 @@ def snapshot(repo, output, allow_dirty):
     return target, {"commit": head, "git_tree": capture(["git", "rev-parse", "HEAD^{tree}"], repo),
                     "branch": capture(["git", "branch", "--show-current"], repo), "dirty": bool(status),
                     "mode": "working-tree snapshot" if status else "exact commit",
-                    "source_tree_sha256": tree_hash(before), "patch_sha256": hashlib.sha256(patch).hexdigest()}
+                    "source_tree_sha256": tree_hash(before), "patch_sha256": hashlib.sha256(patch).hexdigest(),
+                    "source_capture": "dedicated checkout" if use_checkout else "immutable copy"}
 
 
 def expected_tests(root, platform, directories):
@@ -246,6 +258,20 @@ class Run:
             lane["errors"].append(str(error))
         if lane["errors"]:
             lane["status"] = "failed"
+        counts = lane.get("counts", {})
+        print(lane["name"] + ": " + lane["status"] + " " + str(counts), flush=True)
+        for identifier, outcome in lane.get("tests", {}).items():
+            if outcome == "failed":
+                print("FAILED: " + identifier, flush=True)
+        for error in lane["errors"]:
+            print("ERROR: " + error, flush=True)
+        if lane["status"] == "failed":
+            # Make the first actionable assertions visible while later lanes run.
+            log = Path(lane["log"])
+            assertions = [line for line in (log.read_text(errors="replace").splitlines() if log.exists() else [])
+                          if ": error:" in line]
+            for line in assertions[:20]:
+                print(line, flush=True)
         self.save()
 
     def save(self):
@@ -256,7 +282,7 @@ class Run:
                   "human_acceptance": ["Physical device permission/lifecycle recovery", "Touch selection/copy and Save to Files destination",
                                        "VoiceOver touch gestures, rotor and Braille", "Sub-200 ms cached first display on physical hardware"]}
         write_json(self.output / "summary.json", report)
-        lines = ["# RemoteFiles automated acceptance", "", "Result: **" + report["status"] + "**", "",
+        lines = ["# RemoteFiles automated validation", "", "Requested lanes: " + ", ".join(self.metadata.get("requested_lanes", DEFAULT_LANES)), "", "Result: **" + report["status"] + "**", "",
                  "Source: `" + self.metadata["commit"] + "` (" + self.metadata["mode"] + ")",
                  "Source manifest SHA-256: `" + self.metadata["source_tree_sha256"] + "`", "",
                  "| Lane | Result | Passed | Failed | Skipped |", "|---|---|---:|---:|---:|"]
@@ -275,10 +301,53 @@ class Run:
         (self.output / "SUMMARY.md").write_text("\n".join(lines) + "\n")
 
 
+def execute_lanes(run, lanes, packages, scratch, derived, simulator=None):
+    root, output = run.root, run.output
+    base = ["xcodebuild", "-jobs", "2", "-project", "RemoteFiles.xcodeproj", "-scheme", "RemoteFiles",
+            "-clonedSourcePackagesDirPath", packages, "-onlyUsePackageVersionsFromResolvedFile", "-derivedDataPath", derived]
+    if "macos-openssh" in lanes:
+        mac = run.command("macos-openssh", ["scripts/test-openssh.sh", "swift", "test", "-j", "2", "--scratch-path", scratch, "--force-resolved-versions"])
+        run.tests(mac, expected_tests(root, "macOS", ["Tests/RemoteFilesCoreTests"]))
+    for lane in ("simulator", "simulator-core", "simulator-ui"):
+        if lane not in lanes:
+            continue
+        directories = []
+        selection = []
+        if lane != "simulator-ui":
+            directories.append("Tests/RemoteFilesCoreTests")
+        if lane != "simulator-core":
+            directories.append("Tests/RemoteFilesUITests")
+        if lane == "simulator-core":
+            selection = ["-only-testing:RemoteFilesTests"]
+        elif lane == "simulator-ui":
+            selection = ["-only-testing:RemoteFilesUITests"]
+        expected = expected_tests(root, "iOS", directories)
+        ordinary_skips = SIMULATOR_ALLOWED_SKIPS | {name for name in expected if name.startswith("RealServerUITests/")}
+        sim_result = output / (lane + ".xcresult")
+        sim = run.command(lane, ["scripts/test-openssh.sh"] + base + ["-configuration", "Debug", "-destination", "platform=iOS Simulator,id=" + simulator,
+            "-resultBundlePath", sim_result, "-parallel-testing-enabled", "NO", "-collect-test-diagnostics", "never",
+            "-test-timeouts-enabled", "YES", "-default-test-execution-time-allowance", "180", "-maximum-test-execution-time-allowance", "240",
+            "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"] + selection + ["test"])
+        run.tests(sim, expected, ordinary_skips, sim_result)
+    if "voiceover" in lanes:
+        # The disposable fixture substitutes only app entry point and UI checks.
+        run.env["REMOTEFILES_SOURCE_PACKAGES_DIR"] = str(packages)
+        voice_dir = output / "voiceover"
+        vo = run.command("voiceover", ["scripts/test-voiceover.sh", simulator, voice_dir, derived])
+        vo["launcher_log"] = vo["log"]
+        vo["log"] = str(voice_dir / "voiceover.log")
+        run.tests(vo, expected_tests(root, "iOS", ["Tests/VoiceOverFixtures"]), xcresult=voice_dir / "voiceover.xcresult")
+    if "release-device-compile" in lanes:
+        run.command("release-device-compile", base + ["-configuration", "Release", "-destination", "generic/platform=iOS", "CODE_SIGNING_ALLOWED=NO", "build"])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--simulator", required=True, help="Available iOS 27 simulator UDID; never a physical device")
+    parser.add_argument("--simulator", help="Available iOS 27 simulator UDID; required for Simulator/VoiceOver lanes")
+    parser.add_argument("--lane", choices=AVAILABLE_LANES, action="append",
+                        help="Run only this lane (repeatable); default is all four acceptance lanes")
     parser.add_argument("--output", required=True, type=Path, help="Fresh evidence directory outside the repository")
+    parser.add_argument("--use-checkout", action="store_true", help="Validate a dedicated clean checkout directly (CI), with source hashes checked before/after")
     parser.add_argument("--allow-dirty", action="store_true", help="Capture current files with exact manifest/patch hashes")
     parser.add_argument("--source-packages", type=Path, help="Optional reusable Xcode locked-dependency checkout directory")
     parser.add_argument("--swift-scratch", type=Path, help="Optional reusable Swift build directory")
@@ -286,6 +355,13 @@ def main():
     parser.add_argument("--port", type=int, default=22222, help="Disposable loopback sshd port (default 22222)")
     parser.add_argument("--timeout-minutes", type=int, default=30, help="Deadline per command, including build/test startup (default 30)")
     args = parser.parse_args()
+    try:
+        lanes = selected_lanes(args.lane)
+    except ValueError as error:
+        parser.error(str(error))
+    needs_simulator = any(lane.startswith("simulator") or lane == "voiceover" for lane in lanes)
+    if needs_simulator and not args.simulator:
+        parser.error("--simulator is required for the selected lanes")
     repo = Path(__file__).resolve().parents[1]
     output = args.output.expanduser().resolve()
     if output.is_relative_to(repo) or output.exists():
@@ -297,47 +373,36 @@ def main():
     output.mkdir(parents=True)
     run = None
     try:
-        root, metadata = snapshot(repo, output, args.allow_dirty)
+        prepared_at = time.monotonic()
+        root, metadata = snapshot(repo, output, args.allow_dirty, args.use_checkout)
+        metadata["source_preparation_seconds"] = round(time.monotonic() - prepared_at, 3)
         metadata["started_utc"] = datetime.now(timezone.utc).isoformat()
         metadata["xcode"] = capture(["xcodebuild", "-version"])
         metadata["swift"] = capture(["swift", "--version"])
-        inventory = json.loads(capture(["xcrun", "simctl", "list", "devices", "available", "-j"]))
-        runtimes = json.loads(capture(["xcrun", "simctl", "list", "runtimes", "-j"]))
-        device = [(runtime, device) for runtime, devices in inventory["devices"].items() for device in devices if device["udid"] == args.simulator]
-        if len(device) != 1 or not device[0][0].startswith("com.apple.CoreSimulator.SimRuntime.iOS-27"):
-            raise RuntimeError("Selected UDID is not an available iOS 27 simulator")
-        metadata["simulator_runtime"], metadata["simulator"] = device[0]
-        write_json(output / "simulator-inventory.json", inventory)
-        write_json(output / "simulator-runtimes.json", runtimes)
+        metadata["requested_lanes"] = list(lanes)
+        metadata["full_acceptance"] = set(DEFAULT_LANES).issubset(lanes)
+        if needs_simulator:
+            inventory = json.loads(capture(["xcrun", "simctl", "list", "devices", "available", "-j"]))
+            runtimes = json.loads(capture(["xcrun", "simctl", "list", "runtimes", "-j"]))
+            device = [(runtime, device) for runtime, devices in inventory["devices"].items() for device in devices if device["udid"] == args.simulator]
+            if len(device) != 1 or not device[0][0].startswith("com.apple.CoreSimulator.SimRuntime.iOS-27"):
+                raise RuntimeError("Selected UDID is not an available iOS 27 simulator")
+            metadata["simulator_runtime"], metadata["simulator"] = device[0]
+            write_json(output / "simulator-inventory.json", inventory)
+            write_json(output / "simulator-runtimes.json", runtimes)
         run = Run(root, output, metadata, timeout=args.timeout_minutes * 60)
         run.env["REMOTEFILES_TEST_PORT"] = str(args.port)
         packages = (args.source_packages or output / "SourcePackages").expanduser().resolve()
         scratch = (args.swift_scratch or output / "SwiftBuild").expanduser().resolve()
         derived = (args.derived_data or output / "DerivedData").expanduser().resolve()
-        base = ["xcodebuild", "-jobs", "2", "-project", "RemoteFiles.xcodeproj", "-scheme", "RemoteFiles",
-                "-clonedSourcePackagesDirPath", packages, "-onlyUsePackageVersionsFromResolvedFile", "-derivedDataPath", derived]
-        mac = run.command("macos-openssh", ["scripts/test-openssh.sh", "swift", "test", "-j", "2", "--scratch-path", scratch, "--force-resolved-versions"])
-        run.tests(mac, expected_tests(root, "macOS", ["Tests/RemoteFilesCoreTests"]))
-        simulator_expected = expected_tests(root, "iOS", ["Tests/RemoteFilesCoreTests", "Tests/RemoteFilesUITests"])
-        ordinary_skips = SIMULATOR_ALLOWED_SKIPS | {name for name in simulator_expected if name.startswith("RealServerUITests/")}
-        sim_result = output / "simulator.xcresult"
-        sim = run.command("simulator", ["scripts/test-openssh.sh"] + base + ["-configuration", "Debug", "-destination", "platform=iOS Simulator,id=" + args.simulator,
-            "-resultBundlePath", sim_result, "-parallel-testing-enabled", "NO", "-collect-test-diagnostics", "never",
-            "-test-timeouts-enabled", "YES", "-default-test-execution-time-allowance", "180", "-maximum-test-execution-time-allowance", "240",
-            "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-", "test"])
-        run.tests(sim, simulator_expected, ordinary_skips, sim_result)
-        # The disposable fixture substitutes only app entry point and UI checks.
-        # Its hosted core-test target must not be run a second time by this lane.
-        run.env["REMOTEFILES_SOURCE_PACKAGES_DIR"] = str(packages)
-        voice_dir = output / "voiceover"
-        vo = run.command("voiceover", ["scripts/test-voiceover.sh", args.simulator, voice_dir, derived])
-        vo["launcher_log"] = vo["log"]
-        vo["log"] = str(voice_dir / "voiceover.log")
-        run.tests(vo, expected_tests(root, "iOS", ["Tests/VoiceOverFixtures"]), xcresult=voice_dir / "voiceover.xcresult")
-        run.command("release-device-compile", base + ["-configuration", "Release", "-destination", "generic/platform=iOS", "CODE_SIGNING_ALLOWED=NO", "build"])
+        execute_lanes(run, lanes, packages, scratch, derived, args.simulator)
         frozen_manifest = json.loads((output / "source-manifest.json").read_text())
-        if manifest(root, [entry["path"] for entry in frozen_manifest]) != frozen_manifest:
+        verified_files = source_files(root) if args.use_checkout else [entry["path"] for entry in frozen_manifest]
+        if manifest(root, verified_files) != frozen_manifest:
             raise RuntimeError("A build command changed captured source or lockfiles")
+        if args.use_checkout and (capture(["git", "rev-parse", "HEAD"], repo) != metadata["commit"] or
+                                  capture(["git", "status", "--porcelain=v1", "--untracked-files=all"], repo)):
+            raise RuntimeError("A build command changed the dedicated checkout's Git state")
         metadata["finished_utc"] = datetime.now(timezone.utc).isoformat()
         run.complete = True
         run.save()
