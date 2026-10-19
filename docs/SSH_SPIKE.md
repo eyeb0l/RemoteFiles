@@ -37,7 +37,10 @@ Citadel's `readAll` trusts the initial stat size. The adapter instead keeps up t
 reads in flight (sixteen for transfers), delivers bytes strictly in file order, applies the
 configured limit to every response, and probes one byte beyond the limit to detect growth. A
 short read is treated as a gap to fill, not EOF; once a filled gap confirms the server's
-maximum read size, later requests use that size. An explicit 15-second
+maximum read size, later requests use that size. NIOSSH sizes each channel's receive window to the
+client's maximum packet size; its 128 KiB default capped transfers near 64 KiB per round trip, so the
+adapter sets 2 MiB. With a 40 ms simulated RTT a 3 MiB download fell from about 2.2 s to 0.6 s
+(`scripts/benchmark-latency.sh`). An explicit 15-second
 operation deadline bounds connection/list/read operations; the dependency also has a
 10-second login timeout. Requests reuse an existing SSH connection without automatic
 reconnect loops. A deliberate next request reconnects if the connection has ended.
