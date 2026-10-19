@@ -85,6 +85,9 @@ skip on Simulator. Benchmark operations run once against the loopback fixture;
 these timings do not measure network latency. No signing certificates, saved connections,
 repository secrets, or real server access are required.
 
+Dependency and build caches are reused by toolchain, dependency pins and source
+hashes; every run still builds and executes tests with fresh evidence.
+
 The Actions job summary displays the lane results; downloadable acceptance artifacts
 retain logs, JSON reports and xcresult bundles for seven days, including failed
 runs. Build caches, copied sources and generated SSH fixture keys are excluded.
