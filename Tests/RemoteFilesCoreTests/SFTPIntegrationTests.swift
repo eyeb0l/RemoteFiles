@@ -549,6 +549,20 @@ final class BoundedPreviewReaderTests: XCTestCase {
         XCTAssertLessThan(lengths.count, 60, "Capped reads must not discard and repeat in-flight ranges")
     }
 
+    func testSmallServerReadCapStaysWithinTheReadWindow() async throws {
+        let bytes = (0..<300_000).map { UInt8(truncatingIfNeeded: $0 &* 13) }
+        for window in [8, 16] {
+            let file = PipelinedPreviewFile(bytes, maximumRead: 4 * 1024)
+            var received: [UInt8] = []
+            _ = try await BoundedPreviewReader.stream(initialSize: nil, limit: 2_097_152, window: window, readChunk: { offset, amount in
+                await file.read(offset: offset, length: amount)
+            }) { received.append(contentsOf: $0.readableBytesView) }
+            XCTAssertEqual(received, bytes)
+            let peak = await file.peak
+            XCTAssertLessThanOrEqual(peak, window, "Gap pieces must wait for free slots in the read window")
+        }
+    }
+
     func testPipelinedReadNeverRequestsPastProbeAndRejectsGrowth() async throws {
         let file = PipelinedPreviewFile(Array(repeating: 1, count: 500_000))
         do {
@@ -589,6 +603,23 @@ final class BoundedPreviewReaderTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(600))
         let drained = await finished.value
         XCTAssertTrue(drained, "The operation still finishes and can release its channel")
+
+        // The deadline outlives a cancelled caller, so an unanswered request still releases its channel.
+        let released = ProgressFlag()
+        let abandoned = Task {
+            try await SFTPRemoteFileService.detachedDeadline(seconds: 1, onTimeout: { Task { await released.set() } }) {
+                await withCheckedContinuation { continuation in
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 3) { continuation.resume() }
+                }
+                return 1
+            }
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        abandoned.cancel()
+        do { _ = try await abandoned.value; XCTFail("Cancelled caller must not receive the result") } catch is CancellationError { }
+        try await Task.sleep(for: .milliseconds(1_300))
+        let releasedAfterCancel = await released.value
+        XCTAssertTrue(releasedAfterCancel, "onTimeout must still run for work that ignores cancellation")
 
         let timedOut = ProgressFlag()
         do {

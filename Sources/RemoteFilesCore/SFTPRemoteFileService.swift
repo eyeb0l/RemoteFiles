@@ -418,18 +418,25 @@ public actor SFTPRemoteFileService: RemoteFileService {
     }
 
     /// Runs `operation` in its own task so a cancelled caller need not wait for a request the
-    /// transport cannot interrupt. The deadline still fires `onTimeout` for an unresponsive server.
+    /// transport cannot interrupt. The deadline outlives the caller: it runs until the operation
+    /// itself finishes, so an unanswered request still fires `onTimeout` and releases its channel.
     nonisolated static func detachedDeadline<T: Sendable>(seconds: UInt64,
                                                           onTimeout: @escaping @Sendable () -> Void,
                                                           operation: @escaping @Sendable () async throws -> T) async throws -> T {
         let outcome = FirstOutcome<T>()
+        let finished = LockedFlag()
         let work = Task { try await operation() }
-        Task { outcome.resolve(await work.result) }
         let timer = Task {
             try await Task.sleep(nanoseconds: seconds * 1_000_000_000)
-            if outcome.resolve(.failure(RemoteFileError.timedOut)) { onTimeout(); work.cancel() }
+            guard !finished.isSet else { return }
+            outcome.resolve(.failure(RemoteFileError.timedOut))
+            onTimeout(); work.cancel()
         }
-        defer { timer.cancel() }
+        Task {
+            let result = await work.result
+            finished.set(); timer.cancel()
+            outcome.resolve(result)
+        }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { outcome.install($0) }
         } onCancel: {
@@ -441,14 +448,14 @@ public actor SFTPRemoteFileService: RemoteFileService {
     nonisolated static func deadline<T: Sendable>(seconds: UInt64,
                                                          close: @escaping @Sendable () -> Void,
                                                          operation: @escaping @Sendable () async throws -> T) async throws -> T {
-        let deadline = DeadlineFlag()
+        let deadline = LockedFlag()
         return try await withTaskCancellationHandler {
             do {
                 return try await withThrowingTaskGroup(of: T.self) { group in
                     group.addTask { try await operation() }
                     group.addTask {
                         try await Task.sleep(nanoseconds: seconds * 1_000_000_000)
-                        deadline.expire()
+                        deadline.set()
                         close()
                         throw RemoteFileError.timedOut
                     }
@@ -457,7 +464,7 @@ public actor SFTPRemoteFileService: RemoteFileService {
                 }
             } catch {
                 if Task.isCancelled { throw CancellationError() }
-                if deadline.expired { throw RemoteFileError.timedOut }
+                if deadline.isSet { throw RemoteFileError.timedOut }
                 throw error
             }
         } onCancel: { close() }
@@ -584,11 +591,11 @@ private final class FirstOutcome<T: Sendable>: @unchecked Sendable {
     }
 }
 
-private final class DeadlineFlag: @unchecked Sendable {
+private final class LockedFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var value = false
-    var expired: Bool { lock.lock(); defer { lock.unlock() }; return value }
-    func expire() { lock.lock(); value = true; lock.unlock() }
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    func set() { lock.lock(); value = true; lock.unlock() }
 }
 
 /// Shared receive-time bound, independent of the server's initial size hint.
@@ -605,10 +612,11 @@ enum BoundedPreviewReader {
         return (bytes, result.requests)
     }
 
-    /// Keeps up to `window` reads in flight so throughput is not capped at one chunk per round
+    /// Keeps at most `window` reads in flight so throughput is not capped at one chunk per round
     /// trip, and hands bytes to `consume` strictly in file order. A short read is not EOF: its gap
-    /// is requested as soon as it arrives, and once a filled gap confirms the server's maximum read
-    /// size, later requests use it. Requests never extend more than one probe byte past `limit`.
+    /// is queued as soon as it arrives and takes the next free slots, and once a filled gap confirms
+    /// the server's maximum read size, later requests use it. Requests never extend more than one
+    /// probe byte past `limit`.
     static func stream(initialSize: UInt64?, limit: Int, chunkSize: Int = 64 * 1024, window: Int = 8,
                        readChunk: @escaping @Sendable (UInt64, UInt32) async throws -> ByteBuffer,
                        consume: (ByteBuffer) async throws -> Void) async throws -> (bytes: Int, requests: Int) {
@@ -619,21 +627,29 @@ enum BoundedPreviewReader {
             var issued: [Int: Request] = [:]
             var order: [Int] = []       // Unconsumed request IDs by ascending offset.
             var received: [Int: ByteBuffer] = [:]
-            var nextID = 0, nextOffset = 0, inFlight = 0, consumed = 0
+            var waiting: [Int] = []     // Registered gap pieces not yet sent, by ascending offset.
+            var nextID = 0, sent = 0, nextOffset = 0, inFlight = 0, consumed = 0
             var endOfFile = Int.max     // Lowest offset already answered with EOF.
             var chunk = max(1, chunkSize)
-            func issue(_ request: Request, at position: Int) {
+            func register(_ request: Request, at position: Int) -> Int {
                 let id = nextID
-                nextID += 1; inFlight += 1
+                nextID += 1
                 issued[id] = request
                 order.insert(id, at: position)
+                return id
+            }
+            func send(_ id: Int) {
+                let request = issued[id]!
+                inFlight += 1; sent += 1
                 group.addTask { (id, try await readChunk(UInt64(request.offset), UInt32(request.amount))) }
             }
             while true {
                 try Task.checkCancellation()
+                // Gaps hold back in-order delivery, so they take free slots before new ranges.
+                while inFlight < max(1, window), !waiting.isEmpty { send(waiting.removeFirst()) }
                 while inFlight < max(1, window), nextOffset <= limit, nextOffset < endOfFile {
                     let amount = min(chunk, limit - nextOffset + 1)
-                    issue(Request(offset: nextOffset, amount: amount, fillsShortRead: nil), at: order.endIndex)
+                    send(register(Request(offset: nextOffset, amount: amount, fillsShortRead: nil), at: order.endIndex))
                     nextOffset += amount
                 }
                 // Every byte through the probe was requested and accepted: only growth gets here.
@@ -650,9 +666,10 @@ enum BoundedPreviewReader {
                     var position = order.firstIndex(of: id)! + 1
                     while offset < request.offset + request.amount {
                         let amount = min(chunk, request.offset + request.amount - offset)
-                        issue(Request(offset: offset, amount: amount, fillsShortRead: buffer.readableBytes), at: position)
+                        waiting.append(register(Request(offset: offset, amount: amount, fillsShortRead: buffer.readableBytes), at: position))
                         offset += amount; position += 1
                     }
+                    waiting.sort { issued[$0]!.offset < issued[$1]!.offset }
                 } else if let short = request.fillsShortRead {
                     chunk = min(chunk, max(short, 4 * 1024))
                 }
@@ -661,7 +678,7 @@ enum BoundedPreviewReader {
                     let request = issued.removeValue(forKey: head)!
                     if buffer.readableBytes == 0 {
                         group.cancelAll()
-                        return (consumed, nextID)
+                        return (consumed, sent)
                     }
                     guard buffer.readableBytes <= request.amount, buffer.readableBytes <= limit - consumed else {
                         throw RemoteFileError.tooLarge(limit)
