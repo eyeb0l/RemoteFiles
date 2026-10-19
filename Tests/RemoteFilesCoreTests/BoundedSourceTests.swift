@@ -146,6 +146,20 @@ import RemoteFilesCore
         let source = "<!doctype html><html><head><style>h1{color:rgb(90,40,220)}</style></head><body><h1>café 東京</h1><table><tr><td>Rendered cell</td></tr></table></body></html>"
         let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 360, height: 400), configuration: StaticHTMLWebView.configuration(rules: rules))
         let probe = SVGAttackProbe(); view.navigationDelegate = probe
+        // A pixel assertion needs an onscreen renderer. An unattached web view
+        // may suspend its GPU process between navigation and the snapshot.
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        let controller = UIViewController(); controller.view = view
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        view.layoutIfNeeded()
+        defer {
+            view.stopLoading(); view.navigationDelegate = nil
+            window.isHidden = true; window.rootViewController = nil; previous?.makeKey()
+        }
+        XCTAssertTrue(view.window === window)
         view.loadHTMLString(StaticHTMLWebView.html(source), baseURL: nil)
         try await wait { probe.finished }
         let body = try await view.evaluateJavaScript("document.body.innerText") as? String
@@ -153,7 +167,10 @@ import RemoteFilesCore
         XCTAssertTrue(body?.contains("Rendered cell") == true)
         let color = try await view.evaluateJavaScript("getComputedStyle(document.querySelector('h1')).color") as? String
         XCTAssertEqual(color, "rgb(90, 40, 220)")
-        let snapshot = try await view.takeSnapshot(configuration: nil)
+        XCTAssertTrue(view.window === window, "Keep the renderer visible until the snapshot finishes")
+        let configuration = WKSnapshotConfiguration()
+        configuration.afterScreenUpdates = true
+        let snapshot = try await view.takeSnapshot(configuration: configuration)
         let pixels = try XCTUnwrap(snapshot.cgImage)
         var bytes = [UInt8](repeating: 0, count: pixels.width * pixels.height * 4)
         let context = try XCTUnwrap(CGContext(data: &bytes, width: pixels.width, height: pixels.height, bitsPerComponent: 8,
@@ -163,7 +180,6 @@ import RemoteFilesCore
         XCTAssertGreaterThan(purple, 100, "Actual styled pixels must be drawn, not only exposed to accessibility")
         XCTAssertFalse(view.configuration.defaultWebpagePreferences.allowsContentJavaScript)
         XCTAssertFalse(view.configuration.websiteDataStore.isPersistent)
-        view.stopLoading(); view.navigationDelegate = nil
     }
     func testHTMLCannotRunDocumentScriptsOrLoadResources() async throws {
         let rules = try await SVGResourceBlocker.rules()
