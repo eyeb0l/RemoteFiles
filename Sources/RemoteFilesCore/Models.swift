@@ -8,6 +8,8 @@ public struct ConnectionProfile: Identifiable, Codable, Hashable, Sendable {
     public var username: String
     public var identityID: UUID
     public var startingDirectory: String
+    /// Only shows Tailscale setup tips in the connection editor; connections never route differently.
+    /// The stored name is kept so saved profiles keep decoding.
     public var usesTailscale: Bool
     public init(id: UUID = UUID(), name: String, host: String, port: Int = 22, username: String,
                 identityID: UUID, startingDirectory: String = ".", usesTailscale: Bool = false) {
