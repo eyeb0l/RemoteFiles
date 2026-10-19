@@ -40,3 +40,18 @@ The same method gains an optional `resolvingPath` argument (default `true`, the 
 Upstream repeats `realpath` until the path stops changing, which costs at least one round trip even for
 an already-canonical path. RemoteFiles canonicalizes once itself, because it reports that path, and
 passes `false` to skip the redundant request.
+
+`listDirectory` also gains an optional `concurrentReads` argument (default `1`, one `readdir` at a time as
+upstream). A larger value keeps that many `readdir` requests in flight on the directory handle, so a folder
+that fits one reply needs one round trip and a large folder is paced by the server rather than the RTT.
+A new internal `sendRequestFuture` queues a request without awaiting it; event-loop tasks run in submission
+order, so pipelined requests reach the server in issue order. Responses are consumed in request order and
+every issued request is awaited. SFTP v3 does not promise that a server handles one handle's requests in
+order (OpenSSH's sftp-server does), so correctness does not depend on it: each `readdir` takes a distinct
+batch of the server's directory stream, names that arrive after an earlier request's EOF are kept unless
+their filename was already returned (so a server that rewinds after EOF cannot repeat entries), and an
+error status after EOF is ignored. After EOF no `readdir` is sent and `SSH_FXP_CLOSE` goes out at once behind
+those still in flight, so draining them costs no extra round trip; its status must still be `ok`. An error
+before EOF, task cancellation, or a reply other than names or EOF (upstream silently ended the listing on
+one) stops new requests, drains those in flight, closes the handle and fails the listing. RemoteFiles
+passes 8.

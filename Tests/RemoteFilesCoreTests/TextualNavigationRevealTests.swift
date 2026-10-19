@@ -222,4 +222,84 @@ private struct PreparedRevealFixture: View {
         try await check(block: "| \(headings) |\n| \(divider) |\n\(rows)", needle: "table_find_target")
     }
 }
+
+@MainActor final class ReaderWarmUpTests: XCTestCase {
+    func testWarmUpRunsOffTheMainActorCoalescesAndRepeatsCheaply() async {
+        let first = ReaderWarmUp.start()
+        XCTAssertEqual(first, ReaderWarmUp.start(), "An in-flight warm-up must be shared, not duplicated")
+        let outcome = await first.value
+        XCTAssertFalse(outcome.ranOnMainThread)
+        XCTAssertTrue(outcome.completed)
+        XCTAssertGreaterThan(outcome.preparedTypes, 30)
+        // Runtime caches are populated; a later folder appearance repeats the same lookups.
+        let clock = ContinuousClock()
+        var repeated: ReaderWarmUp.Outcome?
+        let elapsed = await clock.measure { repeated = await ReaderWarmUp.start().value }
+        XCTAssertEqual(repeated, outcome)
+        XCTAssertLessThan(elapsed, .milliseconds(500))
+    }
+
+    func testWarmUpStopsBetweenTypesWhenCancelled() async {
+        let partial = await Task.detached {
+            var checks = 0
+            return ReaderWarmUp.perform(shouldContinue: { checks += 1; return checks <= 3 })
+        }.value
+        XCTAssertEqual(partial, .init(preparedTypes: 3, completed: false, ranOnMainThread: false))
+        XCTAssertEqual(StructuredText.prepareRendering(shouldContinue: { false }), 0)
+        let task = ReaderWarmUp.start()
+        ReaderWarmUp.cancel()
+        let outcome = await task.value
+        XCTAssertFalse(outcome.ranOnMainThread)
+        XCTAssertNotEqual(ReaderWarmUp.start(), task, "A finished or cancelled run must not block later warm-up")
+    }
+
+    func testWarmUpDoesNotChangeRenderedDocumentPixels() async throws {
+        let markdown = """
+        # Warm-up heading
+
+        Paragraph with **bold**, *italic*, `code` and a [link](./other.md).
+
+        - First item
+        - Second item
+
+        1. Ordered
+
+        > Quoted text
+
+        ```swift
+        let value = 42
+        ```
+
+        | Name | Value |
+        | --- | --- |
+        | A | 1 |
+        """
+        let before = try await renderedPixels(markdown)
+        _ = await ReaderWarmUp.start().value
+        let after = try await renderedPixels(markdown)
+        XCTAssertEqual(before.count, after.count)
+        XCTAssertTrue(before == after, "Warm-up must not change rendering output")
+    }
+
+    private func renderedPixels(_ markdown: String) async throws -> [UInt8] {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: DocumentContentView(text: markdown, markdown: true, source: false, filename: "warm-up.md"))
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        // Let preparation, inline styles, attachments and highlighting settle before capturing.
+        try await Task.sleep(for: .seconds(3))
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) }
+        let pixels = try XCTUnwrap(image.cgImage)
+        var bytes = [UInt8](repeating: 0, count: pixels.width * pixels.height * 4)
+        let context = try XCTUnwrap(CGContext(data: &bytes, width: pixels.width, height: pixels.height, bitsPerComponent: 8,
+                                              bytesPerRow: pixels.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.draw(pixels, in: CGRect(x: 0, y: 0, width: pixels.width, height: pixels.height))
+        let ink = stride(from: 0, to: bytes.count, by: 4).filter { min(bytes[$0], bytes[$0 + 1], bytes[$0 + 2]) < 180 }.count
+        XCTAssertGreaterThan(ink, 500, "The comparison needs a rendered document, not a blank or loading view")
+        return bytes
+    }
+}
 #endif

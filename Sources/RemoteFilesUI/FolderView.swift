@@ -138,6 +138,11 @@ struct FolderView: View {
         .task(id: "\(model.isForeground)-\(model.sessionRevision)-\(refreshID)") { await reloadIfNeeded() }
         .onDisappear { resolveTask?.cancel(); resolveTask = nil }
         .task(id: "\(filter)-\(showHidden)-\(dateSort)") { await updateVisible() }
+        .task {
+            // Let the listing's own first layout finish; a document opened sooner skips warm-up.
+            try? await Task.sleep(for: .seconds(1))
+            if !Task.isCancelled { ReaderWarmUp.start() }
+        }
     }
     private var pathBar: some View {
         HStack {

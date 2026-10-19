@@ -34,6 +34,16 @@ Local changes:
   with explicit `AnyView` returns. This avoids a nested `ConditionalContent`
   metadata tree spanning all Markdown block implementations on first display;
   the selected view, formatting and block identifiers remain the same.
+- `Internal/Helpers/RenderingWarmUp.swift`: a public, nonisolated
+  `StructuredText.prepareRendering(shouldContinue:)` lets the app move first-display
+  Swift runtime lookups off the main thread. On the caller's thread it resolves the body
+  types and `View`/`ViewModifier` conformances of the default block views, styles and
+  interaction modifiers, checks stored property types for `DynamicProperty`, converts a
+  one-character string through the SwiftUI and Textual attribute scopes, and reflects four
+  body fonts into the existing lock-isolated provider cache. It creates no views, evaluates
+  no bodies, reads no environment and performs no I/O; repeated calls only hit runtime
+  caches. Types missing from its lists are simply resolved on first display as before.
+  Focused tests are in `Tests/HighlighterTests/RenderingWarmUpTests.swift`.
 - Accessibility: headings carry the heading trait; decorative unordered-list
   markers are hidden from assistive technologies. The transparent UIKit text
   selection overlay is hidden from accessibility so VoiceOver reads the underlying
