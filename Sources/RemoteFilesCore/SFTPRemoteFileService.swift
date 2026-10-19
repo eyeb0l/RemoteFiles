@@ -236,6 +236,9 @@ public actor SFTPRemoteFileService: RemoteFileService {
                                                             endpoint: HostEndpoint(host: profile.host, port: profile.port)))
                 )
                 settings.connectTimeout = .seconds(Int64(timeout))
+                // NIOSSH sizes each channel's receive window to this value. Its 128 KiB default
+                // capped transfers near 64 KiB per round trip regardless of pipelined reads.
+                settings.protocolOptions = [.maximumPacketSize(1 << 21)]
                 settings.onChannelCreated = { control.install($0) }
                 do {
                     try Task.checkCancellation()
