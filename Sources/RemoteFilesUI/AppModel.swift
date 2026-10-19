@@ -88,6 +88,12 @@ final class AppModel {
         }
         await persist()
     }
+    /// Forgets the trusted key of the saved endpoint, never unsaved edits in the connection form.
+    func resetTrust(for profile: ConnectionProfile) async {
+        await disconnect()
+        do { try await trust.reset(endpoint: HostEndpoint(host: profile.host, port: profile.port)) }
+        catch { errorMessage = error.localizedDescription }
+    }
     func addIdentity(_ value: IdentityMetadata) async throws {
         guard !demo else { throw RemoteFileError.unavailable("Leave Demo before saving keys.") }
         var candidate = metadata

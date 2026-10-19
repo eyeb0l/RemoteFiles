@@ -1,6 +1,8 @@
 #if os(iOS)
 import XCTest
 import Foundation
+import Crypto
+import NIOSSH
 import RemoteFilesCore
 @testable import RemoteFilesUI
 
@@ -98,6 +100,26 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
         XCTAssertEqual(model.metadata.recents, [recent]); XCTAssertEqual(model.metadata.connections, [profile])
         let disconnects = await base.disconnects, cancelledKeys = await keys.cancellations
         XCTAssertEqual(disconnects, 1); XCTAssertEqual(cancelledKeys, 1)
+    }
+    func testResetTrustForgetsOnlyTheSavedConnectionEndpoint() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = BackgroundExportService(), model = try AppModel(directory: directory, fileService: service)
+        let saved = ConnectionProfile(name: "Studio", host: "Studio.Example", port: 2222, username: "reader", identityID: UUID())
+        let savedKey = NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey
+        let editedKey = NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey
+        // An edited, unsaved host in the form must keep its trust.
+        let edited = HostEndpoint(host: "other.example", port: 22)
+        try await model.trust.trustUnknown(endpoint: HostEndpoint(host: "studio.example", port: 2222), key: HostKeyDetails(publicKey: savedKey))
+        try await model.trust.trustUnknown(endpoint: edited, key: HostKeyDetails(publicKey: editedKey))
+        await model.resetTrust(for: saved)
+        do {
+            try await model.trust.validate(endpoint: HostEndpoint(host: saved.host, port: saved.port), publicKey: savedKey)
+            XCTFail("The saved endpoint must require fresh verification")
+        } catch HostTrustError.unknown { }
+        try await model.trust.validate(endpoint: edited, publicKey: editedKey)
+        XCTAssertNil(model.errorMessage)
+        let disconnects = await service.disconnects; XCTAssertEqual(disconnects, 1)
     }
     func testBackgroundPreservesNestedRoutesWhileExplicitDisconnectClearsThem() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

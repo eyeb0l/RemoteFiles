@@ -84,14 +84,14 @@ struct ConnectionEditor: View {
         }
         .confirmationDialog("Forget this host’s trusted key?", isPresented: $resetTrust, titleVisibility: .visible) {
             Button("Reset Host Trust", role: .destructive) {
-                Task {
-                    do {
-                        await model.disconnect()
-                        try await model.trust.reset(endpoint: HostEndpoint(host: host, port: Int(port) ?? 22))
-                    } catch { model.errorMessage = error.localizedDescription }
-                }
+                guard let existing else { return }
+                Task { await model.resetTrust(for: existing) }
             }
-        } message: { Text("The next connection will require you to verify the server fingerprint again.") }
+        } message: {
+            if let existing {
+                Text("The next connection to \(existing.host):\(String(existing.port)) will require you to verify the server fingerprint again.")
+            }
+        }
     }
 }
 #endif
