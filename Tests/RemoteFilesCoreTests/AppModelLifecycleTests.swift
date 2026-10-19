@@ -140,6 +140,21 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
         model.showFolder(id, path: "/")
         XCTAssertEqual(model.routes, [.folder(id, "."), .folder(id, "/")], "A folder not in the stack is pushed")
     }
+    func testLeavingDemoRestoresTheInjectedService() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = BackgroundExportService(), model = try AppModel(directory: directory, fileService: service)
+        await model.setDemo(true)
+        XCTAssertFalse(model.service as AnyObject === service, "Demo uses its own sample transport")
+        let demoProfile = try XCTUnwrap(model.metadata.connections.first)
+        let samples = try await model.service.listDirectory(profile: demoProfile, path: "/Projects")
+        XCTAssertFalse(samples.entries.isEmpty)
+        await model.setDemo(false)
+        XCTAssertTrue(model.service as AnyObject === service, "Leaving Demo must restore the injected transport")
+        XCTAssertTrue(model.metadata.connections.isEmpty)
+        let disconnects = await service.disconnects
+        XCTAssertEqual(disconnects, 1, "Entering Demo closes the injected transport; leaving closes only the sample one")
+    }
     func testBackgroundPreservesNestedRoutesWhileExplicitDisconnectClearsThem() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

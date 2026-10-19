@@ -547,7 +547,7 @@ extension RealServerUITests {
                 if !field.isHittable { app.swipeUp() }
                 field.tap(); field.typeText(value)
             }
-            let tailscale = app.switches["Connect through Tailscale"]
+            let tailscale = app.switches["Show Tailscale Setup Tips"]
             if !tailscale.isHittable { app.swipeUp() }
             if tailscale.value as? String == "0" { tailscale.tap() }
             app.buttons["Save"].tap()

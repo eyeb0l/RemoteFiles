@@ -42,9 +42,9 @@ struct ConnectionEditor: View {
             }
             Section {
                 TextField("Starting directory (optional)", text: $directory).textInputAutocapitalization(.never).autocorrectionDisabled()
-                Toggle("Connect through Tailscale", isOn: $tailscale)
+                Toggle("Show Tailscale Setup Tips", isOn: $tailscale)
             } footer: {
-                Text("Leave blank to use the server’s default directory, or enter an absolute path. Paths starting with ~ are not expanded.")
+                Text("Leave blank to use the server’s default directory, or enter an absolute path. Paths starting with ~ are not expanded. Tailscale tips do not change how the app connects.")
             }
             Section("Advanced") {
                 TextField("SSH port", text: $port).keyboardType(.numberPad)

@@ -94,7 +94,7 @@ public extension RemoteResourceResolving {
 /// Disk bytes only: 256 MiB LRU, 24-hour retention, 5-minute freshness, 128 MiB per file.
 /// After the freshness window, a copy whose remote size and modification time still match is
 /// revalidated with one metadata request instead of being transferred again.
-/// At most two streaming transfers. A flight owns multiple cancellable consumers; the last
+/// At most two streaming transfers; others wait in arrival order. A flight owns multiple cancellable consumers; the last
 /// consumer leaving cancels that flight. The transport owns its SFTP operation channel.
 public actor RemoteResourceResolver: RemoteResourceResolving {
     private struct Flight {
@@ -112,6 +112,8 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
     // A refresh separates new consumers from an older transfer without cancelling it.
     private var generations: [String: UUID] = [:]
     private var transfers = 0
+    // Fetches waiting for a transfer slot, oldest first. A released slot passes straight to the next one.
+    private var slotWaiters: [(id: UUID, continuation: CheckedContinuation<Void, Error>)] = []
     public init(service: any RemoteFileService, directory: URL, diskLimit: Int = 256 * 1024 * 1024,
                 fileLimit: Int = 128 * 1024 * 1024, freshness: TimeInterval = 300) {
         self.service = service; self.directory = directory; self.diskLimit = diskLimit
@@ -259,10 +261,9 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
                 return target
             }
         }
-        while transfers >= 2 { try await Task.sleep(for: .milliseconds(25)) }
+        try await acquireTransferSlot()
+        defer { releaseTransferSlot() }
         try Task.checkCancellation()
-        transfers += 1
-        defer { transfers -= 1 }
         let temp = directory.appendingPathComponent(UUID().uuidString + ".partial")
         defer { try? fm.removeItem(at: temp) }
         let downloaded: RemoteEntry
@@ -291,6 +292,26 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         try? fm.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: destination.path)
         #endif
         return destination
+    }
+    private func acquireTransferSlot() async throws {
+        try Task.checkCancellation()
+        if transfers < 2 { transfers += 1; return }
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if Task.isCancelled { continuation.resume(throwing: CancellationError()); return }
+                slotWaiters.append((id: id, continuation: continuation))
+            }
+        } onCancel: { Task { await self.cancelTransferWait(id) } }
+    }
+    /// A cancelled waiter leaves the queue without taking a slot. If a slot reached it first,
+    /// the caller's cancellation check releases that slot to the next waiter.
+    private func cancelTransferWait(_ id: UUID) {
+        guard let index = slotWaiters.firstIndex(where: { $0.id == id }) else { return }
+        slotWaiters.remove(at: index).continuation.resume(throwing: CancellationError())
+    }
+    private func releaseTransferSlot() {
+        if slotWaiters.isEmpty { transfers -= 1 } else { slotWaiters.removeFirst().continuation.resume() }
     }
     private static let versionAttribute = "dev.iris.RemoteFiles.remote-version"
 

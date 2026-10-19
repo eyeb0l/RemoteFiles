@@ -23,6 +23,8 @@ final class AppModel {
     let trust: HostTrustStore
     let publicKeyInstaller: any PublicKeyInstalling
     private(set) var service: any RemoteFileService
+    /// The real (or injected) transport, restored when leaving Demo.
+    private let connectionService: any RemoteFileService
     let resourceDirectory: URL
     private var resourceService: RemoteResourceResolver?
     private var exportService: RemoteOriginalExporter?
@@ -60,7 +62,8 @@ final class AppModel {
         readingPositions = ReadingPositionStore(fileURL: directory.appendingPathComponent("reading-positions-v1.json"))
         trust = try HostTrustStore(fileURL: directory.appendingPathComponent("known-hosts-v1.json"))
         self.publicKeyInstaller = publicKeyInstaller ?? SSHPublicKeyInstaller(trust: trust)
-        service = fileService ?? CoalescingFileService(base: SFTPRemoteFileService(identityStore: identities, trustStore: trust, metadataStore: metadataStore))
+        connectionService = fileService ?? CoalescingFileService(base: SFTPRemoteFileService(identityStore: identities, trustStore: trust, metadataStore: metadataStore))
+        service = connectionService
     }
     func load() async { metadata = await metadataStore.snapshot() }
     func prepareReadingPosition(_ position: DocumentReadingPosition, text: String, profile: ConnectionProfile, path: String) async {
@@ -221,7 +224,7 @@ final class AppModel {
             service = CoalescingFileService(base: DemoRemoteFileService())
         } else {
             metadata = realMetadata
-            service = CoalescingFileService(base: SFTPRemoteFileService(identityStore: identities, trustStore: trust, metadataStore: metadataStore))
+            service = connectionService
         }
         demo = enabled
     }
