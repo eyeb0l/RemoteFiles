@@ -126,7 +126,12 @@ private struct OverflowFixtureView: View {
         XCTAssertNotNil(interaction.model.selectedRange)
         XCTAssertTrue(selectedText(interaction.model).isEqual(to: originalCopy))
         interaction.model.selectedRange = nil
-        try await wait { !self.views(first).contains { $0 is UITextInteractionView } }
+        do {
+            try await wait { !self.views(first).contains { $0 is UITextInteractionView } }
+        } catch {
+            print("OVERFLOW SELECTION RETIREMENT offset=\(scroll.contentOffset) viewport=\(scroll.convert(scroll.bounds, to: window)) block=\(first.convert(first.bounds, to: window)) selection=\(String(describing: interaction.model.selectedRange)) attached=\(first.window === window) hasText=\(interaction.model.hasText)")
+            throw error
+        }
     }
     func testChangedOffscreenCodeRemeasuresBeforeRetirementAndRemount() async throws {
         let (window, previous, state) = try host(); defer { cleanup(window, previous: previous) }
@@ -172,6 +177,17 @@ private struct OverflowFixtureView: View {
         guard let scroll = outer(window) else { return nil }
         return views(window).compactMap { $0 as? UITextInteractionView }.first {
             $0.model.hasText && $0.bounds.height > scroll.contentSize.height * 0.9
+        }
+    }
+    private func showSource(_ state: OverflowFixtureState, in window: UIWindow) async throws {
+        state.source = true
+        // Observe the actual replacement, not a fixed delay that can coalesce
+        // Source and Rendered into one update on a busy Simulator.
+        try await wait {
+            !self.views(window).contains { $0 is UITextInteractionView } &&
+                self.views(window).compactMap { $0 as? SourceTextView }.contains {
+                    $0.window === window && $0.bounds.width > 0 && $0.bounds.height > 0 && $0.text == state.text
+                }
         }
     }
     private func visibleCharacter(_ window: UIWindow) throws -> (Int, CGFloat) {
@@ -221,10 +237,14 @@ private struct OverflowFixtureView: View {
         try await wait { state.position.overflowGeometry.hasReadingAnchor }
         let saved = try visibleCharacter(window)
         for _ in 0..<3 {
-            state.source = true
-            try await Task.sleep(for: .seconds(1))
+            try await showSource(state, in: window)
             state.source = false
-            try await wait { self.prose(window).map { self.selectedText($0.model).string.contains("Paragraph 71") } == true && !state.position.overflowGeometry.isRestoringReadingAnchor }
+            do {
+                try await wait { self.prose(window).map { self.selectedText($0.model).string.contains("Paragraph 71") } == true && !state.position.overflowGeometry.isRestoringReadingAnchor }
+            } catch {
+                print("OVERFLOW SOURCE RETURN source=\(state.source) proseReady=\(self.prose(window).map { self.selectedText($0.model).string.contains("Paragraph 71") } == true) restoring=\(state.position.overflowGeometry.isRestoringReadingAnchor) hasAnchor=\(state.position.overflowGeometry.hasReadingAnchor) sourceViews=\(self.views(window).filter { $0 is SourceTextView }.count)")
+                throw error
+            }
             try await Task.sleep(for: .milliseconds(500))
             XCTAssertEqual(try characterY(saved.0, in: window), saved.1, accuracy: 2,
                            "Return to the same logical prose character even when previously unseen heights become precise")
@@ -293,7 +313,7 @@ private struct OverflowFixtureView: View {
         XCTAssertTrue(state.position.overflowGeometry.hasReadingAnchor)
         let before = block.convert(block.bounds, to: window).minY
         for _ in 0..<3 {
-            state.source = true; try await Task.sleep(for: .milliseconds(500))
+            try await showSource(state, in: window)
             state.source = false
             try await wait { region()?.ready == true && !state.position.overflowGeometry.isRestoringReadingAnchor }
             try await Task.sleep(for: .milliseconds(300))

@@ -69,13 +69,14 @@ private struct NativeVideoFixture: View {
             path: "/Projects/" + name, allowedRoot: "/Projects", destination: url, limit: 128 * 1024 * 1024)
         return url
     }
-    private func waitUntil(_ condition: () -> Bool) async throws {
+    private func waitUntil(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
         let deadline = ContinuousClock.now + .seconds(10)
         while ContinuousClock.now < deadline {
             if condition() { return }
             try await Task.sleep(for: .milliseconds(25))
         }
-        XCTFail("Timed out waiting for playback state")
+        XCTFail("Timed out waiting for playback state", file: file, line: line)
+        throw NSError(domain: "PlaybackTests", code: 1)
     }
     private func checkPlayback(_ name: String, mediaType: AVMediaType) async throws {
         let source = try await downloaded(name)
@@ -221,11 +222,27 @@ private struct NativeVideoFixture: View {
         func players(_ controller: UIViewController) -> [AVPlayerViewController] {
             (controller as? AVPlayerViewController).map { [$0] } ?? controller.children.flatMap(players)
         }
-        try await waitUntil { players(window.rootViewController!).first?.player != nil }
+        // A representable may allocate its controller before SwiftUI finishes
+        // mounting the view and its lifecycle observers.
+        do {
+            try await waitUntil {
+                players(window.rootViewController!).contains { $0.player != nil && $0.viewIfLoaded?.window === window }
+            }
+        } catch {
+            print("PLAYBACK MOUNT controllers=\(players(window.rootViewController!).count) foreground=\(model.isForeground)")
+            await model.disconnect()
+            throw error
+        }
         let player = try XCTUnwrap(players(window.rootViewController!).first?.player)
         player.play()
         model.isForeground = false
-        try await waitUntil { player.currentItem == nil }
+        do {
+            try await waitUntil { player.currentItem == nil }
+        } catch {
+            print("PLAYBACK BACKGROUND foreground=\(model.isForeground) rate=\(player.rate) itemStatus=\(String(describing: player.currentItem?.status.rawValue)) attached=\(players(window.rootViewController!).first?.viewIfLoaded?.window === window) controllers=\(players(window.rootViewController!).count)")
+            await model.disconnect()
+            throw error
+        }
         XCTAssertEqual(player.rate, 0)
         await model.disconnect()
     }
