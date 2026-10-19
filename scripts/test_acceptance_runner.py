@@ -58,6 +58,34 @@ class AcceptanceRunnerTests(unittest.TestCase):
         self.check_skipped_result("LatencyBenchmarkTests/testRoundTripSensitiveOperations", (), "failed")
 
 
+class LogResultTests(unittest.TestCase):
+    def test_interleaved_system_diagnostics_do_not_hide_completed_results(self):
+        for outcome in ("passed", "failed", "skipped"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                log = Path(directory) / "test.log"
+                log.write_text(
+                    f"Test Case '-[RemoteFilesTests.PlaybackTests testCodec]' {outcome}"
+                    "2026-10-19 17:02:35.586656+0000 TestHost[8471:44930] [AQ] diagnostic\n"
+                    " (0.050 seconds).\n")
+                self.assertEqual(acceptance.log_tests(log), {"PlaybackTests/testCodec": outcome})
+
+    def test_interleaved_repeated_results_still_fail_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "test.log"
+            log.write_text("Test Case '-[ExampleTests testOne]' passed (0.001 seconds).\n"
+                           "Test Case '-[ExampleTests testOne]' passed2026-10-19 17:02:35 diagnostic\n"
+                           " (0.001 seconds).\n")
+            with self.assertRaisesRegex(RuntimeError, "Repeated result"):
+                acceptance.log_tests(log)
+
+    def test_started_and_incomplete_outcome_names_are_not_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "test.log"
+            log.write_text("Test Case '-[ExampleTests testOne]' started.\n"
+                           "Test Case '-[ExampleTests testTwo]' passedSomething (0.001 seconds).\n")
+            self.assertEqual(acceptance.log_tests(log), {})
+
+
 class LaneSelectionTests(unittest.TestCase):
     def test_default_keeps_full_acceptance_and_rejects_overlapping_inventories(self):
         self.assertEqual(acceptance.selected_lanes(None), acceptance.DEFAULT_LANES)

@@ -159,7 +159,10 @@ def expected_tests(root, platform, directories):
 
 def log_tests(path):
     tests = {}
-    pattern = re.compile(r"Test Case '-\[(?:[\w]+\.)?(\w+) (test\w+)\]' (passed|failed|skipped) \(")
+    # Simulator diagnostics may interleave between XCTest's completed outcome
+    # and its duration. Count the explicit marker; retain inventory, duplicate,
+    # skip-policy and xcresult-count checks independently of timing text.
+    pattern = re.compile(r"Test Case '-\[(?:[\w]+\.)?(\w+) (test\w+)\]' (passed|failed|skipped)(?=\s|$|\d{4}-\d{2}-\d{2} )")
     for match in pattern.finditer(path.read_text(errors="replace")):
         identifier = match[1] + "/" + match[2]
         if identifier in tests:
