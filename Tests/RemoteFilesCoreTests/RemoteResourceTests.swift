@@ -323,6 +323,50 @@ final class RemoteResourceTests: XCTestCase {
         let count = await service.downloads
         XCTAssertEqual(count, 2)
     }
+    func testQueuedTransfersRunTwoAtATimeInOrderAndCancelledWaiterTakesNoSlot() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = ScopedResourceTransportMock(blockDownloads: true)
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        let doc = location, root = doc.resourceRoot
+        func path(_ name: String) -> String { root + "/" + name }
+        let a = Task { try await resolver.localFile(for: "a.png", in: doc) }
+        let b = Task { try await resolver.localFile(for: "b.png", in: doc) }
+        try await service.waitForDownloads(2)
+        // Queue c, d and e behind the two active transfers, in that order.
+        var queued: [Task<URL, Error>] = []
+        for name in ["c.png", "d.png", "e.png"] {
+            queued.append(Task { try await resolver.localFile(for: name, in: doc) })
+            try await Task.sleep(for: .milliseconds(30))
+        }
+        var started = await service.downloads.count
+        XCTAssertEqual(started, 2, "Only two transfers may stream at once")
+        queued[1].cancel()
+        do { _ = try await queued[1].value; XCTFail("A queued waiter must leave promptly when cancelled") } catch is CancellationError { }
+        await service.release(path: path("a.png"), occurrence: 1)
+        _ = try await a.value
+        try await service.waitForDownloads(3)
+        await service.release(path: path("b.png"), occurrence: 1)
+        _ = try await b.value
+        try await service.waitForDownloads(4)
+        // Give a leaked slot time to show up as an extra transfer.
+        try await Task.sleep(for: .milliseconds(50))
+        let order = await service.downloads
+        XCTAssertEqual(order, [path("a.png"), path("b.png"), path("c.png"), path("e.png")],
+                       "Freed slots go to waiters in order, skipping the cancelled one")
+        await service.release(path: path("c.png"), occurrence: 1)
+        await service.release(path: path("e.png"), occurrence: 1)
+        _ = try await queued[0].value; _ = try await queued[2].value
+        // Both slots are free again: two new transfers start at once.
+        let f = Task { try await resolver.localFile(for: "f.png", in: doc) }
+        let g = Task { try await resolver.localFile(for: "g.png", in: doc) }
+        try await service.waitForDownloads(6)
+        started = await service.downloads.count
+        XCTAssertEqual(started, 6)
+        await service.release(path: path("f.png"), occurrence: 1)
+        await service.release(path: path("g.png"), occurrence: 1)
+        _ = try await f.value; _ = try await g.value
+    }
     func testScopedRefreshPreservesUnrelatedDocumentsAndConnections() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
