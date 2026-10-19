@@ -80,7 +80,9 @@ GitHub-hosted `xcode-27` image, explicitly selects Xcode 27.0, creates a disposa
 iOS 27.0 simulator, and invokes the existing full acceptance runner. It requires
 all macOS/OpenSSH, signed iOS core/demo UI, VoiceOver, and unsigned Release device
 compile lanes. Missing tests and unexpected skips fail the run; only the existing
-real-server opt-in UI tests may skip. No signing certificates, saved connections,
+real-server opt-in UI tests and the physical-device Data Protection assertion may
+skip on Simulator. Benchmark operations run once against the loopback fixture;
+these timings do not measure network latency. No signing certificates, saved connections,
 repository secrets, or real server access are required.
 
 The Actions job summary displays the lane results; downloadable acceptance artifacts
