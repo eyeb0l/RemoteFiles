@@ -85,7 +85,13 @@ public final class SFTPClient: Sendable {
     ///   ID is in flight at any given time; multiple reponses to the same ID are likely to cause
     ///   unpredictable behavior.
     internal func sendRequest(_ request: SFTPRequest) async throws -> SFTPResponse {
-        try await self.eventLoop.flatSubmit {
+        try await self.sendRequestFuture(request).get()
+    }
+
+    /// RemoteFiles: queues the request without waiting for its response. Event-loop tasks run in
+    /// submission order, so requests issued one after another reach the server in that order.
+    internal func sendRequestFuture(_ request: SFTPRequest) -> EventLoopFuture<SFTPResponse> {
+        self.eventLoop.flatSubmit {
             let requestId = request.requestId
             let promise = self.channel.eventLoop.makePromise(of: SFTPResponse.self)
             
@@ -101,7 +107,7 @@ public final class SFTPClient: Sendable {
             return self.channel.writeAndFlush(request.makeMessage()).flatMap {
                 promise.futureResult
             }
-        }.get()
+        }
     }
 
     /// Set the attributes of a file on the SFTP server.
@@ -135,7 +141,10 @@ public final class SFTPClient: Sendable {
     
     /// List the contents of a directory on the SFTP server.
     ///
-    /// - Parameter path: The path to list
+    /// - Parameters:
+    ///   - path: The path to list
+    ///   - resolvingPath: Whether to canonicalize `path` with `realpath` first
+    ///   - concurrentReads: The most READDIR requests kept in flight; 1 reads one batch at a time
     /// - Returns: Array of directory entries
     /// - Throws: SFTPError if the request fails
     ///
@@ -150,7 +159,8 @@ public final class SFTPClient: Sendable {
     /// ```
     public func listDirectory(
         atPath path: String,
-        resolvingPath: Bool = true
+        resolvingPath: Bool = true,
+        concurrentReads: Int = 1
     ) async throws -> [SFTPMessage.Name] {
         var path = path
         var oldPath: String
@@ -172,36 +182,62 @@ public final class SFTPClient: Sendable {
             throw SFTPError.invalidResponse
         }
         
+        // RemoteFiles: keep `concurrentReads` READDIR requests in flight, so a folder within one batch needs
+        // one round trip and a large one is paced by the server rather than the RTT. Responses are consumed
+        // in request order, and every issued request is awaited. Each READDIR takes a distinct batch from
+        // the server's directory stream, so the listing stays complete even if a server answered them out of
+        // order; only the order of whole batches could then differ. After EOF no READDIR is issued, and
+        // CLOSE goes out behind those still in flight, so the surplus reads cost no extra round trip.
+        let window = max(1, concurrentReads)
+        var inFlight = CircularBuffer<EventLoopFuture<SFTPResponse>>()
         var names = [SFTPMessage.Name]()
-        do {
-            var response = try await sendRequest(
-                .readdir(
-                    .init(
-                        requestId: self.allocateRequestId(),
-                        handle: handle.handle
-                    )
-                )
-            )
-
-            while case .name(let name) = response {
-                names.append(name)
-                response = try await sendRequest(
-                    .readdir(
-                        .init(
-                            requestId: self.allocateRequestId(),
-                            handle: handle.handle
-                        )
-                    )
-                )
+        var returned: Set<String>?
+        var closing: EventLoopFuture<SFTPResponse>?
+        var failure: Error?
+        func fill() {
+            while failure == nil, closing == nil, inFlight.count < window {
+                if Task.isCancelled { failure = CancellationError(); return }
+                inFlight.append(self.sendRequestFuture(.readdir(.init(requestId: self.allocateRequestId(), handle: handle.handle))))
             }
-        } catch {
-            _ = try? await sendRequest(.closeFile(.init(requestId: self.allocateRequestId(), handle: handle.handle)))
-            throw error
+        }
+        fill()
+        while let next = inFlight.popFirst() {
+            do {
+                let response = try await next.get()
+                guard failure == nil else { continue }
+                switch response {
+                case .name(let name) where closing == nil:
+                    names.append(name)
+                    fill()
+                case .name(let name):
+                    // Only a server that reorders one handle's requests, or rewinds after EOF, answers names
+                    // after EOF. Keep those not already returned, so no entry is lost or repeated.
+                    var seen = returned ?? Set(names.flatMap { $0.components.map(\.filename) })
+                    let fresh = name.components.filter { seen.insert($0.filename).inserted }
+                    returned = seen
+                    if !fresh.isEmpty { names.append(.init(requestId: name.requestId, components: fresh)) }
+                case .status(let status) where status.errorCode == .eof && closing == nil:
+                    closing = self.sendRequestFuture(.closeFile(.init(requestId: self.allocateRequestId(), handle: handle.handle)))
+                case .status(let status) where status.errorCode == .eof:
+                    break
+                default:
+                    throw SFTPError.invalidResponse
+                }
+            } catch is SFTPMessage.Status where closing != nil {
+                // A server may reject READDIR on an exhausted or closed handle; the listing is already complete.
+            } catch {
+                failure = failure ?? error
+            }
+        }
+        if let failure {
+            _ = try? await (closing ?? self.sendRequestFuture(.closeFile(.init(requestId: self.allocateRequestId(), handle: handle.handle)))).get()
+            throw failure
         }
 
         // RemoteFiles: close the directory handle so a reused SFTP channel does not accumulate handles.
         // The inbound handler passes `.eof` statuses through as responses, so require `.ok` explicitly.
-        guard case .status(let status) = try await sendRequest(.closeFile(.init(requestId: self.allocateRequestId(), handle: handle.handle))) else {
+        let close = closing ?? self.sendRequestFuture(.closeFile(.init(requestId: self.allocateRequestId(), handle: handle.handle)))
+        guard case .status(let status) = try await close.get() else {
             throw SFTPError.invalidResponse
         }
         guard status.errorCode == .ok else {
