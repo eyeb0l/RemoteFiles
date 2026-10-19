@@ -68,6 +68,28 @@ compile lanes, and reports missing tests or unexpected skips as failures.
 [Automated acceptance](AUTOMATED_ACCEPTANCE.md) distinguishes these results
 from the physical-device and human checks that remain.
 
+## GitHub Actions CI
+
+[CI](https://github.com/eyeb0l/RemoteFiles/actions/workflows/ci.yml) runs on
+pull requests, pushes to `main`, and manual dispatch. New commits
+cancel older runs for the same pull request or branch.
+
+The fast **Repository checks** job verifies the generated Xcode project and
+runs the Python failure/cleanup regressions. **Xcode 27 acceptance** uses the
+GitHub-hosted `xcode-27` image, explicitly selects Xcode 27.0, creates a disposable
+iOS 27.0 simulator, and invokes the existing full acceptance runner. It requires
+all macOS/OpenSSH, signed iOS core/demo UI, VoiceOver, and unsigned Release device
+compile lanes. Missing tests and unexpected skips fail the run; only the existing
+real-server opt-in UI tests may skip. No signing certificates, saved connections,
+repository secrets, or real server access are required.
+
+The Actions job summary displays the lane results; downloadable acceptance artifacts
+retain logs, JSON reports and xcresult bundles for seven days, including failed
+runs. Build caches, copied sources and generated SSH fixture keys are excluded.
+The job has a 150-minute limit and the runner keeps its 30-minute per-command
+deadline. Simulator results do not establish physical-iPhone acceptance. CI does
+not change branch protection or publish app builds.
+
 ## Renderer performance
 
 Textual is locally vendored at the original pinned revision with focused startup and reader accessibility fixes. [Provenance](../Vendor/Textual/UPSTREAM.md) records the changes and license; [performance evidence](READER_PERFORMANCE.md) records simulator and physical-iPhone measurements, tests, and remaining limits.
