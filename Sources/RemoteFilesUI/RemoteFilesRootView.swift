@@ -30,6 +30,7 @@ public struct RemoteFilesRootView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background {
+                ReaderWarmUp.cancel()
                 model?.isForeground = false
                 lifecycleTask = Task { await model?.background() }
             }
@@ -87,7 +88,7 @@ struct AppNavigation: View {
     }
 }
 
-private struct HomeView: View {
+struct HomeView: View {
     @Bindable var model: AppModel
     private var demoIndicator: some View {
         Label("Demo workspace · sample files", systemImage: "sparkles")

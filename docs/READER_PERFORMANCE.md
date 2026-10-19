@@ -5,6 +5,100 @@ Measured 22 September 2026 with Xcode 27.0 (27A266a), Swift 6.4 and macOS
 thread and reduces the observed simulator reader stall. It does **not** establish
 that all reader hitches or the preview's performance acceptance criteria are resolved.
 
+## Follow-up: off-main runtime warm-up (19 October 2026)
+
+Measured with Xcode 27.0 on the iPhone 18 Pro simulator (iOS 27.0). This reduces,
+but does not remove, the residual simulator stall. No physical-device profile was
+recorded for this change.
+
+### What dominated
+
+In the baseline, 75–88% of main-thread samples in the reader potential hang were in
+`swift_conformsToProtocolMaybeInstantiateSuperclasses`: cold Swift conformance-cache
+lookups. Callers were SwiftUI's stored-property `DynamicProperty` checks
+(`DynamicPropertyCache.fields`), body-type resolution (`BodyAccessor.makeBody`, via
+mangled-name requirement checks), and `Text` attribute-scope descriptions. JavaScriptCore
+and Prism had no main-thread samples. An LLDB breakpoint on the runtime's cache insertion
+counted 882 main-thread misses during one baseline reader open. Each one costs roughly
+0.35 ms on the simulator. The app binary has only 2,675 conformance records, so the per-miss
+cost is the scan over all loaded system images. Hardware may scan far less; that was not measured.
+
+Loading an image that contains Swift conformances clears the whole runtime cache. When
+XCTest attached, accessibility support loaded about 250 images. A warm-up run at launch was
+therefore lost before the UI test opened a folder, so warm-up starts from the folder view.
+
+### Change
+
+- Textual: `StructuredText.prepareRendering(shouldContinue:)` runs on the caller's thread.
+  For the default block views, styles and interaction modifiers, it resolves body types and
+  `View`/`ViewModifier` conformances. It also checks their stored property types for
+  `DynamicProperty`. It converts a one-character string through the SwiftUI and Textual
+  attribute scopes and reflects four body fonts into the existing provider cache. See the
+  [provenance](../Vendor/Textual/UPSTREAM.md).
+- App: `ReaderWarmUp` does the same for the reader chrome, the document switch, the source
+  view, inline images and Home's Recents section, then calls Textual. Each `FolderView`
+  waits 1 s for its own first layout and then starts warm-up as a detached utility task.
+  One run is in flight at a time, so a repeated run only hits caches. Leaving the folder
+  within 1 s skips warm-up, and backgrounding the app cancels it between types.
+- No view is created, no body or environment is evaluated, and nothing touches disk or the
+  network. Types that are not listed are resolved on first display as before. Most remaining
+  misses are SwiftUI-internal types, private Textual environment keys and closure-typed
+  properties, which cannot be named here.
+
+### Before and after
+
+The build was Release with `ENABLE_TESTABILITY=YES`. Each run used this sequence:
+
+1. Install the app and launch it once, discarding that first launch.
+2. Launch a fresh `--demo` process and attach Time Profiler (`xctrace --attach RemoteFiles`, 45 s).
+3. Run only `testBrowseReadRefreshAndReturn` with `TEST_RUNNER_REMOTEFILES_PROFILE_EXISTING_APP=1`.
+
+Baseline (HEAD `e7ffec0`) and patched runs alternated, five of each. The measurement window
+is 1.8 s from the UI test's synthesized tap on *Latest report*, aligned using the trace and
+test start times.
+
+| Reader open, 1.8 s window | Baseline | Warm-up |
+| --- | ---: | ---: |
+| Runs with a reader potential hang | 5 of 5 | 2 of 5 |
+| Potential-hang duration | 368–530 ms (median 488) | 262 and 281 ms; none in 3 runs |
+| Median main-thread busy samples (≈1 ms each) | 660 | 459 |
+| Median main-thread samples with a conformance-lookup leaf | 326 | 144 |
+
+The folder open, measured over 1.5 s from the *Projects* tap, was unchanged. Median busy
+samples were 384 before and 390 after. Folder potential hangs occurred in both builds (3 of 5
+and 5 of 5), and every one began before warm-up ran. Warm-up itself took 225–291
+background-thread samples, about 1 s after the folder appeared.
+
+An earlier batch of five pairs started warm-up immediately when the folder appeared. It
+recorded 418–557 ms baseline reader hangs against one 322 ms hang in five patched runs. That
+warm-up could overlap the folder's own first layout, which is why the 1 s delay was added.
+
+These are simulator results under XCTest automation, which loads extra images. They show
+less main-thread work and fewer, shorter reader hangs. They do not establish the sub-200 ms
+cached-display target or any improvement on a physical device.
+
+### Regression checks
+
+- `swift test --package-path Vendor/Textual` passed 5 tests. Two are new warm-up tests: one
+  covers off-thread, complete and repeatable runs, and one checks that it stops when asked.
+- `swift test` ran 129 tests: 13 skipped, 0 failures.
+- `REMOTEFILES_TEST_PORT=22422 scripts/test-openssh.sh xcodebuild … test` ran on the
+  iPhone 18 Pro simulator:
+  - Hosted: 194 tests, 2 skipped (device-only file protection and the latency benchmark).
+  - UI: 23 tests, 14 passed and 9 opt-in real-server tests skipped, 0 failures.
+- `ReaderWarmUpTests` covers three behaviours:
+  - warm-up runs off the main thread, coalesces runs and repeats cheaply;
+  - it stops between types when cancelled;
+  - a rendered Markdown document's pixels are identical before and after warm-up.
+
+Evidence (not committed) is in `/private/tmp/remotefiles-reader-evidence/`:
+
+- `final2-{base,warm}-N.trace` with `-hangs.xml`, `-samples.xml`, `-test.log` and `.xcresult`.
+  Warm run 2 was lost to an `xctrace` save hang, and run 6 replaces it.
+- The earlier `final-*` batch.
+- LLDB miss logs: `conf2-conformances.tsv` (baseline) and `conf11-conformances.tsv` (patched).
+- Test logs: `ios-tests.log`, `swift-test.log` and `textual-tests.log`.
+
 ## Cause and implementation
 
 The original Debug and Release recordings showed approximately 0.6 seconds of
