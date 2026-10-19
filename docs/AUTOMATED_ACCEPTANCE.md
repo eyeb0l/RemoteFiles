@@ -53,8 +53,8 @@ allows its fixture cleanup trap to finish before escalation to termination.
 
 | Lane | What it establishes | Required outcome |
 |---|---|---|
-| macOS + loopback OpenSSH | All host core tests, key import/trust, read/stream caps, cancellation and generated server fixtures; actual large-image decode | Every inventoried method runs, no failures or skips |
-| Signed iOS Simulator | Hosted Keychain/UI lifecycle tests, loopback SFTP, generated large-image decode and ordinary demo UI journeys | Every inventoried method runs; only explicit real-server opt-in methods may skip |
+| macOS + loopback OpenSSH | All host core tests, key import/trust, read/stream caps, cancellation and generated server fixtures; actual large-image decode | Every inventoried method runs, no failures or skips; benchmark operations run once on loopback |
+| Signed iOS Simulator | Hosted Keychain/UI lifecycle tests, loopback SFTP, generated large-image decode and ordinary demo UI journeys | Every inventoried method runs; only real-server opt-in methods and the physical-device Data Protection assertion may skip |
 | Actual VoiceOver service | `XCUIVoiceOverService` speech/focus checks against production reader/image views in a disposable fixture app | Every VoiceOver method passes; original VoiceOver enabled state is restored |
 | Release generic iOS compile | Optimized device-target compilation | Build succeeds; this is not an installable/signed device run |
 
@@ -69,7 +69,13 @@ There are no automatic retries. An investigated rerun uses a fresh evidence
 directory; retain and disclose the first failure. Summary status stays `running`
 until all required lanes finish, or `failed` as soon as a lane fails.
 
-`RealServerUITests` are explicitly skipped in the Simulator run. The runner
+`RealServerUITests` are explicitly skipped in the Simulator run. The single
+`IdentityTests/testTrustStoreWritesUseCompleteFileProtection` method may also skip
+because Simulator filesystems do not report Data Protection classes; its actual
+protection assertion still requires a physical device. Keychain tests must run.
+The opt-in latency benchmark's operations run once against the generated
+loopback fixture on both platforms, with no latency proxy or performance
+threshold. These timings are smoke coverage, not network-latency evidence. The runner
 clears inherited real-server opt-in variables and never touches a real server.
 The current `testSeventyMegabyteImageUsesBoundedDisplayPixels` creates a valid
 PNG over 70 MB inside its temporary directory on both platforms, then checks

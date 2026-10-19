@@ -20,6 +20,10 @@ import sys
 import time
 
 
+# Simulator filesystems cannot establish physical-device Data Protection classes.
+SIMULATOR_ALLOWED_SKIPS = {"IdentityTests/testTrustStoreWritesUseCompleteFileProtection"}
+
+
 def capture(command, cwd=None):
     return subprocess.check_output(command, cwd=cwd, text=True).strip()
 
@@ -165,6 +169,12 @@ class Run:
                 del self.env[key]
         self.env["REMOTEFILES_REAL_SERVER"] = "0"
         self.env["TEST_RUNNER_REMOTEFILES_REAL_SERVER"] = "0"
+        # Exercise the opt-in operations once against this runner's disposable
+        # fixture. These timings are a smoke check, not a network-latency claim.
+        for key, value in {"REMOTEFILES_BENCHMARK": "1", "REMOTEFILES_BENCHMARK_RUNS": "1",
+                           "REMOTEFILES_BENCHMARK_LABEL": "acceptance-loopback"}.items():
+            self.env[key] = value
+            self.env["TEST_RUNNER_" + key] = value
 
     def command(self, name, command, cwd=None, log=None):
         path = log or self.output / (name + ".log")
@@ -309,7 +319,7 @@ def main():
         mac = run.command("macos-openssh", ["scripts/test-openssh.sh", "swift", "test", "-j", "2", "--scratch-path", scratch, "--force-resolved-versions"])
         run.tests(mac, expected_tests(root, "macOS", ["Tests/RemoteFilesCoreTests"]))
         simulator_expected = expected_tests(root, "iOS", ["Tests/RemoteFilesCoreTests", "Tests/RemoteFilesUITests"])
-        ordinary_skips = {name for name in simulator_expected if name.startswith("RealServerUITests/")}
+        ordinary_skips = SIMULATOR_ALLOWED_SKIPS | {name for name in simulator_expected if name.startswith("RealServerUITests/")}
         sim_result = output / "simulator.xcresult"
         sim = run.command("simulator", ["scripts/test-openssh.sh"] + base + ["-configuration", "Debug", "-destination", "platform=iOS Simulator,id=" + args.simulator,
             "-resultBundlePath", sim_result, "-parallel-testing-enabled", "NO", "-collect-test-diagnostics", "never",
