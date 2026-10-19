@@ -101,21 +101,59 @@ class LaneSelectionTests(unittest.TestCase):
             inventories = []
             def command(self, name, command):
                 self.commands.append((name, command))
-                return {"name": name, "log": "unused"}
+                return {"name": name, "log": "unused", "status": "passed"}
             def tests(self, lane, expected, allowed_skips=(), xcresult=None):
                 self.inventories.append(expected)
-        run = Recorder()
+        run = Recorder(); run.commands = []; run.inventories = []
         acceptance.execute_lanes(run, [lane], Path("packages"), Path("scratch"), Path("derived"), "simulator-id")
         return run
 
     def test_quick_ios_runs_the_complete_hosted_core_inventory_without_ui_journeys(self):
         run = self.run_lane("simulator-core")
-        self.assertEqual(len(run.commands), 1)
-        self.assertIn("-only-testing:RemoteFilesTests", run.commands[0][1])
+        self.assertEqual(len(run.commands), 2)
+        build, execution = run.commands[0][1], run.commands[1][1]
+        self.assertEqual(build[build.index("-scheme") + 1], "RemoteFilesCoreCI")
+        self.assertIn("generic/platform=iOS Simulator", build)
+        self.assertEqual(build[-1], "build-for-testing")
+        self.assertEqual(execution[-1], "test-without-building")
+        self.assertIn("-only-testing:RemoteFilesTests", execution)
         expected = run.inventories[0]
         self.assertIn("OverflowViewportTests/testLargeFastJumpKeepsVisibleProseAnchorAndSourceReturnRestoresSameCharacter", expected)
         self.assertIn("IdentityTests/testDeviceKeychainPersistenceAndAccessibility", expected)
         self.assertFalse(any(name.startswith(("RealServerUITests/", "RemoteFilesUITests/")) for name in expected))
+
+    def test_failed_core_build_never_boots_or_runs_cached_tests(self):
+        class FailedBuild:
+            root = Path(__file__).resolve().parents[1]
+            output = Path("/tmp/unused-evidence")
+            env = {}
+            def command(self, name, command):
+                self.commands.append(name)
+                return {"status": "failed"}
+            def tests(self, *args, **kwargs):
+                raise AssertionError("Failed builds cannot validate stale test products")
+        run = FailedBuild(); run.commands = []
+        with patch.object(acceptance, "boot_selected_simulator") as boot:
+            acceptance.execute_lanes(run, ["simulator-core"], Path("packages"), Path("scratch"), Path("derived"), "sim", True)
+            boot.assert_not_called()
+        self.assertEqual(run.commands, ["simulator-core-build"])
+
+    def test_core_boot_follows_build_and_precedes_same_inventory_execution(self):
+        events = []
+        class OrderedRun:
+            root = Path(__file__).resolve().parents[1]
+            output = Path("/tmp/unused-evidence")
+            env = {}
+            def command(self, name, command):
+                events.append(name)
+                return {"status": "passed"}
+            def tests(self, lane, expected, allowed_skips=(), xcresult=None):
+                self.expected = expected
+        run = OrderedRun()
+        with patch.object(acceptance, "boot_selected_simulator", side_effect=lambda *args: events.append("boot")):
+            acceptance.execute_lanes(run, ["simulator-core"], Path("packages"), Path("scratch"), Path("derived"), "sim", True)
+        self.assertEqual(events, ["simulator-core-build", "boot", "simulator-core"])
+        self.assertEqual(run.expected, acceptance.expected_tests(run.root, "iOS", ["Tests/RemoteFilesCoreTests"]))
 
     def test_ui_acceptance_does_not_repeat_the_core_tests(self):
         run = self.run_lane("simulator-ui")

@@ -19,27 +19,33 @@ runs:
         toolchain=$(xcodebuild -version | shasum -a 256 | cut -d ' ' -f 1)
         family=ios
         if [[ "$LANE" == macos-openssh ]]; then family=macos; fi
-        echo "prefix=xcode-$toolchain-${{ runner.arch }}-$family" >> "$GITHUB_OUTPUT"
+        echo "prefix=v2-xcode-$toolchain-${{ runner.arch }}-$family" >> "$GITHUB_OUTPUT"
+        echo "legacy=xcode-$toolchain-${{ runner.arch }}-$family" >> "$GITHUB_OUTPUT"
     - name: Restore dependency and build caches
       id: cache
       uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
       with:
         path: ${{ env.CI_CACHE }}
-        key: ${{ steps.build.outputs.prefix }}-${{ hashFiles('**/Package.resolved', '**/Package.swift') }}-${{ hashFiles('App/**', 'Sources/**', 'Tests/**', 'Vendor/**', 'RemoteFiles.xcodeproj/project.pbxproj') }}-${{ inputs.lane }}
+        key: ${{ steps.build.outputs.prefix }}-${{ hashFiles('**/Package.resolved', '**/Package.swift') }}-${{ hashFiles('App/**', 'Sources/**', 'Tests/**', 'Vendor/**', 'RemoteFiles.xcodeproj/**') }}-${{ inputs.lane }}
         restore-keys: |
-          ${{ steps.build.outputs.prefix }}-${{ hashFiles('**/Package.resolved', '**/Package.swift') }}-${{ hashFiles('App/**', 'Sources/**', 'Tests/**', 'Vendor/**', 'RemoteFiles.xcodeproj/project.pbxproj') }}-
+          ${{ steps.build.outputs.prefix }}-${{ hashFiles('**/Package.resolved', '**/Package.swift') }}-${{ hashFiles('App/**', 'Sources/**', 'Tests/**', 'Vendor/**', 'RemoteFiles.xcodeproj/**') }}-
           ${{ steps.build.outputs.prefix }}-${{ hashFiles('**/Package.resolved', '**/Package.swift') }}-
-    - name: Create and boot iOS 27 simulator
+          ${{ steps.build.outputs.legacy }}-${{ hashFiles('**/Package.resolved', '**/Package.swift') }}-
+    - name: Create disposable iOS 27 simulator
       id: simulator
       if: inputs.lane != 'macos-openssh' && inputs.lane != 'release-device-compile'
       shell: bash
+      env:
+        LANE: ${{ inputs.lane }}
       run: |
         simulator=$(xcrun simctl create 'RemoteFiles CI' \
           com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro \
           com.apple.CoreSimulator.SimRuntime.iOS-27-0)
         echo "udid=$simulator" >> "$GITHUB_OUTPUT"
-        xcrun simctl boot "$simulator"
-        xcrun simctl bootstatus "$simulator" -b
+        if [[ "$LANE" != simulator-core ]]; then
+          xcrun simctl boot "$simulator"
+          xcrun simctl bootstatus "$simulator" -b
+        fi
     - name: Run selected validation lane
       shell: bash
       env:
@@ -48,9 +54,12 @@ runs:
       run: |
         simulator_options=()
         if [[ -n "$SIMULATOR_UDID" ]]; then simulator_options=(--simulator "$SIMULATOR_UDID"); fi
+        if [[ "$LANE" == simulator-core ]]; then simulator_options+=(--boot-simulator); fi
+        export REMOTEFILES_RUNNER_LAUNCHED_AT=$(date +%s)
         python3 -B scripts/test-acceptance.py --use-checkout --lane "$LANE" "${simulator_options[@]}" \
           --output "$EVIDENCE" --source-packages "$CI_CACHE/SourcePackages" \
-          --swift-scratch "$CI_CACHE/SwiftBuild" --derived-data "$CI_CACHE/DerivedData"
+          --swift-scratch "$CI_CACHE/SwiftBuild" --derived-data "$CI_CACHE/DerivedData" \
+          --ci-compilation-cache "$CI_CACHE/CompilationCache"
     - name: Publish lane summary
       if: always()
       shell: bash
@@ -86,6 +95,7 @@ runs:
         path: |
           ${{ env.EVIDENCE }}/SUMMARY.md
           ${{ env.EVIDENCE }}/summary.json
+          ${{ env.EVIDENCE }}/phase-timings.json
           ${{ env.EVIDENCE }}/BLOCKER.txt
           ${{ env.EVIDENCE }}/*.log
           ${{ env.EVIDENCE }}/*-xcresult-*.json
