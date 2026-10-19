@@ -46,6 +46,14 @@ Local changes:
   target from the app distribution. Retain focused upstream tokenizer tests in
   a dependency-free `HighlighterTests` target.
 
+- `OverflowGeometryCache.swift`: wait for a replacement viewport/selection model
+  before starting the bounded five-second reading-anchor correction window.
+  Attachment waiting has its own ten-second limit. Previously the correction
+  deadline ran while SwiftUI was still mounting large rendered content, so a
+  slow Source-to-Rendered transition could discard the logical anchor and retain
+  a pixel offset for different block heights. The reader regression includes an
+  intentionally delayed attachment and keeps the original prose-character test.
+
 Before/after evidence and limitations are recorded in
 `../../docs/READER_PERFORMANCE.md`. Keep this fork small and return to the pinned
 upstream package when an equivalent verified fix is available.

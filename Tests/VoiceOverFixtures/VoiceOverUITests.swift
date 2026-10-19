@@ -229,20 +229,26 @@ import XCTest
             let action = try service.currentSpeech().utterance
             print("VO RECENT ACTION: \(action)")
             XCTAssertTrue(action.localizedCaseInsensitiveContains("Remove from Recents"))
-            // XCTest exposes VoiceOver speech/focus, but has no custom-action invocation
-            // API. Validate discovery above and activate the visible native swipe control
-            // below. This does not claim that synthesized touches exercise the rotor.
-            recent.swipeLeft()
-            let remove = app.buttons["Remove from Recents"].firstMatch
-            XCTAssertTrue(remove.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(service.isEnabled)
-            remove.tap()
-            XCTAssertTrue(app.navigationBars["RemoteFiles"].waitForExistence(timeout: 5), "The removal action must keep Home visible")
-            XCTAssertTrue(recent.waitForNonExistence(timeout: 5))
-            // Relaunch also rules out a lazy/offscreen row being mistaken for removal.
-            app.terminate(); app.launch()
-            XCTAssertTrue(app.navigationBars["RemoteFiles"].waitForExistence(timeout: 10))
-            XCTAssertFalse(recent.exists)
+            capture("VoiceOver recent removal action discovery", app)
+        }
+        // XCTest's touch synthesis does not reliably invoke a selected VoiceOver
+        // custom action. Exercise the native swipe control in touch mode, then
+        // restore VoiceOver for the post-removal Home/focus checks. Teardown
+        // always restores the Simulator's original enabled state.
+        try service.disable()
+        XCTAssertFalse(service.isEnabled)
+        let start = recent.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5))
+        let end = recent.coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: end)
+        let remove = app.buttons["Remove from Recents"].firstMatch
+        XCTAssertTrue(remove.waitForExistence(timeout: 5), app.debugDescription)
+        remove.tap()
+        XCTAssertTrue(app.navigationBars["RemoteFiles"].waitForExistence(timeout: 5), "The removal action must keep Home visible")
+        XCTAssertTrue(recent.waitForNonExistence(timeout: 5))
+        app.terminate(); app.launch()
+        XCTAssertTrue(app.navigationBars["RemoteFiles"].waitForExistence(timeout: 10))
+        XCTAssertFalse(recent.exists, "Removal must persist across relaunch")
+        try withVoiceOver {
             try focus("Projects", name: "Home after recent removal relaunch", limit: 35)
             capture("VoiceOver recent removal", app)
         }

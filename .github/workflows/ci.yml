@@ -4,7 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
+    inputs:
+      full_acceptance:
+        description: Run UI journeys, VoiceOver and Release compilation as well
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -22,98 +28,78 @@ jobs:
     name: Repository checks
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    outputs:
+      quick: ${{ steps.scope.outputs.quick }}
+      acceptance: ${{ steps.scope.outputs.acceptance }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 0
       - name: Check generated Xcode project
         run: |
           python3 scripts/generate-project.py
           git diff --exit-code -- RemoteFiles.xcodeproj
-      - name: Test runner failure and cleanup handling
+      - name: Test CI scope, inventories and runner cleanup
         run: python3 -B -m unittest discover -s scripts -p 'test_*.py' -v
-      - name: Check whitespace
-        run: git diff --check HEAD^ HEAD
+      - name: Classify the complete change
+        id: scope
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+          CI_HEAD_SHA: ${{ github.sha }}
+          CI_FORCE_QUICK: ${{ github.event_name == 'workflow_dispatch' }}
+          CI_FORCE_ACCEPTANCE: ${{ inputs.full_acceptance == true || contains(github.event.pull_request.labels.*.name, 'full-acceptance') }}
+        run: python3 -B scripts/ci_scope.py
+      - name: Check changed whitespace
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+        run: |
+          if [[ -n "$CI_BASE_SHA" && ! "$CI_BASE_SHA" =~ ^0+$ ]]; then
+            git diff --check "$CI_BASE_SHA" HEAD
+          else
+            git diff --check HEAD^ HEAD
+          fi
 
-  acceptance:
-    name: Xcode 27 acceptance
+  quick:
+    name: Quick / ${{ matrix.lane }}
     needs: repository-checks
+    if: needs.repository-checks.outputs.quick == 'true'
     runs-on: xcode-27
-    timeout-minutes: 150
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [macos-openssh, simulator-core]
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
-      EVIDENCE: /private/tmp/remotefiles-acceptance
+      EVIDENCE: /private/tmp/remotefiles-validation
       CI_CACHE: /private/tmp/remotefiles-ci-cache
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - name: Restore dependency and build caches
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      - uses: ./.github/actions/validate
         with:
-          path: ${{ env.CI_CACHE }}
-          key: xcode-27.0-${{ runner.arch }}-${{ hashFiles('**/Package.resolved', 'Package.swift', 'Vendor/**') }}-${{ hashFiles('App/**', 'Sources/**', 'Tests/**', 'RemoteFiles.xcodeproj/project.pbxproj') }}
-          restore-keys: |
-            xcode-27.0-${{ runner.arch }}-${{ hashFiles('**/Package.resolved', 'Package.swift', 'Vendor/**') }}-
-      - name: Verify toolchain and project
-        run: |
-          xcodebuild -version
-          swift --version
-          plutil -lint RemoteFiles.xcodeproj/project.pbxproj
-          xcrun simctl list runtimes
-      - name: Create and boot iOS 27 simulator
-        id: simulator
-        timeout-minutes: 10
-        run: |
-          simulator=$(xcrun simctl create 'RemoteFiles CI' \
-            com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro \
-            com.apple.CoreSimulator.SimRuntime.iOS-27-0)
-          echo "udid=$simulator" >> "$GITHUB_OUTPUT"
-          xcrun simctl boot "$simulator"
-          xcrun simctl bootstatus "$simulator" -b
-      - name: Run all automated acceptance lanes
-        run: |
-          python3 -B scripts/test-acceptance.py \
-            --simulator '${{ steps.simulator.outputs.udid }}' \
-            --output "$EVIDENCE" \
-            --source-packages "$CI_CACHE/SourcePackages" \
-            --swift-scratch "$CI_CACHE/SwiftBuild" \
-            --derived-data "$CI_CACHE/DerivedData"
-      - name: Publish acceptance summary
-        if: always()
-        run: |
-          if [[ -f "$EVIDENCE/SUMMARY.md" ]]; then
-            cat "$EVIDENCE/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY"
-          elif [[ -f "$EVIDENCE/BLOCKER.txt" ]]; then
-            cat "$EVIDENCE/BLOCKER.txt" >> "$GITHUB_STEP_SUMMARY"
-          fi
-      - name: Remove disposable simulator
-        timeout-minutes: 2
-        if: always() && steps.simulator.outputs.udid != ''
-        env:
-          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
-        run: |
-          xcrun simctl shutdown "$SIMULATOR_UDID" || true
-          xcrun simctl delete "$SIMULATOR_UDID"
-      # Upload evidence only; exclude build caches, source copies and SSH fixture keys.
-      - name: Retain test logs and result bundles
-        timeout-minutes: 5
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+          lane: ${{ matrix.lane }}
+
+  acceptance:
+    name: Acceptance / ${{ matrix.lane }}
+    needs: [repository-checks, quick]
+    if: needs.repository-checks.outputs.acceptance == 'true'
+    runs-on: xcode-27
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [simulator-ui, voiceover, release-device-compile]
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+      EVIDENCE: /private/tmp/remotefiles-validation
+      CI_CACHE: /private/tmp/remotefiles-ci-cache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          name: acceptance-${{ github.run_id }}-${{ github.run_attempt }}
-          retention-days: 7
-          if-no-files-found: warn
-          path: |
-            ${{ env.EVIDENCE }}/SUMMARY.md
-            ${{ env.EVIDENCE }}/summary.json
-            ${{ env.EVIDENCE }}/BLOCKER.txt
-            ${{ env.EVIDENCE }}/*.log
-            ${{ env.EVIDENCE }}/*-xcresult-*.json
-            ${{ env.EVIDENCE }}/source-manifest.json
-            ${{ env.EVIDENCE }}/source-status.txt
-            ${{ env.EVIDENCE }}/simulator-*.json
-            ${{ env.EVIDENCE }}/simulator.xcresult
-            ${{ env.EVIDENCE }}/voiceover/voiceover.log
-            ${{ env.EVIDENCE }}/voiceover/voiceover.xcresult
+          persist-credentials: false
+      - uses: ./.github/actions/validate
+        with:
+          lane: ${{ matrix.lane }}

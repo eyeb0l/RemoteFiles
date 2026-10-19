@@ -49,6 +49,14 @@ deadline, including test-host startup; use `--timeout-minutes 5` for a bounded
 infrastructure check. A timeout interrupts only that stage's process group and
 allows its fixture cleanup trap to finish before escalation to termination.
 
+## CI selection
+
+The default local command below still requires all four lanes. GitHub CI uses
+independently inventoried lanes to run quick macOS/hosted-core validation on
+ordinary code changes, and adds UI, VoiceOver and Release jobs for sensitive
+changes or explicit requests. See [CI policy and timing](CI.md). `--lane` reports
+its selected coverage explicitly; it does not count unrequested lanes as passed.
+
 ## Required lanes and failure rules
 
 | Lane | What it establishes | Required outcome |

@@ -331,6 +331,9 @@ final class RemoteResourceTests: XCTestCase {
         let doc = location, root = doc.resourceRoot
         func path(_ name: String) -> String { root + "/" + name }
         let a = Task { try await resolver.localFile(for: "a.png", in: doc) }
+        // Task creation order does not guarantee actor arrival order. Establish
+        // the first active transfer before asserting the queue's FIFO behavior.
+        try await service.waitForDownloads(1)
         let b = Task { try await resolver.localFile(for: "b.png", in: doc) }
         try await service.waitForDownloads(2)
         // Queue c, d and e behind the two active transfers, in that order.

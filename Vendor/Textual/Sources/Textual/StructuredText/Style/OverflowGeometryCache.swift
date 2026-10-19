@@ -53,6 +53,7 @@ import UIKit
   private var tracksDeferredGeometry = false
   private var restoring = false
   private var restorationDeadline: CFTimeInterval = 0
+  private var attachmentDeadline: CFTimeInterval = 0
   private var restorationCompletion: ((CGPoint) -> Void)?
 
   public var isRestoringReadingAnchor: Bool { restoring }
@@ -145,8 +146,11 @@ import UIKit
   public func restoreReadingAnchor(completion: @escaping (CGPoint) -> Void) {
     guard readingAnchor != nil else { return }
     cancelAnchor(); restoring = true; restorationCompletion = completion
-    restorationDeadline = CACurrentMediaTime() + 5
-    until = restorationDeadline
+    // SwiftUI can announce appearance before the replacement selection model
+    // attaches. Do not spend its geometry-correction budget waiting for a view.
+    attachmentDeadline = CACurrentMediaTime() + 10
+    restorationDeadline = 0
+    until = 0
     startLink()
   }
 
@@ -186,7 +190,7 @@ import UIKit
 
   func geometryDidChange() {
     if geometryAnchor != nil { until = min(geometryDeadline, CACurrentMediaTime() + 0.3) }
-    if restoring { until = min(restorationDeadline, CACurrentMediaTime() + 0.3) }
+    if restoring, restorationDeadline > 0 { until = min(restorationDeadline, CACurrentMediaTime() + 0.3) }
   }
 
   @objc private func correctAnchor() {
@@ -207,16 +211,22 @@ import UIKit
 
   private func restoreFrame() {
     guard let saved = readingAnchor else { cancelAnchor(); return }
+    let now = CACurrentMediaTime()
+    let deadline = restorationDeadline > 0 ? restorationDeadline : attachmentDeadline
     guard let scroll, let window = scroll.window else {
-      if CACurrentMediaTime() >= restorationDeadline { cancelAnchor() }
+      if now >= deadline { cancelAnchor() }
       return
     }
     if scroll.isTracking || scroll.isDragging {
       finishRestoration(scroll); recordReadingAnchor(); return
     }
     guard let point = resolve(saved, in: scroll) else {
-      if CACurrentMediaTime() >= restorationDeadline { finishRestoration(scroll) }
+      if now >= deadline { finishRestoration(scroll) }
       return
+    }
+    if restorationDeadline == 0, point.ready {
+      restorationDeadline = now + 5
+      until = now + 0.3
     }
     let viewport = scroll.convert(scroll.bounds, to: window)
     let delta = point.y - viewport.minY - saved.viewportY
@@ -224,7 +234,9 @@ import UIKit
       scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x,
                                      y: max(0, scroll.contentOffset.y + delta)), animated: false)
     }
-    if (point.ready && CACurrentMediaTime() >= until) || CACurrentMediaTime() >= restorationDeadline {
+    if restorationDeadline > 0 {
+      if (point.ready && now >= until) || now >= restorationDeadline { finishRestoration(scroll) }
+    } else if now >= attachmentDeadline {
       finishRestoration(scroll)
     }
   }
@@ -239,6 +251,7 @@ import UIKit
   func cancelAnchor() {
     link?.invalidate(); link = nil; geometryAnchor = nil
     restoring = false; restorationCompletion = nil
+    restorationDeadline = 0; attachmentDeadline = 0
   }
   func cancelGeometryAnchor() { if !restoring { cancelAnchor() } }
   #else

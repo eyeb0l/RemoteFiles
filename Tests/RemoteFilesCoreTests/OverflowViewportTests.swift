@@ -231,6 +231,39 @@ private struct OverflowFixtureView: View {
         }
     }
 
+    func testReadingAnchorRestorationWaitsForTheReplacementViewportToAttach() async throws {
+        let (window, previous, state) = try host(text: fixture(72)); defer { cleanup(window, previous: previous) }
+        try await wait { self.prose(window).map { self.selectedText($0.model).string.contains("Paragraph 71") } == true }
+        let scroll = try XCTUnwrap(outer(window))
+        scroll.setContentOffset(CGPoint(x: 0, y: scroll.contentSize.height * 0.73), animated: false)
+        try await Task.sleep(for: .seconds(2))
+        let saved = try visibleCharacter(window)
+        let cache = state.position.overflowGeometry
+        cache.recordReadingAnchor()
+        XCTAssertTrue(cache.hasReadingAnchor)
+        let probe = try XCTUnwrap(views(window).compactMap { $0 as? OverflowAnchorBridge.Probe }.first)
+        let parent = try XCTUnwrap(probe.superview)
+        // Model a replacement subtree whose prepared text takes longer to attach
+        // than the old five-second correction budget. Keep this independent of CPU speed.
+        probe.removeFromSuperview()
+        var completed = false
+        cache.restoreReadingAnchor { _ in completed = true }
+        scroll.setContentOffset(.zero, animated: false)
+        try await Task.sleep(for: .milliseconds(5500))
+        XCTAssertNil(probe.window, "The replacement viewport has not attached yet")
+        XCTAssertTrue(cache.isRestoringReadingAnchor, "Waiting for a viewport must not consume the geometry-correction budget")
+        parent.addSubview(probe)
+        try await wait { completed && !cache.isRestoringReadingAnchor }
+        XCTAssertEqual(try characterY(saved.0, in: window), saved.1, accuracy: 2)
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "Reading position restored after delayed viewport attachment"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     private func checkBlockReturn(marker: String) async throws {
         let text = String(repeating: "Selectable opening prose. ", count: 2700) + "\n\n```text\n" +
             (0..<40).map { "anchor-code-\($0) " + String(repeating: "wide_", count: 50) }.joined(separator: "\n") +
