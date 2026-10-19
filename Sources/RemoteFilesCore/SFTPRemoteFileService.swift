@@ -36,7 +36,7 @@ public actor SFTPRemoteFileService: RemoteFileService {
         let session = try await session(for: profile)
         let result = try await perform(session: session) { sftp in
             let canonical = try await sftp.getRealPath(atPath: Self.validated(path))
-            let groups = try await sftp.listDirectory(atPath: canonical)
+            let groups = try await sftp.listDirectory(atPath: canonical, resolvingPath: false)
             let entries = groups.flatMap(\.components).filter {
                 $0.filename != "." && $0.filename != ".."
             }.map { component in

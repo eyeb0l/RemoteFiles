@@ -34,3 +34,8 @@ handle after the final `readdir` (and best-effort when a `readdir` fails). Upstr
 which forced RemoteFiles to open a fresh SFTP channel per operation. With the handle closed, RemoteFiles
 reuses one SFTP channel per SSH session for listings, metadata and document reads. A non-`ok` close status
 fails the listing, so the caller retires that channel instead of reusing it.
+
+The same method gains an optional `resolvingPath` argument (default `true`, the upstream behaviour).
+Upstream repeats `realpath` until the path stops changing, which costs at least one round trip even for
+an already-canonical path. RemoteFiles canonicalizes once itself, because it reports that path, and
+passes `false` to skip the redundant request.

@@ -29,8 +29,9 @@ while its operation drains the in-flight request and closes its handles. Any fai
 cancelled operation retires the shared channel once its other users finish; the next operation
 opens a fresh one. Image, media and export transfers keep their own child channel, closed on
 completion, cancellation or timeout, so bulk reads never queue ahead of browsing requests.
-The application only exposes realpath, stat, readdir, and read operations; it does not issue
-remote writes or shell commands.
+A listing canonicalizes its path once and skips Citadel's repeated `realpath`, saving one round
+trip per folder. The application only exposes realpath, stat, readdir, and read operations; it
+does not issue remote writes or shell commands.
 
 Citadel's `readAll` trusts the initial stat size. The adapter instead keeps up to eight 64 KiB
 reads in flight (sixteen for transfers), delivers bytes strictly in file order, applies the

@@ -149,12 +149,14 @@ public final class SFTPClient: Sendable {
     /// }
     /// ```
     public func listDirectory(
-        atPath path: String
+        atPath path: String,
+        resolvingPath: Bool = true
     ) async throws -> [SFTPMessage.Name] {
         var path = path
         var oldPath: String
 
-        repeat {
+        // RemoteFiles: callers that already hold a canonical path skip the realpath round trips.
+        while resolvingPath {
             oldPath = path
             guard case .name(let realpath) = try await sendRequest(.realpath(.init(requestId: self.allocateRequestId(), path: path))) else {
                 self.logger.warning("SFTP server returned bad response to open file request, this is a protocol error")
@@ -162,7 +164,8 @@ public final class SFTPClient: Sendable {
             }
 
             path = realpath.path
-        } while path != oldPath
+            if path == oldPath { break }
+        }
         
         guard case .handle(let handle) = try await sendRequest(.opendir(.init(requestId: self.allocateRequestId(), handle: path))) else {
             self.logger.warning("SFTP server returned bad response to open file request, this is a protocol error")
