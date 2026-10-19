@@ -410,6 +410,28 @@ final class RemoteResourceTests: XCTestCase {
         XCTAssertEqual(refreshed.image.width, 5)
         XCTAssertTrue(unrelated.image === retained.image, "Scoped invalidation retains unrelated decoded pixels")
     }
+    func testCacheSurvivesRenamesButNeverCrossesAccounts() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = ImageTransportMock()
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        let doc = location
+        let first = try await resolver.localFile(for: "a.png", in: doc)
+        var renamed = doc.profile
+        renamed.name = "Renamed"; renamed.startingDirectory = "/Users/iris"; renamed.usesTailscale.toggle()
+        renamed.host = renamed.host.uppercased()
+        let reused = try await resolver.localFile(for: "a.png", in: .init(profile: renamed, path: doc.path))
+        XCTAssertEqual(reused, first)
+        var downloads = await service.downloads
+        XCTAssertEqual(downloads, 1, "Display-only edits must keep cached bytes")
+        for change in [{ (p: inout ConnectionProfile) in p.username = "other" }, { $0.port = 2222 },
+                       { $0.host = "other-mac" }, { $0.identityID = UUID() }] {
+            var other = doc.profile; change(&other)
+            _ = try await resolver.localFile(for: "a.png", in: .init(profile: other, path: doc.path))
+        }
+        downloads = await service.downloads
+        XCTAssertEqual(downloads, 5, "A different account, endpoint or identity must never share bytes")
+    }
     func testDiskBudgetAndProfileIsolation() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }

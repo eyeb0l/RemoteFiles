@@ -56,8 +56,9 @@ model in a later navigation change.
   again with the full boundary check. SFTP times have one-second resolution, so document
   **Refresh** still invalidates and re-downloads its images. At most two bounded partial transfers add up to 256 MiB transient
   disk usage. Failed/cancelled partials are removed; old orphan files expire during cleanup.
-  Cache filenames hash the entire profile, canonicalized lexical path and document root;
-  different accounts/identities/endpoints do not share entries. This is `Library/Caches`,
+  Cache filenames hash the normalized endpoint, username, identity, document root and
+  canonicalized lexical path, so renaming a connection or editing its starting folder keeps
+  cached images, while different accounts/identities/endpoints never share entries. This is `Library/Caches`,
   excluded from backup, with complete iOS file protection.
 - Decoded image cache: **32 MiB** explicit LRU. Rows/viewer also retain their currently
   displayed thumbnail. Memory warnings clear the decoded LRU along with document/folder caches. Background/disconnect clears decoded caches and cancels flights.
