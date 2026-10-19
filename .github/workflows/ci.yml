@@ -89,6 +89,7 @@ jobs:
             cat "$EVIDENCE/BLOCKER.txt" >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Remove disposable simulator
+        timeout-minutes: 2
         if: always() && steps.simulator.outputs.udid != ''
         env:
           SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
@@ -97,6 +98,7 @@ jobs:
           xcrun simctl delete "$SIMULATOR_UDID"
       # Upload evidence only; exclude build caches, source copies and SSH fixture keys.
       - name: Retain test logs and result bundles
+        timeout-minutes: 5
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
