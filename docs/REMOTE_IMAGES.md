@@ -46,11 +46,15 @@ model in a later navigation change.
   most; remaining visible requests wait cancellably.
 - Transfers reuse `SFTPRemoteFileService`'s authenticated session and own SFTP child
   channels. Only the referenced file is opened: no sibling enumeration/prefetch.
-- Source bytes stream to disk in at most 256 KiB chunks, with a **128 MiB** per-file
+- Source bytes stream to disk in order from up to sixteen pipelined 64 KiB reads, with a **128 MiB** per-file
   receive-time limit (also checked against FSTAT). A resource operation allows up to
   180 seconds; existing text operation deadlines are unchanged.
 - Disk cache: **256 MiB** completed-file LRU, **5-minute** freshness, **24-hour** retention
-  cleanup on insertion. At most two bounded partial transfers add up to 256 MiB transient
+  cleanup on insertion. Each cached file records the remote size and modification time it was
+  downloaded at. After the freshness window, one metadata request revalidates it: a match whose
+  canonical path stays inside the document folder reuses the bytes; anything else downloads
+  again with the full boundary check. SFTP times have one-second resolution, so document
+  **Refresh** still invalidates and re-downloads its images. At most two bounded partial transfers add up to 256 MiB transient
   disk usage. Failed/cancelled partials are removed; old orphan files expire during cleanup.
   Cache filenames hash the entire profile, canonicalized lexical path and document root;
   different accounts/identities/endpoints do not share entries. This is `Library/Caches`,

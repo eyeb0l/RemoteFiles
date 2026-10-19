@@ -149,12 +149,14 @@ public final class SFTPClient: Sendable {
     /// }
     /// ```
     public func listDirectory(
-        atPath path: String
+        atPath path: String,
+        resolvingPath: Bool = true
     ) async throws -> [SFTPMessage.Name] {
         var path = path
         var oldPath: String
 
-        repeat {
+        // RemoteFiles: callers that already hold a canonical path skip the realpath round trips.
+        while resolvingPath {
             oldPath = path
             guard case .name(let realpath) = try await sendRequest(.realpath(.init(requestId: self.allocateRequestId(), path: path))) else {
                 self.logger.warning("SFTP server returned bad response to open file request, this is a protocol error")
@@ -162,7 +164,8 @@ public final class SFTPClient: Sendable {
             }
 
             path = realpath.path
-        } while path != oldPath
+            if path == oldPath { break }
+        }
         
         guard case .handle(let handle) = try await sendRequest(.opendir(.init(requestId: self.allocateRequestId(), handle: path))) else {
             self.logger.warning("SFTP server returned bad response to open file request, this is a protocol error")
@@ -170,18 +173,8 @@ public final class SFTPClient: Sendable {
         }
         
         var names = [SFTPMessage.Name]()
-        var response = try await sendRequest(
-            .readdir(
-                .init(
-                    requestId: self.allocateRequestId(),
-                    handle: handle.handle
-                )
-            )
-        )
-        
-        while case .name(let name) = response {
-            names.append(name)
-            response = try await sendRequest(
+        do {
+            var response = try await sendRequest(
                 .readdir(
                     .init(
                         requestId: self.allocateRequestId(),
@@ -189,8 +182,32 @@ public final class SFTPClient: Sendable {
                     )
                 )
             )
+
+            while case .name(let name) = response {
+                names.append(name)
+                response = try await sendRequest(
+                    .readdir(
+                        .init(
+                            requestId: self.allocateRequestId(),
+                            handle: handle.handle
+                        )
+                    )
+                )
+            }
+        } catch {
+            _ = try? await sendRequest(.closeFile(.init(requestId: self.allocateRequestId(), handle: handle.handle)))
+            throw error
         }
-        
+
+        // RemoteFiles: close the directory handle so a reused SFTP channel does not accumulate handles.
+        // The inbound handler passes `.eof` statuses through as responses, so require `.ok` explicitly.
+        guard case .status(let status) = try await sendRequest(.closeFile(.init(requestId: self.allocateRequestId(), handle: handle.handle))) else {
+            throw SFTPError.invalidResponse
+        }
+        guard status.errorCode == .ok else {
+            throw SFTPError.errorStatus(status)
+        }
+
         return names
     }
     

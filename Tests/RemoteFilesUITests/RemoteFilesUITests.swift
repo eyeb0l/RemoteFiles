@@ -40,7 +40,7 @@ final class RemoteFilesUITests: XCTestCase {
             XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
             let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Example.swift,")).firstMatch
             XCTAssertTrue(row.waitForExistence(timeout: 10))
-            if !row.isHittable { app.swipeUp() }; row.tap()
+            revealFolderRow(row, in: app).tap()
             XCTAssertTrue(app.staticTexts["Syntax highlighted source"].waitForExistence(timeout: 15))
         }
         let toggle = app.descendants(matching: .any).matching(identifier: "Wrap Lines").firstMatch
@@ -77,8 +77,7 @@ final class RemoteFilesUITests: XCTestCase {
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Preview.html,")).firstMatch
-        for _ in 0..<8 { if row.exists && row.isHittable { break }; app.swipeUp() }
-        XCTAssertTrue(row.exists && row.isHittable, app.debugDescription); row.tap()
+        revealFolderRow(row, in: app).tap()
         XCTAssertTrue(app.buttons["Source"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.webViews.staticTexts["HTML preview"].waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertTrue(app.webViews.staticTexts["Sample table"].exists, app.debugDescription)
@@ -107,8 +106,7 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         for filename in ["Sample audio.m4a", "Sample video.mp4"] {
             let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", filename + ",")).firstMatch
-            for _ in 0..<8 { if row.exists && row.isHittable { break }; app.swipeUp() }
-            XCTAssertTrue(row.exists && row.isHittable, app.debugDescription); row.tap()
+            revealFolderRow(row, in: app).tap()
             let video = filename.hasSuffix(".mp4")
             XCTAssertTrue(app.sliders["Playback position"].waitForExistence(timeout: 20), app.debugDescription)
             let play = app.buttons["Play"]
@@ -146,8 +144,7 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         let json = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Long lines.json,")).firstMatch
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
-        for _ in 0..<6 { if json.exists && json.isHittable { break }; app.swipeUp() }
-        XCTAssertTrue(json.exists && json.isHittable); json.tap()
+        revealFolderRow(json, in: app).tap()
         let source = app.textViews["Bounded source text"]
         XCTAssertTrue(source.waitForExistence(timeout: 15))
         XCTAssertTrue((source.value as? String)?.hasPrefix("{\n  \"version\": 1,") == true)
@@ -161,8 +158,7 @@ final class RemoteFilesUITests: XCTestCase {
         let svg = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Icon.svg,")).firstMatch
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
         // Back preserves the folder position at Long lines.json; Icon.svg is above it.
-        for _ in 0..<6 { if svg.exists && svg.isHittable { break }; app.swipeDown() }
-        XCTAssertTrue(svg.exists && svg.isHittable); svg.tap()
+        revealFolderRow(svg, in: app, searchingDown: false).tap()
         let image = app.descendants(matching: .any).matching(identifier: "Rendered SVG image").firstMatch
         XCTAssertTrue(image.waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertTrue(app.activityIndicators.firstMatch.waitForNonExistence(timeout: 20), app.debugDescription)
@@ -193,8 +189,7 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly review.md,")).firstMatch
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
-        for _ in 0..<5 { if report.exists && report.isHittable { break }; app.swipeUp() }
-        XCTAssertTrue(report.waitForExistence(timeout: 5) && report.isHittable); report.tap()
+        revealFolderRow(report, in: app).tap()
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
         app.buttons["Document actions"].tap(); app.buttons["Disconnect"].tap()
         XCTAssertTrue(app.navigationBars["RemoteFiles"].waitForExistence(timeout: 10))
@@ -206,8 +201,7 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(recent.waitForNonExistence(timeout: 5))
         if !projects.isHittable { app.swipeDown() }; projects.tap()
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
-        for _ in 0..<5 { if report.exists && report.isHittable { break }; app.swipeUp() }
-        XCTAssertTrue(report.waitForExistence(timeout: 5) && report.isHittable); report.tap()
+        revealFolderRow(report, in: app).tap()
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15), "Remote document must still exist after recent removal")
     }
     func testDisconnectFromNestedFolderClearsStackAndReconnectsFromHome() throws {
@@ -235,8 +229,7 @@ final class RemoteFilesUITests: XCTestCase {
         projects.tap()
         let example = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Example.swift,")).firstMatch
         XCTAssertTrue(example.waitForExistence(timeout: 10))
-        if !example.isHittable { app.swipeUp() }
-        example.tap()
+        revealFolderRow(example, in: app).tap()
         let highlighted = app.staticTexts["Syntax highlighted source"]
         XCTAssertTrue(highlighted.waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertTrue(highlighted.label.contains("// Keep remote files within reach. 東京 ✨"))
@@ -251,9 +244,7 @@ final class RemoteFilesUITests: XCTestCase {
         app.navigationBars.buttons["Projects"].tap()
         let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly review.md,")).firstMatch
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
-        for _ in 0..<6 { if report.exists && report.isHittable { break }; app.swipeUp() }
-        XCTAssertTrue(report.exists && report.isHittable)
-        report.tap()
+        revealFolderRow(report, in: app).tap()
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
         app.buttons["Source"].tap()
         XCTAssertTrue(highlighted.waitForExistence(timeout: 15), app.debugDescription)
@@ -304,9 +295,8 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(projects.waitForExistence(timeout: 15))
         projects.tap()
         let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Latest report")).firstMatch
-        XCTAssertTrue(report.waitForExistence(timeout: 10))
-        if !report.isHittable { app.swipeUp() }
-        report.tap()
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
+        revealFolderRow(report, in: app).tap()
         let rendered = app.scrollViews["Rendered Markdown document"]
         XCTAssertTrue(rendered.waitForExistence(timeout: 15))
         attachScreenshot("Physical reader")
@@ -448,17 +438,31 @@ final class RemoteFilesUITests: XCTestCase {
         projects.tap()
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
         let file = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", filename + ",")).firstMatch
-        // List virtualizes off-screen rows, so existence must be checked while revealing.
-        for _ in 0..<6 {
-            if file.exists && file.isHittable { break }
-            app.swipeUp()
-        }
-        XCTAssertTrue(file.waitForExistence(timeout: 5) && file.isHittable,
-                      "The Demo file should be reachable: \(filename)\n" + app.debugDescription)
-        file.tap()
+        revealFolderRow(file, in: app).tap()
         XCTAssertTrue(app.navigationBars[filename].waitForExistence(timeout: 10))
         XCTAssertTrue(app.scrollViews[markdown ? "Rendered Markdown document" : "Plain text document"].waitForExistence(timeout: 15))
         return app
+    }
+
+    /// List virtualizes off-screen rows, so existence is checked while revealing. XCTest also
+    /// reports a row under the bottom search bar as hittable while the bar takes its tap, so
+    /// drag in short, momentum-free steps until the whole row lies inside the list and above it.
+    @discardableResult
+    private func revealFolderRow(_ row: XCUIElement, in app: XCUIApplication,
+                                 searchingDown: Bool = true) -> XCUIElement {
+        let list = app.collectionViews.firstMatch
+        XCTAssertTrue(list.waitForExistence(timeout: 10), app.debugDescription)
+        for _ in 0..<16 {
+            let search = app.searchFields.firstMatch
+            let bottom = min(list.frame.maxY, search.exists ? search.frame.minY - 16 : .greatestFiniteMagnitude)
+            if row.exists, row.isHittable, row.frame.minY >= list.frame.minY, row.frame.maxY <= bottom { return row }
+            let down = row.exists ? row.frame.maxY > bottom : searchingDown
+            let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.65 : 0.35))
+            let to = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.35 : 0.65))
+            from.press(forDuration: 0.05, thenDragTo: to)
+        }
+        XCTFail("Could not reveal folder row clear of the bars.\n" + app.debugDescription)
+        return row
     }
 
     private func documentLink(_ label: String, in app: XCUIApplication) -> XCUIElement {

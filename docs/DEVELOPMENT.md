@@ -45,6 +45,17 @@ Use the signed simulator test command for the actual Keychain tests: an unsigned
 
 The OpenSSH fixture binds loopback port 22222 (override `REMOTEFILES_TEST_PORT`), authorises only generated test keys in a temporary file, uses its own host keys/config, disables passwords/PAM, and cleans up on exit. It does not edit the Mac’s SSH configuration or existing keys. It runs under the current account, so tests intentionally touch only its generated fixture directory. Starting this fixture requires permission to run local loopback networking in restricted environments.
 
+### Latency benchmark
+
+Loopback has almost no latency, so it hides round-trip costs. `scripts/benchmark-latency.sh` starts the same isolated fixture and puts `scripts/latency_proxy.py`, a loopback TCP proxy that delays each direction by half the RTT, in front of it. It then times cold connect, listings, a symlink lookup, small and large reads, an unchanged reopen and a 3 MiB download. Arguments are RTT in milliseconds (default 40), per-direction Mbit/s (default 0, unlimited) and runs (default 5); each `BENCH` line reports the median and fastest run.
+
+```sh
+scripts/benchmark-latency.sh 40        # Tailscale or good Wi-Fi
+scripts/benchmark-latency.sh 150 20    # cellular-like: 150 ms RTT, 20 Mbit/s
+```
+
+The proxy models fixed delay only, with no loss, jitter or reordering, and it changes no system network settings. Use it to compare revisions on the same Mac, not to predict field timings.
+
 See [PREVIEW_STATUS.md](../PREVIEW_STATUS.md) for **actual** results and outstanding acceptance, [SSH_SPIKE.md](SSH_SPIKE.md) for the dependency decision, [RENDERER_SPIKE.md](RENDERER_SPIKE.md) for rendering evidence, and [ROADMAP.md](../ROADMAP.md) for deferred scope. Citadel is vendored from an exact upstream commit with a narrow cancellation patch and original license; see [its provenance](../Vendor/Citadel/UPSTREAM.md).
 
 ## Full acceptance

@@ -18,6 +18,8 @@ struct ReaderView: View {
     @State private var requestID = UUID()
     @State private var copied = false
     @State private var loadedAt: Date?
+    /// The remote version of the displayed text, used to revalidate it without a transfer.
+    @State private var displayedVersion: RemoteFileVersion?
     @State private var readingPosition = DocumentReadingPosition()
     @State private var lastSessionRevision = -1
     @State private var lastRefreshID = -1
@@ -196,6 +198,11 @@ struct ReaderView: View {
         }
         source = false; navigation.show(heading)
     }
+    private func applyInitialFragment() {
+        guard !appliedInitialFragment, let fragment = entry.headingFragment else { return }
+        appliedInitialFragment = true
+        revealHeading(fragment)
+    }
     private func prepareReading(_ decoded: DocumentPreview) async {
         guard case .text(let text, let markdown) = decoded else { return }
         await model.prepareReadingPosition(readingPosition, text: text, profile: profile, path: entry.path)
@@ -210,22 +217,34 @@ struct ReaderView: View {
         guard !isMedia else { return }
         guard model.isForeground else { loading = false; error = "Connection paused while the app is in the background."; return }
         guard DocumentPolicy.kind(filename: entry.name) != .unsupported else { preview = .unsupportedFileType; return }
+        // Opening, returning to the foreground and unlocking revalidate; an explicit Refresh always reads.
+        let explicitRefresh = lastRefreshID >= 0 && lastRefreshID != refreshID
         let token = UUID(); requestID = token
         let revision = model.sessionRevision
         lastSessionRevision = model.sessionRevision; lastRefreshID = refreshID
         loading = true; error = nil
+        var knownVersion = preview == nil ? nil : displayedVersion
         if entry.navigationRoot == nil, preview == nil, let bytes = model.cachedDocument(profile.id, path: entry.path) {
+            let version = model.cachedDocumentVersion(profile.id, path: entry.path)
             let cached = await Task.detached(priority: .userInitiated) { DocumentPolicy.decode(bytes, filename: entry.name) }.value
             await prepareReading(cached)
             guard !Task.isCancelled, token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
-            preview = cached; contentRevision = navigation.revision
+            preview = cached; contentRevision = navigation.revision; displayedVersion = version
+            knownVersion = version
         }
         do {
-            let bytes: Data
-            if let root = entry.navigationRoot {
-                bytes = try await model.service.readDocumentFile(profile: profile, path: entry.path, allowedRoot: root, limit: DocumentPolicy.previewByteLimit)
-            } else {
-                bytes = try await model.service.readFile(profile: profile, path: entry.path, limit: DocumentPolicy.previewByteLimit)
+            let read = try await model.service.readFileIfChanged(profile: profile, path: entry.path, allowedRoot: entry.navigationRoot,
+                                                                 limit: DocumentPolicy.previewByteLimit,
+                                                                 since: explicitRefresh ? nil : knownVersion)
+            guard case .contents(let bytes, let version) = read else {
+                try Task.checkCancellation()
+                guard token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
+                loadedAt = .now
+                model.connectionStates[profile.id] = "Connected"
+                await model.recordRecent(profile: profile, entry: entry)
+                applyInitialFragment()
+                if token == requestID { loading = false }
+                return
             }
             let decoded = await Task.detached(priority: .userInitiated) { DocumentPolicy.decode(bytes, filename: entry.name) }.value
             try Task.checkCancellation()
@@ -248,20 +267,18 @@ struct ReaderView: View {
                     if refreshImages { lastImageRefresh = refreshID; imageVersion += 1 }
                     if case .text = decoded {} else { navigation.clear() }
                     preview = decoded; contentRevision = navigation.revision; loadedAt = .now; copied = false
-                    model.cache(bytes, id: profile.id, path: entry.path)
+                    displayedVersion = version
+                    model.cache(bytes, version: version, id: profile.id, path: entry.path)
                     model.connectionStates[profile.id] = "Connected"
                     await model.recordRecent(profile: profile, entry: entry)
                 })
             guard published else { return }
-            if !appliedInitialFragment, let fragment = entry.headingFragment {
-                appliedInitialFragment = true
-                revealHeading(fragment)
-            }
+            applyInitialFragment()
         } catch {
             guard token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
             if !Task.isCancelled && !(error is CancellationError) {
                 self.error = error.localizedDescription
-                if model.isSecurityError(error) { preview = nil; navigation.clear() }
+                if model.isSecurityError(error) { preview = nil; displayedVersion = nil; navigation.clear() }
                 model.handle(error, profile: profile)
             }
         }

@@ -347,6 +347,72 @@ final class SFTPIntegrationTests: XCTestCase {
         await service.disconnect()
     }
 
+    #if os(macOS)
+    func testSharedChannelReleasesHandlesRevalidatesAndRetiresAfterFailures() async throws {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Shared channel")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        defer { Task { await service.disconnect() } }
+        // Each listing must close its directory handle: a reused channel would otherwise hold them all.
+        for _ in 0..<50 { _ = try await service.listDirectory(profile: profile, path: fixture.files + "/empty") }
+        XCTAssertEqual(try Self.openDescriptors(on: fixture.files + "/empty"), 0)
+        let large = try await service.readFile(profile: profile, path: fixture.files + "/large-report.md", limit: 2_097_152)
+        XCTAssertEqual(large, try Data(contentsOf: URL(fileURLWithPath: fixture.files + "/large-report.md")))
+        _ = try await service.resolveEntry(profile: profile, path: fixture.files + "/report-link.md")
+        var metrics = await service.metrics()
+        XCTAssertEqual(metrics.sftpChannels, 1, "Successful short operations must share one SFTP channel")
+
+        let filename = fixture.files + "/versioned.md"
+        try Data("first".utf8).write(to: URL(fileURLWithPath: filename))
+        defer { try? FileManager.default.removeItem(atPath: filename) }
+        guard case .contents(let first, let version?) = try await service.readFileIfChanged(
+            profile: profile, path: filename, allowedRoot: nil, limit: 1024, since: nil) else { return XCTFail("First read must transfer a version") }
+        XCTAssertEqual(first, Data("first".utf8))
+        let before = await service.metrics().bytesReceived
+        guard case .unchanged = try await service.readFileIfChanged(
+            profile: profile, path: filename, allowedRoot: fixture.files, limit: 1024, since: version) else { return XCTFail("Unchanged file must not transfer") }
+        let after = await service.metrics().bytesReceived
+        XCTAssertEqual(after, before)
+        try Data("second".utf8).write(to: URL(fileURLWithPath: filename))
+        try FileManager.default.setAttributes([.modificationDate: version.modifiedAt.addingTimeInterval(5)], ofItemAtPath: filename)
+        guard case .contents(let second, _) = try await service.readFileIfChanged(
+            profile: profile, path: filename, allowedRoot: nil, limit: 1024, since: version) else { return XCTFail("Changed file must transfer") }
+        XCTAssertEqual(second, Data("second".utf8))
+
+        do {
+            _ = try await service.readFile(profile: profile, path: fixture.files + "/removed.txt", limit: 1024)
+            XCTFail("Missing remote file must fail")
+        } catch RemoteFileError.notFound { }
+        let cancelled = Task { try await service.readFile(profile: profile, path: fixture.files + "/large-report.md", limit: 2_097_152) }
+        cancelled.cancel()
+        _ = try? await cancelled.value
+        let listing = try await service.listDirectory(profile: profile, path: fixture.files)
+        XCTAssertTrue(listing.entries.contains { $0.name == "report.md" })
+        metrics = await service.metrics()
+        XCTAssertEqual(metrics.connections, 1)
+        XCTAssertLessThanOrEqual(metrics.sftpChannels, 3, "A failed or cancelled operation retires only its channel")
+        XCTAssertGreaterThanOrEqual(metrics.sftpChannels, 2)
+    }
+
+    /// Descriptors any process holds on `path`; only the fixture's sftp-server opens this folder.
+    private static func openDescriptors(on path: String) throws -> Int {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        process.arguments = ["-Fn", path]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(decoding: data, as: UTF8.self).split(separator: "\n").filter { $0.hasPrefix("n") }.count
+    }
+    #endif
+
     func testCancelBeforeConnectDoesNotAuthenticate() async throws {
         let fixture = try Fixture()
         let stores = try Stores(fixture: fixture)
@@ -457,6 +523,138 @@ final class BoundedPreviewReaderTests: XCTestCase {
         XCTAssertEqual(result.1, 3)
         let requested = await chunks.requests
         XCTAssertEqual(requested, [9, 7, 1])
+    }
+
+    func testPipelinedReadKeepsRequestsInFlightAndDeliversBytesInOrder() async throws {
+        let bytes = (0..<300_000).map { UInt8(truncatingIfNeeded: $0 &* 31) }
+        let file = PipelinedPreviewFile(bytes)
+        let result = try await BoundedPreviewReader.read(initialSize: nil, limit: 2_097_152) { offset, amount in
+            await file.read(offset: offset, length: amount)
+        }
+        XCTAssertEqual(Array(result.0), bytes)
+        let peak = await file.peak
+        XCTAssertGreaterThan(peak, 1, "Reads must not wait for one round trip per chunk")
+        XCTAssertLessThanOrEqual(peak, 8)
+    }
+
+    func testServerReadCapFillsGapsAndShrinksLaterRequests() async throws {
+        let bytes = (0..<200_000).map { UInt8(truncatingIfNeeded: $0 &* 7) }
+        let file = PipelinedPreviewFile(bytes, maximumRead: 10_000)
+        let result = try await BoundedPreviewReader.read(initialSize: UInt64(bytes.count), limit: 2_097_152) { offset, amount in
+            await file.read(offset: offset, length: amount)
+        }
+        XCTAssertEqual(Array(result.0), bytes)
+        let lengths = await file.requests.map(\.1)
+        XCTAssertGreaterThanOrEqual(lengths.filter { $0 == 10_000 }.count, 4, "Gaps must split at the server's observed read size")
+        XCTAssertLessThan(lengths.count, 60, "Capped reads must not discard and repeat in-flight ranges")
+    }
+
+    func testSmallServerReadCapStaysWithinTheReadWindow() async throws {
+        let bytes = (0..<300_000).map { UInt8(truncatingIfNeeded: $0 &* 13) }
+        for window in [8, 16] {
+            let file = PipelinedPreviewFile(bytes, maximumRead: 4 * 1024)
+            var received: [UInt8] = []
+            _ = try await BoundedPreviewReader.stream(initialSize: nil, limit: 2_097_152, window: window, readChunk: { offset, amount in
+                await file.read(offset: offset, length: amount)
+            }) { received.append(contentsOf: $0.readableBytesView) }
+            XCTAssertEqual(received, bytes)
+            let peak = await file.peak
+            XCTAssertLessThanOrEqual(peak, window, "Gap pieces must wait for free slots in the read window")
+        }
+    }
+
+    func testPipelinedReadNeverRequestsPastProbeAndRejectsGrowth() async throws {
+        let file = PipelinedPreviewFile(Array(repeating: 1, count: 500_000))
+        do {
+            _ = try await BoundedPreviewReader.read(initialSize: 100, limit: 300_000) { offset, amount in
+                await file.read(offset: offset, length: amount)
+            }
+            XCTFail("A file beyond its limit must be rejected")
+        } catch RemoteFileError.tooLarge(let limit) { XCTAssertEqual(limit, 300_000) }
+        let requests = await file.requests
+        XCTAssertTrue(requests.allSatisfy { $0.0 + UInt64($0.1) <= 300_001 })
+
+        let exact = PipelinedPreviewFile(Array(repeating: 2, count: 300_000))
+        let result = try await BoundedPreviewReader.read(initialSize: nil, limit: 300_000) { offset, amount in
+            await exact.read(offset: offset, length: amount)
+        }
+        XCTAssertEqual(result.0.count, 300_000)
+    }
+
+    func testDetachedDeadlineReturnsOnCancellationWhileOperationDrains() async throws {
+        let finished = ProgressFlag()
+        let started = Date()
+        let task = Task {
+            try await SFTPRemoteFileService.detachedDeadline(seconds: 10, onTimeout: {}) {
+                // Mirrors a transport request that ignores task cancellation.
+                await withCheckedContinuation { continuation in
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { continuation.resume() }
+                }
+                await finished.set()
+                return 1
+            }
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        task.cancel()
+        do { _ = try await task.value; XCTFail("Cancelled caller must not receive the result") } catch is CancellationError { }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.3)
+        let drainedEarly = await finished.value
+        XCTAssertFalse(drainedEarly)
+        try await Task.sleep(for: .milliseconds(600))
+        let drained = await finished.value
+        XCTAssertTrue(drained, "The operation still finishes and can release its channel")
+
+        // The deadline outlives a cancelled caller, so an unanswered request still releases its channel.
+        let released = ProgressFlag()
+        let abandoned = Task {
+            try await SFTPRemoteFileService.detachedDeadline(seconds: 1, onTimeout: { Task { await released.set() } }) {
+                await withCheckedContinuation { continuation in
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 3) { continuation.resume() }
+                }
+                return 1
+            }
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        abandoned.cancel()
+        do { _ = try await abandoned.value; XCTFail("Cancelled caller must not receive the result") } catch is CancellationError { }
+        try await Task.sleep(for: .milliseconds(1_300))
+        let releasedAfterCancel = await released.value
+        XCTAssertTrue(releasedAfterCancel, "onTimeout must still run for work that ignores cancellation")
+
+        let timedOut = ProgressFlag()
+        do {
+            _ = try await SFTPRemoteFileService.detachedDeadline(seconds: 1, onTimeout: { Task { await timedOut.set() } }) {
+                try await Task.sleep(for: .seconds(5)); return 1
+            }
+            XCTFail("Deadline must fire")
+        } catch RemoteFileError.timedOut { }
+        try await Task.sleep(for: .milliseconds(50))
+        let fired = await timedOut.value
+        XCTAssertTrue(fired)
+    }
+}
+
+private actor ProgressFlag {
+    private(set) var value = false
+    func set() { value = true }
+}
+
+/// Serves bytes by offset and records concurrent requests, like a pipelined SFTP server.
+private actor PipelinedPreviewFile {
+    private let bytes: [UInt8]
+    private let maximumRead: Int
+    private var inFlight = 0
+    private(set) var peak = 0
+    private(set) var requests: [(UInt64, UInt32)] = []
+    init(_ bytes: [UInt8], maximumRead: Int = .max) { self.bytes = bytes; self.maximumRead = maximumRead }
+    func read(offset: UInt64, length: UInt32) async -> ByteBuffer {
+        requests.append((offset, length))
+        inFlight += 1; peak = max(peak, inFlight)
+        try? await Task.sleep(for: .milliseconds(2))
+        inFlight -= 1
+        let start = min(Int(offset), bytes.count)
+        let end = min(start + min(Int(length), maximumRead), bytes.count)
+        return ByteBuffer(bytes: bytes[start..<end])
     }
 }
 
