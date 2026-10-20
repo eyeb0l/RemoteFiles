@@ -4,12 +4,19 @@ set -euo pipefail
 umask 077
 fixture="$(mktemp -d /private/tmp/remotefiles-openssh.XXXXXX)"
 server_pid=""
+logger_pid=""
 cleanup() {
   if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi
+  # The logger exits once every server process has closed the pipe. Bound the wait in case a
+  # session child outlives the listener, then stop it so cleanup cannot hang.
+  if [ -n "$logger_pid" ]; then
+    for ((i=0; i<50; i++)); do kill -0 "$logger_pid" 2>/dev/null || break; sleep 0.1; done
+    kill "$logger_pid" 2>/dev/null || true; wait "$logger_pid" 2>/dev/null || true
+  fi
   # REMOTEFILES_SSHD_LOG keeps the complete server log as evidence: a client-side
   # transport error alone cannot show whether the server or the client ended a session.
   if [ -n "${REMOTEFILES_SSHD_LOG:-}" ] && [ -f "$fixture/sshd.log" ]; then
-    sleep 0.2; cp "$fixture/sshd.log" "$REMOTEFILES_SSHD_LOG" 2>/dev/null || true
+    cp "$fixture/sshd.log" "$REMOTEFILES_SSHD_LOG" 2>/dev/null || true
   fi
   rm -rf "$fixture"
 }
@@ -60,10 +67,14 @@ CONFIG
 if /usr/sbin/sshd -t -f "$fixture/sshd_config" -o PerSourcePenalties=no 2>/dev/null; then
   echo 'PerSourcePenalties no' >> "$fixture/sshd_config"
 fi
-# Timestamp each line so server events can be matched to test logs.
-/usr/sbin/sshd -D -e -f "$fixture/sshd_config" > >(/usr/bin/perl -MPOSIX=strftime -MTime::HiRes=time -ne \
+# Timestamp each line so server events can be matched to test logs. A named pipe, rather than
+# process substitution, gives cleanup the logger's PID to wait for before copying the log.
+mkfifo "$fixture/sshd.pipe"
+/usr/bin/perl -MPOSIX=strftime -MTime::HiRes=time -ne \
   'BEGIN { $| = 1 } my $t = time; printf "%s.%03dZ %s", strftime("%H:%M:%S", gmtime $t), ($t - int $t) * 1000, $_' \
-  > "$fixture/sshd.log") 2>&1 &
+  < "$fixture/sshd.pipe" > "$fixture/sshd.log" &
+logger_pid=$!
+/usr/sbin/sshd -D -e -f "$fixture/sshd_config" > "$fixture/sshd.pipe" 2>&1 &
 server_pid=$!
 for ((i=0; i<30; i++)); do
   if ! kill -0 "$server_pid" 2>/dev/null; then
