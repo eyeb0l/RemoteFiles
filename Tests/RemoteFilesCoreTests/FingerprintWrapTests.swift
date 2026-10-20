@@ -31,6 +31,7 @@ private struct RecordingRenderer: TextRenderer {
     private func layout(_ view: some View, width: CGFloat, size: DynamicTypeSize) async throws -> TextLayoutRecord {
         let record = TextLayoutRecord()
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
         let window = UIWindow(windowScene: scene)
         window.frame = CGRect(x: 0, y: 0, width: width + 40, height: 800)
         window.rootViewController = UIHostingController(rootView: view
@@ -39,7 +40,7 @@ private struct RecordingRenderer: TextRenderer {
             .frame(width: width)
             .fixedSize(horizontal: false, vertical: true))
         window.makeKeyAndVisible()
-        defer { window.isHidden = true }
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
         let deadline = ContinuousClock.now + .seconds(5)
         while record.lines.isEmpty, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
         XCTAssertFalse(record.lines.isEmpty, "Text was never drawn")
