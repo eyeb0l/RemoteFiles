@@ -1,0 +1,109 @@
+#if os(iOS)
+import XCTest
+import Foundation
+import RemoteFilesCore
+@testable import RemoteFilesUI
+
+final class FolderBrowsingTests: XCTestCase {
+    private let early = Date(timeIntervalSince1970: 1_000), late = Date(timeIntervalSince1970: 2_000)
+
+    private func file(_ name: String, size: UInt64? = nil, modifiedAt: Date? = nil) -> RemoteEntry {
+        RemoteEntry(name: name, path: "/p/" + name, kind: .file, size: size, modifiedAt: modifiedAt)
+    }
+    private func folder(_ name: String) -> RemoteEntry { RemoteEntry(name: name, path: "/p/" + name, kind: .directory) }
+    private func link(_ name: String, to target: RemoteEntry?) -> RemoteEntry {
+        RemoteEntry(name: name, path: "/p/" + name, kind: .symlink, link: target.map { .target($0) } ?? .broken)
+    }
+    private func names(_ rows: [FolderRow]) -> [String] { rows.map(\.entry.name) }
+
+    func testRowsDescribeWhatAResolvedLinkOpens() {
+        let folderLink = FolderRow(link("Current", to: RemoteEntry(name: "Reports", path: "/r/Reports", kind: .directory)))
+        XCTAssertEqual(folderLink.symbol, "folder.fill")
+        XCTAssertEqual(folderLink.subtitle, "Link to folder")
+        let fileLink = FolderRow(link("Latest", to: RemoteEntry(name: "a.md", path: "/r/a.md", kind: .file, size: 2048, modifiedAt: late)))
+        XCTAssertEqual(fileLink.symbol, "doc.richtext")
+        XCTAssertTrue(fileLink.subtitle.hasPrefix("Link to file · 2 KB · "), fileLink.subtitle)
+        XCTAssertEqual(FolderRow(link("Old", to: nil)).subtitle, "Broken link")
+        let unresolved = FolderRow(RemoteEntry(name: "Later", path: "/p/Later", kind: .symlink))
+        XCTAssertEqual(unresolved.symbol, "link")
+        XCTAssertEqual(unresolved.subtitle, "Symbolic link")
+        XCTAssertEqual(FolderRow(file("plain.txt")).subtitle, "File")
+    }
+
+    func testLinkedFoldersSortWithFoldersInEveryOrder() {
+        let listing = FolderListing(DirectorySnapshot(path: "/p", entries: [
+            file("b.txt", size: 10, modifiedAt: early), link("Archive", to: folder("Real archive")),
+            folder("Zeta"), file("a.md", size: 30, modifiedAt: late), link("Gone", to: nil)
+        ]))
+        for order in FolderSortOrder.allCases {
+            XCTAssertEqual(Array(names(listing.visible(query: "", showHidden: false, order: order)).prefix(2)), ["Archive", "Zeta"],
+                           "Folders and links to folders come first when sorting by \(order)")
+        }
+    }
+
+    func testSortOrdersUseTargetValuesAndPutMissingValuesLast() {
+        let entries = [
+            file("small.txt", size: 1, modifiedAt: early), file("big.md", size: 900, modifiedAt: nil),
+            file("unknown.swift"), link("newest", to: file("target.md", size: 500, modifiedAt: late)),
+            folder("B folder"), folder("A folder")
+        ]
+        let listing = FolderListing(DirectorySnapshot(path: "/p", entries: entries))
+        XCTAssertEqual(names(listing.visible(query: "", showHidden: false, order: .name)),
+                       ["A folder", "B folder", "big.md", "newest", "small.txt", "unknown.swift"])
+        XCTAssertEqual(names(listing.visible(query: "", showHidden: false, order: .modified)),
+                       ["A folder", "B folder", "newest", "small.txt", "big.md", "unknown.swift"])
+        XCTAssertEqual(names(listing.visible(query: "", showHidden: false, order: .size)),
+                       ["A folder", "B folder", "big.md", "newest", "small.txt", "unknown.swift"])
+        // Kind groups by extension; a link sorts by its own name.
+        XCTAssertEqual(names(listing.visible(query: "", showHidden: false, order: .kind)),
+                       ["A folder", "B folder", "newest", "big.md", "unknown.swift", "small.txt"])
+    }
+
+    func testFilteringAndHiddenFilesApplyBeforeSorting() {
+        let listing = FolderListing(DirectorySnapshot(path: "/p", entries: [
+            file(".env", size: 99), file("notes.md", size: 5), file("Notes old.md", size: 50), file("todo.txt", size: 1)
+        ]))
+        XCTAssertEqual(names(listing.visible(query: "notes", showHidden: false, order: .size)), ["Notes old.md", "notes.md"])
+        XCTAssertEqual(names(listing.visible(query: "", showHidden: true, order: .size)).first, ".env")
+        XCTAssertFalse(names(listing.visible(query: "", showHidden: false, order: .size)).contains(".env"))
+    }
+
+    @MainActor func testSortChoicesAreRememberedPerFolderBoundedAndNeverInDemo() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "FolderBrowsingTests-" + UUID().uuidString
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { try? FileManager.default.removeItem(at: directory); preferences.removePersistentDomain(forName: suite) }
+        let model = try AppModel(directory: directory, fileService: DemoRemoteFileService(delayNanoseconds: 0), preferences: preferences)
+        let profile = ConnectionProfile(name: "Studio", host: "studio", username: "reader", identityID: UUID())
+        let other = UUID()
+        model.metadata.connections = [profile]
+
+        XCTAssertEqual(model.folderSortOrder(profile.id, path: "/Projects"), .name)
+        model.setFolderSortOrder(.size, id: profile.id, path: "/Projects")
+        model.setFolderSortOrder(.kind, id: other, path: "/Projects")
+        XCTAssertEqual(model.folderSortOrder(profile.id, path: "/Projects"), .size)
+        XCTAssertEqual(model.folderSortOrder(profile.id, path: "/Projects/Reports"), .name, "Choices are per folder")
+        XCTAssertEqual(model.folderSortOrder(other, path: "/Projects"), .kind, "and per connection")
+        let relaunched = try AppModel(directory: directory, fileService: DemoRemoteFileService(delayNanoseconds: 0), preferences: preferences)
+        XCTAssertEqual(relaunched.folderSortOrder(profile.id, path: "/Projects"), .size)
+
+        model.setFolderSortOrder(.name, id: profile.id, path: "/Projects")
+        XCTAssertEqual((preferences.array(forKey: "folderSortOrders-v1") as? [[String]])?.count, 1, "Name is stored as no entry")
+
+        for index in 0..<(AppModel.folderSortLimit + 5) {
+            model.setFolderSortOrder(.modified, id: profile.id, path: "/f\(index)")
+        }
+        XCTAssertEqual((preferences.array(forKey: "folderSortOrders-v1") as? [[String]])?.count, AppModel.folderSortLimit)
+        XCTAssertEqual(model.folderSortOrder(other, path: "/Projects"), .name, "The least recently changed choice is dropped first")
+        XCTAssertEqual(model.folderSortOrder(profile.id, path: "/f\(AppModel.folderSortLimit + 4)"), .modified)
+
+        await model.removeConnection(profile)
+        XCTAssertNil(preferences.array(forKey: "folderSortOrders-v1"), "Deleting a connection forgets its folders")
+
+        await model.setDemo(true)
+        model.setFolderSortOrder(.size, id: profile.id, path: "/Projects")
+        XCTAssertEqual(model.folderSortOrder(profile.id, path: "/Projects"), .name)
+        XCTAssertNil(preferences.array(forKey: "folderSortOrders-v1"), "Demo never writes sort choices")
+    }
+}
+#endif

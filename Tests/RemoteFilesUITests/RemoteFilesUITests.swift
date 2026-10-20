@@ -288,6 +288,37 @@ final class RemoteFilesUITests: XCTestCase {
                        "Back navigation should not refetch a cached listing")
     }
 
+    func testLinkedFolderOpensInOneTapAndSortBySizeReordersFiles() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
+        let linked = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Current reports,")).firstMatch
+        let row = revealFolderRow(linked, in: app)
+        XCTAssertTrue(row.label.contains("Link to folder"), row.label)
+        attachScreenshot("Linked folder sorted with folders")
+        row.tap()
+        XCTAssertTrue(app.navigationBars["Reports"].waitForExistence(timeout: 10), "A resolved folder link opens without a lookup")
+        app.navigationBars.buttons["Projects"].tap()
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
+        let fileLink = revealFolderRow(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Latest report,")).firstMatch, in: app)
+        XCTAssertTrue(fileLink.label.contains("Link to file"), fileLink.label)
+        let broken = revealFolderRow(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Old notes,")).firstMatch, in: app)
+        XCTAssertTrue(broken.label.contains("Broken link"), broken.label)
+        attachScreenshot("File link and broken link")
+        app.buttons["Folder actions"].tap()
+        app.buttons["Sort By"].tap()
+        app.buttons["Size"].tap()
+        // Too large.md (3 MB) now leads the files, ahead of Archive.zip (805 KB), which sorts before it by name.
+        let largest = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Too large.md,")).firstMatch
+        let second = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Archive.zip,")).firstMatch
+        // The list is scrolled down to Old notes; the largest file now sits near the top.
+        revealFolderRow(largest, in: app, searchingDown: false)
+        XCTAssertTrue(second.waitForExistence(timeout: 5) && largest.frame.minY < second.frame.minY, app.debugDescription)
+        attachScreenshot("Folder sorted by size")
+    }
+
     func testBrowseReadRefreshAndReturn() throws {
         continueAfterFailure = false
         let app = XCUIApplication()

@@ -56,7 +56,10 @@ final class AppModel {
     private var directoryOrder: [String] = []
     private var documentOrder: [String] = []
 
-    init(directory: URL, fileService: (any RemoteFileService)? = nil, publicKeyInstaller: (any PublicKeyInstalling)? = nil) throws {
+    let preferences: UserDefaults
+    init(directory: URL, fileService: (any RemoteFileService)? = nil, publicKeyInstaller: (any PublicKeyInstalling)? = nil,
+         preferences: UserDefaults = .standard) throws {
+        self.preferences = preferences
         resourceDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("RemoteImages-v1")
         metadataStore = try MetadataStore(fileURL: directory.appendingPathComponent("library-v1.json"))
         readingPositions = ReadingPositionStore(fileURL: directory.appendingPathComponent("reading-positions-v1.json"))
@@ -88,8 +91,34 @@ final class AppModel {
         if !demo {
             do { try await readingPositions.remove(connectionID: profile.id) }
             catch { errorMessage = error.localizedDescription }
+            storeFolderSortOrders(folderSortOrders().filter { !$0[0].hasPrefix(profile.id.uuidString + "|") })
         }
         await persist()
+    }
+    private static let folderSortKey = "folderSortOrders-v1"
+    /// Most folders whose sort choice is remembered; the least recently changed is dropped first.
+    static let folderSortLimit = 200
+    /// A folder's remembered sort, or Name. Demo never reads or writes these choices.
+    func folderSortOrder(_ id: UUID, path: String) -> FolderSortOrder {
+        guard !demo else { return .name }
+        let key = id.uuidString + "|" + path
+        return folderSortOrders().last { $0[0] == key }.flatMap { FolderSortOrder(rawValue: $0[1]) } ?? .name
+    }
+    /// Remembers a user's sort choice for a canonical folder path. Name is the default, so it is
+    /// stored as no entry at all.
+    func setFolderSortOrder(_ order: FolderSortOrder, id: UUID, path: String) {
+        guard !demo else { return }
+        let key = id.uuidString + "|" + path
+        var entries = folderSortOrders().filter { $0[0] != key }
+        if order != .name { entries.append([key, order.rawValue]) }
+        storeFolderSortOrders(Array(entries.suffix(Self.folderSortLimit)))
+    }
+    /// Stored as [key, order] pairs, oldest first.
+    private func folderSortOrders() -> [[String]] {
+        (preferences.array(forKey: Self.folderSortKey) as? [[String]])?.filter { $0.count == 2 } ?? []
+    }
+    private func storeFolderSortOrders(_ entries: [[String]]) {
+        if entries.isEmpty { preferences.removeObject(forKey: Self.folderSortKey) } else { preferences.set(entries, forKey: Self.folderSortKey) }
     }
     /// Forgets the trusted key of the saved endpoint, never unsaved edits in the connection form.
     func resetTrust(for profile: ConnectionProfile) async {
