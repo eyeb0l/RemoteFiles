@@ -254,9 +254,11 @@ class Run:
         resources = self.output / (name + "-resources.log")
         if self.measure_resources and sys.platform == "darwin":
             invocation = ["/usr/bin/time", "-l", "-o", str(resources)] + invocation
+        # Lanes wrapped by scripts/test-openssh.sh retain the fixture's complete server log.
+        env = dict(self.env, REMOTEFILES_SSHD_LOG=str(self.output / (name + "-sshd.log")))
         with path.open("w") as handle:
             process = subprocess.Popen(invocation, cwd=cwd or self.root,
-                                       env=self.env, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
+                                       env=env, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
             try:
                 exit_code = process.wait(timeout=self.timeout)
             except subprocess.TimeoutExpired:

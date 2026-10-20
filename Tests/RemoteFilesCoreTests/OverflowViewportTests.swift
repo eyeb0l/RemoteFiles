@@ -51,8 +51,11 @@ private struct OverflowFixtureView: View {
             $0.bounds.width > 100 && $0.bounds.height < 600 && $0.contentSize.width > $0.bounds.width + 100
         }.sorted { $0.convert($0.bounds, to: window).minY < $1.convert($1.bounds, to: window).minY }
     }
+    /// Polls observable state, so a passing run returns as soon as it settles. The bound covers main-thread
+    /// layout of the 72-section fixture: each Source/Rendered switch took 5-7 s on a loaded local Simulator
+    /// and longer on 3-CPU CI runners, while restoration and retirement stay frame-driven behind it.
     private func wait(_ predicate: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
-        let deadline = ContinuousClock.now + .seconds(12)
+        let deadline = ContinuousClock.now + .seconds(45)
         while ContinuousClock.now < deadline {
             if predicate() { return }
             try await Task.sleep(for: .milliseconds(30))

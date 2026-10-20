@@ -15,13 +15,25 @@ import SwiftUI
 #if TEXTUAL_ENABLE_TEXT_SELECTION
   @Observable
   final class TextSelectionCoordinator {
-    private var models: [WeakBox<TextSelectionModel>] = []
+    // RemoteFiles: models register from UIKit representable updates, in the middle of SwiftUI
+    // updates. When this list was observed, a registration could fire an Overflow's one-shot
+    // observation during an update; SwiftUI dropped that invalidation, so the later deselection
+    // went unobserved and the offscreen region never retired. Only the flag below is observed.
+    @ObservationIgnored private var models: [WeakBox<TextSelectionModel>] = []
 
-    var hasActiveSelection: Bool { models.contains { $0.wrapped?.selectedRange != nil } }
+    /// Whether any registered model has a selection. Changes only when a selection starts or ends.
+    private(set) var hasActiveSelection = false
 
     func register(_ model: TextSelectionModel) {
       models.append(WeakBox(model))
       compact()
+      selectionDidChange()
+    }
+
+    /// Forgets a model that moved to another coordinator, so its selection stops counting here.
+    func unregister(_ model: TextSelectionModel) {
+      models.removeAll { $0.wrapped == nil || $0.wrapped === model }
+      selectionDidChange()
     }
 
     func modelDidSelectText(_ model: TextSelectionModel) {
@@ -30,6 +42,12 @@ import SwiftUI
         weakModel.wrapped?.selectedRange = nil
       }
       compact()
+    }
+
+    /// Recomputes the observed flag after a registered model's selection changes or it is released.
+    func selectionDidChange() {
+      let active = models.contains { $0.wrapped?.selectedRange != nil }
+      if active != hasActiveSelection { hasActiveSelection = active }
     }
 
     private func compact() {

@@ -41,7 +41,12 @@ scripts/test-acceptance.py --allow-dirty \
 Run one acceptance process at a time per simulator/build cache. Builds use two
 compiler jobs to keep an 8 GB Mac responsive. The isolated sshd binds
 `127.0.0.1:22222`; pass `--port 22223` if another disposable fixture owns that
-port. A port collision fails the lane. In a restricted agent environment, use
+port. A port collision fails the lane. Each fixture-backed lane keeps the
+server's complete, timestamped log as `<lane>-sshd.log` in the output folder, so
+a dropped connection can be attributed to the client or the server. The fixture
+disables OpenSSH per-source penalties: tests deliberately abandon handshakes, and
+penalised loopback connections would otherwise fail later, unrelated tests.
+In a restricted agent environment, use
 the supported approved shell execution workflow for compiler caches,
 CoreSimulator and the loopback fixture. Do not change system permissions or
 disable sandbox/security checks to make a test pass. Each command has a 30-minute

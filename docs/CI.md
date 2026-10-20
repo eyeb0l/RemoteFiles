@@ -81,7 +81,7 @@ verification and host CPU/memory capacity. macOS `/usr/bin/time -l` resource log
 record command CPU time, maximum resident memory, page faults and swaps. These
 measurements distinguish cache hits from actual build savings.
 
-Logs, source identity, phase/resource measurements, summaries and xcresults are uploaded for seven days on
+Logs (including each fixture-backed lane's complete `<lane>-sshd.log`), source identity, phase/resource measurements, summaries and xcresults are uploaded for seven days on
 success or failure. Failed method identifiers/assertions are printed immediately
 in the job log. Cleanup touches only each job's disposable Simulator and generated
 loopback fixture. New commits cancel superseded runs for the same PR or branch.
