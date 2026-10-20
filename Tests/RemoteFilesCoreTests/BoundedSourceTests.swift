@@ -83,6 +83,55 @@ import RemoteFilesCore
         let ink = stride(from: 0, to: bytes.count, by: 4).filter { min(bytes[$0], bytes[$0+1], bytes[$0+2]) < 180 }.count
         XCTAssertGreaterThan(ink, 100, "Accessibility text alone does not prove that the blank-view regression is fixed")
     }
+    func testSVGContentViewLoadsDOMAndVisiblePixelsWithinItsDeadline() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        let source = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><rect width=\"100\" height=\"100\" fill=\"#5a28dc\"/></svg>"
+        window.rootViewController = UIHostingController(rootView: SVGContentView(text: source, filename: "fixture.svg"))
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        func web(_ root: UIView) -> WKWebView? {
+            if let view = root as? WKWebView { return view }
+            return root.subviews.lazy.compactMap { web($0) }.first
+        }
+        let deadline = ContinuousClock.now + .seconds(15)
+        var renderer: WKWebView?
+        repeat {
+            renderer = web(window)
+            if let renderer, renderer.url != nil, !renderer.isLoading { break }
+            try await Task.sleep(for: .milliseconds(25))
+        } while ContinuousClock.now < deadline
+        let view = try XCTUnwrap(renderer, "The production SVG preview must retain its renderer")
+        XCTAssertTrue(view.window === window)
+        XCTAssertNotNil(view.url)
+        XCTAssertFalse(view.isLoading, "The production renderer must finish within its existing fifteen-second deadline")
+        let count = try await view.evaluateJavaScript("document.querySelectorAll('svg rect').length") as? Int
+        XCTAssertEqual(count, 1)
+        let color = try await view.evaluateJavaScript("getComputedStyle(document.querySelector('rect')).fill") as? String
+        XCTAssertEqual(color, "rgb(90, 40, 220)")
+        // Check the composed production view, including its loading/error state,
+        // rather than a WebKit-only snapshot that can ignore a hidden container.
+        var purple = 0
+        repeat {
+            let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            }
+            let pixels = try XCTUnwrap(image.cgImage)
+            var bytes = [UInt8](repeating: 0, count: pixels.width * pixels.height * 4)
+            let context = try XCTUnwrap(CGContext(data: &bytes, width: pixels.width, height: pixels.height, bitsPerComponent: 8,
+                bytesPerRow: pixels.width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.draw(pixels, in: CGRect(x: 0, y: 0, width: pixels.width, height: pixels.height))
+            purple = stride(from: 0, to: bytes.count, by: 4).filter { bytes[$0+2] > 160 && bytes[$0] < 140 && bytes[$0+1] < 110 }.count
+            if purple > 100 { break }
+            try await Task.sleep(for: .milliseconds(50))
+        } while ContinuousClock.now < deadline
+        XCTAssertGreaterThan(purple, 100,
+            "The production preview must show SVG pixels within fifteen seconds, not a loading or timeout view; attached=\(view.window === window), loading=\(view.isLoading), progress=\(view.estimatedProgress), size=\(view.bounds.size)")
+        XCTAssertFalse(view.configuration.defaultWebpagePreferences.allowsContentJavaScript)
+        XCTAssertFalse(view.configuration.websiteDataStore.isPersistent)
+    }
+
     func testStaticSVGRendererDisablesContentJavaScriptAndUsesNoPersistentData() async throws {
         let rules = try await SVGResourceBlocker.rules()
         let renderer = StaticSVGWebView(svg: "<svg/>", rules: rules, filename: "safe.svg", onFinish: {}, onFailure: { _ in })

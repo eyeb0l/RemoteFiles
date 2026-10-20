@@ -1,7 +1,10 @@
 #if os(iOS)
 import SwiftUI
 import WebKit
+import OSLog
 import RemoteFilesCore
+
+private let svgRenderingLog = Logger(subsystem: "dev.iris.RemoteFiles", category: "SVGPreview")
 
 struct SVGContentView: View {
     let text: String
@@ -30,7 +33,10 @@ struct SVGContentView: View {
                 try Task.checkCancellation()
                 rules = blockers; prepared = svg
                 try await Task.sleep(for: .seconds(15))
-                if !loaded { error = "This SVG could not finish rendering. Use Source to inspect it." }
+                if !loaded {
+                    svgRenderingLog.error("SVG rendering exceeded its fifteen-second deadline")
+                    error = "This SVG could not finish rendering. Use Source to inspect it."
+                }
             } catch is CancellationError { }
             catch { self.error = error.localizedDescription }
         }
@@ -84,11 +90,13 @@ struct StaticSVGWebView: UIViewRepresentable {
         view.accessibilityLabel = "Rendered SVG image, " + filename
         view.accessibilityIdentifier = "Rendered SVG image"
         view.accessibilityTraits = .image
+        context.coordinator.trace("created", view)
         return view
     }
     func updateUIView(_ view: WKWebView, context: Context) {
         guard context.coordinator.svg != svg else { return }
         context.coordinator.svg = svg
+        context.coordinator.trace("load requested", view)
         view.loadHTMLString(Self.html(svg), baseURL: nil)
     }
     static func html(_ svg: String) -> String {
@@ -99,10 +107,15 @@ struct StaticSVGWebView: UIViewRepresentable {
         """
     }
     static func dismantleUIView(_ view: WKWebView, coordinator: Coordinator) {
+        coordinator.trace("dismantled", view)
         view.stopLoading(); view.navigationDelegate = nil
     }
     final class Coordinator: NSObject, WKNavigationDelegate {
         var svg: String?
+        private let diagnosticID = UUID().uuidString
+        func trace(_ event: String, _ view: WKWebView) {
+            svgRenderingLog.notice("SVG \(self.diagnosticID, privacy: .public) \(event, privacy: .public): attached=\(view.window != nil, privacy: .public) width=\(Double(view.bounds.width), privacy: .public) height=\(Double(view.bounds.height), privacy: .public) loading=\(view.isLoading, privacy: .public) progress=\(view.estimatedProgress, privacy: .public)")
+        }
         let onFinish: () -> Void
         let onFailure: (String) -> Void
         init(onFinish: @escaping () -> Void, onFailure: @escaping (String) -> Void) {
@@ -110,12 +123,15 @@ struct StaticSVGWebView: UIViewRepresentable {
         }
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             let initial = action.navigationType == .other && action.targetFrame?.isMainFrame == true && action.request.url?.absoluteString == "about:blank"
+            trace(initial ? "navigation allowed" : "navigation denied", webView)
             decisionHandler(initial ? .allow : .cancel)
         }
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { onFinish() }
-        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { onFailure("This SVG could not be rendered. Use Source to inspect it.") }
-        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { onFailure("This SVG could not be rendered. Use Source to inspect it.") }
-        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { onFailure("The image preview stopped. Use Source or refresh to try again.") }
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) { trace("started", webView) }
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) { trace("committed", webView) }
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { trace("finished", webView); onFinish() }
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { trace("failed", webView); onFailure("This SVG could not be rendered. Use Source to inspect it.") }
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { trace("failed", webView); onFailure("This SVG could not be rendered. Use Source to inspect it.") }
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { trace("process terminated", webView); onFailure("The image preview stopped. Use Source or refresh to try again.") }
     }
 }
 #endif

@@ -139,6 +139,29 @@ class LogResultTests(unittest.TestCase):
             self.assertEqual(acceptance.log_tests(log), {})
 
 
+class VoiceOverDiagnosticsTests(unittest.TestCase):
+    def test_launcher_preserves_xctest_status_when_diagnostic_collection_fails(self):
+        script = Path(__file__).with_name("test-voiceover.sh")
+        for test_status, trace_status in ((0, 0), (65, 0), (65, 9)):
+            with self.subTest(test_status=test_status, trace_status=trace_status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); tools = root / "tools"; tools.mkdir()
+                for name, status, output in (("xcodebuild", test_status, "Injected XCTest outcome"),
+                                             ("xcrun", trace_status, "Injected SVG diagnostics")):
+                    tool = tools / name
+                    tool.write_text(f"#!/bin/sh\necho '{output}'\nexit {status}\n")
+                    tool.chmod(0o755)
+                env = dict(os.environ); env["PATH"] = str(tools) + os.pathsep + env["PATH"]
+                output = root / "evidence"
+                result = subprocess.run(["bash", str(script), "owned-fixture-simulator", str(output)],
+                                        env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, test_status, result.stderr)
+                self.assertIn("Injected XCTest outcome", (output / "voiceover.log").read_text())
+                if test_status:
+                    self.assertIn("Injected SVG diagnostics", (output / "svg-rendering.log").read_text())
+                else:
+                    self.assertFalse((output / "svg-rendering.log").exists())
+
+
 class LaneSelectionTests(unittest.TestCase):
     def test_default_keeps_full_acceptance_and_rejects_overlapping_inventories(self):
         self.assertEqual(acceptance.selected_lanes(None), acceptance.DEFAULT_LANES)

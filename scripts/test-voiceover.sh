@@ -46,10 +46,22 @@ if [ -n "${REMOTEFILES_CI_COMPILATION_CACHE:-}" ]; then
   ci_options=(COMPILATION_CACHE_ENABLE_CACHING=YES COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS=YES
     "COMPILATION_CACHE_CAS_PATH=$REMOTEFILES_CI_COMPILATION_CACHE" COMPILER_INDEX_STORE_ENABLE=NO)
 fi
-xcodebuild -jobs 2 -project "$fixture/RemoteFiles.xcodeproj" -scheme RemoteFiles "${package_options[@]}" "${ci_options[@]}" \
+if xcodebuild -jobs 2 -project "$fixture/RemoteFiles.xcodeproj" -scheme RemoteFiles "${package_options[@]}" "${ci_options[@]}" \
   -configuration Debug -destination "platform=iOS Simulator,id=$simulator" \
   -derivedDataPath "$derived" -resultBundlePath "$output/voiceover.xcresult" \
   -only-testing:"$test_identifier" -parallel-testing-enabled NO \
   -test-timeouts-enabled YES -default-test-execution-time-allowance 180 \
   -maximum-test-execution-time-allowance 240 -collect-test-diagnostics never \
-  CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- test > "$output/voiceover.log" 2>&1
+  CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- test > "$output/voiceover.log" 2>&1; then
+  test_status=0
+else
+  test_status=$?
+fi
+if [ "$test_status" -ne 0 ]; then
+  # Only this preview category is public, content-free lifecycle state. Keep the
+  # original XCTest failure even if Simulator log collection also fails.
+  xcrun simctl spawn "$simulator" log show --last 30m --style compact --info \
+    --predicate 'subsystem == "dev.iris.RemoteFiles" AND category == "SVGPreview"' \
+    > "$output/svg-rendering.log" 2>&1 || true
+fi
+exit "$test_status"
