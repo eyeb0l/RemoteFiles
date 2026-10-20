@@ -68,6 +68,19 @@ Local changes:
   and then start another correction budget. A controlled attached/unready-region
   regression retains the separate delayed-attachment and prose-character checks.
 
+- `TextSelectionCoordinator.swift`, `TextSelectionModel.swift`: `hasActiveSelection`
+  is a stored observable flag instead of a computed scan of the observed model
+  list. Models register from UIKit representable updates in the middle of SwiftUI
+  updates; observing that list let a registration fire an `Overflow` region's
+  one-shot observation mid-update, SwiftUI dropped the invalidation, and the later
+  deselection went unobserved, so an offscreen code block stayed mounted
+  indefinitely (reproduced 3 in 25 relaunched runs under CPU load, and on CI).
+  The list is now `@ObservationIgnored`; the flag changes only when a selection
+  starts, ends or its model is released (previously a released selected model kept
+  the computed value stale without notifying observers).
+  `TextSelectionCoordinatorTests` covers registration, moving and releasing a
+  selection without SwiftUI.
+
 Before/after evidence and limitations are recorded in
 `../../docs/READER_PERFORMANCE.md`. Keep this fork small and return to the pinned
 upstream package when an equivalent verified fix is available.

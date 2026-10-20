@@ -21,6 +21,7 @@
         if selectedRange != nil {
           coordinator?.modelDidSelectText(self)
         }
+        coordinator?.selectionDidChange()
         selectionDidChange?()
       }
     }
@@ -43,6 +44,12 @@
     ) {
       self.layoutCollection = layoutCollection
       setCoordinator(coordinator)
+    }
+
+    deinit {
+      // RemoteFiles: a released selection must not keep other regions retained. Weak references
+      // to this model already read as nil here.
+      if selectedRange != nil { coordinator?.selectionDidChange() }
     }
 
     func setLayoutCollection(_ layoutCollection: any TextLayoutCollection) {
