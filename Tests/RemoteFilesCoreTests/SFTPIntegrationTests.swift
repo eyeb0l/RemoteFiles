@@ -480,6 +480,57 @@ final class SFTPIntegrationTests: XCTestCase {
     }
     #endif
 
+    #if os(macOS)
+    func testListingResolvesLinkTargetsMarksBrokenLinksAndBoundsTheWork() async throws {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Link resolution")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        defer { Task { await service.disconnect() } }
+        let fm = FileManager.default
+        let folder = fixture.files + "/links-" + UUID().uuidString
+        try fm.createDirectory(atPath: folder, withIntermediateDirectories: false)
+        defer { try? fm.removeItem(atPath: folder) }
+        try fm.createSymbolicLink(atPath: folder + "/report", withDestinationPath: "../report.md")
+        try fm.createSymbolicLink(atPath: folder + "/docs", withDestinationPath: fixture.files + "/docs")
+        try fm.createSymbolicLink(atPath: folder + "/missing", withDestinationPath: "nowhere.md")
+        try fm.createSymbolicLink(atPath: folder + "/loop-a", withDestinationPath: "loop-b")
+        try fm.createSymbolicLink(atPath: folder + "/loop-b", withDestinationPath: "loop-a")
+        let listing = try await service.listDirectory(profile: profile, path: folder)
+        func entry(_ name: String) throws -> RemoteEntry { try XCTUnwrap(listing.entries.first { $0.name == name }, name) }
+
+        let report = try entry("report")
+        XCTAssertEqual(report.kind, .symlink)
+        XCTAssertEqual(report.effectiveKind, .file)
+        XCTAssertEqual(report.linkTarget?.path, fixture.files + "/report.md")
+        let reportSize = try fm.attributesOfItem(atPath: fixture.files + "/report.md")[.size] as? NSNumber
+        XCTAssertEqual(report.linkTarget?.size, reportSize?.uint64Value)
+        XCTAssertEqual(report.followingLink()?.exportFilename, "report", "Export keeps the link's own name")
+        let docs = try entry("docs")
+        XCTAssertEqual(docs.effectiveKind, .directory)
+        XCTAssertEqual(docs.followingLink()?.path, fixture.files + "/docs")
+        for broken in ["missing", "loop-a", "loop-b"] {
+            XCTAssertEqual(try entry(broken).link, .broken, broken)
+        }
+
+        // Resolution is bounded: later links stay unresolved and still resolve when tapped.
+        let many = folder + "/many"
+        try fm.createDirectory(atPath: many, withIntermediateDirectories: false)
+        for index in 0..<300 { try fm.createSymbolicLink(atPath: many + "/link-\(index)", withDestinationPath: "../../report.md") }
+        let crowded = try await service.listDirectory(profile: profile, path: many)
+        XCTAssertEqual(crowded.entries.count, 300)
+        XCTAssertEqual(crowded.entries.filter { $0.linkTarget != nil }.count, SFTPRemoteFileService.linkResolutionLimit)
+        let unresolved = try XCTUnwrap(crowded.entries.first { $0.link == nil })
+        let tapped = try await service.resolveEntry(profile: profile, path: unresolved.path)
+        XCTAssertEqual(tapped.path, fixture.files + "/report.md")
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.connections, 1)
+    }
+    #endif
+
     func testCancelBeforeConnectDoesNotAuthenticate() async throws {
         let fixture = try Fixture()
         let stores = try Stores(fixture: fixture)
@@ -733,4 +784,51 @@ private actor ControlledPreviewChunks {
         requests.append(maximum)
         return ByteBuffer(string: chunks.isEmpty ? "" : chunks.removeFirst())
     }
+}
+
+final class LinkResolutionSchedulingTests: XCTestCase {
+    private func links(_ count: Int) -> [RemoteEntry] {
+        (0..<count).map { RemoteEntry(name: "link-\($0)", path: "/p/link-\($0)", kind: .symlink) }
+    }
+
+    func testCancelledListingStopsSchedulingLookups() async throws {
+        let lookups = LookupCounter()
+        let task = Task {
+            try await SFTPRemoteFileService.resolvingLinks(in: links(300)) { link in
+                await lookups.started()
+                // Like Citadel's requests, a sent lookup ignores task cancellation.
+                await withCheckedContinuation { continuation in
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { continuation.resume() }
+                }
+                return .target(RemoteEntry(name: "t", path: "/t/" + link.name, kind: .file))
+            }
+        }
+        try await Task.sleep(for: .milliseconds(30))
+        task.cancel()
+        do { _ = try await task.value; XCTFail("A cancelled listing must not return") } catch is CancellationError { }
+        let started = await lookups.count
+        XCTAssertEqual(started, SFTPRemoteFileService.linkResolutionWindow, "Only the first wave was sent before cancellation")
+    }
+
+    func testTimeBudgetLeavesLaterLinksUnresolvedWithoutFailingTheListing() async throws {
+        let lookups = LookupCounter()
+        let clock = ContinuousClock(), began = clock.now
+        let entries = try await SFTPRemoteFileService.resolvingLinks(in: links(300), budget: .milliseconds(150)) { link in
+            await lookups.started()
+            try? await Task.sleep(for: .milliseconds(100))
+            return .target(RemoteEntry(name: "t", path: "/t/" + link.name, kind: .file))
+        }
+        let started = await lookups.count
+        let resolved = entries.filter { $0.link != nil }.count
+        XCTAssertEqual(resolved, started, "Every lookup that was sent still completes")
+        XCTAssertGreaterThanOrEqual(started, SFTPRemoteFileService.linkResolutionWindow)
+        XCTAssertLessThan(started, 100, "No new lookups start after the budget")
+        XCTAssertEqual(entries.count, 300)
+        XCTAssertLessThan(clock.now - began, .seconds(1))
+    }
+}
+
+private actor LookupCounter {
+    private(set) var count = 0
+    func started() { count += 1 }
 }
