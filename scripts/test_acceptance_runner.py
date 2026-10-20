@@ -3,6 +3,7 @@
 import importlib.util
 import contextlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -68,6 +69,58 @@ class LogResultTests(unittest.TestCase):
                     "2026-10-19 17:02:35.586656+0000 TestHost[8471:44930] [AQ] diagnostic\n"
                     " (0.050 seconds).\n")
                 self.assertEqual(acceptance.log_tests(log), {"PlaybackTests/testCodec": outcome})
+
+    def test_structured_diagnostics_inside_identifiers_preserve_every_outcome(self):
+        diagnostic = "2026-10-20 07:46:30.173137+0000 RemoteFilesTestHost[11686:48841] [player] codec diagnostic\n"
+        for prefix, suffix in (("Remote", "FilesTests.PlaybackTests testCodec"),
+                               ("RemoteFilesTests.Playback", "Tests testCodec"),
+                               ("RemoteFilesTests.PlaybackTests testCo", "dec")):
+            for outcome in ("passed", "failed", "skipped"):
+                with self.subTest(prefix=prefix, outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                    log = Path(directory) / "test.log"
+                    log.write_text(f"Test Case '-[{prefix}{diagnostic}{suffix}]' {outcome} (0.644 seconds).\n")
+                    self.assertEqual(acceptance.log_tests(log), {"PlaybackTests/testCodec": outcome})
+
+    def test_interrupted_identifier_duplicates_are_still_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "test.log"
+            log.write_text("Test Case '-[ExampleTests testOne]' passed (0.001 seconds).\n"
+                           "Test Case '-[Exam2026-10-20 07:46:30.173137+0000 TestHost[1:2] [player] diagnostic\n"
+                           "pleTests testOne]' failed (0.001 seconds).\n")
+            with self.assertRaisesRegex(RuntimeError, "Repeated result"):
+                acceptance.log_tests(log)
+
+    def test_unknown_or_unterminated_identifier_interruptions_do_not_create_results(self):
+        for interruption in ("unknown diagnostic\n", "2026-10-20 07:46:30 TestHost diagnostic\n",
+                             "2026-10-20 07:46:30.173137+0000 TestHost[1:2] [player] missing newline"):
+            with self.subTest(interruption=interruption), tempfile.TemporaryDirectory() as directory:
+                log = Path(directory) / "test.log"
+                log.write_text(f"Test Case '-[Exam{interruption}pleTests testOne]' passed (0.001 seconds).\n")
+                self.assertEqual(acceptance.log_tests(log), {})
+
+    def test_recovered_identifiers_keep_xcresult_and_outcome_validation(self):
+        cases = (("passed", (1, 0, 0), "passed"),
+                 ("passed", (0, 1, 0), "failed"),
+                 ("failed", (0, 1, 0), "failed"),
+                 ("skipped", (0, 0, 1), "failed"))
+        for outcome, actual, expected_status in cases:
+            with self.subTest(outcome=outcome, actual=actual), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                log = root / "test.log"
+                log.write_text("Test Case '-[Exam2026-10-20 07:46:30.173137+0000 TestHost[1:2] [player] diagnostic\n"
+                               f"pleTests testOne]' {outcome} (0.001 seconds).\n")
+                run = acceptance.Run(root, root, {"commit": "fixture", "mode": "test", "source_tree_sha256": "fixture"})
+                lane = {"name": "fixture", "status": "passed", "errors": [], "log": str(log)}
+                run.lanes.append(lane)
+                def export(command, stdout, **kwargs):
+                    summary = dict(zip(("passedTests", "failedTests", "skippedTests"), actual))
+                    summary["expectedFailures"] = 0
+                    json.dump(summary if "summary" in command else {}, stdout)
+                with patch.object(acceptance.subprocess, "run", side_effect=export), contextlib.redirect_stdout(io.StringIO()):
+                    run.tests(lane, {"ExampleTests/testOne"}, xcresult=root / "fixture.xcresult")
+                self.assertEqual(lane["status"], expected_status, lane["errors"])
+                if actual != (1, 0, 0) and outcome == "passed":
+                    self.assertTrue(any("xcresult/log count mismatch" in error for error in lane["errors"]))
 
     def test_interleaved_repeated_results_still_fail_validation(self):
         with tempfile.TemporaryDirectory() as directory:
