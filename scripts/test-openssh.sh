@@ -8,16 +8,20 @@ logger_pid=""
 cleanup() {
   if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi
   # With sshd stopped, ask the timestamping follower to drain the log to its end and exit.
-  # Bound the wait so cleanup cannot hang, then stop it.
+  # It ignores the process-group INT/TERM a timed-out runner sends; bound the wait, then kill it.
+  drained=0
   if [ -n "$logger_pid" ]; then
     : > "$fixture/sshd.stop"
     for ((i=0; i<50; i++)); do kill -0 "$logger_pid" 2>/dev/null || break; sleep 0.1; done
-    kill "$logger_pid" 2>/dev/null || true; wait "$logger_pid" 2>/dev/null || true
+    kill -KILL "$logger_pid" 2>/dev/null || true
+    if wait "$logger_pid" 2>/dev/null; then drained=1; fi
   fi
   # REMOTEFILES_SSHD_LOG keeps the complete server log as evidence: a client-side
   # transport error alone cannot show whether the server or the client ended a session.
-  if [ -n "${REMOTEFILES_SSHD_LOG:-}" ] && [ -f "$fixture/sshd-timestamped.log" ]; then
-    cp "$fixture/sshd-timestamped.log" "$REMOTEFILES_SSHD_LOG" 2>/dev/null || true
+  # If the follower did not finish, keep the complete raw log rather than a partial copy.
+  if [ -n "${REMOTEFILES_SSHD_LOG:-}" ]; then
+    if [ "$drained" = 1 ]; then cp "$fixture/sshd-timestamped.log" "$REMOTEFILES_SSHD_LOG" 2>/dev/null || true
+    elif [ -f "$fixture/sshd.log" ]; then cp "$fixture/sshd.log" "$REMOTEFILES_SSHD_LOG" 2>/dev/null || true; fi
   fi
   rm -rf "$fixture"
 }
@@ -74,6 +78,7 @@ fi
 /usr/sbin/sshd -D -e -f "$fixture/sshd_config" >> "$fixture/sshd.log" 2>&1 &
 server_pid=$!
 /usr/bin/perl -MPOSIX=strftime -MTime::HiRes=time,sleep -e '
+  $SIG{INT} = $SIG{TERM} = "IGNORE";
   my ($in, $out, $stop) = @ARGV;
   open(my $r, "<", $in) or die "$in: $!"; open(my $w, ">", $out) or die "$out: $!"; select $w; $| = 1;
   while (1) {
