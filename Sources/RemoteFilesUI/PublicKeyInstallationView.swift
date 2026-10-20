@@ -83,7 +83,7 @@ struct PublicKeyInstallationView: View {
             Section {
                 Text(identity.name)
                 FingerprintView(value: identity.fingerprint)
-                Text(identity.publicKey).font(.caption.monospaced()).textSelection(.enabled)
+                PublicKeyText(value: identity.publicKey)
             } header: { Text("Public key") } footer: { Text("Only the public key is sent. The private key stays in this device’s Keychain.") }
             Section {
                 Text("Adds this public key to the account’s ~/.ssh/authorized_keys, enabling key login for this identity. Existing keys stay in place. Password login must already be enabled; the app does not change server settings.")
@@ -142,7 +142,7 @@ private struct PublicKeyInstallationConfirmation: View {
                 Section("Public key to install") {
                     Text(request.identityName)
                     FingerprintView(value: request.fingerprint)
-                    Text(request.publicKey).font(.caption.monospaced()).textSelection(.enabled)
+                    PublicKeyText(value: request.publicKey)
                 }
                 Section {
                     Text("This adds the public key to this account’s authorized_keys. It grants access using this identity and preserves existing entries. Your private key is never sent.")

@@ -29,4 +29,6 @@ An encrypted import retains its original encrypted representation in Keychain. I
 
 Public keys use NIOSSH's canonical OpenSSH serialisation, including the SSH algorithm and length-prefixed wire representation. SHA-256 fingerprints hash that full SSH public-key wire representation; they do not hash a raw Curve25519 public byte array.
 
+Fingerprints and public keys are shown in monospaced, selectable text typeset as non-linguistic content (`zxx`). Long values wrap between any two characters without the hyphen iOS otherwise adds to wrapped English words, so every visible character belongs to the value. Copied text and VoiceOver labels use the unchanged string. `FingerprintWrapTests` checks the laid-out glyphs at narrow widths and large Dynamic Type sizes.
+
 Trust is scoped to normalised hostname/address and port. Unknown keys block connection and expose a fingerprint for explicit acceptance. Trusted keys persist atomically in a separate versioned metadata document. A changed key blocks and cannot be overwritten by the unknown-key acceptance method. Reset removes trust; a subsequent connection must still be independently verified and explicitly accepted. A corrupt trust document blocks loading rather than silently discarding previous trust. The asynchronous transport validator completes without holding a networking event loop open for UI interaction.
