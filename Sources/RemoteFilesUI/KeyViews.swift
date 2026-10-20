@@ -428,18 +428,11 @@ struct UnlockKeyView: View {
     private func unlock() {
         guard !isWorking, !passphrase.isEmpty else { return }
         isWorking = true; message = nil
-        let remember = rememberWithBiometrics && !hasBiometricUnlock
+        let remember = rememberWithBiometrics && !hasBiometricUnlock ? biometryName : nil
         operation = Task {
             do {
-                _ = try await model.identities.unlock(identity, passphrase: passphrase)
-                try Task.checkCancellation()
-                if remember, let biometryName {
-                    // The key is already unlocked; failing to store the copy must not block connecting.
-                    do { try await model.identities.enableBiometricUnlock(identity) }
-                    catch { model.errorMessage = "The key is unlocked, but \(biometryName) unlock couldn't be turned on. \(error.localizedDescription)" }
-                }
-                completedUnlock = true
-                passphrase = ""; model.sheet = nil; model.sessionRevision += 1
+                try await model.unlockAndConnect(identity, passphrase: passphrase, rememberWith: remember)
+                completedUnlock = true; passphrase = ""
             } catch is CancellationError { passphrase = "" }
             catch { passphrase = ""; message = error.localizedDescription }
             isWorking = false

@@ -28,6 +28,7 @@ import sys
 SIMULATOR_ALLOWED_SKIPS = {
     "IdentityTests/testTrustStoreWritesUseCompleteFileProtection",
     "IdentityTests/testSimulatedFaceIDReadsTheStoredKey",
+    "IdentityTests/testCancellingFaceIDDismissesThePromptWithoutReading",
     "IdentityTests/testSimulatedEnrolmentChangeInvalidatesTheStoredKey",
 }
 DEFAULT_LANES = ("macos-openssh", "simulator", "voiceover", "release-device-compile")

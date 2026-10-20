@@ -4,6 +4,9 @@ import Security
 import Crypto
 import NIOSSH
 @testable import RemoteFilesCore
+#if os(iOS)
+@testable import RemoteFilesUI
+#endif
 
 private final class MemorySecrets: IdentitySecretStore, @unchecked Sendable {
     private let lock = NSLock()
@@ -164,6 +167,23 @@ final class IdentityTests: XCTestCase {
         XCTAssertEqual(data, Data("seed".utf8))
     }
 
+    /// Opt-in like the test above, but no match is sent: cancelling must dismiss the prompt itself.
+    func testCancellingFaceIDDismissesThePromptWithoutReading() async throws {
+        guard ProcessInfo.processInfo.environment["REMOTEFILES_BIOMETRIC_SIMULATION"] == "1" else {
+            throw XCTSkip("Set TEST_RUNNER_REMOTEFILES_BIOMETRIC_SIMULATION=1 with Face ID enrolled in the Simulator.")
+        }
+        let store = KeychainBiometricKeyStore(service: "dev.iris.RemoteFilesTests.biometric")
+        let reference = UUID().uuidString
+        try store.save(Data("seed".utf8), reference: reference)
+        defer { try? store.delete(reference: reference) }
+        let load = Task { try await store.load(reference: reference, reason: "Unlock the test key.") }
+        try await Task.sleep(for: .seconds(2))
+        let cancelledAt = ContinuousClock.now
+        load.cancel()
+        do { _ = try await load.value; XCTFail("A cancelled prompt must not read the key") } catch is CancellationError { }
+        XCTAssertLessThan(ContinuousClock.now - cancelledAt, .seconds(5), "The prompt waited for an answer after cancellation")
+    }
+
     /// Opt-in physical-device check, two phases: `save` stores a copy, then add or remove a Face ID
     /// appearance in Settings, and `read` must find the copy unusable even with a matching face.
     /// The Simulator cannot run it: re-enrolling there leaves the biometric domain state unchanged.
@@ -317,10 +337,15 @@ private final class FakeBiometricStore: BiometricKeyStore, @unchecked Sendable {
     var outcome = Outcome.authenticate
     var failDelete = false
     var pauseLoads = false
+    /// Cancels the calling task while saving, as dismissing the unlock sheet can.
+    var cancelDuringSave = false
     private(set) var prompts = 0
     func stored(_ reference: String) -> Data? { lock.lock(); defer { lock.unlock() }; return storage[reference] }
     func replace(_ reference: String, with data: Data) { lock.lock(); storage[reference] = data; lock.unlock() }
-    func save(_ data: Data, reference: String) throws { replace(reference, with: data) }
+    func save(_ data: Data, reference: String) throws {
+        if cancelDuringSave { withUnsafeCurrentTask { $0?.cancel() } }
+        replace(reference, with: data)
+    }
     func load(reference: String, reason: String) async throws -> Data {
         lock.lock(); prompts += 1; let paused = pauseLoads; lock.unlock()
         if paused { await withCheckedContinuation { continuation in lock.lock(); gate = continuation; lock.unlock() } }
@@ -454,4 +479,27 @@ final class BiometricUnlockTests: XCTestCase {
         let stillEnabled = await store.hasBiometricUnlock(kept)
         XCTAssertFalse(stillEnabled)
     }
+
+    #if os(iOS)
+    @MainActor func testDismissingTheSheetWhileTurningOnFaceIDDoesNotReconnect() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let biometrics = FakeBiometricStore(), identities = IdentityStore(secretStore: MemorySecrets(), biometricStore: biometrics)
+        let model = try AppModel(directory: directory, fileService: DemoRemoteFileService(delayNanoseconds: 0), identities: identities)
+        let identity = try await encryptedIdentity(identities)
+        model.sheet = .unlock(identity)
+
+        biometrics.cancelDuringSave = true
+        let dismissed = Task { try await model.unlockAndConnect(identity, passphrase: "passphrase", rememberWith: "Face ID") }
+        do { try await dismissed.value; XCTFail("A dismissed unlock must not reconnect") } catch is CancellationError { }
+        XCTAssertEqual(model.sessionRevision, 0)
+        XCTAssertNotNil(model.sheet, "Only the dismissal closes the sheet")
+        XCTAssertNil(model.errorMessage)
+
+        biometrics.cancelDuringSave = false
+        try await model.unlockAndConnect(identity, passphrase: "passphrase", rememberWith: "Face ID")
+        XCTAssertEqual(model.sessionRevision, 1)
+        XCTAssertNil(model.sheet)
+    }
+    #endif
 }

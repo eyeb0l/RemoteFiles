@@ -73,6 +73,7 @@ public struct KeychainIdentitySecretStore: IdentitySecretStore {
     }
 
     public func load(reference: String) throws -> Data {
+        try Task.checkCancellation()
         var attributes = query(reference: reference)
         attributes[kSecReturnData as String] = true
         attributes[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -93,7 +94,8 @@ public struct KeychainIdentitySecretStore: IdentitySecretStore {
 public protocol BiometricKeyStore: Sendable {
     /// Replaces any existing item. Never prompts.
     func save(_ data: Data, reference: String) throws
-    /// Asks for Face ID or Touch ID with `reason`, then reads the item.
+    /// Asks for Face ID or Touch ID with `reason`, then reads the item. Cancelling the task dismisses
+    /// the prompt and throws `CancellationError` without reading.
     func load(reference: String, reason: String) async throws -> Data
     /// Whether an item exists, without prompting.
     func contains(reference: String) -> Bool
@@ -134,8 +136,12 @@ public struct KeychainBiometricKeyStore: BiometricKeyStore {
         let context = LAContext()
         context.localizedFallbackTitle = "Enter Passphrase"
         do {
-            _ = try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason)
+            // Cancelling the task does not stop the prompt; invalidating its context does.
+            _ = try await withTaskCancellationHandler {
+                try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason)
+            } onCancel: { context.invalidate() }
         } catch let error as LAError {
+            try Task.checkCancellation()
             switch error.code {
             case .biometryNotAvailable, .biometryNotEnrolled: throw IdentityError.biometricsUnavailable
             default: throw IdentityError.biometricsDeclined

@@ -19,7 +19,7 @@ final class AppModel {
     }
     let metadataStore: MetadataStore
     let readingPositions: ReadingPositionStore
-    let identities = IdentityStore()
+    let identities: IdentityStore
     let trust: HostTrustStore
     let publicKeyInstaller: any PublicKeyInstalling
     private(set) var service: any RemoteFileService
@@ -58,8 +58,9 @@ final class AppModel {
 
     let preferences: UserDefaults
     init(directory: URL, fileService: (any RemoteFileService)? = nil, publicKeyInstaller: (any PublicKeyInstalling)? = nil,
-         preferences: UserDefaults = .standard) throws {
+         preferences: UserDefaults = .standard, identities: IdentityStore = IdentityStore()) throws {
         self.preferences = preferences
+        self.identities = identities
         resourceDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("RemoteImages-v1")
         metadataStore = try MetadataStore(fileURL: directory.appendingPathComponent("library-v1.json"))
         readingPositions = ReadingPositionStore(fileURL: directory.appendingPathComponent("reading-positions-v1.json"))
@@ -173,6 +174,23 @@ final class AppModel {
                   let key = metadata.identities.first(where: { $0.id == profile.identityID }) {
             sheet = .unlock(key)
         }
+    }
+    /// Unlocks with the passphrase, keeps a copy for `biometryName` when given, then reconnects.
+    /// Throws `CancellationError` without reconnecting when the sheet is dismissed meanwhile.
+    func unlockAndConnect(_ identity: IdentityMetadata, passphrase: String, rememberWith biometryName: String?) async throws {
+        _ = try await identities.unlock(identity, passphrase: passphrase)
+        try Task.checkCancellation()
+        if let biometryName {
+            // The key is already unlocked; failing to store the copy must not block connecting.
+            do { try await identities.enableBiometricUnlock(identity) }
+            catch {
+                try Task.checkCancellation()
+                errorMessage = "The key is unlocked, but \(biometryName) unlock couldn't be turned on. \(error.localizedDescription)"
+            }
+            // Cancelling does not interrupt the actor call, so check again before reconnecting.
+            try Task.checkCancellation()
+        }
+        sheet = nil; sessionRevision += 1
     }
     func isSecurityError(_ error: Error) -> Bool {
         if error is HostTrustError || error is IdentityError { return true }
