@@ -7,16 +7,17 @@ server_pid=""
 logger_pid=""
 cleanup() {
   if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi
-  # The logger exits once every server process has closed the pipe. Bound the wait in case a
-  # session child outlives the listener, then stop it so cleanup cannot hang.
+  # With sshd stopped, ask the timestamping follower to drain the log to its end and exit.
+  # Bound the wait so cleanup cannot hang, then stop it.
   if [ -n "$logger_pid" ]; then
+    : > "$fixture/sshd.stop"
     for ((i=0; i<50; i++)); do kill -0 "$logger_pid" 2>/dev/null || break; sleep 0.1; done
     kill "$logger_pid" 2>/dev/null || true; wait "$logger_pid" 2>/dev/null || true
   fi
   # REMOTEFILES_SSHD_LOG keeps the complete server log as evidence: a client-side
   # transport error alone cannot show whether the server or the client ended a session.
-  if [ -n "${REMOTEFILES_SSHD_LOG:-}" ] && [ -f "$fixture/sshd.log" ]; then
-    cp "$fixture/sshd.log" "$REMOTEFILES_SSHD_LOG" 2>/dev/null || true
+  if [ -n "${REMOTEFILES_SSHD_LOG:-}" ] && [ -f "$fixture/sshd-timestamped.log" ]; then
+    cp "$fixture/sshd-timestamped.log" "$REMOTEFILES_SSHD_LOG" 2>/dev/null || true
   fi
   rm -rf "$fixture"
 }
@@ -67,15 +68,25 @@ CONFIG
 if /usr/sbin/sshd -t -f "$fixture/sshd_config" -o PerSourcePenalties=no 2>/dev/null; then
   echo 'PerSourcePenalties no' >> "$fixture/sshd_config"
 fi
-# Timestamp each line so server events can be matched to test logs. A named pipe, rather than
-# process substitution, gives cleanup the logger's PID to wait for before copying the log.
-mkfifo "$fixture/sshd.pipe"
-/usr/bin/perl -MPOSIX=strftime -MTime::HiRes=time -ne \
-  'BEGIN { $| = 1 } my $t = time; printf "%s.%03dZ %s", strftime("%H:%M:%S", gmtime $t), ($t - int $t) * 1000, $_' \
-  < "$fixture/sshd.pipe" > "$fixture/sshd.log" &
-logger_pid=$!
-/usr/sbin/sshd -D -e -f "$fixture/sshd_config" > "$fixture/sshd.pipe" 2>&1 &
+# Tests read sshd.log directly (including assertions that lines are absent), so sshd writes it
+# synchronously. A follower adds read-time timestamps (within 50 ms) to a separate evidence copy.
+: > "$fixture/sshd.log"
+/usr/sbin/sshd -D -e -f "$fixture/sshd_config" >> "$fixture/sshd.log" 2>&1 &
 server_pid=$!
+/usr/bin/perl -MPOSIX=strftime -MTime::HiRes=time,sleep -e '
+  my ($in, $out, $stop) = @ARGV;
+  open(my $r, "<", $in) or die "$in: $!"; open(my $w, ">", $out) or die "$out: $!"; select $w; $| = 1;
+  while (1) {
+    my $stopping = -e $stop;
+    while (defined(my $line = <$r>)) {
+      # Keep a partial line until sshd finishes writing it, unless the server has stopped.
+      if ($line !~ /\n\z/ && !$stopping) { seek($r, -length($line), 1); last }
+      my $t = time; printf "%s.%03dZ %s", strftime("%H:%M:%S", gmtime $t), ($t - int $t) * 1000, $line;
+    }
+    last if $stopping;
+    sleep 0.05; seek($r, 0, 1);
+  }' "$fixture/sshd.log" "$fixture/sshd-timestamped.log" "$fixture/sshd.stop" &
+logger_pid=$!
 for ((i=0; i<30; i++)); do
   if ! kill -0 "$server_pid" 2>/dev/null; then
     cat "$fixture/sshd.log"
