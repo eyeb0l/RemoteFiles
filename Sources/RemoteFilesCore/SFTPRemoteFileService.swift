@@ -38,6 +38,9 @@ public actor SFTPRemoteFileService: RemoteFileService {
     static let linkResolutionLimit = 256
     /// Links resolved at once, each sending REALPATH and STAT together.
     static let linkResolutionWindow = 16
+    /// Time after which no new link lookups start, keeping best-effort resolution well inside the
+    /// listing's deadline on slow connections. Lookups already sent still finish.
+    static let linkResolutionBudget: Duration = .seconds(3)
 
     public func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
         let started = Date()
@@ -58,7 +61,8 @@ public actor SFTPRemoteFileService: RemoteFileService {
                            path: RemotePath.appending(component.filename, to: canonical),
                            attributes: component.attributes)
             }
-            return DirectorySnapshot(path: canonical, entries: try await Self.resolvingLinks(in: entries, sftp: sftp))
+            let linked = try await Self.resolvingLinks(in: entries) { await Self.linkResolution(for: $0, sftp: sftp) }
+            return DirectorySnapshot(path: canonical, entries: linked)
         }
         measurements.directoryOperations += 1
         measurements.lastDirectorySeconds = Date().timeIntervalSince(started)
@@ -68,14 +72,18 @@ public actor SFTPRemoteFileService: RemoteFileService {
     /// Resolves symbolic links so their rows can show and open the target directly. Each link sends
     /// REALPATH and STAT together and links resolve in parallel, so a folder of links costs about one
     /// more round trip. A failed lookup leaves that link unresolved rather than failing the listing.
-    private nonisolated static func resolvingLinks(in entries: [RemoteEntry], sftp: SFTPClient) async throws -> [RemoteEntry] {
+    /// Cancellation and the time budget stop new lookups; the remaining links resolve when tapped.
+    nonisolated static func resolvingLinks(in entries: [RemoteEntry], budget: Duration = linkResolutionBudget,
+                                           resolve: @escaping @Sendable (RemoteEntry) async -> LinkResolution?) async throws -> [RemoteEntry] {
+        let deadline = ContinuousClock.now + budget
         var pending = entries.indices.filter { entries[$0].kind == .symlink }.prefix(linkResolutionLimit).makeIterator()
         var resolved = entries
         try await withThrowingTaskGroup(of: (Int, LinkResolution?).self) { group in
             func startNext() {
-                guard let index = pending.next() else { return }
+                // Lookups ignore cancellation once sent, so an abandoned or slow listing must stop adding them.
+                guard ContinuousClock.now < deadline, !Task.isCancelled, let index = pending.next() else { return }
                 let link = entries[index]
-                group.addTask { (index, await linkResolution(for: link, sftp: sftp)) }
+                _ = group.addTaskUnlessCancelled { (index, await resolve(link)) }
             }
             for _ in 0..<linkResolutionWindow { startNext() }
             while let (index, link) = try await group.next() {
