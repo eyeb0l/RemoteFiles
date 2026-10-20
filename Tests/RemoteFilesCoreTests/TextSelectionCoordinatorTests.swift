@@ -47,4 +47,20 @@ import Observation
         XCTAssertEqual(released.count, 1)
         XCTAssertFalse(coordinator.hasActiveSelection, "A released selection must not keep offscreen regions retained")
     }
+
+    func testMovingASelectedModelToAnotherCoordinatorReleasesThePreviousOne() {
+        let first = TextSelectionCoordinator(), second = TextSelectionCoordinator()
+        let model = TextSelectionModel(coordinator: first)
+        select(model)
+        let left = observe(first)
+        model.setCoordinator(second)
+        XCTAssertEqual(left.count, 1)
+        XCTAssertFalse(first.hasActiveSelection, "The previous coordinator must not keep its regions retained")
+        XCTAssertTrue(second.hasActiveSelection)
+        model.selectedRange = nil
+        XCTAssertFalse(second.hasActiveSelection)
+        select(model)
+        model.setCoordinator(nil)
+        XCTAssertFalse(second.hasActiveSelection, "Leaving every coordinator releases the selection too")
+    }
 }

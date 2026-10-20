@@ -78,8 +78,10 @@ Local changes:
   The list is now `@ObservationIgnored`; the flag changes only when a selection
   starts, ends or its model is released (previously a released selected model kept
   the computed value stale without notifying observers).
-  `TextSelectionCoordinatorTests` covers registration, moving and releasing a
-  selection without SwiftUI.
+  A model that moves to another coordinator (or none) unregisters from the previous
+  one, which recomputes its flag. `TextSelectionCoordinatorTests` covers
+  registration, moving and releasing a selection, and coordinator changes without
+  SwiftUI.
 
 Before/after evidence and limitations are recorded in
 `../../docs/READER_PERFORMANCE.md`. Keep this fork small and return to the pinned

@@ -30,6 +30,12 @@ import SwiftUI
       selectionDidChange()
     }
 
+    /// Forgets a model that moved to another coordinator, so its selection stops counting here.
+    func unregister(_ model: TextSelectionModel) {
+      models.removeAll { $0.wrapped == nil || $0.wrapped === model }
+      selectionDidChange()
+    }
+
     func modelDidSelectText(_ model: TextSelectionModel) {
       // Clear selection in the other models
       for weakModel in models where weakModel.wrapped !== model {

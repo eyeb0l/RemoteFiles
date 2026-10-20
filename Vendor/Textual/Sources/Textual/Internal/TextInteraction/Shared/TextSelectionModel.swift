@@ -79,7 +79,10 @@
         return
       }
 
+      // RemoteFiles: the previous coordinator caches whether any of its models is selected.
+      let previous = self.coordinator
       self.coordinator = coordinator
+      previous?.unregister(self)
       coordinator?.register(self)
     }
 
