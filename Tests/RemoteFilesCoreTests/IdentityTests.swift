@@ -131,6 +131,60 @@ final class IdentityTests: XCTestCase {
         XCTAssertEqual(try protection(), .complete)
     }
 
+    func testBiometricKeychainItemIsStoredWithoutPromptingAndRemovable() throws {
+        XCTAssertNotNil(Bundle.main.object(forInfoDictionaryKey: "NSFaceIDUsageDescription"),
+                        "Face ID needs a usage description before it can prompt")
+        let store = KeychainBiometricKeyStore(service: "dev.iris.RemoteFilesTests.biometric")
+        let reference = UUID().uuidString
+        do { try store.save(Data("seed".utf8), reference: reference) }
+        catch IdentityError.keychain(let status) {
+            // Saving requires a device passcode, which the Simulator does not have.
+            throw XCTSkip("This device cannot hold passcode-protected biometric items (status \(status)); run on a physical device.")
+        }
+        defer { try? store.delete(reference: reference) }
+        XCTAssertTrue(store.contains(reference: reference), "Checking for the copy must not need Face ID")
+        try store.save(Data("replacement".utf8), reference: reference)
+        XCTAssertTrue(store.contains(reference: reference))
+        try store.delete(reference: reference)
+        XCTAssertFalse(store.contains(reference: reference))
+        XCTAssertNoThrow(try store.delete(reference: reference), "Deleting twice is not an error")
+    }
+
+    /// Opt-in: the Simulator must have Face ID enrolled, and the host must send a match while the prompt shows.
+    func testSimulatedFaceIDReadsTheStoredKey() async throws {
+        guard ProcessInfo.processInfo.environment["REMOTEFILES_BIOMETRIC_SIMULATION"] == "1" else {
+            throw XCTSkip("Set TEST_RUNNER_REMOTEFILES_BIOMETRIC_SIMULATION=1 and send a Face ID match from the host.")
+        }
+        let store = KeychainBiometricKeyStore(service: "dev.iris.RemoteFilesTests.biometric")
+        let reference = UUID().uuidString
+        try store.save(Data("seed".utf8), reference: reference)
+        defer { try? store.delete(reference: reference) }
+        print("BIOMETRIC_PROMPT_READY")
+        let data = try await store.load(reference: reference, reason: "Unlock the test key.")
+        XCTAssertEqual(data, Data("seed".utf8))
+    }
+
+    /// Opt-in physical-device check, two phases: `save` stores a copy, then add or remove a Face ID
+    /// appearance in Settings, and `read` must find the copy unusable even with a matching face.
+    /// The Simulator cannot run it: re-enrolling there leaves the biometric domain state unchanged.
+    func testSimulatedEnrolmentChangeInvalidatesTheStoredKey() async throws {
+        let phase = ProcessInfo.processInfo.environment["REMOTEFILES_BIOMETRIC_ENROLMENT_PHASE"]
+        guard let phase else { throw XCTSkip("Set TEST_RUNNER_REMOTEFILES_BIOMETRIC_ENROLMENT_PHASE to save, then read.") }
+        let store = KeychainBiometricKeyStore(service: "dev.iris.RemoteFilesTests.biometric")
+        let reference = "enrolment-change-check"
+        if phase == "save" {
+            try store.save(Data("seed".utf8), reference: reference)
+            XCTAssertTrue(store.contains(reference: reference))
+            return
+        }
+        defer { try? store.delete(reference: reference) }
+        print("BIOMETRIC_PROMPT_READY")
+        do {
+            _ = try await store.load(reference: reference, reason: "Unlock the test key.")
+            XCTFail("A copy saved before an enrolment change must not be readable")
+        } catch IdentityError.biometricsUnavailable { }
+    }
+
     func testDeviceKeychainPersistenceAndAccessibility() async throws {
         let service = "app.remotefiles.tests." + UUID().uuidString
         let secrets = KeychainIdentitySecretStore(service: service)
@@ -252,4 +306,152 @@ final class IdentityTests: XCTestCase {
         return String(decoding: data, as: UTF8.self)
     }
     #endif
+}
+
+/// Biometric Keychain stand-in: records prompts and can decline, lose its item, or pause a load.
+private final class FakeBiometricStore: BiometricKeyStore, @unchecked Sendable {
+    enum Outcome { case authenticate, decline, unavailable }
+    private let lock = NSLock()
+    private var storage: [String: Data] = [:]
+    private var gate: CheckedContinuation<Void, Never>?
+    var outcome = Outcome.authenticate
+    var failDelete = false
+    var pauseLoads = false
+    private(set) var prompts = 0
+    func stored(_ reference: String) -> Data? { lock.lock(); defer { lock.unlock() }; return storage[reference] }
+    func replace(_ reference: String, with data: Data) { lock.lock(); storage[reference] = data; lock.unlock() }
+    func save(_ data: Data, reference: String) throws { replace(reference, with: data) }
+    func load(reference: String, reason: String) async throws -> Data {
+        lock.lock(); prompts += 1; let paused = pauseLoads; lock.unlock()
+        if paused { await withCheckedContinuation { continuation in lock.lock(); gate = continuation; lock.unlock() } }
+        switch outcome {
+        case .decline: throw IdentityError.biometricsDeclined
+        case .unavailable: throw IdentityError.biometricsUnavailable
+        case .authenticate:
+            guard let data = stored(reference) else { throw IdentityError.biometricsUnavailable }
+            return data
+        }
+    }
+    func resume() { lock.lock(); let waiting = gate; gate = nil; lock.unlock(); waiting?.resume() }
+    var isPaused: Bool { lock.lock(); defer { lock.unlock() }; return gate != nil }
+    func contains(reference: String) -> Bool { stored(reference) != nil }
+    func delete(reference: String) throws {
+        if failDelete { throw IdentityError.keychain(errSecIO) }
+        lock.lock(); storage.removeValue(forKey: reference); lock.unlock()
+    }
+}
+
+final class BiometricUnlockTests: XCTestCase {
+    /// A generated key marked as passphrase-protected stands in for an encrypted import.
+    private func encryptedIdentity(_ store: IdentityStore) async throws -> IdentityMetadata {
+        let generated = try await store.generate(name: "Encrypted stand-in")
+        return IdentityMetadata(id: generated.id, name: generated.name, algorithm: generated.algorithm, publicKey: generated.publicKey,
+                                fingerprint: generated.fingerprint, requiresPassphrase: true, keychainReference: generated.keychainReference)
+    }
+
+    func testEnablingNeedsAnUnlockedEncryptedKeyAndStoresOnlyTheKey() async throws {
+        let biometrics = FakeBiometricStore(), store = IdentityStore(secretStore: MemorySecrets(), biometricStore: biometrics)
+        let identity = try await encryptedIdentity(store)
+        do { try await store.enableBiometricUnlock(identity); XCTFail("A locked key cannot be stored") }
+        catch IdentityError.missingPassphrase { }
+        let key = try await store.unlock(identity)
+        try await store.enableBiometricUnlock(identity)
+        let hasUnlock = await store.hasBiometricUnlock(identity)
+        XCTAssertTrue(hasUnlock)
+        let stored = try XCTUnwrap(biometrics.stored(identity.keychainReference))
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: stored) as? [String: Any])
+        XCTAssertEqual(Set(fields.keys), ["version", "format", "bytes"], "Only the key itself is stored")
+        XCTAssertEqual((fields["bytes"] as? String).flatMap { Data(base64Encoded: $0) }, key.rawRepresentation)
+
+        let plain = try await store.generate(name: "Unencrypted")
+        _ = try await store.unlock(plain)
+        do { try await store.enableBiometricUnlock(plain); XCTFail("Unencrypted keys have no passphrase to replace") }
+        catch IdentityError.missingPassphrase { }
+    }
+
+    func testFaceIDUnlockReturnsTheSameKeyEachForegroundSession() async throws {
+        let biometrics = FakeBiometricStore(), store = IdentityStore(secretStore: MemorySecrets(), biometricStore: biometrics)
+        let identity = try await encryptedIdentity(store)
+        let key = try await store.unlock(identity)
+        try await store.enableBiometricUnlock(identity)
+        await store.clearSession()
+        let unlocked = try await store.unlockWithBiometrics(identity, reason: "Connect")
+        XCTAssertEqual(unlocked.rawRepresentation, key.rawRepresentation)
+        _ = try await store.unlockWithBiometrics(identity, reason: "Connect")
+        XCTAssertEqual(biometrics.prompts, 1, "An unlocked key is reused within the session")
+        let cached = try await store.unlock(identity)
+        XCTAssertEqual(cached.rawRepresentation, key.rawRepresentation, "Connections use the Face ID-unlocked key")
+        await store.clearSession()
+        _ = try await store.unlockWithBiometrics(identity, reason: "Connect")
+        XCTAssertEqual(biometrics.prompts, 2, "Backgrounding still clears the unlocked key")
+    }
+
+    func testDeclinedUnavailableAndMismatchedCopiesFallBackToThePassphrase() async throws {
+        let biometrics = FakeBiometricStore(), store = IdentityStore(secretStore: MemorySecrets(), biometricStore: biometrics)
+        let identity = try await encryptedIdentity(store)
+        _ = try await store.unlock(identity)
+        try await store.enableBiometricUnlock(identity)
+        await store.clearSession()
+        biometrics.outcome = .decline
+        do { _ = try await store.unlockWithBiometrics(identity, reason: "Connect"); XCTFail() } catch IdentityError.biometricsDeclined { }
+        biometrics.outcome = .unavailable
+        do { _ = try await store.unlockWithBiometrics(identity, reason: "Connect"); XCTFail() } catch IdentityError.biometricsUnavailable { }
+
+        biometrics.outcome = .authenticate
+        let foreign = Curve25519.Signing.PrivateKey().rawRepresentation
+        biometrics.replace(identity.keychainReference,
+                           with: Data(#"{"version":1,"format":"generatedEd25519","bytes":"\#(foreign.base64EncodedString())"}"#.utf8))
+        do { _ = try await store.unlockWithBiometrics(identity, reason: "Connect"); XCTFail("A different key must never be used") }
+        catch IdentityError.biometricsUnavailable { }
+        XCTAssertNil(biometrics.stored(identity.keychainReference), "The mismatched copy is removed")
+        let promptsBefore = biometrics.prompts
+        do { _ = try await store.unlockWithBiometrics(identity, reason: "Connect"); XCTFail("Nothing was unlocked") }
+        catch IdentityError.biometricsUnavailable { }
+        XCTAssertEqual(biometrics.prompts, promptsBefore + 1, "No key was cached by the rejected copy")
+
+        let noBiometrics = IdentityStore(secretStore: MemorySecrets(), biometricStore: nil)
+        let other = try await encryptedIdentity(noBiometrics)
+        let available = await noBiometrics.hasBiometricUnlock(other)
+        XCTAssertFalse(available)
+        do { _ = try await noBiometrics.unlockWithBiometrics(other, reason: "Connect"); XCTFail() } catch IdentityError.biometricsUnavailable { }
+    }
+
+    func testBackgroundingDuringFaceIDLeavesNothingUnlocked() async throws {
+        let biometrics = FakeBiometricStore(), store = IdentityStore(secretStore: MemorySecrets(), biometricStore: biometrics)
+        let identity = try await encryptedIdentity(store)
+        _ = try await store.unlock(identity)
+        try await store.enableBiometricUnlock(identity)
+        await store.clearSession()
+        biometrics.pauseLoads = true
+        let unlock = Task { try await store.unlockWithBiometrics(identity, reason: "Connect") }
+        for _ in 0..<200 where !biometrics.isPaused { try await Task.sleep(for: .milliseconds(5)) }
+        await store.clearSession()
+        biometrics.resume()
+        do { _ = try await unlock.value; XCTFail("A superseded unlock must not complete") } catch IdentityError.sessionEnded { }
+        biometrics.pauseLoads = false
+        _ = try await store.unlockWithBiometrics(identity, reason: "Connect")
+        XCTAssertEqual(biometrics.prompts, 2, "The superseded unlock cached nothing, so Face ID is asked again")
+    }
+
+    func testDeletingAnIdentityRemovesItsFaceIDCopyFirst() async throws {
+        let biometrics = FakeBiometricStore(), secrets = MemorySecrets()
+        let store = IdentityStore(secretStore: secrets, biometricStore: biometrics)
+        let identity = try await encryptedIdentity(store)
+        _ = try await store.unlock(identity)
+        try await store.enableBiometricUnlock(identity)
+        biometrics.failDelete = true
+        do { try await store.delete(identity, referencedBy: []); XCTFail() } catch IdentityError.keychain { }
+        XCTAssertNoThrow(try secrets.load(reference: identity.keychainReference), "The identity survives a failed cleanup")
+        biometrics.failDelete = false
+        try await store.delete(identity, referencedBy: [])
+        XCTAssertNil(biometrics.stored(identity.keychainReference))
+        XCTAssertThrowsError(try secrets.load(reference: identity.keychainReference))
+
+        let kept = try await encryptedIdentity(store)
+        _ = try await store.unlock(kept)
+        try await store.enableBiometricUnlock(kept)
+        try await store.disableBiometricUnlock(kept)
+        let stillEnabled = await store.hasBiometricUnlock(kept)
+        XCTAssertFalse(stillEnabled)
+    }
 }

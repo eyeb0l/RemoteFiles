@@ -2,6 +2,7 @@
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
+import LocalAuthentication
 import RemoteFilesCore
 
 struct KeyManagerView: View {
@@ -57,7 +58,10 @@ private struct IdentityDetailsView: View {
     @State private var copied = false
     @State private var confirmDeletion = false
     @State private var showInstallation = false
+    @State private var biometricUnlock = false
+    @State private var biometricMessage: String?
     private var connections: [ConnectionProfile] { model.metadata.connections.filter { $0.identityID == identity.id } }
+    private var biometryName: String { BiometricUnlock.name ?? "Face ID" }
 
     var body: some View {
         Form {
@@ -73,6 +77,19 @@ private struct IdentityDetailsView: View {
                 Button("Install Public Key on Server", systemImage: "server.rack") { showInstallation = true }.disabled(model.demo)
             } header: { Text("Public identity") } footer: {
                 Text("Add this public key to the server account's ~/.ssh/authorized_keys file. The private key remains in this device's Keychain.")
+            }
+            if identity.requiresPassphrase, biometricUnlock || BiometricUnlock.name != nil {
+                Section {
+                    LabeledContent("\(biometryName) Unlock", value: biometricUnlock ? "On" : "Off")
+                    if biometricUnlock {
+                        Button("Turn Off \(biometryName) Unlock", role: .destructive) { turnOffBiometricUnlock() }
+                    }
+                    if let biometricMessage { Text(biometricMessage).foregroundStyle(.red) }
+                } header: { Text("Unlock") } footer: {
+                    Text(biometricUnlock
+                         ? "An unlocked copy of this key is kept in this device's Keychain, readable only with \(biometryName) as enrolled when it was turned on. Turning it off deletes that copy; the passphrase still unlocks the key."
+                         : "To turn it on, unlock this key with its passphrase when connecting and choose “Use \(biometryName) next time”.")
+                }
             }
             if !connections.isEmpty {
                 Section {
@@ -90,6 +107,7 @@ private struct IdentityDetailsView: View {
         .sheet(isPresented: $showInstallation) {
             NavigationStack { PublicKeyInstallationView(model: model, identity: identity, connection: connections.first) }
         }
+        .task { biometricUnlock = await model.identities.hasBiometricUnlock(identity) }
         .confirmationDialog("Delete this SSH identity from this device?", isPresented: $confirmDeletion, titleVisibility: .visible) {
             Button("Delete Identity", role: .destructive) {
                 Task {
@@ -97,6 +115,17 @@ private struct IdentityDetailsView: View {
                     if !model.metadata.identities.contains(where: { $0.id == identity.id }) { dismiss() }
                 }
             }
+        }
+    }
+}
+
+private extension IdentityDetailsView {
+    func turnOffBiometricUnlock() {
+        biometricMessage = nil
+        Task {
+            do { try await model.identities.disableBiometricUnlock(identity) }
+            catch { biometricMessage = error.localizedDescription }
+            biometricUnlock = await model.identities.hasBiometricUnlock(identity)
         }
     }
 }
@@ -325,6 +354,20 @@ struct ChangedHostView: View {
     }
 }
 
+/// "Face ID" or "Touch ID" when biometrics can be used now, otherwise nil.
+enum BiometricUnlock {
+    static var name: String? {
+        let context = LAContext()
+        guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil) else { return nil }
+        switch context.biometryType {
+        case .faceID: return "Face ID"
+        case .touchID: return "Touch ID"
+        default: return nil
+        }
+    }
+    static func symbol(for name: String) -> String { name == "Touch ID" ? "touchid" : "faceid" }
+}
+
 struct UnlockKeyView: View {
     let model: AppModel
     let identity: IdentityMetadata
@@ -334,15 +377,32 @@ struct UnlockKeyView: View {
     @State private var isWorking = false
     @State private var operation: Task<Void, Never>?
     @State private var completedUnlock = false
+    @State private var biometryName = BiometricUnlock.name
+    @State private var hasBiometricUnlock = false
+    @State private var rememberWithBiometrics = false
 
     var body: some View {
         Form {
+            if hasBiometricUnlock, let biometryName {
+                Section {
+                    Button(action: unlockWithBiometrics) {
+                        Label("Unlock with \(biometryName)", systemImage: BiometricUnlock.symbol(for: biometryName))
+                    }.disabled(isWorking)
+                }
+            }
             Section {
                 SecureField("Private-key passphrase", text: $passphrase)
                     .textInputAutocapitalization(.never).autocorrectionDisabled().privacySensitive()
                     .onSubmit(unlock)
             } header: { Text(identity.name) } footer: {
                 Text("The identity stays unlocked only for this foreground connection session. The passphrase is never saved.")
+            }
+            if !hasBiometricUnlock, let biometryName, identity.requiresPassphrase {
+                Section {
+                    Toggle("Use \(biometryName) next time", isOn: $rememberWithBiometrics)
+                } footer: {
+                    Text("Keeps an unlocked copy of this key in this device's Keychain, readable only with \(biometryName) as enrolled now. The passphrase is still never saved. Turn it off in SSH Keys.")
+                }
             }
             if let message { Section { Text(message).foregroundStyle(.red) } }
             Section {
@@ -359,19 +419,49 @@ struct UnlockKeyView: View {
             if !completedUnlock { Task { await model.identities.clearSession() } }
         }
         .onChange(of: scenePhase) { _, phase in if phase == .background { cancel() } }
+        .task {
+            hasBiometricUnlock = await model.identities.hasBiometricUnlock(identity)
+            if hasBiometricUnlock, biometryName != nil { unlockWithBiometrics() }
+        }
     }
 
     private func unlock() {
         guard !isWorking, !passphrase.isEmpty else { return }
         isWorking = true; message = nil
+        let remember = rememberWithBiometrics && !hasBiometricUnlock
         operation = Task {
             do {
                 _ = try await model.identities.unlock(identity, passphrase: passphrase)
                 try Task.checkCancellation()
+                if remember, let biometryName {
+                    // The key is already unlocked; failing to store the copy must not block connecting.
+                    do { try await model.identities.enableBiometricUnlock(identity) }
+                    catch { model.errorMessage = "The key is unlocked, but \(biometryName) unlock couldn't be turned on. \(error.localizedDescription)" }
+                }
                 completedUnlock = true
                 passphrase = ""; model.sheet = nil; model.sessionRevision += 1
             } catch is CancellationError { passphrase = "" }
             catch { passphrase = ""; message = error.localizedDescription }
+            isWorking = false
+        }
+    }
+
+    private func unlockWithBiometrics() {
+        guard !isWorking, let biometryName else { return }
+        isWorking = true; message = nil
+        operation = Task {
+            do {
+                _ = try await model.identities.unlockWithBiometrics(identity, reason: "Unlock “\(identity.name)” to connect.")
+                try Task.checkCancellation()
+                completedUnlock = true
+                model.sheet = nil; model.sessionRevision += 1
+            } catch is CancellationError {
+            } catch IdentityError.biometricsDeclined {
+                // Cancelled or not recognised: the passphrase field stays available.
+            } catch IdentityError.biometricsUnavailable {
+                hasBiometricUnlock = false
+                message = "\(biometryName) unlock is no longer available for this key, for example because \(biometryName) changed. Enter its passphrase; you can turn \(biometryName) unlock on again below."
+            } catch { message = error.localizedDescription }
             isWorking = false
         }
     }

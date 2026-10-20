@@ -19,7 +19,7 @@ The first connection on a local network may require iOS Local Network permission
 
 ## Keys and trust
 
-Generated Ed25519 keys and verified OpenSSH Ed25519 import formats are documented in [KEY_SUPPORT.md](KEY_SUPPORT.md). Imports accept extensionless files and explicit paste. Encrypted originals remain encrypted in Keychain; an unlocked key is retained only for the foreground session. Passphrases are never persisted. Keychain uses `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, with synchronisation disabled. This does not imply hardware-backed Ed25519 protection.
+Generated Ed25519 keys and verified OpenSSH Ed25519 import formats are documented in [KEY_SUPPORT.md](KEY_SUPPORT.md). Imports accept extensionless files and explicit paste. Encrypted originals remain encrypted in Keychain; an unlocked key is retained only for the foreground session. Passphrases are never persisted. Optional Face ID unlock keeps an unlocked copy readable only with the currently enrolled Face ID; see [Face ID unlock](KEY_SUPPORT.md#face-id-unlock). Keychain uses `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, with synchronisation disabled. This does not imply hardware-backed Ed25519 protection.
 
 Unknown hosts require explicit trust. Changed host keys block before account authentication. The reset flow removes trust and requires another verification; it does not silently accept the new key. A key used by a saved connection cannot be deleted.
 
