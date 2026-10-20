@@ -232,10 +232,13 @@ private struct PreparedRevealFixture: View {
         XCTAssertTrue(outcome.completed)
         XCTAssertGreaterThan(outcome.preparedTypes, 30)
         // Runtime caches are populated; a later folder appearance repeats the same lookups.
-        let clock = ContinuousClock()
-        var repeated: ReaderWarmUp.Outcome?
-        let elapsed = await clock.measure { repeated = await ReaderWarmUp.start().value }
+        let repeated = await ReaderWarmUp.start().value
         XCTAssertEqual(repeated, outcome)
+        // Time the repeated lookups themselves. Waiting for a utility-priority task to be scheduled
+        // took 0.85 s on a loaded 3-CPU CI runner and says nothing about the cached work.
+        let elapsed = await Task.detached {
+            ContinuousClock().measure { _ = ReaderWarmUp.perform(shouldContinue: { true }) }
+        }.value
         XCTAssertLessThan(elapsed, .milliseconds(500))
     }
 

@@ -14,7 +14,9 @@ final class SFTPIntegrationTests: XCTestCase {
         let key = try await stores.identity.generate(name: "Public-only installer fixture")
         let request = try PublicKeyInstallationRequest(host: "127.0.0.1", port: fixture.port, username: fixture.username, identity: key)
         let file = URL(fileURLWithPath: fixture.directory + "/authorized_keys"), before = try Data(contentsOf: URL(fileURLWithPath: fixture.directory + "/authorized_keys"))
-        let installer = SSHPublicKeyInstaller(trust: stores.trust, timeoutSeconds: 5)
+        // The product's own 30-second bound: under CI load the fixture handshake alone has taken
+        // nearly five seconds, and an expired deadline is reported as an uncertain installation.
+        let installer = SSHPublicKeyInstaller(trust: stores.trust)
         do { _ = try await installer.install(request, password: "not-a-real-password"); XCTFail("Unknown host must block before password login") }
         catch HostTrustError.unknown { }
         try await stores.trustFixtureHost()
@@ -24,7 +26,7 @@ final class SFTPIntegrationTests: XCTestCase {
         let changed = try HostTrustStore(fileURL: URL(fileURLWithPath: fixture.directory + "/installer-changed-\(UUID().uuidString).json"))
         let wrongHost = try HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: key.publicKey))
         try await changed.trustUnknown(endpoint: fixture.endpoint, key: wrongHost)
-        let changedInstaller = SSHPublicKeyInstaller(trust: changed, timeoutSeconds: 5)
+        let changedInstaller = SSHPublicKeyInstaller(trust: changed)
         do { _ = try await changedInstaller.install(request, password: "not-a-real-password"); XCTFail("Changed host must block") }
         catch HostTrustError.changed { }
         XCTAssertEqual(try Data(contentsOf: file), before)
@@ -597,7 +599,12 @@ private struct Stores {
         let details = try HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: publicKey))
         try await trust.trustUnknown(endpoint: fixture.endpoint, key: details)
     }
-    func service(timeoutSeconds: UInt64 = 15) -> SFTPRemoteFileService {
+    /// Functional checks use the benchmark's 60-second budget rather than the 15-second interactive
+    /// deadline. The fixture is macOS sshd, which resolves the owner and group of every listed entry
+    /// through opendirectoryd; while a fresh CI simulator finishes booting, a passing run measured
+    /// 15.9 s for the 1,000-entry folder although file reads stayed in milliseconds. Deadline
+    /// behaviour keeps its own explicit short-timeout tests.
+    func service(timeoutSeconds: UInt64 = 60) -> SFTPRemoteFileService {
         SFTPRemoteFileService(identityStore: identity, trustStore: trust, metadataStore: metadata,
                               timeoutSeconds: timeoutSeconds)
     }
