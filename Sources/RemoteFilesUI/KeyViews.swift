@@ -68,7 +68,7 @@ private struct IdentityDetailsView: View {
             Section {
                 LabeledContent("Algorithm", value: "Ed25519")
                 FingerprintView(value: identity.fingerprint)
-                Text(identity.publicKey).font(.caption.monospaced()).textSelection(.enabled)
+                PublicKeyText(value: identity.publicKey)
                 Button {
                     UIPasteboard.general.string = identity.publicKey
                     copied = true
@@ -468,8 +468,24 @@ struct UnlockKeyView: View {
 struct FingerprintView: View {
     let value: String
     var body: some View {
-        Text(value).font(.footnote.monospaced()).textSelection(.enabled)
+        Text(verbatim: value).font(.footnote.monospaced()).keyMaterialTypesetting().textSelection(.enabled)
             .accessibilityLabel("SHA-256 fingerprint, \(value)")
     }
+}
+
+struct PublicKeyText: View {
+    let value: String
+    var body: some View {
+        Text(verbatim: value).font(.caption.monospaced()).keyMaterialTypesetting().textSelection(.enabled)
+            .accessibilityLabel(Text(verbatim: value))
+    }
+}
+
+extension Text {
+    /// Key material is not language. iOS hyphenates English text that wraps inside a long token,
+    /// drawing a "-" that is not part of the fingerprint or key. Typesetting it as "no linguistic
+    /// content" (ISO 639-2 `zxx`) disables hyphenation, so lines break between any two characters
+    /// without adding glyphs. The string, copied text and accessibility label are unchanged.
+    func keyMaterialTypesetting() -> Text { typesettingLanguage(Locale.Language(identifier: "zxx")) }
 }
 #endif
