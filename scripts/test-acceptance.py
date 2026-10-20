@@ -199,11 +199,19 @@ def expected_tests(root, platform, directories):
 
 def log_tests(path):
     tests = {}
-    # Simulator diagnostics may interleave between XCTest's completed outcome
-    # and its duration. Count the explicit marker; retain inventory, duplicate,
-    # skip-policy and xcresult-count checks independently of timing text.
+    # Simulator diagnostics may split an XCTest identifier or appear between
+    # its outcome and duration. Remove only complete, structured runtime log
+    # records inside the identifier; unknown interruptions still fail inventory.
+    diagnostic = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+[+-]\d{4} "
+                            r"[\w.-]+\[\d+:\d+\] \[[^\]\n]+\] [^\n]*\n")
     pattern = re.compile(r"Test Case '-\[(?:[\w]+\.)?(\w+) (test\w+)\]' (passed|failed|skipped)(?=\s|$|\d{4}-\d{2}-\d{2} )")
-    for match in pattern.finditer(path.read_text(errors="replace")):
+    for fragment in path.read_text(errors="replace").split("Test Case '-[")[1:]:
+        name, closing, remainder = fragment.partition("]'")
+        if not closing:
+            continue
+        match = pattern.match("Test Case '-[" + diagnostic.sub("", name) + closing + remainder)
+        if not match:
+            continue
         identifier = match[1] + "/" + match[2]
         if identifier in tests:
             raise RuntimeError("Repeated result (retries are not acceptance): " + identifier)

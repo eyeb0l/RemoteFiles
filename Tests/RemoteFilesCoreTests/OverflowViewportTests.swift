@@ -284,6 +284,42 @@ private struct OverflowFixtureView: View {
         add(attachment)
     }
 
+    func testAttachedUnreadyAnchorFinishesWithinItsCorrectionBudget() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        let controller = UIViewController()
+        window.rootViewController = controller
+        let scroll = UIScrollView(frame: window.bounds)
+        scroll.contentInsetAdjustmentBehavior = .never
+        scroll.contentSize = CGSize(width: window.bounds.width, height: 3000)
+        controller.view.addSubview(scroll)
+        let cache = OverflowGeometryCache()
+        let probe = OverflowAnchorBridge.Probe(cache, deferring: true)
+        probe.frame = CGRect(x: 0, y: 0, width: 1, height: 1)
+        scroll.addSubview(probe)
+        let region = ReadingAnchorRegionBridge.Probe(cache, id: .image("delayed-region"), ready: true)
+        region.frame = CGRect(x: 0, y: 1000, width: window.bounds.width, height: 500)
+        scroll.addSubview(region)
+        window.makeKeyAndVisible()
+        defer { cache.cancelAnchor(); cleanup(window, previous: previous) }
+        scroll.setContentOffset(CGPoint(x: 0, y: 1000), animated: false)
+        cache.recordReadingAnchor()
+        XCTAssertTrue(cache.hasReadingAnchor)
+        region.ready = false
+        var completed = false
+        cache.restoreReadingAnchor { _ in completed = true }
+        scroll.setContentOffset(.zero, animated: false)
+        try await wait { scroll.contentOffset.y > 999 && cache.isRestoringReadingAnchor }
+        // Keep the anchor attached but deliberately unready beyond the five-second
+        // correction budget. Attachment waiting must not extend that budget.
+        try await Task.sleep(for: .seconds(6))
+        XCTAssertFalse(region.ready)
+        XCTAssertTrue(completed, "Attached content must finish restoration within its correction budget")
+        XCTAssertFalse(cache.isRestoringReadingAnchor)
+        XCTAssertEqual(scroll.contentOffset.y, 1000, accuracy: 1)
+    }
+
     private func checkBlockReturn(marker: String) async throws {
         let text = String(repeating: "Selectable opening prose. ", count: 2700) + "\n\n```text\n" +
             (0..<40).map { "anchor-code-\($0) " + String(repeating: "wide_", count: 50) }.joined(separator: "\n") +

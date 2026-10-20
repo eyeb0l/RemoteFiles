@@ -63,6 +63,10 @@ Local changes:
   slow Source-to-Rendered transition could discard the logical anchor and retain
   a pixel offset for different block heights. The reader regression includes an
   intentionally delayed attachment and keeps the original prose-character test.
+  A resolvable attached anchor starts that correction window even while its
+  asynchronous region is unready; it must not first consume the attachment wait
+  and then start another correction budget. A controlled attached/unready-region
+  regression retains the separate delayed-attachment and prose-character checks.
 
 Before/after evidence and limitations are recorded in
 `../../docs/READER_PERFORMANCE.md`. Keep this fork small and return to the pinned

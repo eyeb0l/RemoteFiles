@@ -17,8 +17,19 @@ import XCTest
             capture("VoiceOver bounded JSON", app)
         }
         app.navigationBars.buttons["Projects"].tap()
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10), app.debugDescription)
         let svg = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Icon.svg,")).firstMatch
-        XCTAssertTrue(svg.waitForExistence(timeout: 10)); if !svg.isHittable { app.swipeUp() }; svg.tap()
+        // Returning from JSON can retain a later row at the top of the virtualized
+        // list. Stage that position deliberately so this regression always covers
+        // finding SVG above the viewport, rather than relying on a scroll reset.
+        let last = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly review.md,")).firstMatch
+        for _ in 0..<6 { if last.exists && last.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(last.exists && last.isHittable, app.debugDescription)
+        XCTAssertFalse(svg.exists && svg.isHittable, "Exercise an offscreen SVG row before searching upward")
+        for _ in 0..<6 { if svg.exists && svg.isHittable { break }; app.swipeDown() }
+        XCTAssertTrue(svg.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(svg.isHittable, app.debugDescription)
+        svg.tap()
         XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "Rendered SVG image").firstMatch.waitForExistence(timeout: 15))
         XCTAssertTrue(app.activityIndicators.firstMatch.waitForNonExistence(timeout: 20), app.debugDescription)
         try withVoiceOver {

@@ -3,6 +3,7 @@
 import importlib.util
 import contextlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -69,6 +70,58 @@ class LogResultTests(unittest.TestCase):
                     " (0.050 seconds).\n")
                 self.assertEqual(acceptance.log_tests(log), {"PlaybackTests/testCodec": outcome})
 
+    def test_structured_diagnostics_inside_identifiers_preserve_every_outcome(self):
+        diagnostic = "2026-10-20 07:46:30.173137+0000 RemoteFilesTestHost[11686:48841] [player] codec diagnostic\n"
+        for prefix, suffix in (("Remote", "FilesTests.PlaybackTests testCodec"),
+                               ("RemoteFilesTests.Playback", "Tests testCodec"),
+                               ("RemoteFilesTests.PlaybackTests testCo", "dec")):
+            for outcome in ("passed", "failed", "skipped"):
+                with self.subTest(prefix=prefix, outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                    log = Path(directory) / "test.log"
+                    log.write_text(f"Test Case '-[{prefix}{diagnostic}{suffix}]' {outcome} (0.644 seconds).\n")
+                    self.assertEqual(acceptance.log_tests(log), {"PlaybackTests/testCodec": outcome})
+
+    def test_interrupted_identifier_duplicates_are_still_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "test.log"
+            log.write_text("Test Case '-[ExampleTests testOne]' passed (0.001 seconds).\n"
+                           "Test Case '-[Exam2026-10-20 07:46:30.173137+0000 TestHost[1:2] [player] diagnostic\n"
+                           "pleTests testOne]' failed (0.001 seconds).\n")
+            with self.assertRaisesRegex(RuntimeError, "Repeated result"):
+                acceptance.log_tests(log)
+
+    def test_unknown_or_unterminated_identifier_interruptions_do_not_create_results(self):
+        for interruption in ("unknown diagnostic\n", "2026-10-20 07:46:30 TestHost diagnostic\n",
+                             "2026-10-20 07:46:30.173137+0000 TestHost[1:2] [player] missing newline"):
+            with self.subTest(interruption=interruption), tempfile.TemporaryDirectory() as directory:
+                log = Path(directory) / "test.log"
+                log.write_text(f"Test Case '-[Exam{interruption}pleTests testOne]' passed (0.001 seconds).\n")
+                self.assertEqual(acceptance.log_tests(log), {})
+
+    def test_recovered_identifiers_keep_xcresult_and_outcome_validation(self):
+        cases = (("passed", (1, 0, 0), "passed"),
+                 ("passed", (0, 1, 0), "failed"),
+                 ("failed", (0, 1, 0), "failed"),
+                 ("skipped", (0, 0, 1), "failed"))
+        for outcome, actual, expected_status in cases:
+            with self.subTest(outcome=outcome, actual=actual), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                log = root / "test.log"
+                log.write_text("Test Case '-[Exam2026-10-20 07:46:30.173137+0000 TestHost[1:2] [player] diagnostic\n"
+                               f"pleTests testOne]' {outcome} (0.001 seconds).\n")
+                run = acceptance.Run(root, root, {"commit": "fixture", "mode": "test", "source_tree_sha256": "fixture"})
+                lane = {"name": "fixture", "status": "passed", "errors": [], "log": str(log)}
+                run.lanes.append(lane)
+                def export(command, stdout, **kwargs):
+                    summary = dict(zip(("passedTests", "failedTests", "skippedTests"), actual))
+                    summary["expectedFailures"] = 0
+                    json.dump(summary if "summary" in command else {}, stdout)
+                with patch.object(acceptance.subprocess, "run", side_effect=export), contextlib.redirect_stdout(io.StringIO()):
+                    run.tests(lane, {"ExampleTests/testOne"}, xcresult=root / "fixture.xcresult")
+                self.assertEqual(lane["status"], expected_status, lane["errors"])
+                if actual != (1, 0, 0) and outcome == "passed":
+                    self.assertTrue(any("xcresult/log count mismatch" in error for error in lane["errors"]))
+
     def test_interleaved_repeated_results_still_fail_validation(self):
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / "test.log"
@@ -84,6 +137,29 @@ class LogResultTests(unittest.TestCase):
             log.write_text("Test Case '-[ExampleTests testOne]' started.\n"
                            "Test Case '-[ExampleTests testTwo]' passedSomething (0.001 seconds).\n")
             self.assertEqual(acceptance.log_tests(log), {})
+
+
+class VoiceOverDiagnosticsTests(unittest.TestCase):
+    def test_launcher_preserves_xctest_status_when_diagnostic_collection_fails(self):
+        script = Path(__file__).with_name("test-voiceover.sh")
+        for test_status, trace_status in ((0, 0), (65, 0), (65, 9)):
+            with self.subTest(test_status=test_status, trace_status=trace_status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); tools = root / "tools"; tools.mkdir()
+                for name, status, output in (("xcodebuild", test_status, "Injected XCTest outcome"),
+                                             ("xcrun", trace_status, "Injected SVG diagnostics")):
+                    tool = tools / name
+                    tool.write_text(f"#!/bin/sh\necho '{output}'\nexit {status}\n")
+                    tool.chmod(0o755)
+                env = dict(os.environ); env["PATH"] = str(tools) + os.pathsep + env["PATH"]
+                output = root / "evidence"
+                result = subprocess.run(["bash", str(script), "owned-fixture-simulator", str(output)],
+                                        env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, test_status, result.stderr)
+                self.assertIn("Injected XCTest outcome", (output / "voiceover.log").read_text())
+                if test_status:
+                    self.assertIn("Injected SVG diagnostics", (output / "svg-rendering.log").read_text())
+                else:
+                    self.assertFalse((output / "svg-rendering.log").exists())
 
 
 class LaneSelectionTests(unittest.TestCase):

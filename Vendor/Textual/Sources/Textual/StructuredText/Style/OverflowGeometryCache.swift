@@ -224,7 +224,10 @@ import UIKit
       if now >= deadline { finishRestoration(scroll) }
       return
     }
-    if restorationDeadline == 0, point.ready {
+    // A resolvable anchor has attached even if its asynchronous content is not
+    // ready yet. Bound correction from attachment, rather than waiting out the
+    // attachment limit and then starting another full correction window.
+    if restorationDeadline == 0 {
       restorationDeadline = now + 5
       until = now + 0.3
     }
@@ -234,11 +237,7 @@ import UIKit
       scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x,
                                      y: max(0, scroll.contentOffset.y + delta)), animated: false)
     }
-    if restorationDeadline > 0 {
-      if (point.ready && now >= until) || now >= restorationDeadline { finishRestoration(scroll) }
-    } else if now >= attachmentDeadline {
-      finishRestoration(scroll)
-    }
+    if (point.ready && now >= until) || now >= restorationDeadline { finishRestoration(scroll) }
   }
 
   private func finishRestoration(_ scroll: UIScrollView) {
