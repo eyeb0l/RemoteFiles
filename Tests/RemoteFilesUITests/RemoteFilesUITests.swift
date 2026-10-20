@@ -370,6 +370,41 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(add.waitForExistence(timeout: 5))
     }
 
+    func testKeyDetailsShowFingerprintAndPublicKeyWithoutAddedHyphens() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launch()
+        app.buttons["Settings"].tap()
+        app.buttons["SSH Keys"].tap()
+        let generate = try XCTUnwrap(app.buttons.matching(identifier: "Generate Key").allElementsBoundByIndex.first(where: { $0.isHittable }))
+        XCTAssertTrue(generate.isEnabled, "Key generation is unavailable; the app may still be in Demo")
+        generate.tap()
+        let name = app.textFields["Identity name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.tap(); name.typeText("UI test fingerprint wrap")
+        try XCTUnwrap(app.buttons.matching(identifier: "Generate Key").allElementsBoundByIndex.first(where: { $0.isHittable })).tap()
+
+        let fingerprintPrefix = "SHA-256 fingerprint, SHA256:"
+        let fingerprint = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", fingerprintPrefix)).firstMatch
+        XCTAssertTrue(fingerprint.waitForExistence(timeout: 10), app.debugDescription)
+        let digest = String(fingerprint.label.dropFirst(fingerprintPrefix.count))
+        XCTAssertEqual(digest.count, 43, "Unpadded base64 SHA-256 digest: \(digest)")
+        XCTAssertFalse(digest.contains("-"), "Fingerprint must not contain hyphens: \(digest)")
+        XCTAssertGreaterThan(fingerprint.frame.height, 20, "The fingerprint should wrap at this width, exercising the line break")
+        let publicKey = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "ssh-ed25519 AAAA")).firstMatch
+        XCTAssertTrue(publicKey.exists, app.debugDescription)
+        let blob = publicKey.label.split(separator: " ")[1]
+        XCTAssertFalse(blob.contains("-"), "Public key data must not contain hyphens: \(blob)")
+        attachScreenshot("Key details with wrapped fingerprint")
+
+        let delete = app.buttons["Delete Identity"]
+        for _ in 0..<5 where !delete.isHittable { app.swipeUp() }
+        delete.tap()
+        let confirm = app.buttons.matching(identifier: "Delete Identity").allElementsBoundByIndex.last
+        try XCTUnwrap(confirm).tap()
+        XCTAssertTrue(fingerprint.waitForNonExistence(timeout: 10), "The test identity must be removed")
+    }
+
     func testRelativeDocumentNavigationKeepsBackReadingPosition() throws {
         continueAfterFailure = false
         let app = launchDemoReader(filename: "Navigation guide.md")
