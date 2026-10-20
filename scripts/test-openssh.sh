@@ -6,6 +6,11 @@ fixture="$(mktemp -d /private/tmp/remotefiles-openssh.XXXXXX)"
 server_pid=""
 cleanup() {
   if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi
+  # REMOTEFILES_SSHD_LOG keeps the complete server log as evidence: a client-side
+  # transport error alone cannot show whether the server or the client ended a session.
+  if [ -n "${REMOTEFILES_SSHD_LOG:-}" ] && [ -f "$fixture/sshd.log" ]; then
+    sleep 0.2; cp "$fixture/sshd.log" "$REMOTEFILES_SSHD_LOG" 2>/dev/null || true
+  fi
   rm -rf "$fixture"
 }
 trap cleanup EXIT INT TERM
@@ -49,7 +54,16 @@ AllowUsers $(id -un)
 Subsystem sftp internal-sftp
 LogLevel VERBOSE
 CONFIG
-/usr/sbin/sshd -D -e -f "$fixture/sshd_config" > "$fixture/sshd.log" 2>&1 &
+# Tests deliberately abandon handshakes (host-key rejection, pre-auth cancellation). OpenSSH 9.8+
+# penalises each one and, past 15 s of penalties, drops every new loopback connection, making
+# later tests fail on earlier ones. Older sshd versions without the option keep their behaviour.
+if /usr/sbin/sshd -t -f "$fixture/sshd_config" -o PerSourcePenalties=no 2>/dev/null; then
+  echo 'PerSourcePenalties no' >> "$fixture/sshd_config"
+fi
+# Timestamp each line so server events can be matched to test logs.
+/usr/sbin/sshd -D -e -f "$fixture/sshd_config" > >(/usr/bin/perl -MPOSIX=strftime -MTime::HiRes=time -ne \
+  'BEGIN { $| = 1 } my $t = time; printf "%s.%03dZ %s", strftime("%H:%M:%S", gmtime $t), ($t - int $t) * 1000, $_' \
+  > "$fixture/sshd.log") 2>&1 &
 server_pid=$!
 for ((i=0; i<30; i++)); do
   if ! kill -0 "$server_pid" 2>/dev/null; then
