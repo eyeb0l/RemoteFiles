@@ -104,6 +104,7 @@ runs:
           ${{ env.EVIDENCE }}/simulator-*.json
           ${{ env.EVIDENCE }}/*.xcresult
           ${{ env.EVIDENCE }}/voiceover/voiceover.log
+          ${{ env.EVIDENCE }}/voiceover/svg-rendering.log
           ${{ env.EVIDENCE }}/voiceover/voiceover.xcresult
     - name: Save build progress even when tests fail
       if: always() && !cancelled() && steps.cache.outputs.cache-hit != 'true' && steps.cache.outputs.cache-primary-key != ''
