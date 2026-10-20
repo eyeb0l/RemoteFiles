@@ -41,7 +41,12 @@ package_options=()
 if [ -n "${REMOTEFILES_SOURCE_PACKAGES_DIR:-}" ]; then
   package_options=(-clonedSourcePackagesDirPath "$REMOTEFILES_SOURCE_PACKAGES_DIR" -onlyUsePackageVersionsFromResolvedFile)
 fi
-xcodebuild -jobs 2 -project "$fixture/RemoteFiles.xcodeproj" -scheme RemoteFiles "${package_options[@]}" \
+ci_options=()
+if [ -n "${REMOTEFILES_CI_COMPILATION_CACHE:-}" ]; then
+  ci_options=(COMPILATION_CACHE_ENABLE_CACHING=YES COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS=YES
+    "COMPILATION_CACHE_CAS_PATH=$REMOTEFILES_CI_COMPILATION_CACHE" COMPILER_INDEX_STORE_ENABLE=NO)
+fi
+xcodebuild -jobs 2 -project "$fixture/RemoteFiles.xcodeproj" -scheme RemoteFiles "${package_options[@]}" "${ci_options[@]}" \
   -configuration Debug -destination "platform=iOS Simulator,id=$simulator" \
   -derivedDataPath "$derived" -resultBundlePath "$output/voiceover.xcresult" \
   -only-testing:"$test_identifier" -parallel-testing-enabled NO \

@@ -73,3 +73,12 @@ scheme=f'''<?xml version="1.0" encoding="UTF-8"?>
 <AnalyzeAction buildConfiguration="Debug"/><ArchiveAction buildConfiguration="Release" revealArchiveInOrganizer="YES"/>
 </Scheme>'''
 (root/'RemoteFiles.xcodeproj/xcshareddata/xcschemes/RemoteFiles.xcscheme').write_text(scheme)
+
+# CI core tests require UIKit and an ad-hoc signed host, but not the app/UI runner.
+core_scheme=f'''<?xml version="1.0" encoding="UTF-8"?>
+<Scheme LastUpgradeVersion="2700" version="1.3">
+<BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES"><BuildActionEntries><BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES">{ref(tt,'RemoteFilesTests.xctest')}</BuildActionEntry></BuildActionEntries></BuildAction>
+<TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES"><Testables><TestableReference skipped="NO">{ref(tt,'RemoteFilesTests.xctest')}</TestableReference></Testables></TestAction>
+<AnalyzeAction buildConfiguration="Debug"/>
+</Scheme>'''
+(root/'RemoteFiles.xcodeproj/xcshareddata/xcschemes/RemoteFilesCoreCI.xcscheme').write_text(core_scheme)

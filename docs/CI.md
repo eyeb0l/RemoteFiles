@@ -15,7 +15,18 @@ Code changes also run two jobs in parallel:
   generated OpenSSH fixture and key-import cases.
 - **Quick / simulator-core**: every inventoried signed iOS hosted core test,
   including Keychain, image, reader-position and SFTP regressions. This excludes
-  the separate slow UI-journey target, not UIKit-based core tests.
+  the separate slow UI-journey target, not UIKit-based core tests. The generated
+  `RemoteFilesCoreCI` scheme builds the complete core-test target and its signed
+  UIKit host, without building the application or UI-test runner. The original
+  `RemoteFiles` scheme remains responsible for app/UI/Release acceptance.
+
+The core lane records source identity and toolchain/device inventory while its
+fresh disposable Simulator is still shut down. It runs `build-for-testing` for
+`generic/platform=iOS Simulator`, boots only that device after the build succeeds,
+then runs the same products with `test-without-building`. A failed build cannot
+fall back to stale cached tests. The source/HEAD/status guard spans both actions;
+method inventory, unexpected-skip, duplicate-result and xcresult-count checks are
+unchanged. The OpenSSH fixture still surrounds test execution.
 
 Only the explicitly physical-device Data Protection assertion may skip in the
 hosted core lane. Benchmark operations run once on loopback. Missing methods,
@@ -55,11 +66,22 @@ builds leave source/lockfiles unchanged. CI uses its dedicated checkout directly
 instead of copying thousands of files; dirty direct-checkout runs are rejected.
 Local acceptance retains immutable source copies by default. Build caches live outside the fresh evidence folder.
 Keys include the actual Xcode build, architecture, dependency/vendor and source
-hashes, and lane. Related iOS lanes can restore each other's compiled work;
+hashes (including generated schemes), and lane. The v2 cache format enables
+Xcode's native compilation cache, stores its CAS inside the saved cache root,
+and disables IDE indexing for CI Xcode builds. Compiler cache diagnostics are
+retained in each build log. Migration can restore an older dependency/build
+cache, but saves new CAS progress under a v2 key. Related iOS lanes can restore each other's compiled work;
 macOS and iOS caches remain separate. Successful compilation is saved even when
 subsequent tests fail. Cancelled runs do not delay retirement to save a cache.
 
-Logs, source identity, summaries and xcresults are uploaded for seven days on
+Phase timings record source preparation, toolchain queries, device inventory and
+boot separately, with host load averages. The summary also records time from the
+CI shell launch to source preparation, Python module initialization, source
+verification and host CPU/memory capacity. macOS `/usr/bin/time -l` resource logs
+record command CPU time, maximum resident memory, page faults and swaps. These
+measurements distinguish cache hits from actual build savings.
+
+Logs, source identity, phase/resource measurements, summaries and xcresults are uploaded for seven days on
 success or failure. Failed method identifiers/assertions are printed immediately
 in the job log. Cleanup touches only each job's disposable Simulator and generated
 loopback fixture. New commits cancel superseded runs for the same PR or branch.
@@ -110,3 +132,25 @@ combined `simulator` lane. Repeat `--lane` to select disjoint inventories; the
 combined Simulator lane cannot be mixed with its core/UI subsets. Omit `--lane`
 to retain the complete local acceptance run. Use `--allow-dirty` only when the
 report should identify a working-tree snapshot rather than an exact commit.
+
+## Quick-run comparison baseline
+
+[Main run 39311217923](https://github.com/eyeb0l/RemoteFiles/actions/runs/39311217923)
+finished in 13m02s on `3e4c9851875412813cdf762b63be6cfb135acb50`:
+
+| Critical-path phase | Time |
+|---|---:|
+| Workflow/repository/runner/checkout/toolchain/cache setup | 48s |
+| Simulator creation and boot | 1m21s |
+| Runner preparation | 2m54s |
+| Fixture, build and test-host startup | 5m00s |
+| 205 iOS methods (204 passed, one allowed skip) | 2m27s |
+| Evidence, cleanup, cache save and completion | 32s |
+
+The parallel macOS lane took 3m02s and passed 140 methods. Compare hosted runs
+using this same inventory, a first run that populates the native compilation
+cache, a warm rerun of the unchanged commit, and a one-test-file change. Report
+cache state, build/test/boot phases and full workflow duration separately. Keep
+full acceptance before merging CI/scheme changes and verify the resulting main
+push as well. The implementation does not assert a speedup until those hosted
+measurements exist; first-boot contention is a hypothesis to test.
