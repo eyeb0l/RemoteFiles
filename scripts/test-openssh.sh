@@ -4,8 +4,25 @@ set -euo pipefail
 umask 077
 fixture="$(mktemp -d /private/tmp/remotefiles-openssh.XXXXXX)"
 server_pid=""
+logger_pid=""
 cleanup() {
   if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi
+  # With sshd stopped, ask the timestamping follower to drain the log to its end and exit.
+  # It ignores the process-group INT/TERM a timed-out runner sends; bound the wait, then kill it.
+  drained=0
+  if [ -n "$logger_pid" ]; then
+    : > "$fixture/sshd.stop"
+    for ((i=0; i<50; i++)); do kill -0 "$logger_pid" 2>/dev/null || break; sleep 0.1; done
+    kill -KILL "$logger_pid" 2>/dev/null || true
+    if wait "$logger_pid" 2>/dev/null; then drained=1; fi
+  fi
+  # REMOTEFILES_SSHD_LOG keeps the complete server log as evidence: a client-side
+  # transport error alone cannot show whether the server or the client ended a session.
+  # If the follower did not finish, keep the complete raw log rather than a partial copy.
+  if [ -n "${REMOTEFILES_SSHD_LOG:-}" ]; then
+    if [ "$drained" = 1 ]; then cp "$fixture/sshd-timestamped.log" "$REMOTEFILES_SSHD_LOG" 2>/dev/null || true
+    elif [ -f "$fixture/sshd.log" ]; then cp "$fixture/sshd.log" "$REMOTEFILES_SSHD_LOG" 2>/dev/null || true; fi
+  fi
   rm -rf "$fixture"
 }
 trap cleanup EXIT INT TERM
@@ -49,8 +66,32 @@ AllowUsers $(id -un)
 Subsystem sftp internal-sftp
 LogLevel VERBOSE
 CONFIG
-/usr/sbin/sshd -D -e -f "$fixture/sshd_config" > "$fixture/sshd.log" 2>&1 &
+# Tests deliberately abandon handshakes (host-key rejection, pre-auth cancellation). OpenSSH 9.8+
+# penalises each one and, past 15 s of penalties, drops every new loopback connection, making
+# later tests fail on earlier ones. Older sshd versions without the option keep their behaviour.
+if /usr/sbin/sshd -t -f "$fixture/sshd_config" -o PerSourcePenalties=no 2>/dev/null; then
+  echo 'PerSourcePenalties no' >> "$fixture/sshd_config"
+fi
+# Tests read sshd.log directly (including assertions that lines are absent), so sshd writes it
+# synchronously. A follower adds read-time timestamps (within 50 ms) to a separate evidence copy.
+: > "$fixture/sshd.log"
+/usr/sbin/sshd -D -e -f "$fixture/sshd_config" >> "$fixture/sshd.log" 2>&1 &
 server_pid=$!
+/usr/bin/perl -MPOSIX=strftime -MTime::HiRes=time,sleep -e '
+  $SIG{INT} = $SIG{TERM} = "IGNORE";
+  my ($in, $out, $stop) = @ARGV;
+  open(my $r, "<", $in) or die "$in: $!"; open(my $w, ">", $out) or die "$out: $!"; select $w; $| = 1;
+  while (1) {
+    my $stopping = -e $stop;
+    while (defined(my $line = <$r>)) {
+      # Keep a partial line until sshd finishes writing it, unless the server has stopped.
+      if ($line !~ /\n\z/ && !$stopping) { seek($r, -length($line), 1); last }
+      my $t = time; printf "%s.%03dZ %s", strftime("%H:%M:%S", gmtime $t), ($t - int $t) * 1000, $line;
+    }
+    last if $stopping;
+    sleep 0.05; seek($r, 0, 1);
+  }' "$fixture/sshd.log" "$fixture/sshd-timestamped.log" "$fixture/sshd.stop" &
+logger_pid=$!
 for ((i=0; i<30; i++)); do
   if ! kill -0 "$server_pid" 2>/dev/null; then
     cat "$fixture/sshd.log"
