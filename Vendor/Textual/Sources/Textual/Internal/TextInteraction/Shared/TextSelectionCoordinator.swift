@@ -48,12 +48,59 @@ import SwiftUI
     func selectionDidChange() {
       let active = models.contains { $0.wrapped?.selectedRange != nil }
       if active != hasActiveSelection { hasActiveSelection = active }
+      if !active { selectionEndWaiters.forEach { $0.resume() } }
+    }
+
+    // RemoteFiles: an offscreen Overflow region kept mounted for a selection must not depend only on
+    // SwiftUI restarting its retention task when the flag changes; see `selectionEnded()`.
+    @ObservationIgnored private var selectionEndWaiters: [SelectionEndWaiter] = []
+
+    /// Returns once no registered model has a selection, or once the calling task is cancelled.
+    @MainActor func selectionEnded() async {
+      guard hasActiveSelection else { return }
+      let waiter = SelectionEndWaiter()
+      selectionEndWaiters.append(waiter)
+      await withTaskCancellationHandler {
+        await withCheckedContinuation { waiter.install($0) }
+      } onCancel: {
+        waiter.resume()
+      }
+      selectionEndWaiters.removeAll { $0 === waiter }
     }
 
     private func compact() {
       models.removeAll {
         $0.wrapped == nil
       }
+    }
+  }
+#endif
+
+#if TEXTUAL_ENABLE_TEXT_SELECTION
+  /// Resumes its waiting task once, whether the selection ends or the task is cancelled first.
+  private final class SelectionEndWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var resumed = false
+
+    func install(_ continuation: CheckedContinuation<Void, Never>) {
+      lock.lock()
+      if resumed {
+        lock.unlock()
+        continuation.resume()
+      } else {
+        self.continuation = continuation
+        lock.unlock()
+      }
+    }
+
+    func resume() {
+      lock.lock()
+      resumed = true
+      let continuation = continuation
+      self.continuation = nil
+      lock.unlock()
+      continuation?.resume()
     }
   }
 #endif
