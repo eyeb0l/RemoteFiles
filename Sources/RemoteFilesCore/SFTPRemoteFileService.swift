@@ -34,6 +34,10 @@ public actor SFTPRemoteFileService: RemoteFileService {
     /// Most READDIR requests a listing keeps in flight. OpenSSH answers up to 100 names each, so
     /// eight keep its sequential server busy across a cellular round trip.
     static let directoryReadWindow = 8
+    /// Symbolic links resolved per listing; later links stay unresolved and resolve when tapped.
+    static let linkResolutionLimit = 256
+    /// Links resolved at once, each sending REALPATH and STAT together.
+    static let linkResolutionWindow = 16
 
     public func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
         let started = Date()
@@ -54,11 +58,52 @@ public actor SFTPRemoteFileService: RemoteFileService {
                            path: RemotePath.appending(component.filename, to: canonical),
                            attributes: component.attributes)
             }
-            return DirectorySnapshot(path: canonical, entries: entries)
+            return DirectorySnapshot(path: canonical, entries: try await Self.resolvingLinks(in: entries, sftp: sftp))
         }
         measurements.directoryOperations += 1
         measurements.lastDirectorySeconds = Date().timeIntervalSince(started)
         return result
+    }
+
+    /// Resolves symbolic links so their rows can show and open the target directly. Each link sends
+    /// REALPATH and STAT together and links resolve in parallel, so a folder of links costs about one
+    /// more round trip. A failed lookup leaves that link unresolved rather than failing the listing.
+    private nonisolated static func resolvingLinks(in entries: [RemoteEntry], sftp: SFTPClient) async throws -> [RemoteEntry] {
+        var pending = entries.indices.filter { entries[$0].kind == .symlink }.prefix(linkResolutionLimit).makeIterator()
+        var resolved = entries
+        try await withThrowingTaskGroup(of: (Int, LinkResolution?).self) { group in
+            func startNext() {
+                guard let index = pending.next() else { return }
+                let link = entries[index]
+                group.addTask { (index, await linkResolution(for: link, sftp: sftp)) }
+            }
+            for _ in 0..<linkResolutionWindow { startNext() }
+            while let (index, link) = try await group.next() {
+                let entry = entries[index]
+                if let link {
+                    resolved[index] = RemoteEntry(name: entry.name, path: entry.path, kind: entry.kind, size: entry.size,
+                                                  modifiedAt: entry.modifiedAt, link: link)
+                }
+                startNext()
+            }
+        }
+        try Task.checkCancellation()
+        return resolved
+    }
+
+    private nonisolated static func linkResolution(for link: RemoteEntry, sftp: SFTPClient) async -> LinkResolution? {
+        async let canonical = sftp.getRealPath(atPath: link.path)
+        async let attributes = sftp.getAttributes(at: link.path)
+        do {
+            let (path, target) = try await (canonical, attributes)
+            return .target(entry(name: RemotePath.name(of: path), path: path, attributes: target))
+        } catch let status as SFTPMessage.Status where status.errorCode == .noSuchFile || status.errorCode == .failure {
+            // A missing target, or a loop, which OpenSSH reports as a generic failure.
+            return .broken
+        } catch {
+            // Permission errors, cancellation and transport failures leave the link to resolve on tap.
+            return nil
+        }
     }
 
     public func readFile(profile: ConnectionProfile, path: String, limit: Int = 2 * 1024 * 1024) async throws -> Data {

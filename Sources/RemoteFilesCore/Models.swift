@@ -34,19 +34,44 @@ public struct RemoteEntry: Identifiable, Hashable, Sendable {
     public let exportFilename: String?
     /// A user-tapped heading link; never part of the remote filesystem path.
     public let headingFragment: String?
-    public init(name: String, path: String, kind: Kind, size: UInt64? = nil, modifiedAt: Date? = nil, navigationRoot: String? = nil, exportFilename: String? = nil) {
+    /// For a symbolic link resolved while listing; nil when it was not resolved.
+    public let link: LinkResolution?
+    public init(name: String, path: String, kind: Kind, size: UInt64? = nil, modifiedAt: Date? = nil, navigationRoot: String? = nil,
+                exportFilename: String? = nil, link: LinkResolution? = nil) {
         self.name = name; self.path = path; self.kind = kind; self.size = size; self.modifiedAt = modifiedAt
         self.navigationRoot = navigationRoot; self.exportFilename = exportFilename
-        self.headingFragment = nil
+        self.headingFragment = nil; self.link = link
     }
     public func openingHeading(_ fragment: String) -> RemoteEntry {
         RemoteEntry(copying: self, headingFragment: fragment)
     }
     private init(copying entry: RemoteEntry, headingFragment: String) {
         name = entry.name; path = entry.path; kind = entry.kind; size = entry.size; modifiedAt = entry.modifiedAt
-        navigationRoot = entry.navigationRoot; exportFilename = entry.exportFilename
+        navigationRoot = entry.navigationRoot; exportFilename = entry.exportFilename; link = entry.link
         self.headingFragment = headingFragment
     }
+    /// The resolved target of a symbolic link, if any.
+    public var linkTarget: RemoteEntry? {
+        if case .target(let target) = link { return target }
+        return nil
+    }
+    /// What this entry behaves as: a resolved link takes its target's kind.
+    public var effectiveKind: Kind { linkTarget?.kind ?? kind }
+    /// The canonical target to open for a resolved link, keeping the link's own name for export.
+    public func followingLink() -> RemoteEntry? {
+        guard let target = linkTarget else { return nil }
+        return RemoteEntry(name: target.name, path: target.path, kind: target.kind, size: target.size,
+                           modifiedAt: target.modifiedAt, exportFilename: name)
+    }
+}
+
+/// What a symbolic link pointed to when its folder was listed. Like the listing itself, it can be
+/// stale; opening the target reads the server again.
+public indirect enum LinkResolution: Hashable, Sendable {
+    /// The canonical target, with its own kind, size and modification time.
+    case target(RemoteEntry)
+    /// The target is missing, or the link is part of a loop.
+    case broken
 }
 
 /// Size and modification time observed when a file's bytes were read. SFTP v3 reports whole

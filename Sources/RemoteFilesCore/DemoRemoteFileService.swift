@@ -41,7 +41,12 @@ public actor DemoRemoteFileService: RemoteFileService {
             .init(name: "Weekly review.md", path: path + "/Weekly review.md", kind: .file, size: UInt64(Self.report.utf8.count), modifiedAt: Date(timeIntervalSince1970: 1790035200)),
             .init(name: "Notes — 東京.txt", path: path + "/Notes — 東京.txt", kind: .file, size: 92),
             .init(name: ".config", path: path + "/.config", kind: .file, size: 18),
-            .init(name: "Latest report", path: path + "/Latest report", kind: .symlink),
+            .init(name: "Latest report", path: path + "/Latest report", kind: .symlink,
+                  link: .target(.init(name: "Weekly review.md", path: path + "/Weekly review.md", kind: .file,
+                                      size: UInt64(Self.report.utf8.count), modifiedAt: Date(timeIntervalSince1970: 1790035200)))),
+            .init(name: "Current reports", path: path + "/Current reports", kind: .symlink,
+                  link: .target(.init(name: "Reports", path: path + "/Reports", kind: .directory))),
+            .init(name: "Old notes", path: path + "/Old notes", kind: .symlink, link: .broken),
             .init(name: "Archive.zip", path: path + "/Archive.zip", kind: .file, size: 804892),
             .init(name: "Empty.txt", path: path + "/Empty.txt", kind: .file, size: 0),
             .init(name: "Binary.txt", path: path + "/Binary.txt", kind: .file, size: 3),
@@ -73,6 +78,8 @@ public actor DemoRemoteFileService: RemoteFileService {
     }
     public func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
         try await pause()
+        if path.hasSuffix("/Old notes") { throw RemoteFileError.notFound }
+        if path.hasSuffix("/Current reports") { return RemoteEntry(name: "Reports", path: RemotePath.parent(of: path) + "/Reports", kind: .directory) }
         return RemoteEntry(name: "Weekly review.md", path: RemotePath.parent(of: path) + "/Weekly review.md", kind: .file)
     }
     public func resolveDocumentLink(profile: ConnectionProfile, documentPath: String, reference: String) async throws -> RemoteEntry {
