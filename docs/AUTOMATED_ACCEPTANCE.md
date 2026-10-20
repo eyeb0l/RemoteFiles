@@ -46,6 +46,13 @@ server's complete, timestamped log as `<lane>-sshd.log` in the output folder, so
 a dropped connection can be attributed to the client or the server. The fixture
 disables OpenSSH per-source penalties: tests deliberately abandon handshakes, and
 penalised loopback connections would otherwise fail later, unrelated tests.
+sshd runs with an empty `TZ` (UTC): otherwise macOS reloads a zoneinfo file for
+the long name of every listed entry, which made the 1,000-entry folder exceed its
+deadline under a fresh simulator's boot load. The two directory-service lookups
+per entry remain, so fixture listings stay sensitive to host load. On iOS, XCTest
+can report a different error than the test threw when another task throws as the
+test fails; fixture tests therefore disconnect in an async teardown block, after
+the failure has been recorded, not from `defer`.
 In a restricted agent environment, use
 the supported approved shell execution workflow for compiler caches,
 CoreSimulator and the loopback fixture. Do not change system permissions or

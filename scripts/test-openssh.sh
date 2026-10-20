@@ -75,7 +75,11 @@ fi
 # Tests read sshd.log directly (including assertions that lines are absent), so sshd writes it
 # synchronously. A follower adds read-time timestamps (within 50 ms) to a separate evidence copy.
 : > "$fixture/sshd.log"
-/usr/sbin/sshd -D -e -f "$fixture/sshd_config" >> "$fixture/sshd.log" 2>&1 &
+# internal-sftp formats an ls -l line for every READDIR entry: two directory-service lookups and, with
+# TZ unset or naming a zone, a reload of the zoneinfo file by strftime. Under a fresh CI simulator's
+# boot load the 1,000-entry folder took over a minute. An empty TZ is UTC with no file to load; local
+# listings were 3-5x faster with it, idle and under load. No test asserts the long names.
+TZ= /usr/sbin/sshd -D -e -f "$fixture/sshd_config" >> "$fixture/sshd.log" 2>&1 &
 server_pid=$!
 /usr/bin/perl -MPOSIX=strftime -MTime::HiRes=time,sleep -e '
   $SIG{INT} = $SIG{TERM} = "IGNORE";
