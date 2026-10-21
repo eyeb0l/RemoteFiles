@@ -28,9 +28,17 @@ Follow existing Swift style: four-space indentation, `UpperCamelCase` types, `lo
 
 Use XCTest classes named `*Tests` and behavior-focused `test...` methods. Add regressions for changed behavior, including cancellation, limits, and lifecycle where relevant. No percentage coverage threshold is defined. For integration acceptance, follow `docs/AUTOMATED_ACCEPTANCE.md`; retain logs and distinguish skipped tests, simulator results, and physical-device evidence.
 
+## CI & Automated Acceptance
+
+GitHub Actions (`.github/workflows/ci.yml`) runs **Repository checks** on every PR and `main` push: runner/scope regressions, generated-project consistency, and `git diff --check` across every commit. `scripts/ci_scope.py` then chooses the Mac lanes; documentation-only changes start none. Code changes run **Quick / macos-openssh** and **Quick / simulator-core** (the `RemoteFilesCoreCI` scheme) in parallel. Reader, preview/security, navigation, dependency, vendored, app-configuration, fixture, CI, and unknown paths also run **Acceptance / simulator-ui**, **voiceover**, and **release-device-compile** after the quick lanes pass; the `full-acceptance` label forces them. Preview the decision with `python3 -B scripts/ci_scope.py --base "$(git merge-base origin/main HEAD)" --head "$(git rev-parse HEAD)"`.
+
+The runner, `scripts/test-acceptance.py`, fails closed: every inventoried XCTest method must report a result, so run `python3 scripts/generate-project.py` after adding tests. A new skip fails unless the method is in `SIMULATOR_ALLOWED_SKIPS` and its reason is documented in `docs/AUTOMATED_ACCEPTANCE.md`. Reproduce a lane locally with `python3 -B scripts/test-acceptance.py --lane simulator-core --simulator SIMULATOR_UDID --output /private/tmp/remotefiles-NEW_RUN`, using a fresh directory outside the checkout, `--allow-dirty` for uncommitted work, one run per simulator, and `--port 22223` if 22222 is taken. Run Python with `-B` so no `__pycache__` appears in `scripts/`.
+
+Investigate a failure before rerunning it. `gh run view RUN_ID --log-failed` prints the failing methods; the `validation-<lane>-<run>-<attempt>` artifact keeps full logs, xcresults, and the fixture's `<lane>-sshd.log` for seven days. Rerun only a failure shown to be unrelated, and say so in the PR; there are no automatic retries. Fixture SFTP tests disconnect in `addTeardownBlock`, not `defer`, so the reported error is the real one. New commits cancel superseded runs on the same branch, including `main`. Update `docs/CI.md` when changing a lane, timing budget, or allowed skip.
+
 ## Commit & Pull Request Guidelines
 
-Use short imperative subjects, such as `Add persistent line wrapping controls to source reader`. Keep commits focused. PRs should explain the behavior change, link relevant issues, report validation and remaining limitations, and include screenshots for UI changes. Update affected feature documentation.
+Use short imperative subjects, such as `Add persistent line wrapping controls to source reader`. Keep commits focused. PRs should explain the behavior change, link relevant issues, report validation and remaining limitations, and include screenshots for UI changes. Update affected feature documentation. Resolve `RemoteFiles.xcodeproj/project.pbxproj` conflicts by taking `main`'s copy and rerunning `scripts/generate-project.py`, never by hand. For stacked PRs, retarget the dependent PR to `main` before deleting its base branch; deleting the base first closes it.
 
 ## Security & Configuration
 
