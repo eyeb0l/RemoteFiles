@@ -83,6 +83,20 @@ Local changes:
   registration, moving and releasing a selection, and coordinator changes without
   SwiftUI.
 
+- `Overflow.swift`, `TextSelectionCoordinator.swift`: an offscreen region kept
+  mounted only for a selection now waits for that selection to end
+  (`TextSelectionCoordinator.selectionEnded()`) and then retires itself. It no
+  longer depends only on SwiftUI restarting its `.task(id:)` with the changed
+  flag. On deselection every region's retention id changes in the same update.
+  On a slow host SwiftUI logged "onChange(of: RetentionWork) action tried to
+  update multiple times per frame" and never restarted the task, although the
+  body had already read the cleared flag. The code block stayed mounted
+  indefinitely, on CI and in 2 of 12 local runs with the simulator test host
+  duty-cycled to 25% CPU.
+  `TextSelectionCoordinatorTests` covers the wait ending on deselection and
+  release, staying active while a selection moves between regions, and ending
+  on cancellation.
+
 Before/after evidence and limitations are recorded in
 `../../docs/READER_PERFORMANCE.md`. Keep this fork small and return to the pinned
 upstream package when an equivalent verified fix is available.

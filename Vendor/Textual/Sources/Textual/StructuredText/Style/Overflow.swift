@@ -73,6 +73,14 @@ public struct Overflow<Content: View>: View {
     #endif
   }
 
+  #if TEXTUAL_ENABLE_TEXT_SELECTION
+  /// Settled offscreen content that stays mounted only because a selection is active.
+  private var retainedOnlyForSelection: Bool {
+    viewport != nil && !voiceOverEnabled && !assistiveContentRequired && !isNearViewport &&
+      (defersInitialContent || contentSize != nil) && (selectionCoordinator?.hasActiveSelection ?? false)
+  }
+  #endif
+
   private struct ContentMeasurement: Equatable {
     let size: CGSize
     let ready: Bool
@@ -179,7 +187,21 @@ public struct Overflow<Content: View>: View {
         if retainContent || isNearViewport || (!defersInitialContent && contentSize == nil) {
           if defersInitialContent, contentSize == nil { viewport?.cache?.captureAnchor() }
           contentIsMounted = true
+          #if TEXTUAL_ENABLE_TEXT_SELECTION
+          // RemoteFiles: settled offscreen content kept only for a selection retires once the selection
+          // ends. Deselection changes every region's id in one update, and under load SwiftUI dropped
+          // this task's restart ("onChange(of: RetentionWork) action tried to update multiple times per
+          // frame"), leaving the region mounted although the body had read the cleared flag.
+          // A replacement selection can start before this task resumes, so wait again while one keeps it.
+          guard retainedOnlyForSelection, let selectionCoordinator else { return }
+          while retainedOnlyForSelection {
+            await selectionCoordinator.selectionEnded()
+            if Task.isCancelled { return }
+          }
+          guard !retainContent, !isNearViewport else { return }
+          #else
           return
+          #endif
         }
         guard contentIsReady else { return }
         // Textual prepares text and highlighting in successive updates. Only

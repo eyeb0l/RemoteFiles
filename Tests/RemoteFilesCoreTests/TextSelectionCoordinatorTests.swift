@@ -7,6 +7,7 @@ import Observation
 /// so registration must not fire that one-shot observation, or the later deselection goes unseen.
 @MainActor final class TextSelectionCoordinatorTests: XCTestCase {
     private final class Notifications: @unchecked Sendable { var count = 0 }
+    @MainActor private final class Ended { var value = false }
 
     private func select(_ model: TextSelectionModel) {
         model.selectedRange = TextRange(start: model.startPosition, end: model.startPosition)
@@ -46,6 +47,57 @@ import Observation
         second = nil
         XCTAssertEqual(released.count, 1)
         XCTAssertFalse(coordinator.hasActiveSelection, "A released selection must not keep offscreen regions retained")
+    }
+
+    /// An offscreen region retained for a selection waits for it to end rather than relying on SwiftUI
+    /// restarting its retention task, which CI showed can be coalesced away under load.
+    func testSelectionEndedReturnsOnDeselectionReleaseAndCancellation() async {
+        let coordinator = TextSelectionCoordinator()
+        await coordinator.selectionEnded() // Nothing selected: returns at once.
+
+        let model = TextSelectionModel(coordinator: coordinator), other = TextSelectionModel(coordinator: coordinator)
+        select(model)
+        let ended = Ended()
+        let deselected = Task { await coordinator.selectionEnded(); ended.value = true }
+        await Task.yield()
+        select(other) // Moving the selection to another region keeps it active.
+        await Task.yield()
+        XCTAssertFalse(ended.value, "Moving a selection must not end the wait")
+        other.selectedRange = nil
+        await deselected.value
+        XCTAssertTrue(ended.value)
+
+        var released: TextSelectionModel? = TextSelectionModel(coordinator: coordinator)
+        select(released!)
+        let afterRelease = Task { await coordinator.selectionEnded() }
+        await Task.yield()
+        released = nil
+        await afterRelease.value
+
+        let kept = TextSelectionModel(coordinator: coordinator)
+        select(kept)
+        let cancelled = Task { await coordinator.selectionEnded() }
+        await Task.yield()
+        cancelled.cancel()
+        await cancelled.value
+        XCTAssertTrue(coordinator.hasActiveSelection, "Cancellation ends the wait without ending the selection")
+        XCTAssertEqual(coordinator.pendingSelectionEndWaits, 0)
+
+        // Many offscreen regions wait at once; deselection releases them all together.
+        let many = (0..<200).map { _ in Task { await coordinator.selectionEnded() } }
+        await Task.yield()
+        XCTAssertEqual(coordinator.pendingSelectionEndWaits, 200)
+        kept.selectedRange = nil
+        XCTAssertEqual(coordinator.pendingSelectionEndWaits, 0, "Deselection releases every waiter in one pass")
+        for wait in many { await wait.value }
+
+        // A replacement selection needs a new wait, which a later deselection ends again.
+        select(kept)
+        let rearmed = Task { await coordinator.selectionEnded() }
+        await Task.yield()
+        XCTAssertEqual(coordinator.pendingSelectionEndWaits, 1)
+        kept.selectedRange = nil
+        await rearmed.value
     }
 
     func testMovingASelectedModelToAnotherCoordinatorReleasesThePreviousOne() {
