@@ -68,6 +68,28 @@ final class FolderBrowsingTests: XCTestCase {
         XCTAssertFalse(names(listing.visible(query: "", showHidden: false, order: .size)).contains(".env"))
     }
 
+    func testSearchResultsSayWhereEachNameWasFound() {
+        XCTAssertEqual(FolderSearchRow(file("n.md"), root: "/p").subtitle, "In this folder · File")
+        XCTAssertEqual(FolderSearchRow(RemoteEntry(name: "n.md", path: "/p/a/b/n.md", kind: .file, size: 2048), root: "/p").subtitle,
+                       "In a/b · 2 KB")
+        XCTAssertEqual(FolderSearchRow(RemoteEntry(name: "Docs", path: "/x/Docs", kind: .directory), root: "/").subtitle, "In x · Folder")
+        XCTAssertEqual(FolderSearchRow(RemoteEntry(name: "n.md", path: "/n.md", kind: .file), root: "/").subtitle, "In this folder · File")
+    }
+
+    func testSearchSummariesReportUnreadableFoldersAndWhyTheSearchStopped() {
+        var state = FolderSearchState()
+        state.progress.foldersSearched = 1
+        XCTAssertEqual(state.summary, "Searched 1 folder.")
+        state.progress.foldersSearched = 1_200; state.progress.unreadableFolders = 2; state.progress.skippedDeepFolders = 3
+        XCTAssertEqual(state.summary, "Searched 1,200 folders. 2 couldn’t be read. Folders more than 16 levels down weren’t searched.")
+        state.progress.stop = .folderLimit
+        XCTAssertEqual(state.summary, "Searched 1,200 folders. 2 couldn’t be read. Stopped after 1,000 folders. Search from a subfolder to go further.")
+        state.progress.stop = .timeLimit
+        XCTAssertTrue(state.summary.hasSuffix("Stopped after 30 seconds. Search from a subfolder to go further."))
+        state.rows = [FolderSearchRow(file("n.md"), root: "/p")]; state.progress.stop = .matchLimit
+        XCTAssertTrue(state.summary.hasSuffix("Showing the first 1 matches. Type more to narrow the search."))
+    }
+
     @MainActor func testSortChoicesAreRememberedPerFolderBoundedAndNeverInDemo() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let suite = "FolderBrowsingTests-" + UUID().uuidString

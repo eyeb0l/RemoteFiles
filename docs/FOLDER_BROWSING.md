@@ -2,7 +2,7 @@
 
 [Documentation](README.md) · [RemoteFiles](../README.md)
 
-Folders list their contents with folders first. Use **Folder actions** to refresh, show hidden files, add a favourite, or choose how the folder is sorted.
+Folders list their contents with folders first. Use **Folder actions** to refresh, show hidden files, add a favourite, or choose how the folder is sorted. The search field filters this folder, or searches names in its subfolders.
 
 | Linked folder | File and broken links | Sorted by size |
 | --- | --- | --- |
@@ -33,3 +33,22 @@ Choose **Folder actions → Sort By**:
 Folders, including links to folders, always come first. Size and date describe what a link opens. Entries without a size or date sort last, and ties fall back to the name. Filtering and hidden files apply before sorting.
 
 The choice is remembered per connection and folder. Choosing **Name** removes the folder's saved choice, at most 200 choices are kept (the least recently changed is dropped first), and deleting a connection forgets its folders. Demo mode never saves sort choices.
+
+## Searching subfolders
+
+Type in the search field, then choose a scope:
+
+- **This Folder:** filters the names already listed, instantly.
+- **Subfolders:** searches names in this folder and every folder below it. Matching ignores case.
+
+<img src="screenshots/folder-browsing/subfolder-search.jpg" width="240" alt="Searching Projects for review: matches in this folder, in Reports, and in Reports/2026, after searching five folders">
+
+*Screenshot from the demo workspace.*
+
+Subfolder search lists folders over the same SFTP connection, so it works on any SFTP account, needs no shell access, and stays read only. Each result says where it was found, such as **In Reports/2026**, and opens like any other row. Results stay while you open one and come back.
+
+- **How it searches:** after typing pauses, the search lists the nearest folders first, four at a time, and results appear as each folder is listed. Changing the text or scope, refreshing, disconnecting or leaving the app stops it.
+- **What it skips:** links are matched by name but never followed, so the search stays inside the folder and can't loop. Hidden files and folders are skipped unless **Show Hidden Files** is on. A folder that can't be read, has gone, or times out is counted and skipped; if the connection ends, the search stops with an error.
+- **Limits:** a search lists at most 1,000 folders, goes at most 16 levels down, shows at most 500 matches, and starts no new listings after 30 seconds. The line above the results says how many folders were searched, how many couldn't be read, and which limit stopped it. To go further, open a subfolder and search from there.
+
+Each folder takes at least one round trip to list, four at a time, so searching a large tree over cellular or Tailscale is much slower than a server-side `find`. Searching file contents is not supported.

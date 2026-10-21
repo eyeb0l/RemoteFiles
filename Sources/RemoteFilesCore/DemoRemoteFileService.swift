@@ -22,6 +22,21 @@ public actor DemoRemoteFileService: RemoteFileService {
         try await pause()
         let path = path == "." ? "/Projects" : path
         if path == "/Projects/Empty" { return DirectorySnapshot(path: path, entries: []) }
+        // Reports and its subfolder are finite, so searching subfolders ends.
+        if path.hasSuffix("/Reports") {
+            return DirectorySnapshot(path: path, entries: [
+                .init(name: "2026", path: path + "/2026", kind: .directory),
+                .init(name: "Linked notes.md", path: path + "/Linked notes.md", kind: .file, size: UInt64(Self.linkedNotes.utf8.count)),
+                .init(name: "Heading notes.md", path: path + "/Heading notes.md", kind: .file, size: UInt64(Self.headingNotes.utf8.count)),
+                .init(name: "Weekly review.md", path: path + "/Weekly review.md", kind: .file, size: UInt64(Self.report.utf8.count), modifiedAt: Date(timeIntervalSince1970: 1790035200))
+            ])
+        }
+        if path.hasSuffix("/Reports/2026") {
+            return DirectorySnapshot(path: path, entries: [
+                .init(name: "Quarterly review.md", path: path + "/Quarterly review.md", kind: .file, size: UInt64(Self.report.utf8.count), modifiedAt: Date(timeIntervalSince1970: 1790035200)),
+                .init(name: "Roadmap notes.md", path: path + "/Roadmap notes.md", kind: .file, size: UInt64(Self.report.utf8.count))
+            ])
+        }
         if path == "/Projects/Thousand files" {
             return DirectorySnapshot(path: path, entries: (1...1000).map { RemoteEntry(name: "Report \($0).md", path: path + "/Report \($0).md", kind: .file, size: 8192) })
         }

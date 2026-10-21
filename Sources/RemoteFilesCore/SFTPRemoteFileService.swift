@@ -456,7 +456,7 @@ public actor SFTPRemoteFileService: RemoteFileService {
         if let status = error as? SFTPMessage.Status {
             switch status.errorCode {
             case .permissionDenied:
-                return RemoteFileError.unavailable("Permission denied. This account cannot read that location on the server.")
+                return RemoteFileError.permissionDenied
             case .noSuchFile:
                 return RemoteFileError.notFound
             case .noConnection, .connectionLost:
