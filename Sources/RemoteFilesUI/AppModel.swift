@@ -23,6 +23,9 @@ final class AppModel {
     let trust: HostTrustStore
     let publicKeyInstaller: any PublicKeyInstalling
     private(set) var service: any RemoteFileService
+    /// Subfolder search lists folders without sharing in-flight requests: cancelling a search must
+    /// not cancel a folder the user opens while the search happens to be listing it.
+    var searchService: any RemoteFileService { (service as? CoalescingFileService)?.base ?? service }
     /// The real (or injected) transport, restored when leaving Demo.
     private let connectionService: any RemoteFileService
     let resourceDirectory: URL

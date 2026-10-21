@@ -62,6 +62,55 @@ enum FolderSortOrder: String, CaseIterable, Sendable {
     }
 }
 
+enum FolderSearchScope: Hashable { case folder, subfolders }
+
+/// A name found by searching subfolders, described with the folder it was found in.
+struct FolderSearchRow: Identifiable, Sendable {
+    let row: FolderRow
+    let subtitle: String
+    var id: String { row.id }
+    init(_ entry: RemoteEntry, root: String) {
+        row = FolderRow(entry)
+        let parent = RemotePath.parent(of: entry.path)
+        let prefix = root == "/" ? "/" : root + "/"
+        let location = parent == root ? "In this folder" : "In " + (parent.hasPrefix(prefix) ? String(parent.dropFirst(prefix.count)) : parent)
+        subtitle = location + " · " + row.subtitle
+    }
+}
+
+/// Results of one subfolder search, replaced whenever the query, scope or folder changes.
+struct FolderSearchState {
+    /// What a search ran for; a finished search for the same key is kept when the folder reappears.
+    struct Key: Equatable {
+        let query: String, root: String, includeHidden: Bool, sessionRevision: Int, refresh: Int
+    }
+    var key: Key?
+    var rows: [FolderSearchRow] = []
+    var progress = RemoteFolderSearch.Update()
+    var error: String?
+
+    /// Opening a result cancels the folder's tasks, so returning restarts them; a search that
+    /// already finished for the same key is shown again instead of listing every folder again.
+    func isFinished(for key: Key) -> Bool { self.key == key && progress.isFinished && error == nil }
+
+    var summary: String {
+        let limits = RemoteFolderSearch.Limits()
+        let searched = progress.foldersSearched
+        var parts = ["Searched \(searched.formatted()) \(searched == 1 ? "folder" : "folders")."]
+        if progress.unreadableFolders > 0 {
+            parts.append("\(progress.unreadableFolders.formatted()) couldn’t be read.")
+        }
+        switch progress.stop {
+        case .matchLimit: parts.append("Showing the first \(rows.count.formatted()) matches. Type more to narrow the search.")
+        case .folderLimit: parts.append("Stopped after \(limits.maxFolders.formatted()) folders. Search from a subfolder to go further.")
+        case .timeLimit: parts.append("Stopped after \(limits.timeLimit.components.seconds) seconds. Search from a subfolder to go further.")
+        case nil:
+            if progress.skippedDeepFolders > 0 { parts.append("Folders more than \(limits.maxDepth) levels down weren’t searched.") }
+        }
+        return parts.joined(separator: " ")
+    }
+}
+
 /// Prepared away from the main actor and retained for an immediate return to a folder.
 struct FolderListing: Sendable {
     let path: String
@@ -125,6 +174,8 @@ struct FolderView: View {
     @State private var lastRefreshID = 0
     @State private var resolving: String?
     @State private var resolveTask: Task<Void, Never>?
+    @State private var searchScope = FolderSearchScope.folder
+    @State private var search = FolderSearchState()
     init(model: AppModel, profile: ConnectionProfile, requestedPath: String) {
         self.model = model
         self.profile = profile
@@ -150,25 +201,15 @@ struct FolderView: View {
                     Label("Couldn’t open folder", systemImage: "folder.badge.questionmark")
                 } description: { Text("Check the connection, then try again.") }
                 actions: { Button("Try Again") { refreshID += 1 }.buttonStyle(.bordered) }
+            } else if searchingSubfolders {
+                subfolderResults
             } else {
                 List {
                     if visible.isEmpty {
                         ContentUnavailableView(filter.isEmpty ? "This folder is empty" : "No matching names", systemImage: filter.isEmpty ? "folder" : "magnifyingglass", description: Text(filter.isEmpty ? "Pull down to check for new files." : "Filtering names in this folder only."))
                             .listRowSeparator(.hidden)
                     }
-                    ForEach(visible) { row in
-                        let entry = row.entry
-                        if let destination = entry.followingLink() {
-                            // Resolved while listing: open the target directly.
-                            NavigationLink(value: route(destination)) { entryRow(row) }
-                        } else if entry.kind == .symlink {
-                            Button { resolve(entry) } label: {
-                                entryRow(row).overlay(alignment: .trailing) { if resolving == entry.path { ProgressView() } }
-                            }.disabled(resolving != nil)
-                        } else {
-                            NavigationLink(value: route(entry)) { entryRow(row) }
-                        }
-                    }
+                    ForEach(visible) { row in link(for: row, subtitle: row.subtitle) }
                 }
                 .listStyle(.plain)
                 .refreshable { await reload() }
@@ -176,7 +217,11 @@ struct FolderView: View {
         }
         .navigationTitle(RemotePath.name(of: path))
         .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $filter, prompt: "Filter this folder")
+        .searchable(text: $filter, prompt: searchScope == .folder ? "Filter this folder" : "Search names in subfolders")
+        .searchScopes($searchScope) {
+            Text("This Folder").tag(FolderSearchScope.folder)
+            Text("Subfolders").tag(FolderSearchScope.subfolders)
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
@@ -193,6 +238,9 @@ struct FolderView: View {
         .task(id: "\(model.isForeground)-\(model.sessionRevision)-\(refreshID)") { await reloadIfNeeded() }
         .onDisappear { resolveTask?.cancel(); resolveTask = nil }
         .task(id: "\(filter)-\(showHidden)-\(sortOrder)") { await updateVisible() }
+        .task(id: "\(searchScope)-\(filter)-\(showHidden)-\(listing?.path ?? "")-\(model.isForeground)-\(model.sessionRevision)-\(lastRefreshID)") {
+            await searchSubfolders()
+        }
         .task {
             // Let the listing's own first layout finish; a document opened sooner skips warm-up.
             try? await Task.sleep(for: .seconds(1))
@@ -222,8 +270,49 @@ struct FolderView: View {
             if let listing { model.setFolderSortOrder(order, id: profile.id, path: listing.path) }
         })
     }
-    private func entryRow(_ row: FolderRow) -> some View {
-        LocationRow(name: row.entry.name, subtitle: row.subtitle, symbol: row.symbol,
+    private var searchQuery: String { filter.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var searchingSubfolders: Bool { searchScope == .subfolders && !searchQuery.isEmpty }
+    private var subfolderResults: some View {
+        List {
+            if search.rows.isEmpty, search.progress.isFinished, search.error == nil {
+                ContentUnavailableView("No matching names", systemImage: "magnifyingglass", description: Text(search.summary))
+                    .listRowSeparator(.hidden)
+            } else {
+                // Above the results, so it stays visible over the keyboard while typing.
+                Group {
+                    if let error = search.error {
+                        Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
+                    } else if !search.progress.isFinished {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text(search.progress.foldersSearched == 0 ? "Searching subfolders…"
+                                 : "Searching… \(search.progress.foldersSearched.formatted()) folders")
+                        }
+                    } else {
+                        Text(search.summary)
+                    }
+                }
+                .font(.footnote).foregroundStyle(.secondary).listRowSeparator(.hidden)
+                ForEach(search.rows) { result in link(for: result.row, subtitle: result.subtitle) }
+            }
+        }
+        .listStyle(.plain)
+    }
+    @ViewBuilder private func link(for row: FolderRow, subtitle: String) -> some View {
+        let entry = row.entry
+        if let destination = entry.followingLink() {
+            // Resolved while listing: open the target directly.
+            NavigationLink(value: route(destination)) { entryRow(row, subtitle: subtitle) }
+        } else if entry.kind == .symlink {
+            Button { resolve(entry) } label: {
+                entryRow(row, subtitle: subtitle).overlay(alignment: .trailing) { if resolving == entry.path { ProgressView() } }
+            }.disabled(resolving != nil)
+        } else {
+            NavigationLink(value: route(entry)) { entryRow(row, subtitle: subtitle) }
+        }
+    }
+    private func entryRow(_ row: FolderRow, subtitle: String) -> some View {
+        LocationRow(name: row.entry.name, subtitle: subtitle, symbol: row.symbol,
                     color: row.entry.effectiveKind == .directory ? .indigo : .secondary)
     }
     private func route(_ entry: RemoteEntry) -> AppModel.Route {
@@ -283,6 +372,32 @@ struct FolderView: View {
             }
         }
         if token == requestID { loading = false }
+    }
+    /// Lists subfolders of the canonical folder once typing pauses; a new query, scope, refresh,
+    /// disconnect or backgrounding cancels the walk.
+    private func searchSubfolders() async {
+        let query = searchQuery
+        guard searchScope == .subfolders, !query.isEmpty, let root = listing?.path,
+              model.isForeground, !model.isDisconnecting else { search = FolderSearchState(); return }
+        let revision = model.sessionRevision
+        let key = FolderSearchState.Key(query: query, root: root, includeHidden: showHidden,
+                                        sessionRevision: revision, refresh: lastRefreshID)
+        guard !search.isFinished(for: key) else { return }
+        search = FolderSearchState(key: key)
+        do { try await Task.sleep(for: .milliseconds(350)) } catch { return }
+        do {
+            for try await update in RemoteFolderSearch.names(matching: query, below: root, profile: profile,
+                                                             service: model.searchService, includeHidden: showHidden) {
+                guard model.sessionRevision == revision else { return }
+                search.rows += update.matches.map { FolderSearchRow($0, root: root) }
+                search.progress = update
+            }
+        } catch {
+            guard !Task.isCancelled, !(error is CancellationError), !model.isDisconnecting,
+                  model.sessionRevision == revision else { return }
+            search.error = error.localizedDescription
+            model.handle(error, profile: profile)
+        }
     }
     private func updateVisible() async {
         guard let listing else { return }

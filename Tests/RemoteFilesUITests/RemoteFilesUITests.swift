@@ -228,6 +228,43 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.navigationBars.buttons["RemoteFiles"].exists)
     }
+    func testSearchingSubfoldersFindsNestedNamesKeepsResultsAndSwitchesBack() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
+        let search = app.searchFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 10)); search.tap(); search.typeText("review")
+        let subfolders = app.buttons["Subfolders"]
+        XCTAssertTrue(subfolders.waitForExistence(timeout: 5), app.debugDescription); subfolders.tap()
+
+        let nested = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Quarterly review.md,")).firstMatch
+        XCTAssertTrue(nested.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(nested.label.contains("In Reports/2026"), nested.label)
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@ AND label CONTAINS %@", "Weekly review.md,", "In Reports")).firstMatch.exists)
+        let summary = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Searched 5 folders")).firstMatch
+        XCTAssertTrue(summary.waitForExistence(timeout: 10), "Projects, its three folders and Reports/2026; the link to Reports is not followed")
+        XCTAssertTrue(summary.isHittable, "The summary stays visible above the keyboard")
+        search.typeText("\n")
+        let capture = XCTAttachment(screenshot: app.screenshot()); capture.name = "Subfolder search results"; capture.lifetime = .keepAlways; add(capture)
+
+        nested.tap()
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.navigationBars.buttons["Projects"].waitForExistence(timeout: 5)); app.navigationBars.buttons["Projects"].tap()
+        // Searching again would show its status for at least the pause before listing.
+        let searching = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Searching")).firstMatch
+        for _ in 0..<20 {
+            XCTAssertFalse(searching.exists, "Coming back shows the finished search instead of searching again")
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        XCTAssertTrue(nested.exists && summary.exists, "Results stay after opening one")
+
+        app.buttons["This Folder"].tap()
+        let filtered = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly review.md,")).firstMatch
+        XCTAssertTrue(filtered.waitForExistence(timeout: 10))
+        XCTAssertFalse(nested.exists, "This Folder filters only the folder's own names")
+    }
     func testSourceSyntaxHighlightingAndMarkdownSource() throws {
         continueAfterFailure = false
         let app = XCUIApplication()

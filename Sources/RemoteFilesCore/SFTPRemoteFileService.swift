@@ -456,7 +456,7 @@ public actor SFTPRemoteFileService: RemoteFileService {
         if let status = error as? SFTPMessage.Status {
             switch status.errorCode {
             case .permissionDenied:
-                return RemoteFileError.unavailable("Permission denied. This account cannot read that location on the server.")
+                return RemoteFileError.permissionDenied
             case .noSuchFile:
                 return RemoteFileError.notFound
             case .noConnection, .connectionLost:
@@ -467,7 +467,7 @@ public actor SFTPRemoteFileService: RemoteFileService {
         return endsConnection(error) ? connectionEnded : error
     }
 
-    private static let connectionEnded = RemoteFileError.unavailable("The SSH connection ended. Refresh to reconnect.")
+    private static let connectionEnded = RemoteFileError.connectionEnded
 
     /// Errors NIO, NIOSSH and Citadel raise once the SSH connection or its SFTP channel has closed.
     private nonisolated static func endsConnection(_ error: Error) -> Bool {

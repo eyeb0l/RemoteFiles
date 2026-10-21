@@ -5,7 +5,8 @@ import Foundation
 public actor CoalescingFileService: RemoteFileService {
     private struct Key: Hashable { let profile: ConnectionProfile; let path: String; let limit: Int }
     private struct VersionedKey: Hashable { let read: Key; let allowedRoot: String?; let since: RemoteFileVersion? }
-    private let base: any RemoteFileService
+    /// The wrapped service, for background work that must neither join nor cancel others' requests.
+    public nonisolated let base: any RemoteFileService
     private var lists: [Key: (UUID, Task<DirectorySnapshot, Error>)] = [:]
     private var reads: [Key: (UUID, Task<Data, Error>)] = [:]
     private var versionedReads: [VersionedKey: (UUID, Task<RemoteFileRead, Error>)] = [:]

@@ -431,8 +431,8 @@ final class SFTPIntegrationTests: XCTestCase {
         do {
             _ = try await listing.value
             XCTFail("A listing whose connection ended must not succeed")
-        } catch RemoteFileError.unavailable(let message) {
-            XCTAssertEqual(message, "The SSH connection ended. Refresh to reconnect.")
+        } catch RemoteFileError.connectionEnded {
+            XCTAssertEqual(RemoteFileError.connectionEnded.localizedDescription, "The SSH connection ended. Refresh to reconnect.")
         }
         XCTAssertLessThan(ContinuousClock.now - dropped, .seconds(5), "A closed connection must not wait for the deadline")
         proxy.resumeReplies()
@@ -512,6 +512,45 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(metrics.sftpChannels, 2)
     }
 
+    func testSubfolderSearchWalksTheTreeOnOneConnectionAndSkipsLockedHiddenAndLinkedFolders() async throws {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Subfolder search")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        let files = FileManager.default, root = fixture.files + "/search-" + UUID().uuidString
+        for folder in ["a/b/c", "a/Needle folder", ".cache", "locked"] {
+            try files.createDirectory(atPath: root + "/" + folder, withIntermediateDirectories: true)
+        }
+        for file in ["needle-top.md", "a/other.txt", "a/b/c/needle-deep.txt", ".cache/needle-hidden.txt", "locked/needle-locked.txt"] {
+            XCTAssertTrue(files.createFile(atPath: root + "/" + file, contents: Data()))
+        }
+        try files.createSymbolicLink(atPath: root + "/needle-link", withDestinationPath: "a")
+        try files.setAttributes([.posixPermissions: 0], ofItemAtPath: root + "/locked")
+        defer {
+            try? files.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root + "/locked")
+            try? files.removeItem(atPath: root)
+        }
+        let canonical = try await service.listDirectory(profile: profile, path: root).path
+
+        var found: [String] = [], final: RemoteFolderSearch.Update?
+        for try await update in RemoteFolderSearch.names(matching: "NEEDLE", below: root, profile: profile,
+                                                         service: service, includeHidden: false) {
+            found += update.matches.map { String($0.path.dropFirst(canonical.count + 1)) }
+            if update.isFinished { final = update }
+        }
+        XCTAssertEqual(Set(found), ["needle-top.md", "needle-link", "a/Needle folder", "a/b/c/needle-deep.txt"])
+        XCTAssertEqual(found.count, 4, "The link to a is matched but not followed, so nothing is found twice")
+        XCTAssertEqual(final?.foldersSearched, 5, "The folder, a, a/b, a/Needle folder and a/b/c")
+        XCTAssertEqual(final?.unreadableFolders, 1, "The locked folder is counted and skipped")
+        XCTAssertNil(final?.stop)
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.connections, 1)
+    }
+
     func testPipelinedListingIsCompleteInServerOrderAndAlwaysClosesItsHandle() async throws {
         let fixture = try Fixture()
         let stores = try Stores(fixture: fixture)
@@ -539,7 +578,7 @@ final class SFTPIntegrationTests: XCTestCase {
         do {
             _ = try await service.listDirectory(profile: profile, path: locked)
             XCTFail("An unreadable folder must fail after its path resolves")
-        } catch RemoteFileError.unavailable(let message) { XCTAssertTrue(message.contains("Permission denied")) }
+        } catch RemoteFileError.permissionDenied { }
         do {
             _ = try await service.listDirectory(profile: profile, path: fixture.files + "/missing-folder")
             XCTFail("A missing folder must fail")
