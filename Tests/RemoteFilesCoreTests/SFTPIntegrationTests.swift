@@ -442,6 +442,49 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertEqual(after.connections, before.connections + 1, "The refresh opens a new SSH connection")
     }
 
+    /// Unlike TreeService's fail-once error, every outcome here comes from the real adapter and
+    /// OpenSSH. Hold replies before OPENDIR completes, stagger three peers behind the first listing,
+    /// then release replies as that first deadline closes their shared channel. The peers still
+    /// have time left on their own deadlines, so they must exercise connection-ended recovery.
+    func testSubfolderSearchRecoversListingsInterruptedByAPeersDeadline() async throws {
+        let (fixture, proxy, service, profile) = try await connectedThroughProxy(name: "Search timeout cascade")
+        let files = FileManager.default, root = fixture.files + "/search-timeout-" + UUID().uuidString
+        let folders = ["a-stalled", "b-peer", "c-peer", "d-peer", "z-later/deep"]
+        for folder in folders {
+            try files.createDirectory(atPath: root + "/" + folder, withIntermediateDirectories: true)
+            XCTAssertTrue(files.createFile(atPath: root + "/" + folder + "/needle.txt", contents: Data()))
+        }
+        XCTAssertTrue(files.createFile(atPath: root + "/needle-top.txt", contents: Data()))
+        defer { proxy.resumeReplies(); try? files.removeItem(atPath: root) }
+        let before = await service.metrics()
+        let observed = StaggeredSearchListings(service: service, proxy: proxy, root: root)
+        var found: [String] = [], final: RemoteFolderSearch.Update?
+        for try await update in RemoteFolderSearch.names(matching: "needle", below: root, profile: profile,
+                                                         service: observed, includeHidden: false) {
+            found += update.matches.map { String($0.path.dropFirst(root.count + 1)) }
+            if update.isFinished { final = update }
+        }
+        XCTAssertEqual(found, ["needle-top.txt", "b-peer/needle.txt", "c-peer/needle.txt", "d-peer/needle.txt", "z-later/deep/needle.txt"],
+                       "Keep earlier matches, recover every interrupted peer, and continue to queued descendants in order")
+        let result = try XCTUnwrap(final)
+        XCTAssertEqual(result.foldersSearched, 6, "Root, three recovered peers, z-later and deep")
+        XCTAssertEqual(result.unreadableFolders, 1, "Only the listing whose own deadline fired is skipped")
+        XCTAssertNil(result.stop)
+        let attempts = await observed.attempts, failures = await observed.failures, peak = await observed.peak
+        XCTAssertEqual(peak, 4, "All four search listings overlap")
+        XCTAssertEqual(attempts[root + "/a-stalled"], 1)
+        XCTAssertEqual(failures[root + "/a-stalled"], ["timedOut"])
+        for peer in ["b-peer", "c-peer", "d-peer"] {
+            XCTAssertEqual(attempts[root + "/" + peer], 2, "Each interrupted peer is retried exactly once")
+            XCTAssertEqual(failures[root + "/" + peer], ["connectionEnded"], "Exercise real mapped transport failures, not injected errors")
+        }
+        let after = await service.metrics()
+        XCTAssertEqual(after.connections, before.connections, "Recovery keeps the authenticated SSH connection")
+        XCTAssertGreaterThan(after.sftpChannels, before.sftpChannels, "Recovery replaces the retired SFTP channel")
+        let refreshed = try await service.listDirectory(profile: profile, path: root + "/b-peer")
+        XCTAssertEqual(refreshed.entries.map(\.name), ["needle.txt"], "Foreground browsing works after recovery")
+    }
+
     /// A service already connected through a `ReplyStallingProxy`, with a deadline long enough for a
     /// loaded runner's handshake; only the stalled operations should reach it.
     private func connectedThroughProxy(name: String) async throws
@@ -771,6 +814,55 @@ private final class IntegrationSecrets: IdentitySecretStore, @unchecked Sendable
     func delete(reference: String) throws {
         lock.lock(); defer { lock.unlock() }; data.removeValue(forKey: reference)
     }
+}
+
+/// Schedules real listings; it never manufactures a snapshot or transport failure. Only the first
+/// wave is staggered. Releasing the relay after the first timeout lets retries use a fresh channel.
+private actor StaggeredSearchListings: RemoteFileService {
+    let service: SFTPRemoteFileService
+    let proxy: ReplyStallingProxy
+    let root: String
+    private(set) var attempts: [String: Int] = [:]
+    private(set) var failures: [String: [String]] = [:]
+    private(set) var peak = 0
+    private var running = 0
+
+    init(service: SFTPRemoteFileService, proxy: ReplyStallingProxy, root: String) {
+        self.service = service; self.proxy = proxy; self.root = root
+    }
+
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
+        attempts[path, default: 0] += 1
+        if attempts[path] == 1, ["b-peer", "c-peer", "d-peer"].contains(RemotePath.name(of: path)) {
+            try await proxy.waitForHeldReplies()
+            // Leave a generous gap between the first deadline and its peers' deadlines, including
+            // the time needed to drain the close and open a replacement channel on a loaded runner.
+            try await Task.sleep(for: .seconds(2))
+        }
+        running += 1; peak = max(peak, running)
+        defer { running -= 1 }
+        do {
+            let snapshot = try await service.listDirectory(profile: profile, path: path)
+            if path == root { proxy.stallReplies() }
+            return snapshot
+        } catch {
+            switch error {
+            case RemoteFileError.timedOut: failures[path, default: []].append("timedOut")
+            case RemoteFileError.connectionEnded: failures[path, default: []].append("connectionEnded")
+            default: failures[path, default: []].append(String(describing: error))
+            }
+            if path == root + "/a-stalled" { proxy.resumeReplies() }
+            throw error
+        }
+    }
+
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data {
+        try await service.readFile(profile: profile, path: path, limit: limit)
+    }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
+        try await service.resolveEntry(profile: profile, path: path)
+    }
+    func disconnect() async { await service.disconnect() }
 }
 
 /// Loopback relay in front of the OpenSSH fixture. After `stallReplies()` it keeps forwarding the
