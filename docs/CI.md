@@ -32,6 +32,20 @@ Only the explicitly physical-device Data Protection assertion may skip in the
 hosted core lane. Benchmark operations run once on loopback. Missing methods,
 failures, unexpected skips and xcresult/log count mismatches fail validation.
 
+The first WebKit navigation in the core test host pays WebKit's cold start.
+`testRendererDefensesBlockActiveMarkupAndResourceRequests` normally runs first.
+On a just-booted Simulator under a host load average near 94, the GPU and
+WebContent processes each took over 8 seconds to launch, and the networking
+process took another 1.9 seconds. The local attack document then missed its old
+10-second wait. On a quieter fresh Simulator the same navigation took 2.3
+seconds, while compiling `SVGResourceBlocker` rules took 0.11 seconds. The test
+now loads an inert SVG in the production configuration first, with a 60-second
+cold-start bound. It then times the attack document against the production
+15-second SVG deadline. After warm-up, that document finished in 0.6–0.7 seconds
+on three fresh-Simulator lane runs. The `finished` precondition and the
+script/resource assertions are unchanged. The test log prints
+`RENDERER DEFENSES TIMING`, which separates rule, WebKit-start and document time.
+
 ## Changes requiring broader acceptance
 
 After quick validation passes, acceptance runs these jobs in parallel:

@@ -156,7 +156,22 @@ import RemoteFilesCore
     }
 
     func testRendererDefensesBlockActiveMarkupAndResourceRequests() async throws {
+        let started = ContinuousClock.now
         let rules = try await SVGResourceBlocker.rules()
+        let compiled = ContinuousClock.now
+        // This is normally the test host's first WebKit navigation. On a freshly
+        // booted, loaded CI simulator the GPU and WebContent processes took over
+        // eight seconds to launch, so start WebKit with an inert document under a
+        // cold-start bound first (docs/CI.md). The attack document then loads in a
+        // responsive renderer within the production fifteen-second SVG deadline.
+        let warmUp = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 320), configuration: StaticSVGWebView.configuration(rules: rules))
+        let warmUpProbe = SVGAttackProbe()
+        warmUp.navigationDelegate = warmUpProbe
+        warmUp.loadHTMLString(StaticSVGWebView.html("<svg xmlns=\"http://www.w3.org/2000/svg\"/>"), baseURL: nil)
+        let warmUpDeadline = ContinuousClock.now + .seconds(60)
+        while !warmUpProbe.finished && ContinuousClock.now < warmUpDeadline { try await Task.sleep(for: .milliseconds(20)) }
+        let warmed = ContinuousClock.now
+        XCTAssertTrue(warmUpProbe.finished, "WebKit must start before its renderer defenses can be checked (\(warmed - compiled))")
         let config = StaticSVGWebView.configuration(rules: rules)
         let probe = SVGAttackProbe()
         config.setURLSchemeHandler(probe, forURLScheme: "fixture")
@@ -173,13 +188,17 @@ import RemoteFilesCore
         <foreignObject><iframe src="fixture://blocked/frame"></iframe></foreignObject></svg>
         """
         view.loadHTMLString(StaticSVGWebView.html(attack), baseURL: nil)
-        let deadline = ContinuousClock.now + .seconds(10)
+        let loading = ContinuousClock.now
+        let deadline = loading + .seconds(15)
         while !probe.finished && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
-        XCTAssertTrue(probe.finished, "The local document must finish loading to make the negative checks meaningful")
+        let timing = "rules=\(compiled - started) webkit_start=\(warmed - compiled) document=\(ContinuousClock.now - loading)"
+        print("RENDERER DEFENSES TIMING \(timing)")
+        XCTAssertTrue(probe.finished, "The local document must finish loading to make the negative checks meaningful (\(timing))")
         try await Task.sleep(for: .milliseconds(500))
         XCTAssertEqual(probe.scripts, 0)
         XCTAssertEqual(probe.resources, 0)
         view.stopLoading(); view.navigationDelegate = nil
+        warmUp.stopLoading(); warmUp.navigationDelegate = nil
         config.userContentController.removeScriptMessageHandler(forName: "securityProbe")
     }
 }
