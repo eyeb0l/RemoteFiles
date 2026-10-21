@@ -1,6 +1,8 @@
 import Foundation
 import Citadel
 import NIOSSH
+import NIOCore
+import Crypto
 
 /// An immutable review of public material. No private key or password belongs in this value.
 public struct PublicKeyInstallationRequest: Identifiable, Hashable, Sendable {
@@ -23,11 +25,26 @@ public struct PublicKeyInstallationRequest: Identifiable, Hashable, Sendable {
         guard identity.publicKey.utf8.count <= 8192, !identity.publicKey.contains(where: { $0.isNewline }),
               !identity.publicKey.contains("\0") else { throw PublicKeyInstallationError.invalidPublicKey }
         let fields = identity.publicKey.split(whereSeparator: \.isWhitespace)
-        guard fields.count >= 2, fields[0] == "ssh-ed25519" else { throw PublicKeyInstallationError.invalidPublicKey }
+        guard fields.count >= 2, ["ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521"].contains(String(fields[0])) else { throw PublicKeyInstallationError.invalidPublicKey }
         do {
-            let details = try HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: fields.prefix(2).joined(separator: " ")))
-            guard details.algorithm == "ssh-ed25519" else { throw PublicKeyInstallationError.invalidPublicKey }
-            self.publicKey = details.publicKey; fingerprint = details.fingerprint
+            if fields[0] == "ssh-rsa" {
+                // Validate without registering a new RSA host-key algorithm globally.
+                guard let data = Data(base64Encoded: String(fields[1])) else { throw PublicKeyInstallationError.invalidPublicKey }
+                var buffer = ByteBuffer(bytes: data)
+                guard let size = buffer.readInteger(as: UInt32.self), buffer.readString(length: Int(size)) == "ssh-rsa" else {
+                    throw PublicKeyInstallationError.invalidPublicKey
+                }
+                let key = try RSASHA2PublicKey.read(from: &buffer)
+                guard buffer.readableBytes == 0 else { throw PublicKeyInstallationError.invalidPublicKey }
+                var canonical = ByteBuffer()
+                canonical.writeInteger(UInt32(7)); canonical.writeString("ssh-rsa"); _ = key.write(to: &canonical)
+                let bytes = Data(canonical.readableBytesView)
+                self.publicKey = "ssh-rsa " + bytes.base64EncodedString()
+                fingerprint = "SHA256:" + Data(SHA256.hash(data: bytes)).base64EncodedString().replacingOccurrences(of: "=", with: "")
+            } else {
+                let details = try HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: fields.prefix(2).joined(separator: " ")))
+                self.publicKey = details.publicKey; fingerprint = details.fingerprint
+            }
         } catch { throw PublicKeyInstallationError.invalidPublicKey }
         self.host = host; self.port = port; self.username = username; identityName = identity.name
     }
@@ -40,7 +57,7 @@ public enum PublicKeyInstallationError: LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .invalidTarget: return "Enter a valid server address, account username and SSH port."
-        case .invalidPublicKey: return "Choose a valid Ed25519 public identity. Private keys cannot be installed."
+        case .invalidPublicKey: return "Choose a valid Ed25519, RSA or ECDSA public identity. Private keys cannot be installed."
         case .busy: return "Another installation is in progress or left a lock. Wait and retry. If it persists, check the account’s key-install lock on the server."
         case .passwordRequired: return "Enter this server account’s password. It is used only for this installation."
         case .passwordUnavailable: return "This server does not offer SSH password authentication. Install the public key manually or choose a server that already supports password login."

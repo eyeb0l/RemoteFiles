@@ -8,9 +8,11 @@ Transitive dependency versions are recorded in the checked-in package resolution
 The SSH protocol implementation is `NIOSSH` from `github.com/Wellz26/swift-nio-ssh`, a GitHub fork of
 `Joannis/swift-nio-ssh`. Upstream Citadel depends on this fork
 with a `0.3.4..<0.4.0` range. Because this package handles host-key verification and authentication, the
-root manifest pins the exact revision `d88989f3d3bb1dfb2a38ce4af598afbf7fc3095c`, which the fork's
-annotated `0.3.7` tag pointed to when checked on 19 October 2026. A dependency update, or a retargeted
-tag, cannot change this code without an explicit, reviewable manifest change.
+original root manifest pinned the exact revision `d88989f3d3bb1dfb2a38ce4af598afbf7fc3095c`, which the fork's
+annotated `0.3.7` tag pointed to when checked on 19 October 2026. The same pinned source is now vendored in `Vendor/swift-nio-ssh`, with a small RFC 8332
+client-authentication patch that separates the signature algorithm from the public-key encoding.
+RSA identity authentication uses SHA-512/SHA-256; public keys retain `ssh-rsa` encoding.
+See its `UPSTREAM.md` for the exact changes. Future updates remain explicit source changes.
 
 ## Why the local patch exists
 
@@ -135,6 +137,10 @@ Verified against this OpenSSH server:
 | OpenSSH Ed25519, unencrypted (`none`) | Import, authentication and SFTP passed |
 | OpenSSH Ed25519, default ssh-keygen encrypted AES-256-CTR/bcrypt 16 | Import, authentication and SFTP passed |
 | OpenSSH Ed25519, AES-128-CTR/bcrypt 16 | Parser import passed; separate authentication not exercised |
+| OpenSSH RSA 2048, unencrypted and AES-256-CTR/bcrypt 4 | Import, authentication and SFTP passed on macOS and hosted iOS |
+| OpenSSH RSA 4096, unencrypted and AES-256-CTR/bcrypt 4 | Import, fingerprint parity and biometric-copy round trip passed on macOS |
+| OpenSSH ECDSA P-256/P-384/P-521, unencrypted and AES-256-CTR/bcrypt 4 | Import, authentication and SFTP passed on macOS and hosted iOS |
+| RSA SHA-256 fallback with SHA-512 and SHA-1 disabled on the server | Authentication and SFTP passed |
 | Missing passphrase | Specific missing-passphrase error |
 | Wrong passphrase | Specific failed-decryption error |
 | bcrypt rounds 32 | Explicit unsupported-format rejection |
@@ -142,10 +148,11 @@ Verified against this OpenSSH server:
 | Public-key-only input | Specific public-key-only error |
 | Malformed input | Specific malformed-key error |
 
-The supported parser policy is Ed25519 OpenSSH with no encryption or AES-128/256-CTR and
-bcrypt rounds 1–31. The table distinguishes tested values from that permitted range; every
-round count was not tested. Other algorithms/formats are deferred. The app never recommends
-removing protection from an existing key.
+The supported parser policy is single-key OpenSSH Ed25519, RSA (2048–8192 bits) and ECDSA
+(P-256/P-384/P-521), with no encryption or AES-128/256-CTR and bcrypt rounds 1–31.
+The table distinguishes tested values from that permitted range; every round count and RSA
+size was not tested. PEM/PKCS#8 and hardware security keys remain unsupported. The app never
+recommends removing protection from an existing key. See [key support](KEY_SUPPORT.md).
 
 ## Reproduce
 

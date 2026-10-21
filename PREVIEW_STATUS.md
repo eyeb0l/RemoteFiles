@@ -1,5 +1,11 @@
 # RemoteFiles preview status
 
+**21 October 2026: RSA and ECDSA OpenSSH identity imports.**
+
+RSA (2048–8192 bits) and ECDSA (P-256/P-384/P-521) now work with encrypted or unencrypted imports, passphrase unlock, optional biometric copies and explicit public-key installation. RSA authentication uses SHA-512/SHA-256. Independent OpenSSH tests passed on macOS and hosted iOS, including a SHA-256-only RSA server configuration on macOS. UI acceptance covers RSA and P-256 imports through the native paste control. See [key support](docs/KEY_SUPPORT.md) for the permitted and tested matrix. This update has not been installed or accepted on a physical device.
+
+## Earlier validation snapshots
+
 **17 October 2026: reader navigation, saved positions, scoped refresh and runner fixes.**
 
 - Both Python UI runners now preserve failure status, attempt all cleanup/integrity checks, save their summary and return a nonzero exit code on failure. Four regression tests inject runner success, failure, timeout, mutation and cleanup errors.
@@ -68,7 +74,7 @@ Exact repeatable commands are in [Build and test](docs/DEVELOPMENT.md#reproducib
 - Document tests covered empty/BOM/invalid-UTF-8/binary states, Markdown structural intents and task markers, image alt-text preservation with all image URLs removed, inactive HTML, and unsafe/relative link rejection. Both renderer image/emoji loaders also perform no I/O.
 - Identity tests covered public-key/fingerprint representation, encrypted originals remaining encrypted in storage, missing/wrong passphrases, malformed/public-only input, deletion safeguards, trust persistence/reset, and unlocked-session clearing. macOS runs the `ssh-keygen` parser matrix; iOS runs the actual Keychain-specific case.
 
-## Supported key matrix
+## Initial key matrix
 
 | Input | Verified result |
 | --- | --- |
@@ -79,7 +85,7 @@ Exact repeatable commands are in [Build and test](docs/DEVELOPMENT.md#reproducib
 | bcrypt 32; AES-256-CBC | Explicit unsupported-configuration rejection passed |
 | Missing/wrong passphrase; public-only; malformed | Specific rejection paths passed |
 
-The parser policy permits AES-128/256-CTR with bcrypt rounds **1–31**, but every round count has not been tested. RSA, ECDSA, security-key identities, PEM/PKCS#8, and other encryption/KDF formats are not advertised as supported. [KEY_SUPPORT.md](docs/KEY_SUPPORT.md) records the exact policy and secret lifecycle.
+This initial matrix covered Ed25519. RSA and ECDSA support was added on 21 October; security-key identities, PEM/PKCS#8 and other encryption/KDF formats remain unsupported. The parser permits AES-128/256-CTR with bcrypt rounds **1–31**, but every round count has not been tested. [KEY_SUPPORT.md](docs/KEY_SUPPORT.md) records the exact policy and secret lifecycle.
 
 ## Measurements and visual evidence
 

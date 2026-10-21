@@ -31,7 +31,7 @@ public enum IdentityError: LocalizedError, Equatable, Sendable {
     public var errorDescription: String? {
         switch self {
         case .publicKeyOnly: return "This is a public key. Import its OpenSSH private-key file instead."
-        case .malformedKey: return "This private key is malformed or damaged. Choose a complete OpenSSH Ed25519 private key."
+        case .malformedKey: return "This private key is malformed or damaged. Choose a complete OpenSSH Ed25519, RSA or ECDSA private key."
         case .unsupportedFormat(let reason): return "This key format is not supported in the preview. \(reason)"
         case .missingPassphrase: return "Enter the passphrase for this encrypted private key."
         case .decryptionFailed: return "The private key could not be unlocked. Check its passphrase; a damaged encrypted key can cause the same error."
@@ -182,7 +182,7 @@ public struct KeychainBiometricKeyStore: BiometricKeyStore {
 
 public actor IdentityStore {
     private struct StoredSecret: Codable {
-        enum Format: String, Codable { case generatedEd25519, importedOpenSSH }
+        enum Format: String, Codable { case generatedEd25519, importedOpenSSH, biometricSigningKey }
         let version: Int
         let format: Format
         let bytes: Data
@@ -191,7 +191,7 @@ public actor IdentityStore {
     private let secretStore: any IdentitySecretStore
     /// Nil where biometric Keychain items are unavailable, such as the macOS test host.
     private let biometricStore: (any BiometricKeyStore)?
-    private var unlocked: [UUID: Curve25519.Signing.PrivateKey] = [:]
+    private var unlocked: [UUID: IdentityPrivateKey] = [:]
     private var sessionGeneration: UInt64 = 0
 
     public init(secretStore: any IdentitySecretStore = KeychainIdentitySecretStore(),
@@ -210,7 +210,7 @@ public actor IdentityStore {
 
     public func generate(name: String) throws -> IdentityMetadata {
         let key = Curve25519.Signing.PrivateKey()
-        let metadata = try makeMetadata(name: name, key: key, requiresPassphrase: false)
+        let metadata = try makeMetadata(name: name, key: .ed25519(key), requiresPassphrase: false)
         let secret = StoredSecret(version: 1, format: .generatedEd25519, bytes: key.rawRepresentation)
         try secretStore.save(JSONEncoder().encode(secret), reference: metadata.keychainReference)
         return metadata
@@ -231,7 +231,7 @@ public actor IdentityStore {
         return metadata
     }
 
-    public func unlock(_ metadata: IdentityMetadata, passphrase: String? = nil) async throws -> Curve25519.Signing.PrivateKey {
+    public func unlock(_ metadata: IdentityMetadata, passphrase: String? = nil) async throws -> IdentityPrivateKey {
         if let key = unlocked[metadata.id] { return key }
         let data = try secretStore.load(reference: metadata.keychainReference)
         guard let secret = try? JSONDecoder().decode(StoredSecret.self, from: data), secret.version == 1 else {
@@ -241,15 +241,17 @@ public actor IdentityStore {
         let key = try await Task.detached(priority: .userInitiated) {
             switch secret.format {
             case .generatedEd25519:
-                return try Curve25519.Signing.PrivateKey(rawRepresentation: secret.bytes)
+                return IdentityPrivateKey.ed25519(try Curve25519.Signing.PrivateKey(rawRepresentation: secret.bytes))
             case .importedOpenSSH:
                 guard let text = String(data: secret.bytes, encoding: .utf8) else { throw IdentityError.malformedKey }
                 return try OpenSSHIdentityParser.parse(text, passphrase: passphrase).key
+            case .biometricSigningKey:
+                throw IdentityError.malformedKey // Never stored as the primary secret.
             }
         }.value
         try Task.checkCancellation()
         guard generation == sessionGeneration else { throw IdentityError.sessionEnded }
-        guard String(openSSHPublicKey: NIOSSHPrivateKey(ed25519Key: key).publicKey) == metadata.publicKey else {
+        guard String(openSSHPublicKey: key.nioPrivateKey.publicKey) == metadata.publicKey else {
             throw IdentityError.malformedKey
         }
         unlocked[metadata.id] = key
@@ -274,7 +276,7 @@ public actor IdentityStore {
     public func enableBiometricUnlock(_ metadata: IdentityMetadata) throws {
         guard metadata.requiresPassphrase, let key = unlocked[metadata.id] else { throw IdentityError.missingPassphrase }
         guard let biometricStore else { throw IdentityError.biometricsUnavailable }
-        let secret = StoredSecret(version: 1, format: .generatedEd25519, bytes: key.rawRepresentation)
+        let secret = StoredSecret(version: 1, format: .biometricSigningKey, bytes: key.rawRepresentation)
         try biometricStore.save(JSONEncoder().encode(secret), reference: metadata.keychainReference)
     }
 
@@ -285,7 +287,7 @@ public actor IdentityStore {
     /// Unlocks with Face ID or Touch ID for this foreground session. Throws `biometricsUnavailable`
     /// when there is no usable copy, and `biometricsDeclined` when authentication is cancelled or fails;
     /// either way the passphrase still unlocks the original.
-    public func unlockWithBiometrics(_ metadata: IdentityMetadata, reason: String) async throws -> Curve25519.Signing.PrivateKey {
+    public func unlockWithBiometrics(_ metadata: IdentityMetadata, reason: String) async throws -> IdentityPrivateKey {
         if let key = unlocked[metadata.id] { return key }
         guard let biometricStore else { throw IdentityError.biometricsUnavailable }
         let generation = sessionGeneration
@@ -293,9 +295,9 @@ public actor IdentityStore {
         try Task.checkCancellation()
         guard generation == sessionGeneration else { throw IdentityError.sessionEnded }
         guard let secret = try? JSONDecoder().decode(StoredSecret.self, from: data), secret.version == 1,
-              secret.format == .generatedEd25519,
-              let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: secret.bytes),
-              String(openSSHPublicKey: NIOSSHPrivateKey(ed25519Key: key).publicKey) == metadata.publicKey else {
+              (secret.format == .biometricSigningKey || secret.format == .generatedEd25519 && metadata.algorithm == "ssh-ed25519"),
+              let key = try? IdentityPrivateKey(algorithm: metadata.algorithm, bytes: secret.bytes),
+              String(openSSHPublicKey: key.nioPrivateKey.publicKey) == metadata.publicKey else {
             // A copy that does not match this identity is never used.
             try? biometricStore.delete(reference: metadata.keychainReference)
             throw IdentityError.biometricsUnavailable
@@ -310,8 +312,8 @@ public actor IdentityStore {
         unlocked.removeAll(keepingCapacity: false)
     }
 
-    private func makeMetadata(name: String, key: Curve25519.Signing.PrivateKey, requiresPassphrase: Bool) throws -> IdentityMetadata {
-        let details = try HostKeyDetails(publicKey: NIOSSHPrivateKey(ed25519Key: key).publicKey)
+    private func makeMetadata(name: String, key: IdentityPrivateKey, requiresPassphrase: Bool) throws -> IdentityMetadata {
+        let details = try HostKeyDetails(publicKey: key.nioPrivateKey.publicKey)
         let id = UUID()
         return IdentityMetadata(id: id, name: name, algorithm: details.algorithm, publicKey: details.publicKey,
                                 fingerprint: details.fingerprint, requiresPassphrase: requiresPassphrase,
@@ -322,7 +324,7 @@ public actor IdentityStore {
 /// Reads only the bounded OpenSSH container header to give useful errors and constrain the
 /// supported matrix. Citadel performs all private-key parsing, KDF work, and decryption.
 enum OpenSSHIdentityParser {
-    struct Parsed { let key: Curve25519.Signing.PrivateKey; let encrypted: Bool }
+    struct Parsed { let key: IdentityPrivateKey; let encrypted: Bool }
 
     static func parse(_ input: String, passphrase: String?) throws -> Parsed {
         guard input.utf8.count <= 256 * 1024 else { throw IdentityError.malformedKey }
@@ -334,7 +336,7 @@ enum OpenSSHIdentityParser {
         let begin = "-----BEGIN OPENSSH PRIVATE KEY-----"
         let end = "-----END OPENSSH PRIVATE KEY-----"
         guard text.hasPrefix(begin) else {
-            if text.hasPrefix("-----BEGIN") { throw IdentityError.unsupportedFormat("Use an OpenSSH Ed25519 private key.") }
+            if text.hasPrefix("-----BEGIN") { throw IdentityError.unsupportedFormat("Use an OpenSSH Ed25519, RSA or ECDSA private key.") }
             throw IdentityError.malformedKey
         }
         guard text.hasSuffix(end) else { throw IdentityError.malformedKey }
@@ -363,12 +365,10 @@ enum OpenSSHIdentityParser {
         guard try reader.integer() == 1 else { throw IdentityError.unsupportedFormat("Only single-key files are supported.") }
         let publicBytes = try reader.field()
         var publicReader = SSHContainerReader(data: publicBytes)
-        guard try publicReader.string() == "ssh-ed25519" else {
-            throw IdentityError.unsupportedFormat("Only Ed25519 identities are supported in this preview.")
+        let algorithm = try publicReader.string()
+        guard ["ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521"].contains(algorithm) else {
+            throw IdentityError.unsupportedFormat("Supported identities are Ed25519, RSA (2048–8192 bits) and ECDSA (P-256, P-384 or P-521).")
         }
-        let publicKey: NIOSSHPublicKey
-        do { publicKey = try NIOSSHPublicKey(openSSHPublicKey: "ssh-ed25519 " + publicBytes.base64EncodedString()) }
-        catch { throw IdentityError.malformedKey }
         let privateBytes = try reader.field()
         guard !privateBytes.isEmpty, reader.remaining == 0, privateBytes.count % (encrypted ? 16 : 8) == 0 else {
             throw IdentityError.malformedKey
@@ -376,14 +376,21 @@ enum OpenSSHIdentityParser {
         if encrypted && (passphrase == nil || passphrase?.isEmpty == true) { throw IdentityError.missingPassphrase }
         // Citadel accepts LF wrapping; normalise container whitespace only for parsing.
         let normalised = begin + "\n" + body + "\n" + end + "\n"
-        let key: Curve25519.Signing.PrivateKey
+        let key: IdentityPrivateKey
+        let decryptionKey = encrypted ? passphrase.map { Data($0.utf8) } : nil
         do {
-            key = try Curve25519.Signing.PrivateKey(sshEd25519: normalised,
-                    decryptionKey: encrypted ? passphrase.map { Data($0.utf8) } : nil)
+            switch algorithm {
+            case "ssh-ed25519": key = .ed25519(try .init(sshEd25519: normalised, decryptionKey: decryptionKey))
+            case "ssh-rsa": key = .rsa(try .init(sshOpenSSH: normalised, decryptionKey: decryptionKey))
+            case "ecdsa-sha2-nistp256": key = .p256(try .init(sshOpenSSH: normalised, decryptionKey: decryptionKey))
+            case "ecdsa-sha2-nistp384": key = .p384(try .init(sshOpenSSH: normalised, decryptionKey: decryptionKey))
+            case "ecdsa-sha2-nistp521": key = .p521(try .init(sshOpenSSH: normalised, decryptionKey: decryptionKey))
+            default: throw IdentityError.malformedKey
+            }
         } catch {
             throw encrypted ? IdentityError.decryptionFailed : IdentityError.malformedKey
         }
-        guard NIOSSHPrivateKey(ed25519Key: key).publicKey == publicKey else { throw IdentityError.malformedKey }
+        guard String(openSSHPublicKey: key.nioPrivateKey.publicKey) == algorithm + " " + publicBytes.base64EncodedString() else { throw IdentityError.malformedKey }
         return Parsed(key: key, encrypted: encrypted)
     }
 }
