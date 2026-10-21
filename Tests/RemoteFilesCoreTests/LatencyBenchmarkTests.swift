@@ -51,7 +51,7 @@ final class LatencyBenchmarkTests: XCTestCase {
             await cold.disconnect()
         }
         let warm = service()
-        defer { Task { await warm.disconnect() } }
+        addTeardownBlock { await warm.disconnect() }
         _ = try await warm.listDirectory(profile: profile, path: files)
         try await measure("list folder") { _ = try await warm.listDirectory(profile: profile, path: files) }
         try await measure("list 1,000 entries") { _ = try await warm.listDirectory(profile: profile, path: files + "/thousand") }

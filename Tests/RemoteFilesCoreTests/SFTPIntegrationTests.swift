@@ -40,7 +40,7 @@ final class SFTPIntegrationTests: XCTestCase {
         let profile = try await stores.profile(identity: generated)
         try await stores.trustFixtureHost()
         let service = stores.service()
-        defer { Task { await service.disconnect() } }
+        addTeardownBlock { await service.disconnect() }
         let listing = try await service.listDirectory(profile: profile, path: fixture.files)
         let cold = await service.metrics()
         print("SFTP cold: connectionSeconds=\(cold.lastConnectionSeconds), directorySeconds=\(cold.lastDirectorySeconds)")
@@ -105,7 +105,7 @@ final class SFTPIntegrationTests: XCTestCase {
         let profile = try await stores.profile(identity: key)
         try await stores.trustFixtureHost()
         let service = stores.service()
-        defer { Task { await service.disconnect() } }
+        addTeardownBlock { await service.disconnect() }
         let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: temp) }
         _ = try await service.listDirectory(profile: profile, path: fixture.files)
@@ -149,7 +149,8 @@ final class SFTPIntegrationTests: XCTestCase {
         try await stores.trustFixtureHost()
         let service = stores.service()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory); Task { await service.disconnect() } }
+        defer { try? FileManager.default.removeItem(at: directory) }
+        addTeardownBlock { await service.disconnect() }
         let resolver = RemoteResourceResolver(service: service, directory: directory)
         let document = RemoteDocumentLocation(profile: profile, path: fixture.files + "/docs/source.md")
         for missing in [fixture.directory + "/old/missing.png", fixture.files + "/docs/missing.png"] {
@@ -183,7 +184,7 @@ final class SFTPIntegrationTests: XCTestCase {
         var profile = try await stores.profile(identity: key)
         try await stores.trustFixtureHost()
         let service = stores.service()
-        defer { Task { await service.disconnect() } }
+        addTeardownBlock { await service.disconnect() }
         let source = fixture.files + "/docs/source.md"
         let parent = try await service.resolveDocumentLink(profile: profile, documentPath: source, reference: "../report.md")
         XCTAssertEqual(parent.path, fixture.files + "/report.md")
@@ -222,7 +223,7 @@ final class SFTPIntegrationTests: XCTestCase {
         let profile = try await stores.profile(identity: key)
         try await stores.trustFixtureHost()
         let service = stores.service()
-        defer { Task { await service.disconnect() } }
+        addTeardownBlock { await service.disconnect() }
         let filename = fixture.files + "/docs/refresh-target.md"
         let before = Data("first version\r\n".utf8)
         try before.write(to: URL(fileURLWithPath: filename))
@@ -256,7 +257,7 @@ final class SFTPIntegrationTests: XCTestCase {
         let profile = try await stores.profile(identity: key)
         try await stores.trustFixtureHost()
         let service = stores.service()
-        defer { Task { await service.disconnect() } }
+        addTeardownBlock { await service.disconnect() }
         let target = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: target) }
         let expected = Data("é 東京\r\n\ttrailing spaces  \r\n".utf8)
@@ -358,6 +359,36 @@ final class SFTPIntegrationTests: XCTestCase {
         await service.disconnect()
     }
 
+    /// CI saw the 1,000-entry listing exceed its deadline while the fixture server answered slowly; the
+    /// client kept eight READDIRs outstanding. A server that stops answering mid-session must fail as
+    /// `timedOut` within the listing's deadline, not hang or surface a transport error.
+    func testStalledServerRepliesFailTheListingAsTimedOut() async throws {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Stalled replies")
+        try fixture.authorize(key.publicKey)
+        let proxy = try await ReplyStallingProxy.start(target: fixture.port)
+        addTeardownBlock { await proxy.stop() }
+        var profile = try await stores.profile(identity: key)
+        profile.port = proxy.port
+        try await stores.trustFixtureHost(port: proxy.port)
+        // Long enough for a loaded runner's handshake; only the stalled listing should reach it.
+        let service = stores.service(timeoutSeconds: 10)
+        addTeardownBlock { await service.disconnect() }
+        _ = try await service.listDirectory(profile: profile, path: fixture.files)
+        proxy.stallReplies()
+        let started = ContinuousClock.now
+        do {
+            _ = try await service.listDirectory(profile: profile, path: fixture.files + "/thousand")
+            XCTFail("A listing whose replies never arrive must not succeed")
+        } catch RemoteFileError.timedOut {
+        }
+        let elapsed = ContinuousClock.now - started
+        XCTAssertGreaterThanOrEqual(elapsed, .seconds(9), "Only the deadline ends a listing that is still waiting")
+        XCTAssertLessThan(elapsed, .seconds(20), "The deadline must end the listing rather than wait for the server")
+        XCTAssertGreaterThan(proxy.heldReplyBytes, 0, "The server answered the listing, but its replies were held")
+    }
+
     #if os(macOS)
     func testSharedChannelReleasesHandlesRevalidatesAndRetiresAfterFailures() async throws {
         let fixture = try Fixture()
@@ -367,7 +398,7 @@ final class SFTPIntegrationTests: XCTestCase {
         let profile = try await stores.profile(identity: key)
         try await stores.trustFixtureHost()
         let service = stores.service()
-        defer { Task { await service.disconnect() } }
+        addTeardownBlock { await service.disconnect() }
         // Each listing must close its directory handle: a reused channel would otherwise hold them all.
         for _ in 0..<50 { _ = try await service.listDirectory(profile: profile, path: fixture.files + "/empty") }
         XCTAssertEqual(try Self.openDescriptors(on: fixture.files + "/empty"), 0)
@@ -417,7 +448,7 @@ final class SFTPIntegrationTests: XCTestCase {
         let profile = try await stores.profile(identity: key)
         try await stores.trustFixtureHost()
         let service = stores.service()
-        defer { Task { await service.disconnect() } }
+        addTeardownBlock { await service.disconnect() }
         let folder = fixture.files + "/thousand"
         // OpenSSH answers at most 100 names per READDIR, so this listing pipelines eleven reads.
         let expected = try Self.directoryOrder(folder)
@@ -491,7 +522,7 @@ final class SFTPIntegrationTests: XCTestCase {
         let profile = try await stores.profile(identity: key)
         try await stores.trustFixtureHost()
         let service = stores.service()
-        defer { Task { await service.disconnect() } }
+        addTeardownBlock { await service.disconnect() }
         let fm = FileManager.default
         let folder = fixture.files + "/links-" + UUID().uuidString
         try fm.createDirectory(atPath: folder, withIntermediateDirectories: false)
@@ -594,16 +625,21 @@ private struct Stores {
         try await metadata.save(value)
         return profile
     }
-    func trustFixtureHost() async throws {
+    /// Trusts the fixture's host key, at its own port or at a relay in front of it.
+    func trustFixtureHost(port: Int? = nil) async throws {
         let publicKey = try String(contentsOfFile: fixture.directory + "/host.pub", encoding: .utf8)
         let details = try HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: publicKey))
-        try await trust.trustUnknown(endpoint: fixture.endpoint, key: details)
+        try await trust.trustUnknown(endpoint: HostEndpoint(host: "127.0.0.1", port: port ?? fixture.port), key: details)
     }
     /// Functional checks use the benchmark's 60-second budget rather than the 15-second interactive
     /// deadline. The fixture is macOS sshd, which resolves the owner and group of every listed entry
     /// through opendirectoryd; while a fresh CI simulator finishes booting, a passing run measured
     /// 15.9 s for the 1,000-entry folder although file reads stayed in milliseconds. Deadline
     /// behaviour keeps its own explicit short-timeout tests.
+    ///
+    /// Tests disconnect in an async teardown block. A disconnect started from `defer` closes the socket
+    /// while a timed-out operation is still draining, and on iOS XCTest then reported that operation's
+    /// `NIOSSHError.tcpShutdown` as the test's error instead of the `timedOut` it threw.
     func service(timeoutSeconds: UInt64 = 60) -> SFTPRemoteFileService {
         SFTPRemoteFileService(identityStore: identity, trustStore: trust, metadataStore: metadata,
                               timeoutSeconds: timeoutSeconds)
@@ -623,6 +659,76 @@ private final class IntegrationSecrets: IdentitySecretStore, @unchecked Sendable
     }
     func delete(reference: String) throws {
         lock.lock(); defer { lock.unlock() }; data.removeValue(forKey: reference)
+    }
+}
+
+/// Loopback relay in front of the OpenSSH fixture. After `stallReplies()` it keeps forwarding the
+/// client's requests but holds every byte the server sends back, as a server that has stopped
+/// answering would, while the TCP connection itself stays open.
+private final class ReplyStallingProxy: @unchecked Sendable {
+    private let lock = NSLock()
+    private var listener: Channel?
+    private var stalled = false
+    private var held = 0
+    var port: Int { lock.withLock { listener?.localAddress?.port ?? 0 } }
+    var heldReplyBytes: Int { lock.withLock { held } }
+
+    static func start(target: Int) async throws -> ReplyStallingProxy {
+        let proxy = ReplyStallingProxy()
+        let listener = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .childChannelOption(ChannelOptions.autoRead, value: false)
+            .childChannelInitializer { $0.pipeline.addHandler(Connector(target: target, proxy: proxy)) }
+            .bind(host: "127.0.0.1", port: 0).get()
+        proxy.lock.withLock { proxy.listener = listener }
+        return proxy
+    }
+
+    func stallReplies() { lock.withLock { stalled = true } }
+    func stop() async { try? await lock.withLock { listener }?.close() }
+
+    private func hold(_ bytes: Int) -> Bool {
+        lock.withLock {
+            if stalled { held += bytes }
+            return stalled
+        }
+    }
+
+    /// Connects to the server once the client's socket is active, then relays both ways. The client
+    /// is not read until then, and the server's banner can only arrive at an active client socket.
+    private final class Connector: ChannelInboundHandler, @unchecked Sendable {
+        typealias InboundIn = ByteBuffer
+        private let target: Int
+        private let proxy: ReplyStallingProxy
+        init(target: Int, proxy: ReplyStallingProxy) { self.target = target; self.proxy = proxy }
+        func channelActive(context: ChannelHandlerContext) {
+            let inbound = context.channel, proxy = proxy
+            ClientBootstrap(group: inbound.eventLoop)
+                .channelInitializer { $0.pipeline.addHandler(Relay(partner: inbound) { proxy.hold($0) }) }
+                .connect(host: "127.0.0.1", port: target)
+                .flatMap { outbound in
+                    inbound.pipeline.addHandler(Relay(partner: outbound) { _ in false }).flatMap {
+                        inbound.setOption(ChannelOptions.autoRead, value: true)
+                    }
+                }
+                .whenFailure { _ in inbound.close(promise: nil) }
+            context.fireChannelActive()
+        }
+    }
+
+    private final class Relay: ChannelInboundHandler, @unchecked Sendable {
+        typealias InboundIn = ByteBuffer
+        private let partner: Channel
+        private let holds: @Sendable (Int) -> Bool
+        init(partner: Channel, holds: @escaping @Sendable (Int) -> Bool) { self.partner = partner; self.holds = holds }
+        func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+            let buffer = unwrapInboundIn(data)
+            if !holds(buffer.readableBytes) { partner.writeAndFlush(buffer, promise: nil) }
+        }
+        func channelInactive(context: ChannelHandlerContext) {
+            partner.close(promise: nil)
+            context.fireChannelInactive()
+        }
+        func errorCaught(context: ChannelHandlerContext, error: Error) { context.close(promise: nil) }
     }
 }
 
