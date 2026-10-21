@@ -363,19 +363,7 @@ final class SFTPIntegrationTests: XCTestCase {
     /// client kept eight READDIRs outstanding. A server that stops answering mid-session must fail as
     /// `timedOut` within the listing's deadline, not hang or surface a transport error.
     func testStalledServerRepliesFailTheListingAsTimedOut() async throws {
-        let fixture = try Fixture()
-        let stores = try Stores(fixture: fixture)
-        let key = try await stores.identity.generate(name: "Stalled replies")
-        try fixture.authorize(key.publicKey)
-        let proxy = try await ReplyStallingProxy.start(target: fixture.port)
-        addTeardownBlock { await proxy.stop() }
-        var profile = try await stores.profile(identity: key)
-        profile.port = proxy.port
-        try await stores.trustFixtureHost(port: proxy.port)
-        // Long enough for a loaded runner's handshake; only the stalled listing should reach it.
-        let service = stores.service(timeoutSeconds: 10)
-        addTeardownBlock { await service.disconnect() }
-        _ = try await service.listDirectory(profile: profile, path: fixture.files)
+        let (fixture, proxy, service, profile) = try await connectedThroughProxy(name: "Stalled replies")
         proxy.stallReplies()
         let started = ContinuousClock.now
         do {
@@ -387,6 +375,90 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(elapsed, .seconds(9), "Only the deadline ends a listing that is still waiting")
         XCTAssertLessThan(elapsed, .seconds(20), "The deadline must end the listing rather than wait for the server")
         XCTAssertGreaterThan(proxy.heldReplyBytes, 0, "The server answered the listing, but its replies were held")
+    }
+
+    /// A deadline asks the shared SFTP channel to close, but the timed-out work holds it until the
+    /// server confirms. The next operation reused that half-closed channel and failed at once with
+    /// NIO's "Output closed"; it must open a fresh channel on the same connection instead.
+    func testDeadlineRetiresTheSharedChannelBeforeTheNextOperation() async throws {
+        let (fixture, proxy, service, profile) = try await connectedThroughProxy(name: "Deadline retirement")
+        let before = await service.metrics()
+        proxy.stallReplies()
+        do {
+            _ = try await service.listDirectory(profile: profile, path: fixture.files + "/empty")
+            XCTFail("A listing whose replies never arrive must not succeed")
+        } catch RemoteFileError.timedOut {
+        }
+        // The server answers again before the client has seen it confirm the abandoned channel's close.
+        proxy.resumeReplies()
+        let listing = try await service.listDirectory(profile: profile, path: fixture.files + "/docs")
+        XCTAssertTrue(listing.entries.contains { $0.name == "source.md" })
+        let after = await service.metrics()
+        XCTAssertEqual(after.connections, before.connections, "Only the channel is replaced, not the SSH connection")
+        XCTAssertEqual(after.sftpChannels, before.sftpChannels + 1)
+    }
+
+    /// A cancelled caller returns before the deadline; the deadline must still retire the channel.
+    func testAbandonedOperationsDeadlineRetiresTheSharedChannel() async throws {
+        let (fixture, proxy, service, profile) = try await connectedThroughProxy(name: "Abandoned deadline")
+        let before = await service.metrics()
+        proxy.stallReplies()
+        let abandoned = Task { try await service.listDirectory(profile: profile, path: fixture.files + "/empty") }
+        try await proxy.waitForHeldReplies()
+        abandoned.cancel()
+        do { _ = try await abandoned.value; XCTFail("A cancelled listing must not succeed") }
+        catch { XCTAssertTrue(error is CancellationError, "Expected cancellation, got \(error)") }
+        // Past the abandoned listing's 10-second deadline, with margin for a loaded runner.
+        try await Task.sleep(for: .seconds(12))
+        proxy.resumeReplies()
+        let listing = try await service.listDirectory(profile: profile, path: fixture.files + "/docs")
+        XCTAssertTrue(listing.entries.contains { $0.name == "source.md" })
+        let after = await service.metrics()
+        XCTAssertEqual(after.connections, before.connections, "Only the channel is replaced, not the SSH connection")
+        XCTAssertEqual(after.sftpChannels, before.sftpChannels + 1)
+    }
+
+    /// A server process ending mid-listing surfaced NIO's raw "Already closed". It must read as an
+    /// ended connection, at once rather than at the deadline, and a refresh must reconnect.
+    func testDroppedConnectionReportsTheEndedSessionAndReconnects() async throws {
+        let (fixture, proxy, service, profile) = try await connectedThroughProxy(name: "Dropped connection")
+        let before = await service.metrics()
+        proxy.stallReplies()
+        let listing = Task { try await service.listDirectory(profile: profile, path: fixture.files + "/thousand") }
+        try await proxy.waitForHeldReplies()
+        let dropped = ContinuousClock.now
+        proxy.dropConnections()
+        do {
+            _ = try await listing.value
+            XCTFail("A listing whose connection ended must not succeed")
+        } catch RemoteFileError.unavailable(let message) {
+            XCTAssertEqual(message, "The SSH connection ended. Refresh to reconnect.")
+        }
+        XCTAssertLessThan(ContinuousClock.now - dropped, .seconds(5), "A closed connection must not wait for the deadline")
+        proxy.resumeReplies()
+        let refreshed = try await service.listDirectory(profile: profile, path: fixture.files + "/docs")
+        XCTAssertTrue(refreshed.entries.contains { $0.name == "source.md" })
+        let after = await service.metrics()
+        XCTAssertEqual(after.connections, before.connections + 1, "The refresh opens a new SSH connection")
+    }
+
+    /// A service already connected through a `ReplyStallingProxy`, with a deadline long enough for a
+    /// loaded runner's handshake; only the stalled operations should reach it.
+    private func connectedThroughProxy(name: String) async throws
+        -> (Fixture, ReplyStallingProxy, SFTPRemoteFileService, ConnectionProfile) {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: name)
+        try fixture.authorize(key.publicKey)
+        let proxy = try await ReplyStallingProxy.start(target: fixture.port)
+        addTeardownBlock { await proxy.stop() }
+        var profile = try await stores.profile(identity: key)
+        profile.port = proxy.port
+        try await stores.trustFixtureHost(port: proxy.port)
+        let service = stores.service(timeoutSeconds: 10)
+        addTeardownBlock { await service.disconnect() }
+        _ = try await service.listDirectory(profile: profile, path: fixture.files)
+        return (fixture, proxy, service, profile)
     }
 
     #if os(macOS)
@@ -664,12 +736,16 @@ private final class IntegrationSecrets: IdentitySecretStore, @unchecked Sendable
 
 /// Loopback relay in front of the OpenSSH fixture. After `stallReplies()` it keeps forwarding the
 /// client's requests but holds every byte the server sends back, as a server that has stopped
-/// answering would, while the TCP connection itself stays open.
+/// answering would, while the TCP connection itself stays open. `resumeReplies()` delivers the held
+/// bytes in order, as the same server answering again, and `dropConnections()` closes the relayed
+/// connections, as the server process ending would.
 private final class ReplyStallingProxy: @unchecked Sendable {
     private let lock = NSLock()
     private var listener: Channel?
     private var stalled = false
     private var held = 0
+    private var connections: [Channel] = []
+    private var replies: [Relay] = []
     var port: Int { lock.withLock { listener?.localAddress?.port ?? 0 } }
     var heldReplyBytes: Int { lock.withLock { held } }
 
@@ -684,13 +760,40 @@ private final class ReplyStallingProxy: @unchecked Sendable {
     }
 
     func stallReplies() { lock.withLock { stalled = true } }
-    func stop() async { try? await lock.withLock { listener }?.close() }
+    func resumeReplies() {
+        let relays = lock.withLock { stalled = false; return replies }
+        relays.forEach { $0.release() }
+    }
+    func dropConnections() {
+        let dropped = lock.withLock {
+            defer { connections = []; replies = [] }
+            return connections
+        }
+        dropped.forEach { $0.close(promise: nil) }
+    }
+    func stop() async {
+        dropConnections()
+        try? await lock.withLock { listener }?.close()
+    }
+
+    /// Waits until the server has answered requests sent after `stallReplies()`.
+    func waitForHeldReplies(timeout: Duration = .seconds(10)) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while heldReplyBytes == 0 {
+            guard ContinuousClock.now < deadline else { throw RemoteFileError.timedOut }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
 
     private func hold(_ bytes: Int) -> Bool {
         lock.withLock {
             if stalled { held += bytes }
             return stalled
         }
+    }
+
+    private func track(_ connection: Channel, replies relay: Relay) {
+        lock.withLock { connections.append(connection); replies.append(relay) }
     }
 
     /// Connects to the server once the client's socket is active, then relays both ways. The client
@@ -702,8 +805,10 @@ private final class ReplyStallingProxy: @unchecked Sendable {
         init(target: Int, proxy: ReplyStallingProxy) { self.target = target; self.proxy = proxy }
         func channelActive(context: ChannelHandlerContext) {
             let inbound = context.channel, proxy = proxy
+            let replies = Relay(partner: inbound) { proxy.hold($0) }
+            proxy.track(inbound, replies: replies)
             ClientBootstrap(group: inbound.eventLoop)
-                .channelInitializer { $0.pipeline.addHandler(Relay(partner: inbound) { proxy.hold($0) }) }
+                .channelInitializer { $0.pipeline.addHandler(replies) }
                 .connect(host: "127.0.0.1", port: target)
                 .flatMap { outbound in
                     inbound.pipeline.addHandler(Relay(partner: outbound) { _ in false }).flatMap {
@@ -715,14 +820,24 @@ private final class ReplyStallingProxy: @unchecked Sendable {
         }
     }
 
+    /// Forwards to `partner`, or queues while `holds` says so. Both channels share one event loop,
+    /// which alone touches the queue, so released bytes always precede later ones.
     private final class Relay: ChannelInboundHandler, @unchecked Sendable {
         typealias InboundIn = ByteBuffer
         private let partner: Channel
         private let holds: @Sendable (Int) -> Bool
+        private var queued: [ByteBuffer] = []
         init(partner: Channel, holds: @escaping @Sendable (Int) -> Bool) { self.partner = partner; self.holds = holds }
         func channelRead(context: ChannelHandlerContext, data: NIOAny) {
             let buffer = unwrapInboundIn(data)
-            if !holds(buffer.readableBytes) { partner.writeAndFlush(buffer, promise: nil) }
+            if holds(buffer.readableBytes) || !queued.isEmpty { queued.append(buffer) } else { partner.writeAndFlush(buffer, promise: nil) }
+        }
+        func release() {
+            partner.eventLoop.execute { [self] in
+                queued.forEach { partner.write($0, promise: nil) }
+                queued = []
+                partner.flush()
+            }
         }
         func channelInactive(context: ChannelHandlerContext) {
             partner.close(promise: nil)
@@ -862,6 +977,32 @@ final class BoundedPreviewReaderTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(50))
         let fired = await timedOut.value
         XCTAssertTrue(fired)
+    }
+
+    /// Another operation may already be queued when the deadline fires. Whatever `onTimeout` marks
+    /// must be in place before the timeout is reported, and a failure caused by its close must not
+    /// replace the timeout.
+    func testDetachedDeadlineRunsOnTimeoutBeforeReportingTheTimeout() async throws {
+        let marked = NSLock(), closed = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var isMarked = false
+        do {
+            _ = try await SFTPRemoteFileService.detachedDeadline(seconds: 1, onTimeout: {
+                // A slow handler widens the window in which an early report would be observed.
+                Thread.sleep(forTimeInterval: 0.2)
+                marked.withLock { isMarked = true }
+                closed.signal()
+                // Lets the closed request fail before the deadline reports.
+                Thread.sleep(forTimeInterval: 0.2)
+            }) { () async throws -> Int in
+                // Mirrors a request that fails once its channel closes, ignoring task cancellation.
+                await withCheckedContinuation { continuation in
+                    DispatchQueue.global().async { closed.wait(); continuation.resume() }
+                }
+                throw ChannelError.outputClosed
+            }
+            XCTFail("Deadline must fire")
+        } catch RemoteFileError.timedOut { }
+        XCTAssertTrue(marked.withLock { isMarked }, "onTimeout must finish before the caller sees the timeout")
     }
 }
 

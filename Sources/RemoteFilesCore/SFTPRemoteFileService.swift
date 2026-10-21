@@ -348,6 +348,10 @@ public actor SFTPRemoteFileService: RemoteFileService {
     /// version round trips on every tap. A cancelled caller returns at once while its operation
     /// drains the in-flight request. Any failure retires the channel once its other users finish,
     /// so an interrupted operation cannot leave a handle open on a reused channel.
+    ///
+    /// A deadline marks the channel closing before the timeout is reported, so no later operation
+    /// reuses it: the timed-out work holds the channel until the server confirms the close or TCP
+    /// drops, and the half-closed channel would fail the next request.
     private func perform<T: Sendable>(session: LiveSession,
                                      operation: @escaping @Sendable (SFTPClient) async throws -> T) async throws -> T {
         let channel = SFTPChannelControl()
@@ -357,7 +361,7 @@ public actor SFTPRemoteFileService: RemoteFileService {
                 if !channel.hasClient { session.control.close() }
             }) {
                 let shared = try await self.acquireSFTP(for: session)
-                channel.install(shared.client)
+                channel.install(shared.client, closing: shared.closing)
                 do {
                     try Task.checkCancellation()
                     let value = try await operation(shared.client)
@@ -403,7 +407,7 @@ public actor SFTPRemoteFileService: RemoteFileService {
 
     private func acquireSFTP(for session: LiveSession) async throws -> SharedSFTPChannel {
         if let shared = session.sftp {
-            if !shared.retired, shared.client.isActive { shared.users += 1; return shared }
+            if !shared.retired, !shared.closing.isSet, shared.client.isActive { shared.users += 1; return shared }
             retire(shared, from: session)
         }
         let opening: Task<SharedSFTPChannel, Error>
@@ -456,11 +460,26 @@ public actor SFTPRemoteFileService: RemoteFileService {
             case .noSuchFile:
                 return RemoteFileError.notFound
             case .noConnection, .connectionLost:
-                return RemoteFileError.unavailable("The SSH connection ended. Refresh to reconnect.")
+                return connectionEnded
             default: break
             }
         }
-        return error
+        return endsConnection(error) ? connectionEnded : error
+    }
+
+    private static let connectionEnded = RemoteFileError.unavailable("The SSH connection ended. Refresh to reconnect.")
+
+    /// Errors NIO, NIOSSH and Citadel raise once the SSH connection or its SFTP channel has closed.
+    private nonisolated static func endsConnection(_ error: Error) -> Bool {
+        switch error {
+        case ChannelError.alreadyClosed, ChannelError.outputClosed, ChannelError.ioOnClosedChannel, ChannelError.eof,
+             SFTPError.connectionClosed:
+            return true
+        case let error as NIOSSHError:
+            return error.type == .tcpShutdown
+        default:
+            return false
+        }
     }
 
     private nonisolated static func validated(_ path: String) throws -> String {
@@ -483,22 +502,26 @@ public actor SFTPRemoteFileService: RemoteFileService {
     /// Runs `operation` in its own task so a cancelled caller need not wait for a request the
     /// transport cannot interrupt. The deadline outlives the caller: it runs until the operation
     /// itself finishes, so an unanswered request still fires `onTimeout` and releases its channel.
+    /// `onTimeout` runs before the caller sees the timeout, and once it has run the result is
+    /// `timedOut` even if the work fails first because of what `onTimeout` closed.
     nonisolated static func detachedDeadline<T: Sendable>(seconds: UInt64,
                                                           onTimeout: @escaping @Sendable () -> Void,
                                                           operation: @escaping @Sendable () async throws -> T) async throws -> T {
         let outcome = FirstOutcome<T>()
         let finished = LockedFlag()
+        let fired = LockedFlag()
         let work = Task { try await operation() }
         let timer = Task {
             try await Task.sleep(nanoseconds: seconds * 1_000_000_000)
             guard !finished.isSet else { return }
-            outcome.resolve(.failure(RemoteFileError.timedOut))
+            fired.set()
             onTimeout(); work.cancel()
+            outcome.resolve(.failure(RemoteFileError.timedOut))
         }
         Task {
             let result = await work.result
             finished.set(); timer.cancel()
-            outcome.resolve(result)
+            outcome.resolve(fired.isSet ? .failure(RemoteFileError.timedOut) : result)
         }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { outcome.install($0) }
@@ -561,6 +584,8 @@ private final class LiveSession: @unchecked Sendable {
 /// The session's reusable SFTP channel. Mutable state is actor-isolated to SFTPRemoteFileService.
 private final class SharedSFTPChannel: @unchecked Sendable {
     let client: SFTPClient
+    /// Set from a deadline outside the actor, before the timeout is reported.
+    let closing = LockedFlag()
     var users = 0
     var retired = false
     init(client: SFTPClient) { self.client = client }
@@ -613,20 +638,25 @@ final class SocketControl: @unchecked Sendable {
 private final class SFTPChannelControl: @unchecked Sendable {
     private let lock = NSLock()
     private var client: SFTPClient?
+    private var closing: LockedFlag?
     private var cancelled = false
     var hasClient: Bool { lock.lock(); defer { lock.unlock() }; return client != nil }
-    func install(_ client: SFTPClient) {
+    /// `closing` is set synchronously on close, before the asynchronous channel close begins.
+    func install(_ client: SFTPClient, closing: LockedFlag? = nil) {
         lock.lock()
         let shouldClose = cancelled
         self.client = client
+        self.closing = closing
         lock.unlock()
-        if shouldClose { Task { try? await client.close() } }
+        if shouldClose { closing?.set(); Task { try? await client.close() } }
     }
     func close() {
         lock.lock()
         cancelled = true
         let old = client
+        let closing = closing
         lock.unlock()
+        closing?.set()
         if let old { Task { try? await old.close() } }
     }
 }
