@@ -81,6 +81,23 @@ import Observation
         cancelled.cancel()
         await cancelled.value
         XCTAssertTrue(coordinator.hasActiveSelection, "Cancellation ends the wait without ending the selection")
+        XCTAssertEqual(coordinator.pendingSelectionEndWaits, 0)
+
+        // Many offscreen regions wait at once; deselection releases them all together.
+        let many = (0..<200).map { _ in Task { await coordinator.selectionEnded() } }
+        await Task.yield()
+        XCTAssertEqual(coordinator.pendingSelectionEndWaits, 200)
+        kept.selectedRange = nil
+        XCTAssertEqual(coordinator.pendingSelectionEndWaits, 0, "Deselection releases every waiter in one pass")
+        for wait in many { await wait.value }
+
+        // A replacement selection needs a new wait, which a later deselection ends again.
+        select(kept)
+        let rearmed = Task { await coordinator.selectionEnded() }
+        await Task.yield()
+        XCTAssertEqual(coordinator.pendingSelectionEndWaits, 1)
+        kept.selectedRange = nil
+        await rearmed.value
     }
 
     func testMovingASelectedModelToAnotherCoordinatorReleasesThePreviousOne() {

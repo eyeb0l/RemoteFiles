@@ -192,9 +192,13 @@ public struct Overflow<Content: View>: View {
           // ends. Deselection changes every region's id in one update, and under load SwiftUI dropped
           // this task's restart ("onChange(of: RetentionWork) action tried to update multiple times per
           // frame"), leaving the region mounted although the body had read the cleared flag.
+          // A replacement selection can start before this task resumes, so wait again while one keeps it.
           guard retainedOnlyForSelection, let selectionCoordinator else { return }
-          await selectionCoordinator.selectionEnded()
-          guard !Task.isCancelled, !retainContent, !isNearViewport else { return }
+          while retainedOnlyForSelection {
+            await selectionCoordinator.selectionEnded()
+            if Task.isCancelled { return }
+          }
+          guard !retainContent, !isNearViewport else { return }
           #else
           return
           #endif

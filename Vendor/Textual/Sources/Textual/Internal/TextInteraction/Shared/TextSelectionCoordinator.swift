@@ -48,24 +48,32 @@ import SwiftUI
     func selectionDidChange() {
       let active = models.contains { $0.wrapped?.selectedRange != nil }
       if active != hasActiveSelection { hasActiveSelection = active }
-      if !active { selectionEndWaiters.forEach { $0.resume() } }
+      if !active, !selectionEndWaiters.isEmpty {
+        // Released in bulk, so many waiting regions cost one pass rather than one scan each.
+        let waiters = selectionEndWaiters.values
+        selectionEndWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+      }
     }
 
     // RemoteFiles: an offscreen Overflow region kept mounted for a selection must not depend only on
     // SwiftUI restarting its retention task when the flag changes; see `selectionEnded()`.
-    @ObservationIgnored private var selectionEndWaiters: [SelectionEndWaiter] = []
+    @ObservationIgnored private var selectionEndWaiters: [ObjectIdentifier: SelectionEndWaiter] = [:]
+
+    /// Waits not yet released by a deselection or cancellation.
+    var pendingSelectionEndWaits: Int { selectionEndWaiters.count }
 
     /// Returns once no registered model has a selection, or once the calling task is cancelled.
     @MainActor func selectionEnded() async {
       guard hasActiveSelection else { return }
       let waiter = SelectionEndWaiter()
-      selectionEndWaiters.append(waiter)
+      selectionEndWaiters[ObjectIdentifier(waiter)] = waiter
       await withTaskCancellationHandler {
         await withCheckedContinuation { waiter.install($0) }
       } onCancel: {
         waiter.resume()
       }
-      selectionEndWaiters.removeAll { $0 === waiter }
+      selectionEndWaiters[ObjectIdentifier(waiter)] = nil
     }
 
     private func compact() {
