@@ -28,8 +28,8 @@ fall back to stale cached tests. The source/HEAD/status guard spans both actions
 method inventory, unexpected-skip, duplicate-result and xcresult-count checks are
 unchanged. The OpenSSH fixture still surrounds test execution.
 
-Only the explicitly physical-device Data Protection assertion may skip in the
-hosted core lane. Benchmark operations run once on loopback. Missing methods,
+Only the methods in `SIMULATOR_ALLOWED_SKIPS` may skip in the hosted core lane:
+the physical-device Data Protection assertion and the opt-in Face ID checks. Benchmark operations run once on loopback. Missing methods,
 failures, unexpected skips and xcresult/log count mismatches fail validation.
 
 The first WebKit navigation in the core test host pays WebKit's cold start.
