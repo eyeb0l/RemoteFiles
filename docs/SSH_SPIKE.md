@@ -34,9 +34,10 @@ document reads share one SFTP channel per SSH session instead of paying the chan
 subsystem and version round trips on every operation. A cancelled caller returns immediately
 while its operation drains the in-flight request and closes its handles. Any failed or
 cancelled operation retires the shared channel once its other users finish; the next operation
-opens a fresh one. A timed-out operation retires it at the deadline: the work holds the channel
-until the server confirms its close, and reusing that half-closed channel failed the next request
-with NIO's "Output closed". Image, media and export transfers keep their own child channel, closed on
+opens a fresh one. A timed-out operation's deadline marks the channel closing before the timeout
+is reported, so no later operation reuses it: the work holds the channel until the server confirms
+its close, and reusing that half-closed channel failed the next request with NIO's "Output closed".
+Image, media and export transfers keep their own child channel, closed on
 completion, cancellation or timeout, so bulk reads never queue ahead of browsing requests.
 A listing canonicalizes its path once and skips Citadel's repeated `realpath`, saving one round
 trip per folder. The application only exposes realpath, stat, readdir, and read operations; it

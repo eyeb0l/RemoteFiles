@@ -978,6 +978,32 @@ final class BoundedPreviewReaderTests: XCTestCase {
         let fired = await timedOut.value
         XCTAssertTrue(fired)
     }
+
+    /// Another operation may already be queued when the deadline fires. Whatever `onTimeout` marks
+    /// must be in place before the timeout is reported, and a failure caused by its close must not
+    /// replace the timeout.
+    func testDetachedDeadlineRunsOnTimeoutBeforeReportingTheTimeout() async throws {
+        let marked = NSLock(), closed = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var isMarked = false
+        do {
+            _ = try await SFTPRemoteFileService.detachedDeadline(seconds: 1, onTimeout: {
+                // A slow handler widens the window in which an early report would be observed.
+                Thread.sleep(forTimeInterval: 0.2)
+                marked.withLock { isMarked = true }
+                closed.signal()
+                // Lets the closed request fail before the deadline reports.
+                Thread.sleep(forTimeInterval: 0.2)
+            }) { () async throws -> Int in
+                // Mirrors a request that fails once its channel closes, ignoring task cancellation.
+                await withCheckedContinuation { continuation in
+                    DispatchQueue.global().async { closed.wait(); continuation.resume() }
+                }
+                throw ChannelError.outputClosed
+            }
+            XCTFail("Deadline must fire")
+        } catch RemoteFileError.timedOut { }
+        XCTAssertTrue(marked.withLock { isMarked }, "onTimeout must finish before the caller sees the timeout")
+    }
 }
 
 private actor ProgressFlag {
