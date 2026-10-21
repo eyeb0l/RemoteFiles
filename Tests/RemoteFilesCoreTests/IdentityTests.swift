@@ -30,7 +30,7 @@ final class IdentityTests: XCTestCase {
         let store = IdentityStore(secretStore: secrets)
         let metadata = try await store.generate(name: "Preview identity")
         let key = try await store.unlock(metadata)
-        XCTAssertEqual(metadata.publicKey, String(openSSHPublicKey: NIOSSHPrivateKey(ed25519Key: key).publicKey))
+        XCTAssertEqual(metadata.publicKey, String(openSSHPublicKey: key.nioPrivateKey.publicKey))
         XCTAssertTrue(metadata.publicKey.hasPrefix("ssh-ed25519 "))
         XCTAssertTrue(metadata.fingerprint.hasPrefix("SHA256:"))
         XCTAssertFalse(metadata.requiresPassphrase)
@@ -217,7 +217,8 @@ final class IdentityTests: XCTestCase {
         let reopened = IdentityStore(secretStore: KeychainIdentitySecretStore(service: service))
         let second = try await reopened.unlock(identity)
         let probe = Data("Keychain persistence verification".utf8)
-        XCTAssertTrue(second.publicKey.isValidSignature(try first.signature(for: probe), for: probe))
+        let digest = SHA256.hash(data: probe)
+        XCTAssertTrue(second.nioPrivateKey.publicKey.isValidSignature(try first.nioPrivateKey.sign(digest: digest), for: digest))
 
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -296,14 +297,89 @@ final class IdentityTests: XCTestCase {
         }
     }
 
-    private func withGeneratedKey(passphrase: String, options: [String] = [],
+    func testSystemRSAAndECDSAImportMatrixWithBiometricRoundTrip() async throws {
+        for (type, bits, algorithm) in [("rsa", "2048", "ssh-rsa"), ("rsa", "4096", "ssh-rsa"),
+                                      ("ecdsa", "256", "ecdsa-sha2-nistp256"),
+                                      ("ecdsa", "384", "ecdsa-sha2-nistp384"),
+                                      ("ecdsa", "521", "ecdsa-sha2-nistp521")] {
+            for passphrase in ["", "fixture-only-passphrase"] {
+                try await withGeneratedKey(passphrase: passphrase, type: type, options: ["-b", bits, "-a", "4"]) { text, publicKey, fingerprint in
+                    let secrets = MemorySecrets(), biometrics = FakeBiometricStore()
+                    let store = IdentityStore(secretStore: secrets, biometricStore: biometrics)
+                    if !passphrase.isEmpty {
+                        for (value, expected) in [(nil, IdentityError.missingPassphrase), ("wrong", .decryptionFailed)] {
+                            do { _ = try await store.importKey(name: type, openSSH: text, passphrase: value); XCTFail("Invalid passphrase must fail") }
+                            catch { XCTAssertEqual(error as? IdentityError, expected) }
+                        }
+                    }
+                    let identity = try await store.importKey(name: type, openSSH: text, passphrase: passphrase)
+                    XCTAssertEqual(identity.algorithm, algorithm)
+                    XCTAssertEqual(identity.publicKey, publicKey)
+                    XCTAssertEqual(identity.fingerprint, fingerprint)
+                    let stored = try JSONSerialization.jsonObject(with: secrets.load(reference: identity.keychainReference)) as? [String: Any]
+                    XCTAssertTrue((stored?["bytes"] as? String) == Data(text.utf8).base64EncodedString(), "Original bytes must be retained")
+                    let key = try await store.unlock(identity, passphrase: passphrase)
+                    XCTAssertEqual(String(openSSHPublicKey: key.nioPrivateKey.publicKey), publicKey)
+                    let install = try PublicKeyInstallationRequest(host: "example.test", port: 22, username: "fixture", identity: identity)
+                    XCTAssertEqual(install.publicKey, publicKey)
+                    XCTAssertEqual(install.fingerprint, fingerprint)
+                    if !passphrase.isEmpty {
+                        try await store.enableBiometricUnlock(identity)
+                        await store.clearSession()
+                        let biometricKey = try await store.unlockWithBiometrics(identity, reason: "Test")
+                        XCTAssertEqual(String(openSSHPublicKey: biometricKey.nioPrivateKey.publicKey), publicKey)
+                        try await store.disableBiometricUnlock(identity)
+                    }
+                    await store.clearSession()
+                    if !passphrase.isEmpty {
+                        do { _ = try await store.unlock(identity); XCTFail("Session clearing must require unlock") }
+                        catch { XCTAssertEqual(error as? IdentityError, .missingPassphrase) }
+                    }
+                }
+            }
+        }
+    }
+
+    func testRSARejectsCorruptedPrivateComponentsAndPublicMismatch() async throws {
+        try await withGeneratedKey(passphrase: "", type: "rsa", options: ["-b", "2048"]) { text, _, _ in
+            let body = text.split(separator: "\n").filter { !$0.hasPrefix("-----") }.joined()
+            let data = try XCTUnwrap(Data(base64Encoded: body))
+            func field(_ offset: inout Int) -> Range<Int> {
+                let size = data[offset..<(offset + 4)].reduce(0) { ($0 << 8) | Int($1) }
+                offset += 4; defer { offset += size }; return offset..<(offset + size)
+            }
+            var offset = 15
+            _ = field(&offset); _ = field(&offset); _ = field(&offset); offset += 4
+            let publicRange = field(&offset), secretRange = field(&offset)
+            var privateOffset = secretRange.lowerBound + 8
+            _ = field(&privateOffset) // algorithm
+            var components: [Range<Int>] = []
+            for _ in 0..<6 { components.append(field(&privateOffset)) }
+            for range in components + [publicRange] {
+                var mutated = data
+                mutated[range.upperBound - 1] ^= 2
+                let key = "-----BEGIN OPENSSH PRIVATE KEY-----\n" + mutated.base64EncodedString() + "\n-----END OPENSSH PRIVATE KEY-----\n"
+                XCTAssertThrowsError(try OpenSSHIdentityParser.parse(key, passphrase: nil)) {
+                    XCTAssertEqual($0 as? IdentityError, .malformedKey)
+                }
+            }
+        }
+    }
+
+    func testUndersizedRSAIsRejected() async throws {
+        try await withGeneratedKey(passphrase: "", type: "rsa", options: ["-b", "1024"]) { text, _, _ in
+            XCTAssertThrowsError(try OpenSSHIdentityParser.parse(text, passphrase: nil))
+        }
+    }
+
+    private func withGeneratedKey(passphrase: String, type: String = "ed25519", options: [String] = [],
                                   body: (String, String, String) async throws -> Void) async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true,
                                                attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: folder) }
         let key = folder.appendingPathComponent("id_ed25519")
-        _ = try runSSHKeygen(["-q", "-t", "ed25519", "-N", passphrase, "-C", "", "-f", key.path] + options)
+        _ = try runSSHKeygen(["-q", "-t", type, "-N", passphrase, "-C", "", "-f", key.path] + options)
         let text = try String(contentsOf: key, encoding: .utf8)
         let publicFields = try String(contentsOf: key.appendingPathExtension("pub"), encoding: .utf8).split(separator: " ")
         let publicKey = publicFields.prefix(2).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -392,6 +468,37 @@ final class BiometricUnlockTests: XCTestCase {
         _ = try await store.unlock(plain)
         do { try await store.enableBiometricUnlock(plain); XCTFail("Unencrypted keys have no passphrase to replace") }
         catch IdentityError.missingPassphrase { }
+    }
+
+    func testLegacyEd25519BiometricCopyStillUnlocks() async throws {
+        let biometrics = FakeBiometricStore(), store = IdentityStore(secretStore: MemorySecrets(), biometricStore: biometrics)
+        let identity = try await encryptedIdentity(store)
+        let key = try await store.unlock(identity)
+        let data = try JSONSerialization.data(withJSONObject: ["version": 1, "format": "generatedEd25519", "bytes": key.rawRepresentation.base64EncodedString()])
+        try biometrics.save(data, reference: identity.keychainReference)
+        await store.clearSession()
+        let restored = try await store.unlockWithBiometrics(identity, reason: "Test")
+        XCTAssertEqual(String(openSSHPublicKey: restored.nioPrivateKey.publicKey), identity.publicKey)
+    }
+
+    func testECDSABiometricCopiesKeepTheirAlgorithmAndRejectMismatchedMetadata() async throws {
+        for fixture in ECDSAIdentityFixture.all() {
+            let biometrics = FakeBiometricStore(), store = IdentityStore(secretStore: MemorySecrets(), biometricStore: biometrics)
+            let imported = try await store.importKey(name: fixture.curve, openSSH: fixture.text())
+            let identity = IdentityMetadata(id: imported.id, name: imported.name, algorithm: imported.algorithm,
+                publicKey: imported.publicKey, fingerprint: imported.fingerprint, requiresPassphrase: true, keychainReference: imported.keychainReference)
+            _ = try await store.unlock(identity)
+            try await store.enableBiometricUnlock(identity)
+            await store.clearSession()
+            let restored = try await store.unlockWithBiometrics(identity, reason: "Test")
+            XCTAssertEqual(String(openSSHPublicKey: restored.nioPrivateKey.publicKey), fixture.publicKey)
+            await store.clearSession()
+            let wrong = IdentityMetadata(id: identity.id, name: identity.name, algorithm: "ssh-ed25519", publicKey: identity.publicKey,
+                fingerprint: identity.fingerprint, requiresPassphrase: true, keychainReference: identity.keychainReference)
+            do { _ = try await store.unlockWithBiometrics(wrong, reason: "Test"); XCTFail("A copy cannot be reinterpreted as another algorithm") }
+            catch { XCTAssertEqual(error as? IdentityError, .biometricsUnavailable) }
+            XCTAssertFalse(biometrics.contains(reference: identity.keychainReference))
+        }
     }
 
     func testFaceIDUnlockReturnsTheSameKeyEachForegroundSession() async throws {

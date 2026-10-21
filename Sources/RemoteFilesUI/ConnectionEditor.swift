@@ -31,7 +31,7 @@ struct ConnectionEditor: View {
             } header: { Text("Server") } footer: { Text("Connect to a Unix system over SFTP. Browsing and previews are read only.") }
             Section("SSH identity") {
                 if model.metadata.identities.isEmpty {
-                    Text("Generate a dedicated key or import an OpenSSH Ed25519 private key.").foregroundStyle(.secondary)
+                    Text("Generate a dedicated key or import an OpenSSH Ed25519, RSA or ECDSA private key.").foregroundStyle(.secondary)
                 } else {
                     Picker("Choose Existing Key", selection: $identityID) {
                         Text("Choose a key").tag(nil as UUID?)

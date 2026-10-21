@@ -39,6 +39,16 @@ public final class SSHAuthenticationMethod: NIOSSHClientUserAuthenticationDelega
         self.implementations = allImplementations
     }
     
+    /// Offers SHA-512 first, then SHA-256. Never offers SHA-1 for this identity.
+    public static func rsaSHA2(username: String, privateKey: RSASHA2PrivateKey) -> SSHAuthenticationMethod {
+        SSHAuthenticationMethod(username: username, keys: [NIOSSHPrivateKey(custom: privateKey), NIOSSHPrivateKey(custom: privateKey.usingSHA256)])
+    }
+
+    private init(username: String, keys: [NIOSSHPrivateKey]) {
+        allImplementations = keys.map { .user(username, offer: .privateKey(.init(privateKey: $0))) }
+        implementations = allImplementations
+    }
+
     /// Creates a password based authentication method.
     /// - Parameters:
     ///  - username: The username to authenticate with.

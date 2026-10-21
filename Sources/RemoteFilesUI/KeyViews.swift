@@ -17,7 +17,7 @@ struct KeyManagerView: View {
                 Button { creation = .generate } label: { Label("Generate Key", systemImage: "key.fill") }.disabled(model.demo)
                 Button { creation = .importKey } label: { Label("Import Key", systemImage: "square.and.arrow.down") }.disabled(model.demo)
             } footer: {
-                Text(model.demo ? "Leave Demo to create or import an SSH identity." : "Create a dedicated identity for RemoteFiles, or import an existing OpenSSH Ed25519 private key.")
+                Text(model.demo ? "Leave Demo to create or import an SSH identity." : "Create a dedicated identity for RemoteFiles, or import an existing OpenSSH Ed25519, RSA or ECDSA private key.")
             }
             Section("Saved identities") {
                 if model.metadata.identities.isEmpty {
@@ -29,7 +29,7 @@ struct KeyManagerView: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 5) {
                             Text(identity.name).font(.headline)
-                            Text(identity.requiresPassphrase ? "Ed25519 · Passphrase protected" : "Ed25519 · Device Keychain")
+                            Text("\(identity.algorithmName) · \(identity.requiresPassphrase ? "Passphrase protected" : "Device Keychain")")
                                 .font(.subheadline).foregroundStyle(.secondary)
                         }.padding(.vertical, 3)
                     }
@@ -66,7 +66,7 @@ private struct IdentityDetailsView: View {
     var body: some View {
         Form {
             Section {
-                LabeledContent("Algorithm", value: "Ed25519")
+                LabeledContent("Algorithm", value: identity.algorithmName)
                 FingerprintView(value: identity.fingerprint)
                 PublicKeyText(value: identity.publicKey)
                 Button {
@@ -161,7 +161,9 @@ private struct KeyCreationView: View {
             if mode == .importKey {
                 Section {
                     Button { showImporter = true } label: { Label("Choose Key File", systemImage: "folder") }
-                    Button(action: pasteKey) { Label("Paste Private Key", systemImage: "doc.on.clipboard") }
+                    PasteButton(payloadType: String.self) { values in
+                        if let value = values.first { pasteKey(value) }
+                    }.accessibilityLabel("Paste Private Key")
                     if let source = selectedSource {
                         Label(source, systemImage: "checkmark.circle").foregroundStyle(.secondary)
                             .lineLimit(2)
@@ -203,9 +205,9 @@ private struct KeyCreationView: View {
         .onChange(of: scenePhase) { _, phase in if phase == .background { cancel() } }
     }
 
-    private func pasteKey() {
-        // Clipboard access happens only after this explicit user action.
-        guard let value = UIPasteboard.general.string, !value.isEmpty else {
+    private func pasteKey(_ value: String) {
+        // The native paste control supplies text only after an explicit user action.
+        guard !value.isEmpty else {
             message = "The clipboard does not contain text."; return
         }
         guard value.utf8.count <= 256 * 1024 else {

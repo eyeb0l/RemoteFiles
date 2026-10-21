@@ -55,3 +55,21 @@ those still in flight, so draining them costs no extra round trip; its status mu
 before EOF, task cancellation, or a reply other than names or EOF (upstream silently ended the listing on
 one) stops new requests, drains those in flight, closes the handle and fails the listing. RemoteFiles
 passes 8.
+
+## RSA and ECDSA identity imports
+
+`ModernIdentityKeys.swift` adds import-only OpenSSH ECDSA P-256/P-384/P-521 parsers
+and a modern RSA signer backed by Swift Crypto `_CryptoExtras`. RSA imports enforce
+2048–8192-bit moduli, bounded canonical positive mpints, CRT coefficient consistency
+and the crypto library's private-key consistency checks. ECDSA imports validate the
+curve, private scalar and derived public point. The app compares the derived public
+key with the outer container for every algorithm. `OpenSSHKey.swift` rejects trailing
+public data and validates every padding byte, accepting a complete padding block.
+
+`SSHAuthenticationMethod.rsaSHA2` offers SHA-512 then SHA-256, never SHA-1.
+Citadel's pre-existing legacy RSA implementation is not used for identity signing.
+Its manifest now uses the local, pinned `../swift-nio-ssh` source because RSA SHA-2
+needs distinct authentication and public-key-format identifiers (RFC 8332).
+Generated Ed25519 identities, cipher/KDF limits and host-key defaults are unchanged.
+Runtime `ssh-keygen` import/fingerprint tests and independent OpenSSH authentication
+cover every supported curve, encrypted/unencrypted originals and RSA SHA-2 fallback.

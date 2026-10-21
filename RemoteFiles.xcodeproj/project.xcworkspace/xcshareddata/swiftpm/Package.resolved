@@ -74,14 +74,6 @@
       }
     },
     {
-      "identity": "swift-nio-ssh",
-      "kind": "remoteSourceControl",
-      "location": "https://github.com/Wellz26/swift-nio-ssh.git",
-      "state": {
-        "revision": "d88989f3d3bb1dfb2a38ce4af598afbf7fc3095c"
-      }
-    },
-    {
       "identity": "swift-system",
       "kind": "remoteSourceControl",
       "location": "https://github.com/apple/swift-system.git",

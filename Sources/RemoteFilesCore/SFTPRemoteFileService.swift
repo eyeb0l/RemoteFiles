@@ -294,7 +294,7 @@ public actor SFTPRemoteFileService: RemoteFileService {
                 try Task.checkCancellation()
                 var settings = SSHClientSettings(
                     host: profile.host, port: profile.port,
-                    authenticationMethod: { .ed25519(username: profile.username, privateKey: privateKey) },
+                    authenticationMethod: { privateKey.authentication(username: profile.username) },
                     hostKeyValidator: .custom(TrustValidator(store: trustStore,
                                                             endpoint: HostEndpoint(host: profile.host, port: profile.port)))
                 )

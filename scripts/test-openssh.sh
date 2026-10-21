@@ -32,6 +32,16 @@ ssh-keygen -q -t ed25519 -N '' -f "$fixture/plain"
 ssh-keygen -q -t ed25519 -N 'fixture-passphrase' -f "$fixture/encrypted"
 ssh-keygen -q -t ed25519 -a 32 -N 'fixture-passphrase' -f "$fixture/unsupported"
 cat "$fixture/plain.pub" "$fixture/encrypted.pub" > "$fixture/authorized_keys"
+# Runtime-only identities exercise every imported algorithm without checking private fixtures in.
+for spec in rsa:2048 ecdsa:256 ecdsa:384 ecdsa:521; do
+  kind="${spec%:*}"; bits="${spec#*:}"
+  for protection in plain encrypted; do
+    passphrase=''; if [ "$protection" = encrypted ]; then passphrase='fixture-passphrase'; fi
+    name="$fixture/$kind-$bits-$protection"
+    ssh-keygen -q -t "$kind" -b "$bits" -a 4 -N "$passphrase" -f "$name"
+    cat "$name.pub" >> "$fixture/authorized_keys"
+  done
+done
 mkdir -p "$fixture/files/empty" "$fixture/files/thousand" "$fixture/files/docs"
 printf '# Fixture report\n\nRead over independent OpenSSH.\n' > "$fixture/files/report.md"
 awk 'BEGIN { print "# Representative agent report\n"; for (i=0;i<1600;i++) print "- Measurement " i ": the remote preview reads Markdown, keeps useful cached content, and refreshes on demand." }' > "$fixture/files/large-report.md"
@@ -60,6 +70,7 @@ StrictModes no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
+PubkeyAcceptedAlgorithms ${REMOTEFILES_TEST_PUBKEY_ALGORITHMS:-ssh-ed25519,rsa-sha2-512,rsa-sha2-256,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521}
 UsePAM no
 PermitRootLogin no
 AllowUsers $(id -un)

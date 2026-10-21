@@ -6,7 +6,7 @@ Connect to an existing SSH/SFTP server, verify its identity, and understand how 
 
 ## Connect a Unix system
 
-Do these setup steps yourself on the server you intend to access. RemoteFiles connects over SSH/SFTP using an Ed25519 identity. The app does not enable services or expose ports. Browsing is read only. The optional public-key installer writes only the selected account’s `~/.ssh/authorized_keys` after you confirm the account and public key; see [public-key installation](PUBLIC_KEY_INSTALLATION.md).
+Do these setup steps yourself on the server you intend to access. RemoteFiles connects over SSH/SFTP using an Ed25519, RSA or ECDSA identity. The app does not enable services or expose ports. Browsing is read only. The optional public-key installer writes only the selected account’s `~/.ssh/authorized_keys` after you confirm the account and public key; see [public-key installation](PUBLIC_KEY_INSTALLATION.md).
 
 1. Enable SSH with an SFTP subsystem for the intended account using the system’s service configuration. On **macOS**, use **System Settings → General → Sharing → Remote Login**. On **Linux or another Unix system**, enable its OpenSSH server and SFTP subsystem according to that system’s documentation. Keep the server awake and reachable. The account must be able to read the chosen project directory.
 2. In RemoteFiles, choose **Add Connection → Generate or Import Key**. Prefer a dedicated generated Ed25519 identity; copy/share its **public** key. Append that public key to the intended account’s `~/.ssh/authorized_keys` on the server (directory permission 700; file permission 600). Never copy a private key into that file. If the server already supports SSH password authentication, **Settings → SSH Keys → select identity → Install Public Key on Server** can append the public key after host verification and explicit confirmation.
@@ -19,7 +19,7 @@ The first connection on a local network may require iOS Local Network permission
 
 ## Keys and trust
 
-Generated Ed25519 keys and verified OpenSSH Ed25519 import formats are documented in [KEY_SUPPORT.md](KEY_SUPPORT.md). Imports accept extensionless files and explicit paste. Encrypted originals remain encrypted in Keychain; an unlocked key is retained only for the foreground session. Passphrases are never persisted. Optional Face ID unlock keeps an unlocked copy readable only with the currently enrolled Face ID; see [Face ID unlock](KEY_SUPPORT.md#face-id-unlock). Keychain uses `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, with synchronisation disabled. This does not imply hardware-backed Ed25519 protection.
+Generated Ed25519 keys and verified OpenSSH Ed25519, RSA and ECDSA import formats are documented in [KEY_SUPPORT.md](KEY_SUPPORT.md). Imports accept extensionless files and explicit paste. Encrypted originals remain encrypted in Keychain; an unlocked key is retained only for the foreground session. Passphrases are never persisted. Optional Face ID unlock keeps an unlocked copy readable only with the currently enrolled Face ID; see [Face ID unlock](KEY_SUPPORT.md#face-id-unlock). Keychain uses `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, with synchronisation disabled. This does not imply hardware-backed Ed25519 protection.
 
 Unknown hosts require explicit trust. Changed host keys block before account authentication. The reset flow removes trust and requires another verification; it does not silently accept the new key. A key used by a saved connection cannot be deleted.
 

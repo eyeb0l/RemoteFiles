@@ -9,6 +9,26 @@ import NIOPosix
 /// Real OpenSSH checks are opt-in; the isolated launcher supplies temporary paths.
 /// A skip without that fixture must never be reported as an authentication pass.
 final class SFTPIntegrationTests: XCTestCase {
+    func testRSAAndECDSAAuthenticateAndReadUsingOpenSSH() async throws {
+        let fixture = try Fixture()
+        for spec in ["rsa-2048", "ecdsa-256", "ecdsa-384", "ecdsa-521"] {
+            for protection in ["plain", "encrypted"] {
+                let stores = try Stores(fixture: fixture)
+                let text = try String(contentsOfFile: fixture.directory + "/" + spec + "-" + protection, encoding: .utf8)
+                let passphrase = protection == "encrypted" ? "fixture-passphrase" : nil
+                let identity = try await stores.identity.importKey(name: spec, openSSH: text, passphrase: passphrase)
+                _ = try await stores.identity.unlock(identity, passphrase: passphrase)
+                let profile = try await stores.profile(identity: identity)
+                try await stores.trustFixtureHost()
+                let service = stores.service()
+                addTeardownBlock { await service.disconnect() }
+                let bytes = try await service.readFile(profile: profile, path: fixture.files + "/report.md", limit: 4096)
+                XCTAssertTrue(String(decoding: bytes, as: UTF8.self).contains("Fixture report"), spec + " " + protection)
+                await service.disconnect()
+            }
+        }
+    }
+
     func testPasswordInstallerRetainsHostVerificationAndRejectsDisabledPasswordWithoutWrites() async throws {
         let fixture = try Fixture(), stores = try Stores(fixture: Fixture())
         let key = try await stores.identity.generate(name: "Public-only installer fixture")

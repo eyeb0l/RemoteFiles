@@ -287,6 +287,9 @@ enum OpenSSH {
     enum KeyType: String {
         case sshRSA = "ssh-rsa"
         case sshED25519 = "ssh-ed25519"
+        case ecdsaP256 = "ecdsa-sha2-nistp256"
+        case ecdsaP384 = "ecdsa-sha2-nistp384"
+        case ecdsaP521 = "ecdsa-sha2-nistp521"
     }
     
     struct PrivateKey<SSHKey: OpenSSHPrivateKey> {
@@ -354,6 +357,7 @@ extension OpenSSH.PrivateKey {
         }
 
         self.publicKey = try SSHKey.PublicKey.read(consuming: &publicKeyBuffer)
+        guard publicKeyBuffer.readableBytes == 0 else { throw InvalidOpenSSHKey.invalidLayout }
         
         guard var privateKeyBuffer = buffer.readSSHBuffer() else {
             throw InvalidOpenSSHKey.missingPrivateKeyBuffer
@@ -392,7 +396,7 @@ extension OpenSSH.PrivateKey {
         let paddingLength = privateKeyBuffer.readableBytes
         
         guard
-            paddingLength < cipher.blockSize,
+            paddingLength <= cipher.blockSize,
             let padding = privateKeyBuffer.readBytes(length: paddingLength)
         else {
             throw InvalidOpenSSHKey.invalidPadding
@@ -402,7 +406,7 @@ extension OpenSSH.PrivateKey {
             return
         }
         
-        for i in 1..<paddingLength {
+        for i in 1...paddingLength {
             guard padding[i - 1] == UInt8(i) else {
                 throw InvalidOpenSSHKey.invalidPadding
             }
