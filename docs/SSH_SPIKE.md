@@ -34,7 +34,9 @@ document reads share one SFTP channel per SSH session instead of paying the chan
 subsystem and version round trips on every operation. A cancelled caller returns immediately
 while its operation drains the in-flight request and closes its handles. Any failed or
 cancelled operation retires the shared channel once its other users finish; the next operation
-opens a fresh one. Image, media and export transfers keep their own child channel, closed on
+opens a fresh one. A timed-out operation retires it at the deadline: the work holds the channel
+until the server confirms its close, and reusing that half-closed channel failed the next request
+with NIO's "Output closed". Image, media and export transfers keep their own child channel, closed on
 completion, cancellation or timeout, so bulk reads never queue ahead of browsing requests.
 A listing canonicalizes its path once and skips Citadel's repeated `realpath`, saving one round
 trip per folder. The application only exposes realpath, stat, readdir, and read operations; it
@@ -73,7 +75,9 @@ adapter sets 2 MiB. With a 40 ms simulated RTT a 3 MiB download fell from about 
 (`scripts/benchmark-latency.sh`). An explicit 15-second
 operation deadline bounds connection/list/read operations; the dependency also has a
 10-second login timeout. Requests reuse an existing SSH connection without automatic
-reconnect loops. A deliberate next request reconnects if the connection has ended.
+reconnect loops. A deliberate next request reconnects if the connection has ended. An operation
+interrupted by the connection or its channel closing reports "The SSH connection ended. Refresh to
+reconnect." rather than NIO's "Already closed" or "Output closed".
 
 ## Independent test environment and results
 
@@ -109,6 +113,11 @@ Verified against this OpenSSH server:
 - A separate silent TCP fixture proved cancellation of an in-flight handshake returned
   within two seconds, and a configured one-second deadline within 2.5 seconds. The combined
   cancellation/deadline test completed in 1.198 seconds on the final simulator run.
+- An in-process relay in front of the OpenSSH fixture holds the server's replies, then delivers
+  them or drops the connection. A listing that times out, or a cancelled one whose deadline
+  passes, leaves the next listing on a fresh SFTP channel over the same connection; a dropped
+  connection fails the in-flight listing at once as an ended connection, and the next listing
+  reconnects.
 - The receive-time helper used by production rejected controlled growth from a 4-byte initial
   stat to 9 received bytes with an 8-byte limit. A separate case proved short reads continue and
   an exact-limit read probes for EOF. These are deterministic byte-receiving tests, not a

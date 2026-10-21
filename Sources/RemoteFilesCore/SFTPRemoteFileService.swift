@@ -348,6 +348,9 @@ public actor SFTPRemoteFileService: RemoteFileService {
     /// version round trips on every tap. A cancelled caller returns at once while its operation
     /// drains the in-flight request. Any failure retires the channel once its other users finish,
     /// so an interrupted operation cannot leave a handle open on a reused channel.
+    ///
+    /// A deadline retires the channel at once: the timed-out work holds it until the server confirms
+    /// the close or TCP drops, and the half-closed channel would fail the next operation.
     private func perform<T: Sendable>(session: LiveSession,
                                      operation: @escaping @Sendable (SFTPClient) async throws -> T) async throws -> T {
         let channel = SFTPChannelControl()
@@ -355,6 +358,8 @@ public actor SFTPRemoteFileService: RemoteFileService {
             return try await Self.detachedDeadline(seconds: timeoutSeconds, onTimeout: {
                 channel.close()
                 if !channel.hasClient { session.control.close() }
+                // A cancelled caller has already returned, so the deadline retires the channel itself.
+                Task { await self.retire(channel, from: session) }
             }) {
                 let shared = try await self.acquireSFTP(for: session)
                 channel.install(shared.client)
@@ -369,6 +374,8 @@ public actor SFTPRemoteFileService: RemoteFileService {
                 }
             }
         } catch {
+            // Retired before the caller returns, so its next operation cannot race the deadline's task.
+            if case RemoteFileError.timedOut = error { retire(channel, from: session) }
             throw Self.mapped(error)
         }
     }
@@ -440,6 +447,13 @@ public actor SFTPRemoteFileService: RemoteFileService {
         if shared.users == 0 { shared.close() }
     }
 
+    /// Retires the shared channel a timed-out operation was using. Its user count stays, so the
+    /// channel closes once that operation drains; a replacement channel is left alone.
+    private func retire(_ channel: SFTPChannelControl, from session: LiveSession) {
+        guard let shared = session.sftp, channel.uses(shared.client) else { return }
+        retire(shared, from: session)
+    }
+
     private nonisolated static func sftpLogger() -> Logger {
         var logger = Logger(label: "RemoteFiles.SFTP")
         logger.logLevel = .error
@@ -456,11 +470,26 @@ public actor SFTPRemoteFileService: RemoteFileService {
             case .noSuchFile:
                 return RemoteFileError.notFound
             case .noConnection, .connectionLost:
-                return RemoteFileError.unavailable("The SSH connection ended. Refresh to reconnect.")
+                return connectionEnded
             default: break
             }
         }
-        return error
+        return endsConnection(error) ? connectionEnded : error
+    }
+
+    private static let connectionEnded = RemoteFileError.unavailable("The SSH connection ended. Refresh to reconnect.")
+
+    /// Errors NIO, NIOSSH and Citadel raise once the SSH connection or its SFTP channel has closed.
+    private nonisolated static func endsConnection(_ error: Error) -> Bool {
+        switch error {
+        case ChannelError.alreadyClosed, ChannelError.outputClosed, ChannelError.ioOnClosedChannel, ChannelError.eof,
+             SFTPError.connectionClosed:
+            return true
+        case let error as NIOSSHError:
+            return error.type == .tcpShutdown
+        default:
+            return false
+        }
     }
 
     private nonisolated static func validated(_ path: String) throws -> String {
@@ -615,6 +644,7 @@ private final class SFTPChannelControl: @unchecked Sendable {
     private var client: SFTPClient?
     private var cancelled = false
     var hasClient: Bool { lock.lock(); defer { lock.unlock() }; return client != nil }
+    func uses(_ client: SFTPClient) -> Bool { lock.lock(); defer { lock.unlock() }; return self.client === client }
     func install(_ client: SFTPClient) {
         lock.lock()
         let shouldClose = cancelled
