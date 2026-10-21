@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import LocalAuthentication
 import Crypto
 import Citadel
 import NIOSSH
@@ -25,6 +26,7 @@ public struct IdentityMetadata: Identifiable, Codable, Hashable, Sendable {
 public enum IdentityError: LocalizedError, Equatable, Sendable {
     case publicKeyOnly, malformedKey, unsupportedFormat(String), missingPassphrase, decryptionFailed
     case missingSecret, keychain(Int32), identityInUse, sessionEnded
+    case biometricsUnavailable, biometricsDeclined
 
     public var errorDescription: String? {
         switch self {
@@ -37,6 +39,8 @@ public enum IdentityError: LocalizedError, Equatable, Sendable {
         case .keychain(let status): return "The device could not access the private key in Keychain (\(status)). Unlock the device and try again."
         case .identityInUse: return "A saved connection still uses this identity. Choose another identity for that connection before deleting it."
         case .sessionEnded: return "The connection session ended. Unlock the identity again to reconnect."
+        case .biometricsUnavailable: return "Face ID unlock is no longer available for this key, for example because Face ID changed. Enter its passphrase; you can turn Face ID unlock on again."
+        case .biometricsDeclined: return "Face ID didn't unlock the key. Enter its passphrase instead."
         }
     }
 }
@@ -69,6 +73,7 @@ public struct KeychainIdentitySecretStore: IdentitySecretStore {
     }
 
     public func load(reference: String) throws -> Data {
+        try Task.checkCancellation()
         var attributes = query(reference: reference)
         attributes[kSecReturnData as String] = true
         attributes[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -77,6 +82,96 @@ public struct KeychainIdentitySecretStore: IdentitySecretStore {
         guard status != errSecItemNotFound else { throw IdentityError.missingSecret }
         guard status == errSecSuccess, let data = result as? Data else { throw IdentityError.keychain(status) }
         return data
+    }
+
+    public func delete(reference: String) throws {
+        let status = SecItemDelete(query(reference: reference) as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw IdentityError.keychain(status) }
+    }
+}
+
+/// Keychain items readable only after the currently enrolled Face ID or Touch ID. Injectable for tests.
+public protocol BiometricKeyStore: Sendable {
+    /// Replaces any existing item. Never prompts.
+    func save(_ data: Data, reference: String) throws
+    /// Asks for Face ID or Touch ID with `reason`, then reads the item. Cancelling the task dismisses
+    /// the prompt and throws `CancellationError` without reading.
+    func load(reference: String, reason: String) async throws -> Data
+    /// Whether an item exists, without prompting.
+    func contains(reference: String) -> Bool
+    func delete(reference: String) throws
+}
+
+/// Unlocked keys for Face ID unlock: this device only, never synchronised, readable only while a
+/// passcode is set and only after biometrics enrolled when the item was saved. Changing Face ID
+/// enrolment makes the item unreadable; the passphrase then unlocks the original as before.
+public struct KeychainBiometricKeyStore: BiometricKeyStore {
+    private let service: String
+    public init(service: String = "app.remotefiles.ssh-identities.biometric") { self.service = service }
+
+    private func query(reference: String) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: service,
+         kSecAttrAccount as String: reference,
+         kSecAttrSynchronizable as String: false,
+         kSecUseDataProtectionKeychain as String: true]
+    }
+
+    public func save(_ data: Data, reference: String) throws {
+        try delete(reference: reference)
+        var error: Unmanaged<CFError>?
+        guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
+                                                           .biometryCurrentSet, &error) else {
+            throw IdentityError.biometricsUnavailable
+        }
+        var attributes = query(reference: reference)
+        attributes[kSecValueData as String] = data
+        attributes[kSecAttrAccessControl as String] = access
+        let status = SecItemAdd(attributes as CFDictionary, nil)
+        guard status == errSecSuccess else { throw IdentityError.keychain(status) }
+    }
+
+    public func load(reference: String, reason: String) async throws -> Data {
+        // Authenticate first so cancellation and lockout are reported before Keychain is touched.
+        let context = LAContext()
+        context.localizedFallbackTitle = "Enter Passphrase"
+        do {
+            // Cancelling the task does not stop the prompt; invalidating its context does.
+            _ = try await withTaskCancellationHandler {
+                try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason)
+            } onCancel: { context.invalidate() }
+        } catch let error as LAError {
+            try Task.checkCancellation()
+            switch error.code {
+            case .biometryNotAvailable, .biometryNotEnrolled: throw IdentityError.biometricsUnavailable
+            default: throw IdentityError.biometricsDeclined
+            }
+        }
+        var attributes = query(reference: reference)
+        attributes[kSecReturnData as String] = true
+        attributes[kSecMatchLimit as String] = kSecMatchLimitOne
+        attributes[kSecUseAuthenticationContext as String] = context
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(attributes as CFDictionary, &result)
+        switch status {
+        case errSecSuccess:
+            guard let data = result as? Data else { throw IdentityError.biometricsUnavailable }
+            return data
+        case errSecUserCanceled: throw IdentityError.biometricsDeclined
+        // A missing item, or one invalidated by a Face ID enrolment change.
+        case errSecItemNotFound, errSecAuthFailed: throw IdentityError.biometricsUnavailable
+        default: throw IdentityError.keychain(status)
+        }
+    }
+
+    public func contains(reference: String) -> Bool {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        var attributes = query(reference: reference)
+        attributes[kSecMatchLimit as String] = kSecMatchLimitOne
+        attributes[kSecUseAuthenticationContext as String] = context
+        let status = SecItemCopyMatching(attributes as CFDictionary, nil)
+        return status == errSecSuccess || status == errSecInteractionNotAllowed
     }
 
     public func delete(reference: String) throws {
@@ -94,11 +189,23 @@ public actor IdentityStore {
     }
 
     private let secretStore: any IdentitySecretStore
+    /// Nil where biometric Keychain items are unavailable, such as the macOS test host.
+    private let biometricStore: (any BiometricKeyStore)?
     private var unlocked: [UUID: Curve25519.Signing.PrivateKey] = [:]
     private var sessionGeneration: UInt64 = 0
 
-    public init(secretStore: any IdentitySecretStore = KeychainIdentitySecretStore()) {
+    public init(secretStore: any IdentitySecretStore = KeychainIdentitySecretStore(),
+                biometricStore: (any BiometricKeyStore)? = IdentityStore.defaultBiometricStore) {
         self.secretStore = secretStore
+        self.biometricStore = biometricStore
+    }
+
+    public static var defaultBiometricStore: (any BiometricKeyStore)? {
+        #if os(iOS)
+        KeychainBiometricKeyStore()
+        #else
+        nil
+        #endif
     }
 
     public func generate(name: String) throws -> IdentityMetadata {
@@ -151,8 +258,50 @@ public actor IdentityStore {
 
     public func delete(_ metadata: IdentityMetadata, referencedBy connectionIdentityIDs: Set<UUID>) throws {
         guard !connectionIdentityIDs.contains(metadata.id) else { throw IdentityError.identityInUse }
+        // The unlocked copy goes first: a failure must not leave it behind after its identity is gone.
+        try biometricStore?.delete(reference: metadata.keychainReference)
         try secretStore.delete(reference: metadata.keychainReference)
         unlocked.removeValue(forKey: metadata.id)
+    }
+
+    /// Whether this identity can be unlocked with Face ID or Touch ID. Never prompts.
+    public func hasBiometricUnlock(_ metadata: IdentityMetadata) -> Bool {
+        biometricStore?.contains(reference: metadata.keychainReference) ?? false
+    }
+
+    /// Keeps this encrypted identity's unlocked key behind the currently enrolled biometrics. It must
+    /// already be unlocked with its passphrase in this session; the passphrase itself is never stored.
+    public func enableBiometricUnlock(_ metadata: IdentityMetadata) throws {
+        guard metadata.requiresPassphrase, let key = unlocked[metadata.id] else { throw IdentityError.missingPassphrase }
+        guard let biometricStore else { throw IdentityError.biometricsUnavailable }
+        let secret = StoredSecret(version: 1, format: .generatedEd25519, bytes: key.rawRepresentation)
+        try biometricStore.save(JSONEncoder().encode(secret), reference: metadata.keychainReference)
+    }
+
+    public func disableBiometricUnlock(_ metadata: IdentityMetadata) throws {
+        try biometricStore?.delete(reference: metadata.keychainReference)
+    }
+
+    /// Unlocks with Face ID or Touch ID for this foreground session. Throws `biometricsUnavailable`
+    /// when there is no usable copy, and `biometricsDeclined` when authentication is cancelled or fails;
+    /// either way the passphrase still unlocks the original.
+    public func unlockWithBiometrics(_ metadata: IdentityMetadata, reason: String) async throws -> Curve25519.Signing.PrivateKey {
+        if let key = unlocked[metadata.id] { return key }
+        guard let biometricStore else { throw IdentityError.biometricsUnavailable }
+        let generation = sessionGeneration
+        let data = try await biometricStore.load(reference: metadata.keychainReference, reason: reason)
+        try Task.checkCancellation()
+        guard generation == sessionGeneration else { throw IdentityError.sessionEnded }
+        guard let secret = try? JSONDecoder().decode(StoredSecret.self, from: data), secret.version == 1,
+              secret.format == .generatedEd25519,
+              let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: secret.bytes),
+              String(openSSHPublicKey: NIOSSHPrivateKey(ed25519Key: key).publicKey) == metadata.publicKey else {
+            // A copy that does not match this identity is never used.
+            try? biometricStore.delete(reference: metadata.keychainReference)
+            throw IdentityError.biometricsUnavailable
+        }
+        unlocked[metadata.id] = key
+        return key
     }
 
     /// Call on disconnect and backgrounding. Passphrases themselves are never retained by this store.

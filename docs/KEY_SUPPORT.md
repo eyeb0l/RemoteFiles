@@ -25,6 +25,35 @@ Only non-secret identity metadata (ID, name, algorithm, canonical public key, fi
 
 An encrypted import retains its original encrypted representation in Keychain. Its passphrase is used for validation/unlock but is never retained by `IdentityStore` or persisted. An unlocked cryptographic key may be cached during the active foreground connection session. Disconnect/background clears that cache and invalidates in-flight unlocks. Swift memory management cannot promise forensic zeroisation of every temporary string or framework copy. Import validation itself does not seed the session cache. The UI must clear its passphrase field after completion or dismissal, and the transport must close its authentication/session references on disconnect.
 
+## Face ID unlock
+
+Face ID unlock is opt-in per encrypted identity. After unlocking with the passphrase, choose **Use Face ID next time** (Touch ID on devices that have it):
+
+- **What is stored:** a second Keychain item holds the unlocked Ed25519 key, never the passphrase. The encrypted original is unchanged.
+- **Where:** a separate service, with `kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly` and `kSecAttrSynchronizable = false`. It never leaves the device, and it is unreadable when the device has no passcode.
+- **Who can read it:** access control `.biometryCurrentSet`, so only the faces or fingers enrolled when it was saved. Adding or removing one makes the item unreadable, and the device passcode cannot read it.
+
+On the next connection the unlock sheet asks for Face ID automatically.
+
+| Turning it on | Next connection | SSH Keys |
+| --- | --- | --- |
+| <img src="screenshots/face-id/unlock-sheet.jpg" width="240" alt="Unlock sheet with Use Face ID next time switched on"> | <img src="screenshots/face-id/face-id-prompt.jpg" width="240" alt="Unlock sheet asking for Face ID automatically"> | <img src="screenshots/face-id/key-details.jpg" width="240" alt="Key details showing Face ID Unlock On with Turn Off"> |
+
+*Simulator screenshots with a throwaway test key and simulated Face ID.*
+
+- **Cancelled or failed Face ID:** the passphrase field stays available.
+- **Unusable copy** (enrolment changed or item missing): the sheet says so, and the passphrase unlocks the original; Face ID can be turned on again from the same sheet.
+- **Copy that doesn't match the identity's public key:** never used, and deleted.
+
+A Face ID unlock fills the same foreground-session cache as a passphrase unlock, so backgrounding still clears it, and an unlock interrupted by backgrounding caches nothing. **SSH Keys → identity → Turn Off Face ID Unlock** deletes the copy. Deleting an identity deletes its Face ID copy first and keeps the identity if that fails.
+
+At rest this copy is protected by Face ID rather than by the passphrase. Generated identities have no passphrase, so their key is protected by the device unlock alone.
+
+Tests use a fake biometric store for the unlock rules, and the hosted iOS suite stores, detects without prompting, and deletes a real item. Three opt-in checks need extra setup:
+- **`testSimulatedFaceIDReadsTheStoredKey`:** reads a stored item through a real Face ID prompt. The Simulator needs Face ID enrolled, and the host sends `com.apple.BiometricKit_Sim.pearl.match` via `xcrun simctl spawn … notifyutil -p`.
+- **`testCancellingFaceIDDismissesThePromptWithoutReading`:** same setup without sending a match; cancelling must close the prompt without reading the item.
+- **`testSimulatedEnrolmentChangeInvalidatesTheStoredKey`:** needs a physical device. The Simulator's biometric domain state does not change when enrolment is toggled, so it cannot show the invalidation.
+
 ## Public keys and host trust
 
 Public keys use NIOSSH's canonical OpenSSH serialisation, including the SSH algorithm and length-prefixed wire representation. SHA-256 fingerprints hash that full SSH public-key wire representation; they do not hash a raw Curve25519 public byte array.

@@ -23,8 +23,14 @@ import subprocess
 import sys
 
 
-# Simulator filesystems cannot establish physical-device Data Protection classes.
-SIMULATOR_ALLOWED_SKIPS = {"IdentityTests/testTrustStoreWritesUseCompleteFileProtection"}
+# Simulator filesystems cannot establish physical-device Data Protection classes. The Face ID
+# checks are opt-in: one needs a host-sent biometric match, the other a physical device.
+SIMULATOR_ALLOWED_SKIPS = {
+    "IdentityTests/testTrustStoreWritesUseCompleteFileProtection",
+    "IdentityTests/testSimulatedFaceIDReadsTheStoredKey",
+    "IdentityTests/testCancellingFaceIDDismissesThePromptWithoutReading",
+    "IdentityTests/testSimulatedEnrolmentChangeInvalidatesTheStoredKey",
+}
 DEFAULT_LANES = ("macos-openssh", "simulator", "voiceover", "release-device-compile")
 AVAILABLE_LANES = DEFAULT_LANES + ("simulator-core", "simulator-ui")
 
