@@ -108,9 +108,13 @@ import XCTest
     }
     func testDemoReaderVoiceOverJourney() throws {
         continueAfterFailure = true
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
-        XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 10))
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]
         try withVoiceOver {
+            // Launch with VoiceOver already enabled so the initial screen change
+            // establishes focus. Enabling it on an idle Home screen can leave
+            // currentSpeech() without an utterance on a fresh CI simulator.
+            app.launch()
+            XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 10))
             try focus("Projects", name: "home")
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch.doubleTap()
             let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Latest report")).firstMatch

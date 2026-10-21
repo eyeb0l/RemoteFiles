@@ -118,6 +118,13 @@ There are no automatic retries. An investigated rerun uses a fresh evidence
 directory; retain and disclose the first failure. Summary status stays `running`
 until all required lanes finish, or `failed` as soon as a lane fails.
 
+The demo reader VoiceOver journey enables the service before launching the app
+so the initial screen change establishes focus. PR #23's first VoiceOver run
+failed at its first Home speech query with `No speech available` after enabling
+the service on an already idle screen; seven other journeys passed. The startup
+ordering change retains every speech, navigation and state-restoration assertion
+and does not retry or skip service failures.
+
 `RealServerUITests` are explicitly skipped in the Simulator run. The single
 `IdentityTests/testTrustStoreWritesUseCompleteFileProtection` method may also skip
 because Simulator filesystems do not report Data Protection classes; its actual
