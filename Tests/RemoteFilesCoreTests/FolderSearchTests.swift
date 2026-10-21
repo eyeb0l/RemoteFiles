@@ -2,23 +2,28 @@ import XCTest
 import Foundation
 @testable import RemoteFilesCore
 
-/// Folders from a dictionary; records listings, how many overlap, and can fail or slow any folder.
-private actor TreeService: RemoteFileService {
+/// Folders from a dictionary; records listings and how many overlap, and can slow any folder or
+/// fail it always or only the first time.
+actor TreeService: RemoteFileService {
     private let folders: [String: [RemoteEntry]]
     private let failures: [String: RemoteFileError]
+    private var failOnce: [String: RemoteFileError]
     private let delay: Duration
+    private let delays: [String: Duration]
     private(set) var listed: [String] = []
     private(set) var mostAtOnce = 0
     private var running = 0
-    init(_ folders: [String: [RemoteEntry]], failures: [String: RemoteFileError] = [:], delay: Duration = .zero) {
-        self.folders = folders; self.failures = failures; self.delay = delay
+    init(_ folders: [String: [RemoteEntry]], failures: [String: RemoteFileError] = [:], failOnce: [String: RemoteFileError] = [:],
+         delay: Duration = .zero, delays: [String: Duration] = [:]) {
+        self.folders = folders; self.failures = failures; self.failOnce = failOnce; self.delay = delay; self.delays = delays
     }
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
         listed.append(path)
         running += 1; mostAtOnce = max(mostAtOnce, running)
         defer { running -= 1 }
-        if delay > .zero { try await Task.sleep(for: delay) }
-        if let failure = failures[path] { throw failure }
+        let pause = delays[path] ?? delay
+        if pause > .zero { try await Task.sleep(for: pause) }
+        if let failure = failOnce.removeValue(forKey: path) ?? failures[path] { throw failure }
         guard let entries = folders[path] else { throw RemoteFileError.notFound }
         return DirectorySnapshot(path: path, entries: entries)
     }
@@ -75,15 +80,37 @@ final class FolderSearchTests: XCTestCase {
         XCTAssertEqual(result.final.foldersSearched, 2)
         XCTAssertEqual(result.final.unreadableFolders, 3, "Permission, a folder removed meanwhile, and a timeout")
 
-        let ended = RemoteFileError.unavailable("The SSH connection ended. Refresh to reconnect.")
+        let flaky = TreeService(tree, failOnce: ["/r/ok": .connectionEnded])
+        let retried = try await search(flaky, "needle")
+        XCTAssertEqual(retried.paths, ["/r/needle.txt", "/r/ok/needle-2.txt"],
+                       "A listing failed by a peer's timeout retiring the shared channel is listed again")
+        XCTAssertEqual(retried.final.unreadableFolders, 3, "Only the folders that are missing; the retried one was found")
+        let flakyListings = await flaky.listed
+        XCTAssertEqual(flakyListings.filter { $0 == "/r/ok" }.count, 2)
         do {
-            _ = try await search(TreeService(tree, failures: ["/r/ok": ended]), "needle")
-            XCTFail("A connection that ended must not look like an unreadable folder")
-        } catch RemoteFileError.unavailable { }
+            _ = try await search(TreeService(tree, failures: ["/r/ok": .connectionEnded]), "needle")
+            XCTFail("A connection that stays ended must not look like an unreadable folder")
+        } catch RemoteFileError.connectionEnded { }
         do {
             _ = try await search(TreeService(tree, failures: ["/r": .permissionDenied]), "needle")
             XCTFail("The starting folder must be readable")
         } catch RemoteFileError.permissionDenied { }
+    }
+
+    func testNearerFoldersAreReportedAndCountedFirstWhateverTheirListingSpeed() async throws {
+        let tree = [
+            "/r": [folder("/r/slow"), folder("/r/fast")],
+            "/r/slow": [file("/r/slow/needle-near")],
+            "/r/fast": [folder("/r/fast/deep")],
+            "/r/fast/deep": (0..<5).map { file("/r/fast/deep/needle-\($0)") }
+        ]
+        let service = TreeService(tree, delays: ["/r/slow": .milliseconds(300)])
+        let result = try await search(service, "needle", limits: .init(maxMatches: 3))
+        let listed = await service.listed
+        XCTAssertTrue(listed.contains("/r/fast/deep"), "The deep folder was listed while the slow one was still pending")
+        XCTAssertEqual(result.paths, ["/r/slow/needle-near", "/r/fast/deep/needle-0", "/r/fast/deep/needle-1"],
+                       "The nearer folder's match comes first and is not crowded out by the deeper folder")
+        XCTAssertEqual(result.final.stop, .matchLimit)
     }
 
     func testLimitsStopTheWalkAndKeepWhatWasFound() async throws {

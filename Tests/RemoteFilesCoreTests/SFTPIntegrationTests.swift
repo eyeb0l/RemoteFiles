@@ -431,8 +431,8 @@ final class SFTPIntegrationTests: XCTestCase {
         do {
             _ = try await listing.value
             XCTFail("A listing whose connection ended must not succeed")
-        } catch RemoteFileError.unavailable(let message) {
-            XCTAssertEqual(message, "The SSH connection ended. Refresh to reconnect.")
+        } catch RemoteFileError.connectionEnded {
+            XCTAssertEqual(RemoteFileError.connectionEnded.localizedDescription, "The SSH connection ended. Refresh to reconnect.")
         }
         XCTAssertLessThan(ContinuousClock.now - dropped, .seconds(5), "A closed connection must not wait for the deadline")
         proxy.resumeReplies()

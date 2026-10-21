@@ -252,7 +252,13 @@ final class RemoteFilesUITests: XCTestCase {
         nested.tap()
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
         XCTAssertTrue(app.navigationBars.buttons["Projects"].waitForExistence(timeout: 5)); app.navigationBars.buttons["Projects"].tap()
-        XCTAssertTrue(nested.waitForExistence(timeout: 10), "Results stay after opening one")
+        // Searching again would show its status for at least the pause before listing.
+        let searching = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Searching")).firstMatch
+        for _ in 0..<20 {
+            XCTAssertFalse(searching.exists, "Coming back shows the finished search instead of searching again")
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        XCTAssertTrue(nested.exists && summary.exists, "Results stay after opening one")
 
         app.buttons["This Folder"].tap()
         let filtered = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly review.md,")).firstMatch

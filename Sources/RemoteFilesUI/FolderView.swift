@@ -80,9 +80,18 @@ struct FolderSearchRow: Identifiable, Sendable {
 
 /// Results of one subfolder search, replaced whenever the query, scope or folder changes.
 struct FolderSearchState {
+    /// What a search ran for; a finished search for the same key is kept when the folder reappears.
+    struct Key: Equatable {
+        let query: String, root: String, includeHidden: Bool, sessionRevision: Int, refresh: Int
+    }
+    var key: Key?
     var rows: [FolderSearchRow] = []
     var progress = RemoteFolderSearch.Update()
     var error: String?
+
+    /// Opening a result cancels the folder's tasks, so returning restarts them; a search that
+    /// already finished for the same key is shown again instead of listing every folder again.
+    func isFinished(for key: Key) -> Bool { self.key == key && progress.isFinished && error == nil }
 
     var summary: String {
         let limits = RemoteFolderSearch.Limits()
@@ -371,11 +380,14 @@ struct FolderView: View {
         guard searchScope == .subfolders, !query.isEmpty, let root = listing?.path,
               model.isForeground, !model.isDisconnecting else { search = FolderSearchState(); return }
         let revision = model.sessionRevision
-        search = FolderSearchState()
+        let key = FolderSearchState.Key(query: query, root: root, includeHidden: showHidden,
+                                        sessionRevision: revision, refresh: lastRefreshID)
+        guard !search.isFinished(for: key) else { return }
+        search = FolderSearchState(key: key)
         do { try await Task.sleep(for: .milliseconds(350)) } catch { return }
         do {
             for try await update in RemoteFolderSearch.names(matching: query, below: root, profile: profile,
-                                                             service: model.service, includeHidden: showHidden) {
+                                                             service: model.searchService, includeHidden: showHidden) {
                 guard model.sessionRevision == revision else { return }
                 search.rows += update.matches.map { FolderSearchRow($0, root: root) }
                 search.progress = update

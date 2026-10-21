@@ -90,6 +90,43 @@ final class FolderBrowsingTests: XCTestCase {
         XCTAssertTrue(state.summary.hasSuffix("Showing the first 1 matches. Type more to narrow the search."))
     }
 
+    func testAFinishedSearchIsKeptOnlyForTheSameQueryFolderAndSession() {
+        let key = FolderSearchState.Key(query: "review", root: "/p", includeHidden: false, sessionRevision: 1, refresh: 0)
+        var state = FolderSearchState(key: key)
+        XCTAssertFalse(state.isFinished(for: key), "A search still running is started again")
+        state.progress.isFinished = true
+        XCTAssertTrue(state.isFinished(for: key))
+        for other in [FolderSearchState.Key(query: "notes", root: "/p", includeHidden: false, sessionRevision: 1, refresh: 0),
+                      FolderSearchState.Key(query: "review", root: "/p", includeHidden: true, sessionRevision: 1, refresh: 0),
+                      FolderSearchState.Key(query: "review", root: "/p", includeHidden: false, sessionRevision: 2, refresh: 0),
+                      FolderSearchState.Key(query: "review", root: "/p", includeHidden: false, sessionRevision: 1, refresh: 1)] {
+            XCTAssertFalse(state.isFinished(for: other))
+        }
+        state.error = "The SSH connection ended."
+        XCTAssertFalse(state.isFinished(for: key), "A failed search is tried again")
+    }
+
+    @MainActor func testCancellingASearchNeverCancelsTheSameFolderOpenedMeanwhile() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let tree = TreeService(["/r": [RemoteEntry(name: "a", path: "/r/a", kind: .directory)],
+                                "/r/a": [RemoteEntry(name: "needle", path: "/r/a/needle", kind: .file)]], delay: .milliseconds(300))
+        let model = try AppModel(directory: directory, fileService: CoalescingFileService(base: tree))
+        let profile = ConnectionProfile(name: "Studio", host: "studio", username: "reader", identityID: UUID())
+        let search = Task {
+            for try await _ in RemoteFolderSearch.names(matching: "needle", below: "/r", profile: profile,
+                                                        service: model.searchService, includeHidden: false) {}
+        }
+        while await tree.listed.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        let opened = Task { try await model.service.listDirectory(profile: profile, path: "/r") }
+        try await Task.sleep(for: .milliseconds(50))
+        search.cancel()
+        let snapshot = try await opened.value
+        XCTAssertEqual(snapshot.entries.map(\.name), ["a"], "The folder the user opened still loads")
+        let listings = await tree.listed
+        XCTAssertEqual(listings.filter { $0 == "/r" }.count, 2, "The search made its own request instead of sharing one")
+    }
+
     @MainActor func testSortChoicesAreRememberedPerFolderBoundedAndNeverInDemo() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let suite = "FolderBrowsingTests-" + UUID().uuidString
