@@ -93,6 +93,12 @@ public enum RemoteFolderSearch {
                 if case .failure(let error) = result, index > 0, endsConnection(error), retried.insert(index).inserted {
                     // A peer's deadline retires the shared SFTP channel and fails the listings on it;
                     // list this folder once more on a fresh channel before giving up.
+                    // Recovery starts another listing, so it shares the walk's scheduling deadline.
+                    guard ContinuousClock.now < deadline else {
+                        progress.stop = .timeLimit
+                        group.cancelAll()
+                        break
+                    }
                     list(index)
                     continue
                 }

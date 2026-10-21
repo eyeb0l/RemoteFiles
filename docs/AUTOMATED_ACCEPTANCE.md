@@ -69,6 +69,35 @@ ordinary code changes, and adds UI, VoiceOver and Release jobs for sensitive
 changes or explicit requests. See [CI policy and timing](CI.md). `--lane` reports
 its selected coverage explicitly; it does not count unrequested lanes as passed.
 
+### Recursive search timeout recovery
+
+`SFTPIntegrationTests.testSubfolderSearchRecoversListingsInterruptedByAPeersDeadline`
+uses the existing loopback OpenSSH fixture and reply-stalling relay. It staggers
+four real `SFTPRemoteFileService` listings so the first deadline closes their
+shared SFTP channel before its peers reach their own deadlines, then releases
+the held replies. Assertions require the first listing's actual `timedOut`,
+three actual `connectionEnded` failures with one retry each, retained ordered
+matches, traversal of queued descendants, a replaced SFTP channel on the same
+authenticated connection, and a successful foreground listing afterwards.
+The scheduling wrapper never injects snapshots or errors. The existing
+`FolderSearchTests` still cover persistent connection failure and root errors;
+`testConnectionRecoveryDoesNotStartAListingAfterTheSearchDeadline` covers the
+retry's scheduling budget separately.
+
+Run just this investigation's suites on a supported Mac with:
+
+```sh
+scripts/test-openssh.sh swift test --filter 'FolderSearchTests|SFTPIntegrationTests'
+```
+
+The relay holds encrypted server replies on loopback while OpenSSH continues
+working. This exercises a real timeout and channel-close cascade, but does not
+establish how an external SFTP server behaves when only one filesystem operation
+stalls while other responses continue. Physical iPhone checks are still needed
+for cellular/Tailscale interruptions, background/foreground cancellation and
+post-recovery navigation during a recursive search. Neither a simulator run nor
+Release device compilation supplies that evidence.
+
 ## Required lanes and failure rules
 
 | Lane | What it establishes | Required outcome |
@@ -88,6 +117,13 @@ handled explicitly, otherwise acceptance fails closed.
 There are no automatic retries. An investigated rerun uses a fresh evidence
 directory; retain and disclose the first failure. Summary status stays `running`
 until all required lanes finish, or `failed` as soon as a lane fails.
+
+The demo reader VoiceOver journey enables the service before launching the app
+so the initial screen change establishes focus. PR #23's first VoiceOver run
+failed at its first Home speech query with `No speech available` after enabling
+the service on an already idle screen; seven other journeys passed. The startup
+ordering change retains every speech, navigation and state-restoration assertion
+and does not retry or skip service failures.
 
 `RealServerUITests` are explicitly skipped in the Simulator run. The single
 `IdentityTests/testTrustStoreWritesUseCompleteFileProtection` method may also skip

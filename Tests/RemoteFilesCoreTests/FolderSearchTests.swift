@@ -113,6 +113,20 @@ final class FolderSearchTests: XCTestCase {
         XCTAssertEqual(result.final.stop, .matchLimit)
     }
 
+    func testConnectionRecoveryDoesNotStartAListingAfterTheSearchDeadline() async throws {
+        let service = TreeService([
+            "/r": [file("/r/needle-kept"), folder("/r/interrupted")],
+            "/r/interrupted": [file("/r/interrupted/needle-late")]
+        ], failOnce: ["/r/interrupted": .connectionEnded], delays: ["/r/interrupted": .seconds(2)])
+        let result = try await search(service, "needle", limits: .init(timeLimit: .seconds(1)))
+        let listed = await service.listed
+        XCTAssertEqual(listed, ["/r", "/r/interrupted"], "Recovery is a new listing and must respect the same deadline")
+        XCTAssertEqual(result.paths, ["/r/needle-kept"], "Keep matches reported before recovery ran out of time")
+        XCTAssertEqual(result.final.stop, .timeLimit)
+        XCTAssertEqual(result.final.foldersSearched, 1)
+        XCTAssertEqual(result.final.unreadableFolders, 0, "An interrupted listing is not an unreadable folder")
+    }
+
     func testLimitsStopTheWalkAndKeepWhatWasFound() async throws {
         let chain = TreeService([
             "/r": [file("/r/needle-0"), folder("/r/1")], "/r/1": [file("/r/1/needle-1"), folder("/r/1/2")],
