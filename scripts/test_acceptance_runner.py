@@ -81,6 +81,36 @@ class LogResultTests(unittest.TestCase):
                     log.write_text(f"Test Case '-[{prefix}{diagnostic}{suffix}]' {outcome} (0.644 seconds).\n")
                     self.assertEqual(acceptance.log_tests(log), {"PlaybackTests/testCodec": outcome})
 
+    def test_structured_diagnostics_inside_result_prefix_preserve_every_outcome(self):
+        diagnostic = ("2026-10-21 01:23:18.442121+0000 RemoteFilesTestHost[11405:46073] [player] "
+                      "<<<< FigFilePlayer >>>> signalled err=-12864 at <>:10684\n")
+        prefix = "Test Case '-["
+        for offset in range(1, len(prefix)):
+            for outcome in ("passed", "failed", "skipped"):
+                with self.subTest(offset=offset, outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                    log = Path(directory) / "test.log"
+                    log.write_text("Test Case '-[ExampleTests testOne]' passed (0.001 seconds).\n"
+                                   f"{prefix[:offset]}{diagnostic}{prefix[offset:]}"
+                                   f"RemoteFilesTests.PlaybackTests testM4AAudioPlaybackSeekingAndCleanup]' {outcome} (0.848 seconds).\n")
+                    self.assertEqual(acceptance.log_tests(log),
+                                     {"ExampleTests/testOne": "passed",
+                                      "PlaybackTests/testM4AAudioPlaybackSeekingAndCleanup": outcome})
+
+    def test_result_prefix_interruptions_still_reject_duplicates_and_unknown_records(self):
+        diagnostic = "2026-10-21 01:23:18.442121+0000 TestHost[1:2] [player] diagnostic\n"
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "test.log"
+            log.write_text("Test Case '-[ExampleTests testOne]' passed (0.001 seconds).\n"
+                           f"Test Ca{diagnostic}{diagnostic}se '-[ExampleTests testOne]' failed (0.001 seconds).\n")
+            with self.assertRaisesRegex(RuntimeError, "Repeated result"):
+                acceptance.log_tests(log)
+        for interruption in ("unknown diagnostic\n", "2026-10-21 01:23:18 TestHost diagnostic\n",
+                             "2026-10-21 01:23:18.442121+0000 TestHost[1:2] [player] missing newline"):
+            with self.subTest(interruption=interruption), tempfile.TemporaryDirectory() as directory:
+                log = Path(directory) / "test.log"
+                log.write_text(f"Test Ca{interruption}se '-[ExampleTests testOne]' passed (0.001 seconds).\n")
+                self.assertEqual(acceptance.log_tests(log), {})
+
     def test_interrupted_identifier_duplicates_are_still_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / "test.log"

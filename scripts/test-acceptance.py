@@ -211,7 +211,12 @@ def log_tests(path):
     diagnostic = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+[+-]\d{4} "
                             r"[\w.-]+\[\d+:\d+\] \[[^\]\n]+\] [^\n]*\n")
     pattern = re.compile(r"Test Case '-\[(?:[\w]+\.)?(\w+) (test\w+)\]' (passed|failed|skipped)(?=\s|$|\d{4}-\d{2}-\d{2} )")
-    for fragment in path.read_text(errors="replace").split("Test Case '-[")[1:]:
+    # The same records may also split the "Test Case '-[" prefix itself.
+    prefix = "Test Case '-["
+    spliced = re.compile("|".join(re.escape(prefix[:offset]) + "(?:" + diagnostic.pattern + ")+" + re.escape(prefix[offset:])
+                                  for offset in range(1, len(prefix))))
+    text = spliced.sub(prefix, path.read_text(errors="replace"))
+    for fragment in text.split(prefix)[1:]:
         name, closing, remainder = fragment.partition("]'")
         if not closing:
             continue
