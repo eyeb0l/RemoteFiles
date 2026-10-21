@@ -16,7 +16,8 @@ A native iPhone app for browsing and reading files on your Mac or Unix server ov
 - Read Markdown or highlighted source, find text, jump to headings, and remember your reading position.
 - Preview images, PDFs, audio, video, and static HTML/SVG.
 - Copy source or save an original file to Files.
-- Connect with SSH keys and explicit host verification. Browsing is read only.
+- Connect directly or through an [SSH jump host](docs/JUMP_HOSTS.md), with SSH keys and explicit host verification. Browsing is read only.
+- Keep the library, folder and reader side by side in the [iPad workspace](docs/IPAD.md).
 
 ## Get started
 

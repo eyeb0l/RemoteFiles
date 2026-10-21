@@ -4,7 +4,12 @@ import RemoteFilesCore
 
 @MainActor @Observable
 final class AppModel {
-    enum Route: Hashable { case folder(UUID, String), file(UUID, RemoteEntry) }
+    enum Route: Hashable {
+        case folder(UUID, String), file(UUID, RemoteEntry)
+        var connectionID: UUID {
+            switch self { case .folder(let id, _), .file(let id, _): return id }
+        }
+    }
     enum Sheet: Identifiable {
         case connection(UUID?), keys, trust(HostEndpoint, HostKeyDetails), changed(HostEndpoint, HostKeyDetails, HostKeyDetails), unlock(IdentityMetadata)
         var id: String {
@@ -77,18 +82,27 @@ final class AppModel {
         await position.prepare(text: text, store: demo ? nil : readingPositions, connectionID: profile.id, path: path)
     }
     func profile(_ id: UUID) -> ConnectionProfile? { metadata.connections.first { $0.id == id } }
+    /// Installation is direct: a bastion-only identity must not prefill the destination account.
+    func installationConnection(for identity: IdentityMetadata) -> ConnectionProfile? {
+        metadata.connections.first { $0.identityID == identity.id }
+    }
     func persist() async {
         guard !demo else { return }
         do { try await metadataStore.save(metadata) } catch { errorMessage = error.localizedDescription }
     }
     func saveConnection(_ value: ConnectionProfile) async {
         await disconnect()
+        // The iPad sidebar can edit the connection whose reader is still on screen.
+        routes.removeAll { $0.connectionID == value.id }
+        sessionRevision += 1
         metadata.connections.removeAll { $0.id == value.id }
         metadata.connections.append(value)
         await persist()
     }
     func removeConnection(_ profile: ConnectionProfile) async {
         await disconnect()
+        routes.removeAll { $0.connectionID == profile.id }
+        sessionRevision += 1
         metadata.connections.removeAll { $0.id == profile.id }
         metadata.favourites.removeAll { $0.connectionID == profile.id }
         metadata.recents.removeAll { $0.connectionID == profile.id }
@@ -130,6 +144,12 @@ final class AppModel {
         do { try await trust.reset(endpoint: HostEndpoint(host: profile.host, port: profile.port)) }
         catch { errorMessage = error.localizedDescription }
     }
+    func resetJumpHostTrust(for profile: ConnectionProfile) async {
+        guard let jump = profile.jumpHost else { return }
+        await disconnect()
+        do { try await trust.reset(endpoint: HostEndpoint(host: jump.host, port: jump.port)) }
+        catch { errorMessage = error.localizedDescription }
+    }
     func addIdentity(_ value: IdentityMetadata) async throws {
         guard !demo else { throw RemoteFileError.unavailable("Leave Demo before saving keys.") }
         var candidate = metadata
@@ -139,7 +159,7 @@ final class AppModel {
     }
     func deleteIdentity(_ value: IdentityMetadata) async {
         do {
-            try await identities.delete(value, referencedBy: Set(metadata.connections.map(\.identityID)))
+            try await identities.delete(value, referencedBy: Set(metadata.connections.flatMap { $0.identityIDs }))
             metadata.identities.removeAll { $0.id == value.id }
             await persist()
         } catch { errorMessage = error.localizedDescription }
@@ -173,6 +193,8 @@ final class AppModel {
             case .changed(let endpoint, let previous, let current): sheet = .changed(endpoint, previous, current)
             default: errorMessage = error.localizedDescription
             }
+        } else if let locked = error as? ConnectionIdentityUnlockRequired {
+            sheet = .unlock(locked.identity)
         } else if (error as? IdentityError) == .missingPassphrase,
                   let key = metadata.identities.first(where: { $0.id == profile.identityID }) {
             sheet = .unlock(key)
@@ -196,7 +218,7 @@ final class AppModel {
         sheet = nil; sessionRevision += 1
     }
     func isSecurityError(_ error: Error) -> Bool {
-        if error is HostTrustError || error is IdentityError { return true }
+        if error is HostTrustError || error is IdentityError || error is ConnectionIdentityUnlockRequired { return true }
         if let boundary = error as? RemoteDocumentLinkError, boundary == .outsideConnection { return true }
         if case RemoteResourceError.outsideDocument = error { return true }
         return false
@@ -243,7 +265,47 @@ final class AppModel {
             guard case .folder(let routeID, let requested) = route, routeID == id else { return false }
             return requested == path || cachedListing(id, path: requested)?.path == path
         }
-        if let existing { routes.removeSubrange((existing + 1)...) } else { routes.append(.folder(id, path)) }
+        if let existing { routes.removeSubrange((existing + 1)...) }
+        else {
+            // A split-view breadcrumb can be tapped while the reader is visible.
+            // Retire that preview before adding a folder, just like a folder-row selection.
+            openInWorkspace(.folder(id, path))
+        }
+    }
+    /// The folder column stays mounted when a file opens, retaining search and scroll state.
+    var workspaceFolder: Route? {
+        guard let last = routes.last else { return nil }
+        let id = last.connectionID
+        if let folder = routes.last(where: { if case .folder(let value, _) = $0 { return value == id }; return false }) { return folder }
+        // A recent file has no folder route yet. Show its containing directory alongside it.
+        if case .file(_, let entry) = last { return .folder(id, RemotePath.parent(of: entry.path)) }
+        return nil
+    }
+    var workspaceFile: Route? {
+        if case .file = routes.last { return routes.last }
+        return nil
+    }
+    func openInWorkspace(_ route: Route) {
+        let currentFolder = workspaceFolder
+        // A compact reader may have several linked-file routes when the window widens.
+        removeTrailingPreviews()
+        // A recent file projects its parent without a folder route. Seed it before drilling down.
+        if let currentFolder, currentFolder.connectionID == route.connectionID, !routes.contains(currentFolder) {
+            routes.append(currentFolder)
+        }
+        if routes.last != route { routes.append(route) }
+    }
+    private func removeTrailingPreviews() {
+        while case .file = routes.last { routes.removeLast() }
+    }
+    var canGoBackInWorkspace: Bool {
+        routes.filter { if case .folder = $0 { return true }; return false }.count > 1
+    }
+    func goBackInWorkspace() {
+        removeTrailingPreviews()
+        guard canGoBackInWorkspace else { return }
+        routes.removeLast()
+        removeTrailingPreviews()
     }
     func clearCaches() { directories.removeAll(); documents.removeAll(); directoryOrder.removeAll(); documentOrder.removeAll() }
     private func key(_ id: UUID, _ path: String) -> String { "\(id.uuidString):\(path)" }

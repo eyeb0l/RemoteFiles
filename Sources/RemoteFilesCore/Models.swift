@@ -7,17 +7,52 @@ public struct ConnectionProfile: Identifiable, Codable, Hashable, Sendable {
     public var port: Int
     public var username: String
     public var identityID: UUID
+    public var jumpHost: JumpHost?
     public var startingDirectory: String
     /// Only shows Tailscale setup tips in the connection editor; connections never route differently.
     /// The stored name is kept so saved profiles keep decoding.
     public var usesTailscale: Bool
     public init(id: UUID = UUID(), name: String, host: String, port: Int = 22, username: String,
-                identityID: UUID, startingDirectory: String = ".", usesTailscale: Bool = false) {
+                identityID: UUID, startingDirectory: String = ".", usesTailscale: Bool = false, jumpHost: JumpHost? = nil) {
         self.id = id; self.name = name; self.host = host; self.port = port
         self.username = username; self.identityID = identityID
         self.startingDirectory = startingDirectory.isEmpty ? "." : startingDirectory
         self.usesTailscale = usesTailscale
+        self.jumpHost = jumpHost
     }
+}
+
+/// One SSH bastion. The destination hostname is resolved by this server, through direct-tcpip.
+/// No passwords or private key material are stored in the profile.
+public struct JumpHost: Codable, Hashable, Sendable {
+    public var host: String
+    public var port: Int
+    public var username: String
+    public var identityID: UUID
+    public init(host: String, port: Int = 22, username: String, identityID: UUID) {
+        self.host = host; self.port = port; self.username = username; self.identityID = identityID
+    }
+}
+
+public extension ConnectionProfile {
+    var identityIDs: Set<UUID> { Set([identityID] + (jumpHost.map { [$0.identityID] } ?? [])) }
+    /// Used by the editor and transport, including profiles loaded from disk.
+    var hasValidSSHEndpoints: Bool {
+        Self.validEndpoint(host: host, port: port, username: username) &&
+        (jumpHost.map { Self.validEndpoint(host: $0.host, port: $0.port, username: $0.username) } ?? true)
+    }
+    private static func validEndpoint(host: String, port: Int, username: String) -> Bool {
+        (1...65535).contains(port) && !host.isEmpty && !host.contains(where: { $0.isWhitespace || $0.isNewline }) &&
+        !host.contains("/") && !host.contains("\0") && !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !username.contains("\0")
+    }
+}
+
+/// Identifies the locked key at either hop, so the UI never prompts for the other endpoint's key.
+public struct ConnectionIdentityUnlockRequired: LocalizedError, Sendable {
+    public let identity: IdentityMetadata
+    public var errorDescription: String? { IdentityError.missingPassphrase.localizedDescription }
+    public init(identity: IdentityMetadata) { self.identity = identity }
 }
 
 public struct RemoteEntry: Identifiable, Hashable, Sendable {

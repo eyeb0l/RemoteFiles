@@ -32,3 +32,6 @@
 - [Roadmap](../ROADMAP.md): deferred work.
 
 Acceptance documents include historical evidence; consult their dates and stated limitations when interpreting results.
+
+- [Jump hosts](JUMP_HOSTS.md): single-bastion SSH routing and independent trust.
+- [iPad workspace](IPAD.md): library, folder and reader in an adaptive split view.

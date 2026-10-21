@@ -254,10 +254,8 @@ public actor SFTPRemoteFileService: RemoteFileService {
 
     private func session(for profile: ConnectionProfile) async throws -> LiveSession {
         try Task.checkCancellation()
-        guard (1...65535).contains(profile.port),
-              !profile.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !profile.host.contains("\0"), !profile.username.isEmpty else {
-            throw RemoteFileError.unavailable("Enter a valid hostname, username, and port from 1 to 65535.")
+        guard profile.hasValidSSHEndpoints else {
+            throw RemoteFileError.unavailable("Enter a valid hostname, username, and port from 1 to 65535 for both endpoints.")
         }
         if let active, active.profile == profile, !active.control.isCancelled, active.client.isConnected { return active }
         if let pending, pendingProfile == profile, !pending.isCancelled {
@@ -288,32 +286,49 @@ public actor SFTPRemoteFileService: RemoteFileService {
         let timeout = timeoutSeconds
         let started = Date()
         let task = Task<LiveSession, Error> {
-            let metadata = try await metadataStore.identity(id: profile.identityID)
-            let privateKey = try await identityStore.unlock(metadata)
+            // Unlock both keys before opening sockets. Each error carries the identity needing UI.
+            func key(_ id: UUID) async throws -> IdentityPrivateKey {
+                let metadata = try await metadataStore.identity(id: id)
+                do { return try await identityStore.unlock(metadata) }
+                catch IdentityError.missingPassphrase { throw ConnectionIdentityUnlockRequired(identity: metadata) }
+            }
+            let jumpKey: IdentityPrivateKey?
+            if let hop = profile.jumpHost { jumpKey = try await key(hop.identityID) } else { jumpKey = nil }
+            let privateKey = try await key(profile.identityID)
             return try await Self.deadline(seconds: timeout, close: { control.close() }) {
-                try Task.checkCancellation()
-                var settings = SSHClientSettings(
-                    host: profile.host, port: profile.port,
-                    authenticationMethod: { privateKey.authentication(username: profile.username) },
-                    hostKeyValidator: .custom(TrustValidator(store: trustStore,
-                                                            endpoint: HostEndpoint(host: profile.host, port: profile.port)))
-                )
-                settings.connectTimeout = .seconds(Int64(timeout))
-                // NIOSSH sizes each channel's receive window to this value. Its 128 KiB default
-                // capped transfers near 64 KiB per round trip regardless of pipelined reads.
-                settings.protocolOptions = [.maximumPacketSize(1 << 21)]
-                settings.onChannelCreated = { control.install($0) }
+                func settings(host: String, port: Int, username: String, key: IdentityPrivateKey) -> SSHClientSettings {
+                    var value = SSHClientSettings(
+                        host: host, port: port,
+                        authenticationMethod: { key.authentication(username: username) },
+                        hostKeyValidator: .custom(TrustValidator(store: trustStore, endpoint: HostEndpoint(host: host, port: port)))
+                    )
+                    value.connectTimeout = .seconds(Int64(timeout))
+                    value.protocolOptions = [.maximumPacketSize(1 << 21)]
+                    value.onChannelCreated = { control.install($0) }
+                    return value
+                }
                 do {
                     try Task.checkCancellation()
-                    let client = try await SSHClient.connect(to: settings)
+                    let destination = settings(host: profile.host, port: profile.port, username: profile.username, key: privateKey)
+                    let client: SSHClient
+                    var bastion: SSHClient?
+                    if let hop = profile.jumpHost, let jumpKey {
+                        let jump = try await SSHClient.connect(to: settings(host: hop.host, port: hop.port, username: hop.username, key: jumpKey))
+                        bastion = jump
+                        try Task.checkCancellation()
+                        client = try await jump.jump(to: destination)
+                    } else {
+                        client = try await SSHClient.connect(to: destination)
+                    }
                     try Task.checkCancellation()
-                    return LiveSession(profile: profile, client: client, control: control)
+                    return LiveSession(profile: profile, client: client, control: control, bastion: bastion)
                 } catch {
                     control.close()
                     throw error
                 }
             }
         }
+
         pending = task
         pendingProfile = profile
         pendingControl = control
@@ -337,8 +352,11 @@ public actor SFTPRemoteFileService: RemoteFileService {
                 pending = nil; pendingProfile = nil; pendingControl = nil
             }
             if Task.isCancelled { throw CancellationError() }
+            if profile.jumpHost != nil, let sshError = error as? NIOSSHError, sshError.type == .channelSetupRejected {
+                throw RemoteFileError.unavailable("The jump host couldn't reach the destination. Check its hostname and port, and that the jump host permits TCP forwarding to it.")
+            }
             if error is NIOConnectionError {
-                throw RemoteFileError.unavailable("Couldn't connect to this server. Check its address and network. For local Wi-Fi, allow RemoteFiles in iPhone Settings → Privacy & Security → Local Network, then try again.")
+                throw RemoteFileError.unavailable("Couldn't connect to this server. Check its address and network. For local Wi-Fi, allow RemoteFiles in Settings → Privacy & Security → Local Network, then try again.")
             }
             throw error
         }
@@ -573,11 +591,12 @@ private final class LiveSession: @unchecked Sendable {
     let profile: ConnectionProfile
     let client: SSHClient
     let control: SocketControl
+    let bastion: SSHClient?
     // Actor-isolated to SFTPRemoteFileService; closing the SSH socket also closes this channel.
     var sftp: SharedSFTPChannel?
     var openingSFTP: Task<SharedSFTPChannel, Error>?
-    init(profile: ConnectionProfile, client: SSHClient, control: SocketControl) {
-        self.profile = profile; self.client = client; self.control = control
+    init(profile: ConnectionProfile, client: SSHClient, control: SocketControl, bastion: SSHClient? = nil) {
+        self.profile = profile; self.client = client; self.control = control; self.bastion = bastion
     }
 }
 
@@ -615,23 +634,23 @@ struct TrustValidator: NIOSSHClientServerAuthenticationDelegate {
 
 final class SocketControl: @unchecked Sendable {
     private let lock = NSLock()
-    private var channel: Channel?
+    private var channels: [Channel] = []
     private var cancelled = false
     var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
     func install(_ channel: Channel) {
         lock.lock()
         let shouldClose = cancelled
-        if !shouldClose { self.channel = channel }
+        if !shouldClose { channels.append(channel) }
         lock.unlock()
         if shouldClose { channel.close(promise: nil) }
     }
     func close() {
         lock.lock()
         cancelled = true
-        let old = channel
-        channel = nil
+        let old = channels
+        channels.removeAll()
         lock.unlock()
-        old?.close(promise: nil)
+        for channel in old.reversed() { channel.close(promise: nil) }
     }
 }
 

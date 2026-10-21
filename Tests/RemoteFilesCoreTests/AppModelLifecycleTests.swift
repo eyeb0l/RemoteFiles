@@ -63,6 +63,82 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
 }
 
 @MainActor final class AppModelLifecycleTests: XCTestCase {
+    func testWorkspaceKeepsFolderAlongsidePreviewAndSharesRoutesWithCompactNavigation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try AppModel(directory: directory, fileService: BackgroundExportService())
+        let id = UUID(), folder = AppModel.Route.folder(UUID(), "/work")
+        let root = AppModel.Route.folder(id, "/"), nested = AppModel.Route.folder(id, "/docs")
+        model.routes = [root, nested]
+        let first = RemoteEntry(name: "one.md", path: "/docs/one.md", kind: .file)
+        let second = RemoteEntry(name: "two.md", path: "/docs/two.md", kind: .file)
+        model.openInWorkspace(.file(id, first))
+        XCTAssertEqual(model.workspaceFolder, nested); XCTAssertEqual(model.workspaceFile, .file(id, first))
+        model.openInWorkspace(.file(id, second))
+        XCTAssertEqual(model.routes, [root, nested, .file(id, second)], "Preview changes replace rather than grow a hidden stack")
+        model.goBackInWorkspace(); XCTAssertEqual(model.routes, [root]); XCTAssertNil(model.workspaceFile)
+        model.openInWorkspace(.file(id, first))
+        model.showFolder(id, path: "/new")
+        XCTAssertEqual(model.routes, [root, .folder(id, "/new")], "A new breadcrumb must not retain a hidden preview")
+        model.goBackInWorkspace(); XCTAssertEqual(model.routes, [root]); XCTAssertNil(model.workspaceFile)
+        model.routes = [folder]; XCTAssertEqual(model.workspaceFolder, folder)
+        model.routes = [root, .file(id, first), .file(id, second)]
+        model.openInWorkspace(.folder(id, "/next"))
+        XCTAssertEqual(model.routes, [root, .folder(id, "/next")], "Widening a linked-reader stack must not retain hidden previews")
+        model.goBackInWorkspace(); XCTAssertEqual(model.routes, [root]); XCTAssertNil(model.workspaceFile)
+        model.routes = [.file(id, first)]; XCTAssertEqual(model.workspaceFolder, .folder(id, "/docs"))
+        model.showFolder(id, path: "/docs")
+        XCTAssertEqual(model.routes, [.folder(id, "/docs")], "Choosing a recent's parent breadcrumb must not duplicate it")
+        model.openInWorkspace(.file(id, first))
+        model.openInWorkspace(.folder(id, "/docs/subfolder"))
+        model.goBackInWorkspace(); XCTAssertEqual(model.routes, [.folder(id, "/docs")], "A recent's containing folder stays in folder history")
+        await model.disconnectAndGoHome(); XCTAssertNil(model.workspaceFile); XCTAssertNil(model.workspaceFolder)
+    }
+
+    func testEditingAndDeletingTheVisibleConnectionRetireItsWorkspaceRoutes() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try AppModel(directory: directory, fileService: BackgroundExportService())
+        var profile = ConnectionProfile(name: "Server", host: "old.invalid", username: "reader", identityID: UUID())
+        model.metadata.connections = [profile]
+        model.routes = [.folder(profile.id, "/docs"), .file(profile.id, .init(name: "one.md", path: "/docs/one.md", kind: .file))]
+        let revision = model.sessionRevision
+        profile.host = "new.invalid"
+        await model.saveConnection(profile)
+        XCTAssertTrue(model.routes.isEmpty, "Old server content must not remain in the new connection's pane")
+        XCTAssertEqual(model.sessionRevision, revision + 1)
+        model.routes = [.folder(profile.id, "/docs")]
+        await model.removeConnection(profile)
+        XCTAssertTrue(model.routes.isEmpty); XCTAssertNil(model.workspaceFolder); XCTAssertNil(model.workspaceFile)
+        XCTAssertTrue(model.metadata.connections.isEmpty)
+    }
+
+    func testJumpHostTrustResetAndIdentityReferencesStaySeparate() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try AppModel(directory: directory, fileService: BackgroundExportService(), identities: IdentityStore(secretStore: JumpLifecycleSecrets()))
+        let identity = try await model.identities.generate(name: "Jump")
+        let profile = ConnectionProfile(name: "Target", host: "target.invalid", username: "reader", identityID: UUID(), jumpHost: JumpHost(host: "jump.invalid", port: 2222, username: "jump", identityID: identity.id))
+        model.metadata.identities = [identity]; model.metadata.connections = [profile]
+        XCTAssertNil(model.installationConnection(for: identity), "A jump-only identity must not suggest installation into the destination account")
+        var destinationUse = profile; destinationUse.identityID = identity.id
+        model.metadata.connections = [destinationUse]
+        XCTAssertEqual(model.installationConnection(for: identity), destinationUse)
+        model.metadata.connections = [profile]
+        await model.deleteIdentity(identity)
+        XCTAssertEqual(model.metadata.identities, [identity]); XCTAssertNotNil(model.errorMessage)
+        let key = NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey
+        let hop = HostEndpoint(host: "jump.invalid", port: 2222), target = HostEndpoint(host: "target.invalid", port: 22)
+        try await model.trust.trustUnknown(endpoint: hop, key: HostKeyDetails(publicKey: key))
+        try await model.trust.trustUnknown(endpoint: target, key: HostKeyDetails(publicKey: key))
+        await model.resetJumpHostTrust(for: profile)
+        do { try await model.trust.validate(endpoint: hop, publicKey: key); XCTFail("Hop trust must reset") } catch HostTrustError.unknown { }
+        try await model.trust.validate(endpoint: target, publicKey: key)
+        model.handle(ConnectionIdentityUnlockRequired(identity: identity), profile: profile)
+        guard case .unlock(let requested) = model.sheet else { return XCTFail("Missing unlock sheet") }
+        XCTAssertEqual(requested.id, identity.id)
+    }
+
     private func wait(_ predicate: @escaping () async -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
         while !(await predicate()) {
@@ -212,5 +288,13 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
         await newExporter.release(fresh.id)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fresh.url.path))
     }
+}
+
+private final class JumpLifecycleSecrets: IdentitySecretStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Data] = [:]
+    func save(_ data: Data, reference: String) throws { lock.lock(); defer { lock.unlock() }; values[reference] = data }
+    func load(reference: String) throws -> Data { lock.lock(); defer { lock.unlock() }; guard let data = values[reference] else { throw IdentityError.missingSecret }; return data }
+    func delete(reference: String) throws { lock.lock(); defer { lock.unlock() }; values.removeValue(forKey: reference) }
 }
 #endif

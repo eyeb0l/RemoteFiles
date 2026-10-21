@@ -9,6 +9,124 @@ import NIOPosix
 /// Real OpenSSH checks are opt-in; the isolated launcher supplies temporary paths.
 /// A skip without that fixture must never be reported as an authentication pass.
 final class SFTPIntegrationTests: XCTestCase {
+    private func jumpFixture() async throws -> (Fixture, Stores, ConnectionProfile) {
+        let fixture = try Fixture(), stores = try Stores(fixture: fixture)
+        guard let port = Int(ProcessInfo.processInfo.environment["REMOTEFILES_SFTP_JUMP_PORT"] ?? "") else {
+            throw XCTSkip("Run the updated isolated OpenSSH fixture with its jump server.")
+        }
+        let destination = try await stores.identity.importKey(name: "Destination", openSSH: String(contentsOfFile: fixture.directory + "/plain", encoding: .utf8))
+        let jump = try await stores.identity.importKey(name: "Bastion", openSSH: String(contentsOfFile: fixture.directory + "/jump-key", encoding: .utf8))
+        var profile = try await stores.profile(identity: destination)
+        profile.jumpHost = JumpHost(host: "127.0.0.1", port: port, username: fixture.username, identityID: jump.id)
+        var value = await stores.metadata.snapshot(); value.identities.append(jump); value.connections = [profile]
+        try await stores.metadata.save(value)
+        return (fixture, stores, profile)
+    }
+
+    func testJumpHostVerifiesBothHostsAndUsesIndependentKeysThenReusesAndReconnects() async throws {
+        let (fixture, stores, profile) = try await jumpFixture()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        let hop = try XCTUnwrap(profile.jumpHost)
+        let jumpEndpoint = HostEndpoint(host: hop.host, port: hop.port)
+        let hopBefore = try String(contentsOfFile: fixture.directory + "/jump-sshd.log", encoding: .utf8)
+        let targetBefore = try String(contentsOfFile: fixture.directory + "/sshd.log", encoding: .utf8)
+        // Unknown bastion fails before either server receives a key offer.
+        do { _ = try await service.listDirectory(profile: profile, path: fixture.files); XCTFail("Require jump trust") }
+        catch HostTrustError.unknown(let endpoint, _) { XCTAssertEqual(endpoint, jumpEndpoint) }
+        let before = try String(contentsOfFile: fixture.directory + "/jump-sshd.log", encoding: .utf8)
+        XCTAssertFalse(String(before.dropFirst(hopBefore.count)).contains("Accepted publickey")); XCTAssertFalse(String(before.dropFirst(hopBefore.count)).contains("Failed publickey"))
+        let jumpPublic = try String(contentsOfFile: fixture.directory + "/jump-host.pub", encoding: .utf8)
+        try await stores.trust.trustUnknown(endpoint: jumpEndpoint, key: HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: jumpPublic)))
+        do { _ = try await service.listDirectory(profile: profile, path: fixture.files); XCTFail("Require destination trust") }
+        catch HostTrustError.unknown(let endpoint, _) { XCTAssertEqual(endpoint, fixture.endpoint) }
+        let destinationLog = try String(contentsOfFile: fixture.directory + "/sshd.log", encoding: .utf8)
+        XCTAssertFalse(String(destinationLog.dropFirst(targetBefore.count)).contains("Accepted publickey"), "Destination trust precedes its authentication")
+        try await stores.trustFixtureHost()
+        let bytes = try await service.readFile(profile: profile, path: fixture.files + "/report.md", limit: 4096)
+        XCTAssertTrue(String(decoding: bytes, as: UTF8.self).contains("Fixture report"))
+        _ = try await service.listDirectory(profile: profile, path: fixture.files + "/empty")
+        let reused = await service.metrics(); XCTAssertEqual(reused.connections, 1); XCTAssertEqual(reused.sftpChannels, 1)
+        await service.disconnect()
+        _ = try await service.readFile(profile: profile, path: fixture.files + "/report.md", limit: 4096)
+        let reconnected = await service.metrics(); XCTAssertEqual(reconnected.connections, 2)
+        let hopLog = try String(contentsOfFile: fixture.directory + "/jump-sshd.log", encoding: .utf8)
+        XCTAssertTrue(hopLog.contains("Accepted publickey"))
+        XCTAssertFalse(String(hopLog.dropFirst(hopBefore.count)).contains("Failed publickey"), "Destination key must never be offered to the bastion")
+    }
+
+    func testJumpHostChangedDestinationKeyBlocksDestinationAuthentication() async throws {
+        let (fixture, stores, profile) = try await jumpFixture()
+        let hop = try XCTUnwrap(profile.jumpHost)
+        let jumpPublic = try String(contentsOfFile: fixture.directory + "/jump-host.pub", encoding: .utf8)
+        try await stores.trust.trustUnknown(endpoint: HostEndpoint(host: hop.host, port: hop.port), key: HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: jumpPublic)))
+        let wrongKey = try HostKeyDetails(publicKey: NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey)
+        try await stores.trust.trustUnknown(endpoint: fixture.endpoint, key: wrongKey)
+        let service = stores.service(); addTeardownBlock { await service.disconnect() }
+        let before = try String(contentsOfFile: fixture.directory + "/sshd.log", encoding: .utf8)
+        do { _ = try await service.listDirectory(profile: profile, path: fixture.files); XCTFail("Changed destination must block") }
+        catch HostTrustError.changed(let endpoint, _, _) { XCTAssertEqual(endpoint, fixture.endpoint) }
+        let after = try String(contentsOfFile: fixture.directory + "/sshd.log", encoding: .utf8)
+        let added = String(after.dropFirst(before.count))
+        XCTAssertFalse(added.contains("Accepted publickey")); XCTAssertFalse(added.contains("Failed publickey"))
+    }
+
+    func testJumpHostForwardingRejectionExplainsTheFailureAndAllowsRetry() async throws {
+        let (fixture, stores, base) = try await jumpFixture()
+        let hop = try XCTUnwrap(base.jumpHost)
+        let jumpPublic = try String(contentsOfFile: fixture.directory + "/jump-host.pub", encoding: .utf8)
+        try await stores.trust.trustUnknown(endpoint: HostEndpoint(host: hop.host, port: hop.port), key: HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: jumpPublic)))
+        try await stores.trustFixtureHost()
+        let service = stores.service(); addTeardownBlock { await service.disconnect() }
+        var denied = base; denied.host = "127.0.0.2" // The bastion permits only 127.0.0.1.
+        do { _ = try await service.listDirectory(profile: denied, path: fixture.files); XCTFail("Forwarding must be refused") }
+        catch RemoteFileError.unavailable(let message) { XCTAssertTrue(message.contains("TCP forwarding")) }
+        let bytes = try await service.readFile(profile: base, path: fixture.files + "/report.md", limit: 4096)
+        XCTAssertTrue(String(decoding: bytes, as: UTF8.self).contains("Fixture report"))
+    }
+
+    func testJumpHostCancellationAndDeadlineCloseTheSilentDestinationTunnel() async throws {
+        let (_, stores, base) = try await jumpFixture()
+        let hop = try XCTUnwrap(base.jumpHost)
+        let fixture = try Fixture()
+        let jumpPublic = try String(contentsOfFile: fixture.directory + "/jump-host.pub", encoding: .utf8)
+        try await stores.trust.trustUnknown(endpoint: HostEndpoint(host: hop.host, port: hop.port), key: HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: jumpPublic)))
+        for cancel in [true, false] {
+            let accepted = expectation(description: "Forwarded destination connected")
+            let closed = expectation(description: "Forwarded destination closed")
+            let listener = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+                .childChannelInitializer { channel in
+                    channel.closeFuture.whenComplete { _ in closed.fulfill() }
+                    accepted.fulfill()
+                    return channel.eventLoop.makeSucceededVoidFuture()
+                }.bind(host: "127.0.0.1", port: 0).get()
+            addTeardownBlock { try? await listener.close() }
+            var profile = base; profile.port = try XCTUnwrap(listener.localAddress?.port)
+            let service = stores.service(timeoutSeconds: cancel ? 10 : 3)
+            addTeardownBlock { await service.disconnect() }
+            let operation = Task { try await service.listDirectory(profile: profile, path: "/") }
+            await fulfillment(of: [accepted], timeout: 5)
+            if cancel { operation.cancel() }
+            do { _ = try await operation.value; XCTFail("Silent destination cannot authenticate") }
+            catch is CancellationError { XCTAssertTrue(cancel) }
+            catch RemoteFileError.timedOut { XCTAssertFalse(cancel) }
+            await fulfillment(of: [closed], timeout: 5)
+            await service.disconnect()
+        }
+    }
+
+    func testJumpHostLockedIdentityReportsTheJumpKeyBeforeOpeningSockets() async throws {
+        let (fixture, stores, original) = try await jumpFixture()
+        let encrypted = try await stores.identity.importKey(name: "Locked bastion", openSSH: String(contentsOfFile: fixture.directory + "/encrypted", encoding: .utf8), passphrase: "fixture-passphrase")
+        await stores.identity.clearSession()
+        var metadata = await stores.metadata.snapshot(); metadata.identities.append(encrypted); try await stores.metadata.save(metadata)
+        var profile = original; profile.jumpHost?.identityID = encrypted.id
+        let service = stores.service(); addTeardownBlock { await service.disconnect() }
+        do { _ = try await service.listDirectory(profile: profile, path: fixture.files); XCTFail("Require the jump key") }
+        catch let error as ConnectionIdentityUnlockRequired { XCTAssertEqual(error.identity.id, encrypted.id) }
+        let measured = await service.metrics(); XCTAssertEqual(measured.connections, 0)
+    }
+
     func testRSAAndECDSAAuthenticateAndReadUsingOpenSSH() async throws {
         let fixture = try Fixture()
         for spec in ["rsa-2048", "ecdsa-256", "ecdsa-384", "ecdsa-521"] {

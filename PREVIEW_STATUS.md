@@ -1,5 +1,9 @@
 # RemoteFiles preview status
 
+**22 October 2026: jump-host connections and iPad workspace.**
+
+Connections can use one SSH bastion with separate identities and host-key verification. Regular-width iPad windows show the library, folder and reader together; iPhone keeps stack navigation. Route changes isolate resource caches, and editing/deleting the visible connection clears old routes. See [jump hosts](docs/JUMP_HOSTS.md) and [iPad workspace](docs/IPAD.md), including simulator screenshots. Local verification covered two-server OpenSSH, hosted core tests, full iPhone UI, focused iPhone/iPad lifecycle and form checks, VoiceOver and unsigned Release compilation. Two VoiceOver cases required isolated fixture state; the fresh-simulator speech-service limitation and retained rerun evidence are recorded in the PR. Physical iPad/windowing and production-bastion acceptance are not claimed.
+
 **21 October 2026: RSA and ECDSA OpenSSH identity imports.**
 
 RSA (2048–8192 bits) and ECDSA (P-256/P-384/P-521) now work with encrypted or unencrypted imports, passphrase unlock, optional biometric copies and explicit public-key installation. RSA authentication uses SHA-512/SHA-256. Independent OpenSSH tests passed on macOS and hosted iOS, including a SHA-256-only RSA server configuration on macOS. UI acceptance covers RSA and P-256 imports through the native paste control. See [key support](docs/KEY_SUPPORT.md) for the permitted and tested matrix. This update has not been installed or accepted on a physical device.
