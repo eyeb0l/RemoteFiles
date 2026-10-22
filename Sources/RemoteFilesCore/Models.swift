@@ -155,10 +155,18 @@ public protocol RemoteFileService: Sendable {
     func resolveDocumentLink(profile: ConnectionProfile, documentPath: String, reference: String) async throws -> RemoteEntry
     func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry
     func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry
+    /// Snapshot roots and files are already canonical. Reject redirects rather than following a
+    /// link that appeared after traversal. Adapters opt in to this stronger download contract.
+    func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL,
+                              limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry
     func disconnect() async
 }
 
 public extension RemoteFileService {
+    func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL,
+                              limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        throw RemoteFileError.unsupportedFile
+    }
     /// Older adapters can finish without chunk progress. Read the actual local size at completion.
     func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL,
                       limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {

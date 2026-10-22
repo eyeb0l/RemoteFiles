@@ -321,11 +321,26 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching {
     }
     public func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String,
                              destination: URL, limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        try await download(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination,
+                           limit: limit, progress: progress, canonicalPaths: false)
+    }
+    public func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String,
+                                     destination: URL, limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        try await download(profile: profile, path: path, allowedRoot: canonicalRoot, destination: destination,
+                           limit: limit, progress: progress, canonicalPaths: true)
+    }
+    private func download(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL,
+                          limit: Int, progress: @escaping DownloadProgressHandler, canonicalPaths: Bool) async throws -> RemoteEntry {
         guard limit > 0, limit < Int.max else { throw RemoteFileError.tooLarge(limit) }
         let session = try await session(for: profile)
         let result = try await performOnDedicatedChannel(session: session, timeout: 180) { sftp in
             let root = try await sftp.getRealPath(atPath: Self.validated(allowedRoot))
             let canonical = try await sftp.getRealPath(atPath: Self.validated(path))
+            if canonicalPaths {
+                guard root.utf8.elementsEqual(allowedRoot.utf8), canonical.utf8.elementsEqual(path.utf8) else {
+                    throw RemoteDocumentLinkError.outsideConnection
+                }
+            }
             guard RemoteResourcePath.contains(canonical, in: root) else { throw RemoteResourceError.outsideDocument }
             let file = try await sftp.openFile(filePath: canonical, flags: .read)
             let attributes = try await file.readAttributes()

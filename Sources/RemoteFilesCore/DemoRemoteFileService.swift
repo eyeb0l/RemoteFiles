@@ -93,9 +93,22 @@ public actor DemoRemoteFileService: RemoteFileService {
     }
     public func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
         try await pause()
+        if path == "." || path == "/Projects" || path.hasSuffix("/Reports") || path.hasSuffix("/Reports/2026") || path.hasSuffix("/Empty") {
+            let canonical = path == "." ? "/Projects" : path
+            return RemoteEntry(name: RemotePath.name(of: canonical), path: canonical, kind: .directory)
+        }
         if path.hasSuffix("/Old notes") { throw RemoteFileError.notFound }
         if path.hasSuffix("/Current reports") { return RemoteEntry(name: "Reports", path: RemotePath.parent(of: path) + "/Reports", kind: .directory) }
         return RemoteEntry(name: "Weekly review.md", path: RemotePath.parent(of: path) + "/Weekly review.md", kind: .file)
+    }
+    public func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL,
+                                     limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        guard RemoteResourcePath.contains(path, in: canonicalRoot),
+              !(path.hasSuffix("/Latest report") || path.hasSuffix("/Current reports")) else {
+            throw RemoteDocumentLinkError.outsideConnection
+        }
+        return try await downloadFile(profile: profile, path: path, allowedRoot: canonicalRoot,
+                                      destination: destination, limit: limit, progress: progress)
     }
     public func resolveDocumentLink(profile: ConnectionProfile, documentPath: String, reference: String) async throws -> RemoteEntry {
         try await pause()

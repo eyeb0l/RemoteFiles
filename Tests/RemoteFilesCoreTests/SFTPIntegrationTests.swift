@@ -10,6 +10,46 @@ import Citadel
 /// Real OpenSSH checks are opt-in; the isolated launcher supplies temporary paths.
 /// A skip without that fixture must never be reported as an authentication pass.
 final class SFTPIntegrationTests: XCTestCase {
+    func testOfflineFolderSnapshotStaysConfinedAndReadableAfterDisconnect() async throws {
+        let fixture = try Fixture(), stores = try Stores(fixture: fixture)
+        let identity = try await stores.identity.generate(name: "Offline folder")
+        try fixture.authorize(identity.publicKey)
+        let profile = try await stores.profile(identity: identity)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        let tree = fixture.files + "/offline-tree-" + UUID().uuidString
+        try FileManager.default.createDirectory(atPath: tree + "/Nested", withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: tree + "/Empty", withIntermediateDirectories: true)
+        try Data("root bytes".utf8).write(to: URL(fileURLWithPath: tree + "/root.txt"))
+        try Data("nested bytes".utf8).write(to: URL(fileURLWithPath: tree + "/Nested/child.txt"))
+        try FileManager.default.createSymbolicLink(atPath: tree + "/link", withDestinationPath: fixture.files + "/original.txt")
+        let canonical = try await service.listDirectory(profile: profile, path: tree).path
+        let local = FileManager.default.temporaryDirectory.appendingPathComponent("offline-tree-store-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: local) }
+        let store = try OfflineFileStore(directory: local)
+        let folder = try await store.pinFolder(profile: profile, path: canonical, service: service)
+        XCTAssertEqual(folder.fileIDs.count, 2); XCTAssertEqual(folder.directories.count, 3); XCTAssertEqual(folder.skippedLinks, 1)
+        let files = await store.snapshot(), member = try XCTUnwrap(files.first { $0.path.hasSuffix("child.txt") })
+        let destination = local.appendingPathComponent("redirect-must-not-download")
+        do {
+            _ = try await service.downloadSnapshotFile(profile: profile, path: canonical + "/link", canonicalRoot: canonical,
+                destination: destination, limit: 100, progress: { _ in })
+            XCTFail("An alias must not be followed by snapshot downloads")
+        } catch RemoteDocumentLinkError.outsideConnection { }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        try FileManager.default.moveItem(atPath: tree, toPath: tree + "-original")
+        try FileManager.default.createSymbolicLink(atPath: tree, withDestinationPath: tree + "-original")
+        do {
+            _ = try await service.downloadSnapshotFile(profile: profile, path: canonical + "/root.txt", canonicalRoot: canonical,
+                destination: destination, limit: 100, progress: { _ in })
+            XCTFail("A redirected snapshot root must fail before reading")
+        } catch RemoteDocumentLinkError.outsideConnection { }
+        await service.disconnect()
+        let lease = try await store.lease(member.id)
+        XCTAssertEqual(try Data(contentsOf: lease.url), Data("nested bytes".utf8))
+    }
+
     func testBoundedSearchExecClosesOnOutputOverflowCancellationAndDeadlineWithoutClosingSFTP() async throws {
         let fixture = try Fixture(), stores = try Stores(fixture: fixture)
         let identity = try await stores.identity.generate(name: "Exec lifecycle")

@@ -19,12 +19,14 @@ final class AppModel {
         }
     }
     enum Sheet: Identifiable {
+        case offlineFolder(ConnectionProfile, String, Bool)
         case connection(UUID?), keys, offlineFiles, trust(HostEndpoint, HostKeyDetails), changed(HostEndpoint, HostKeyDetails, HostKeyDetails), unlock(IdentityMetadata)
         var id: String {
             switch self {
             case .connection: return "connection"
             case .keys: return "keys"
             case .offlineFiles: return "offlineFiles"
+            case .offlineFolder: return "offlineFolder"
             case .trust: return "trust"
             case .changed: return "changed"
             case .unlock: return "unlock"
@@ -46,9 +48,15 @@ final class AppModel {
     let offlineDirectory: URL
     private(set) var offlineStore: OfflineFileStore?
     private(set) var offlinePins: [OfflinePin] = []
+    private(set) var offlineFolders: [OfflineFolderPin] = []
+    var standaloneOfflinePins: [OfflinePin] {
+        let members = Set(offlineFolders.flatMap(\.fileIDs))
+        return offlinePins.filter { !members.contains($0.id) }
+    }
     private(set) var offlineError: String?
     private(set) var pinningName: String?
     private(set) var pinProgress = DownloadProgress()
+    private(set) var folderPinProgress: OfflineFolderProgress?
     private(set) var cancellingPin = false
     private var pinTask: Task<Void, Never>?
     private var pinToken: UUID?
@@ -105,36 +113,48 @@ final class AppModel {
     private func loadOfflineLibrary() async {
         offlineObservation = nil
         let token = UUID(); offlineLibraryToken = token
-        offlineStore = nil; offlinePins = []; offlineError = nil
+        offlineStore = nil; offlinePins = []; offlineFolders = []; offlineError = nil
         do {
             let directory = demo ? offlineDirectory.appendingPathComponent("Demo", isDirectory: true) : offlineDirectory
             let store = try await OfflineFileStore.shared(directory: directory)
-            let pins = await store.snapshot()
+            let library = await store.librarySnapshot()
             guard offlineLibraryToken == token else { return }
-            offlineStore = store; offlinePins = pins
+            offlineStore = store; offlinePins = library.files; offlineFolders = library.folders
             offlineObservation = OfflineLibraryObservation(Task { [weak self] in
                 for await _ in await store.changes() {
-                    let pins = await store.snapshot()
+                    let library = await store.librarySnapshot()
                     guard !Task.isCancelled, self?.offlineLibraryToken == token else { return }
-                    self?.offlinePins = pins
+                    self?.offlinePins = library.files; self?.offlineFolders = library.folders
                 }
             })
         } catch { if offlineLibraryToken == token { offlineError = error.localizedDescription } }
     }
     func offlinePin(profile: ConnectionProfile, path: String) -> OfflinePin? {
-        offlinePins.first { $0.matches(profile, path: path) }
+        standaloneOfflinePins.first { $0.matches(profile, path: path) }
     }
-    func pinOffline(profile: ConnectionProfile, entry: RemoteEntry) {
+    func offlineFolder(profile: ConnectionProfile, path: String) -> OfflineFolderPin? {
+        offlineFolders.first { $0.matches(profile, path: path) }
+    }
+    func pinOffline(profile: ConnectionProfile, entry: RemoteEntry, includeHidden: Bool = false) {
         guard pinTask == nil, isForeground, !isDisconnecting, disconnectWork == nil,
               let store = offlineStore else { return }
-        let token = UUID(), revision = sessionRevision, transport = service
+        let token = UUID(), revision = sessionRevision
+        let transport = entry.kind == .directory ? searchService : service
         pinToken = token; pinningName = entry.exportFilename ?? entry.name
         pinProgress = .init(); cancellingPin = false
+        folderPinProgress = entry.kind == .directory ? .init() : nil
         pinTask = Task {
             do {
-                _ = try await store.pin(profile: profile, entry: entry, allowedRoot: profile.startingDirectory,
-                                        service: transport, operationID: token) { [weak self] progress in
-                    await self?.updatePinProgress(progress, token: token)
+                if entry.kind == .directory {
+                    _ = try await store.pinFolder(profile: profile, path: entry.path, includeHidden: includeHidden,
+                        service: transport, operationID: token) { [weak self] progress in
+                            await self?.updateFolderPinProgress(progress, token: token)
+                        }
+                } else {
+                    _ = try await store.pin(profile: profile, entry: entry, allowedRoot: profile.startingDirectory,
+                                            service: transport, operationID: token) { [weak self] progress in
+                        await self?.updatePinProgress(progress, token: token)
+                    }
                 }
             } catch is CancellationError { }
             catch {
@@ -153,9 +173,20 @@ final class AppModel {
             // its private output is gone; disconnect closes the channel before waiting here.
             await store.waitForCancelledTransfer(token)
             guard pinToken == token else { return }
-            offlinePins = await store.snapshot()
+            await refreshOfflineSnapshot(store)
             pinTask = nil; pinToken = nil; pinningName = nil; cancellingPin = false
+            folderPinProgress = nil
         }
+    }
+    private func refreshOfflineSnapshot(_ store: OfflineFileStore) async {
+        let library = await store.librarySnapshot()
+        guard offlineStore === store else { return }
+        offlinePins = library.files; offlineFolders = library.folders
+    }
+    private func updateFolderPinProgress(_ progress: OfflineFolderProgress, token: UUID) {
+        guard pinToken == token, !cancellingPin else { return }
+        folderPinProgress = progress
+        pinProgress = .init(receivedBytes: progress.bytes)
     }
     private func updatePinProgress(_ progress: DownloadProgress, token: UUID) {
         guard pinToken == token, !cancellingPin else { return }
@@ -167,7 +198,7 @@ final class AppModel {
     }
     func removeOfflinePin(_ pin: OfflinePin) async {
         guard let store = offlineStore else { return }
-        do { try await store.remove(pin.id); offlinePins = await store.snapshot() }
+        do { try await store.remove(pin.id); await refreshOfflineSnapshot(store) }
         catch { errorMessage = error.localizedDescription }
     }
     func refreshOfflinePin(_ pin: OfflinePin) {
@@ -177,6 +208,18 @@ final class AppModel {
         }
         pinOffline(profile: profile, entry: .init(name: RemotePath.name(of: pin.path), path: pin.path,
                                                 kind: .file, exportFilename: pin.filename))
+    }
+    func removeOfflineFolder(_ folder: OfflineFolderPin) async {
+        guard let store = offlineStore else { return }
+        do { try await store.removeFolder(folder.id); await refreshOfflineSnapshot(store) }
+        catch { errorMessage = error.localizedDescription }
+    }
+    func refreshOfflineFolder(_ folder: OfflineFolderPin) {
+        guard let profile = profile(folder.connectionID), folder.matches(profile, path: folder.path) else {
+            errorMessage = "This connection has changed or was removed. The saved folder is still available. Save a new copy from the current connection to update it."
+            return
+        }
+        pinOffline(profile: profile, entry: .init(name: folder.name, path: folder.path, kind: .directory), includeHidden: folder.includeHidden)
     }
     func prepareReadingPosition(_ position: DocumentReadingPosition, text: String, profile: ConnectionProfile, path: String) async {
         await position.prepare(text: text, store: demo ? nil : readingPositions, connectionID: profile.id, path: path)

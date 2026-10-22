@@ -87,4 +87,10 @@ public actor CoalescingFileService: RemoteFileService {
         lists.removeAll(); reads.removeAll(); versionedReads.removeAll()
         await base.disconnect()
     }
+    // Snapshot downloads, like original exports, never join foreground coalesced reads.
+    public func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL,
+                                     limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        try await base.downloadSnapshotFile(profile: profile, path: path, canonicalRoot: canonicalRoot,
+                                            destination: destination, limit: limit, progress: progress)
+    }
 }

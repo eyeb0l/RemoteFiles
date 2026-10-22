@@ -35,6 +35,7 @@ public struct OfflinePin: Identifiable, Codable, Hashable, Sendable {
 
 public enum OfflineFileError: LocalizedError, Sendable {
     case busy, storageFull, tooManyFiles, metadataTooLarge, missing, damaged, invalidLibrary, tooManyReaders, tooLarge(Int), timedOut
+    case folderLimit(String), folderMember
     public var errorDescription: String? {
         switch self {
         case .busy: return "An offline file is already being saved or cancelled. Wait for it to finish."
@@ -47,6 +48,8 @@ public enum OfflineFileError: LocalizedError, Sendable {
         case .tooManyReaders: return "Close another offline preview before opening this file."
         case .tooLarge(let limit): return "Offline copies are limited to \(ByteCountFormatter.string(fromByteCount: Int64(limit), countStyle: .file)) per file."
         case .timedOut: return "Saving this offline copy timed out. Try again while connected."
+        case .folderLimit(let detail): return "This folder exceeds the offline \(detail) limit. The previous copy has been kept."
+        case .folderMember: return "This file belongs to a saved folder. Update or remove the folder instead."
         }
     }
 }
@@ -72,13 +75,15 @@ public actor OfflineFileStore {
     public static let maximumFileBytes = 128 * 1_024 * 1_024
     public static let maximumStoredBytes = 512 * 1_024 * 1_024
     public static let maximumFiles = 100
+    public static let maximumFolders = 32
     private static let maximumIndexBytes = 2 * 1_024 * 1_024
-    private struct Manifest: Codable { var version = 1; var pins: [OfflinePin] = [] }
+    private struct Manifest: Codable { var version = 1; var pins: [OfflinePin] = []; var folders: [OfflineFolderPin]? }
     private let directory: URL
     private let fileLimit: Int
     private let storageLimit: Int
     private let countLimit: Int
     private var pins: [OfflinePin]
+    private var folders: [OfflineFolderPin] = []
     private var operation: UUID?
     private var cancelled = false
     private var exporter: RemoteOriginalExporter?
@@ -86,6 +91,7 @@ public actor OfflineFileStore {
     private var leases: [WeakOfflineLease] = []
     private var refreshingID: UUID?
     private var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
+    private var folderWorker: OfflineFolderDownload?
 
     public init(directory: URL, fileLimit: Int = maximumFileBytes, storageLimit: Int = maximumStoredBytes,
                 countLimit: Int = maximumFiles) throws {
@@ -114,14 +120,16 @@ public actor OfflineFileStore {
                 total += pin.byteCount
             }
             pins = value.pins
+            folders = value.folders ?? []
         } else { pins = [] }
+        try Self.validateFolders(folders, pins: pins)
         // The manifest is the commit point. Clean only recognized, store-owned abandoned output.
         let retained = Set(pins.map { $0.blobID.uuidString })
         for child in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
             let name = child.lastPathComponent
             let abandonedIndex = name.hasPrefix(".index-") && name.hasSuffix(".json") &&
                 UUID(uuidString: String(name.dropFirst(7).dropLast(5))) != nil
-            if (UUID(uuidString: name) != nil && !retained.contains(name)) || name == ".transfers" || name == ".leases" || abandonedIndex {
+            if (UUID(uuidString: name) != nil && !retained.contains(name)) || name == ".transfers" || name == ".leases" || name == ".folder-staging" || abandonedIndex {
                 try FileManager.default.removeItem(at: child)
             }
         }
@@ -132,6 +140,7 @@ public actor OfflineFileStore {
     }
 
     public func snapshot() -> [OfflinePin] { pins.sorted { $0.savedAt > $1.savedAt } }
+    public func folderSnapshot() -> [OfflineFolderPin] { folders.sorted { $0.savedAt > $1.savedAt } }
 
     /// Every window observes commits. Buffer just one invalidation; consumers fetch the latest
     /// snapshot, so a slow/background window neither builds a queue nor replays stale metadata.
@@ -162,7 +171,8 @@ public actor OfflineFileStore {
         guard operation == nil else { throw OfflineFileError.busy }
         guard entry.path.hasPrefix("/") else { throw RemoteFileError.invalidPath }
         if let size = entry.size, size > UInt64(fileLimit) { throw OfflineFileError.tooLarge(fileLimit) }
-        let previous = pins.first { $0.matches(profile, path: entry.path) }
+        let members = Set(folders.flatMap(\.fileIDs))
+        let previous = pins.first { !members.contains($0.id) && $0.matches(profile, path: entry.path) }
         guard previous != nil || pins.count < countLimit else { throw OfflineFileError.tooManyFiles }
         let used = pins.filter { $0.id != previous?.id }.reduce(0) { $0 + $1.byteCount }
         let available = storageLimit - used
@@ -217,7 +227,10 @@ public actor OfflineFileStore {
         }
     }
 
-    public func cancelAll() async { cancelled = true; await exporter?.cancelAll() }
+    public func cancelAll() async {
+        cancelled = true
+        await exporter?.cancelAll(); await folderWorker?.cancel()
+    }
     /// Only the caller that installed a drain may join it. A rejected/busy request must never
     /// wait for an unrelated window's uncooperative transport to finish cancelling.
     public func waitForCancelledTransfer(_ operationID: UUID) async {
@@ -227,14 +240,17 @@ public actor OfflineFileStore {
     }
     public func cancelAndDrain() async {
         let current = exporter, token = operation, previousDrain = draining
+        let folder = folderWorker
         cancelled = true
         await current?.cancelAll()
         await current?.cancelAndDrain()
+        await folder?.cancelAndDrain()
         await previousDrain?.value
         if let token { finish(token) }
     }
 
     public func remove(_ id: UUID) throws {
+        guard !folders.contains(where: { $0.fileIDs.contains(id) }) else { throw OfflineFileError.folderMember }
         guard let pin = pins.first(where: { $0.id == id }) else { return }
         let candidate = pins.filter { $0.id != id }
         try save(candidate); pins = candidate
@@ -274,11 +290,11 @@ public actor OfflineFileStore {
 
     private func finish(_ id: UUID) {
         guard operation == id else { return }
-        operation = nil; exporter = nil; cancelled = false; draining = nil; refreshingID = nil
+        operation = nil; exporter = nil; folderWorker = nil; cancelled = false; draining = nil; refreshingID = nil
         try? FileManager.default.removeItem(at: directory.appendingPathComponent(".transfers").appendingPathComponent(id.uuidString))
     }
-    private func save(_ pins: [OfflinePin]) throws {
-        let data = try JSONEncoder().encode(Manifest(pins: pins))
+    private func save(_ pins: [OfflinePin], folders: [OfflineFolderPin]? = nil) throws {
+        let data = try JSONEncoder().encode(Manifest(pins: pins, folders: folders ?? self.folders))
         guard data.count <= Self.maximumIndexBytes else { throw OfflineFileError.metadataTooLarge }
         let index = directory.appendingPathComponent("index-v1.json")
         let temporary = directory.appendingPathComponent(".index-" + UUID().uuidString + ".json")
@@ -293,11 +309,11 @@ public actor OfflineFileStore {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
     }
-    private static func validFilename(_ value: String) -> Bool {
+    static func validFilename(_ value: String) -> Bool {
         !value.isEmpty && value != "." && value != ".." && !value.contains("/") && !value.contains("\\") &&
         !value.unicodeScalars.contains { $0.value < 32 || $0.value == 127 }
     }
-    private static func protectDirectory(_ url: URL) throws {
+    static func protectDirectory(_ url: URL) throws {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         guard try FileManager.default.attributesOfItem(atPath: url.path)[.type] as? FileAttributeType == .typeDirectory else {
             throw OfflineFileError.invalidLibrary
@@ -309,13 +325,13 @@ public actor OfflineFileStore {
         var values = URLResourceValues(); values.isExcludedFromBackup = true
         var directory = url; try directory.setResourceValues(values)
     }
-    private static func protectFile(_ url: URL) throws {
+    static func protectFile(_ url: URL) throws {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         #if os(iOS)
         try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
         #endif
     }
-    private static func fingerprint(_ url: URL, limit: Int) throws -> (Int, String) {
+    static func fingerprint(_ url: URL, limit: Int) throws -> (Int, String) {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         guard attributes[.type] as? FileAttributeType == .typeRegular else { throw OfflineFileError.damaged }
         guard let size = attributes[.size] as? NSNumber, size.uint64Value <= UInt64(limit) else { throw OfflineFileError.damaged }
@@ -340,5 +356,109 @@ private actor OfflineStores {
         let store = try OfflineFileStore(directory: key)
         stores[key] = store
         return store
+    }
+}
+
+extension OfflineFileStore {
+    public func librarySnapshot() -> OfflineLibrarySnapshot {
+        OfflineLibrarySnapshot(files: snapshot(), folders: folderSnapshot())
+    }
+
+    public func pinFolder(profile: ConnectionProfile, path: String, includeHidden: Bool = false,
+                          service: any RemoteFileService, operationID: UUID = UUID(),
+                          limits: OfflineFolderLimits = .init(),
+                          progress: @escaping OfflineFolderProgressHandler = { _ in }) async throws -> OfflineFolderPin {
+        try Task.checkCancellation()
+        guard operation == nil else { throw OfflineFileError.busy }
+        guard OfflineFolderPin.validPath(path) else { throw RemoteFileError.invalidPath }
+        let previous = folders.first { $0.matches(profile, path: path) }
+        guard previous != nil || folders.count < Self.maximumFolders else { throw OfflineFileError.folderLimit("32 saved folders") }
+        let replaced = Set(previous?.fileIDs ?? [])
+        let remaining = pins.filter { !replaced.contains($0.id) }
+        let used = remaining.reduce(0) { $0 + $1.byteCount }
+        let stagingRoot = directory.appendingPathComponent(".folder-staging")
+        try Self.protectDirectory(stagingRoot)
+        let staging = stagingRoot.appendingPathComponent(operationID.uuidString)
+        let worker = OfflineFolderDownload(directory: staging, profile: profile, path: path, includeHidden: includeHidden,
+            service: (service as? CoalescingFileService)?.base ?? service, oldFiles: pins.filter { replaced.contains($0.id) },
+            fileLimit: fileLimit, byteLimit: storageLimit - used, countLimit: countLimit - remaining.count,
+            limits: limits, progress: progress)
+        operation = operationID; folderWorker = worker; cancelled = false; refreshingID = previous?.id
+        var moved: [URL] = []
+        do {
+            let prepared = try await worker.prepare()
+            try Task.checkCancellation()
+            guard operation == operationID, !cancelled else { throw CancellationError() }
+            for pin in prepared.files {
+                let destination = directory.appendingPathComponent(pin.blobID.uuidString)
+                try FileManager.default.moveItem(at: staging.appendingPathComponent(pin.blobID.uuidString), to: destination)
+                moved.append(destination)
+            }
+            let name = RemotePath.name(of: path)
+            let folder = OfflineFolderPin(id: previous?.id ?? UUID(), connectionID: profile.id, connectionName: profile.name,
+                routeKey: OfflinePin.routeKey(profile), path: path, name: name.isEmpty ? "Root" : name, savedAt: Date(),
+                includeHidden: includeHidden, directories: prepared.directories, fileIDs: prepared.files.map(\.id),
+                skippedLinks: prepared.skippedLinks, skippedOtherEntries: prepared.skippedOtherEntries)
+            // Re-read current metadata: another window may have removed a different pin while
+            // this operation was suspended. Never resurrect it from the planning snapshot.
+            let candidate = pins.filter { !replaced.contains($0.id) } + prepared.files
+            let newFolders = folders.filter { $0.id != folder.id } + [folder]
+            try Self.validateFolders(newFolders, pins: candidate)
+            try Task.checkCancellation()
+            try save(candidate, folders: newFolders)
+            let retired = pins.filter { replaced.contains($0.id) }
+            pins = candidate; folders = newFolders; moved = []
+            publishChange()
+            for pin in retired { try? FileManager.default.removeItem(at: directory.appendingPathComponent(pin.blobID.uuidString)) }
+            await worker.cleanup()
+            finish(operationID)
+            return folder
+        } catch {
+            for url in moved { try? FileManager.default.removeItem(at: url) }
+            await worker.cancel()
+            let drain = Task { await worker.cancelAndDrain(); self.finish(operationID) }
+            if operation == operationID { draining = drain }
+            throw error
+        }
+    }
+
+    public func removeFolder(_ id: UUID) async throws {
+        guard let folder = folders.first(where: { $0.id == id }) else { return }
+        let members = Set(folder.fileIDs), retired = pins.filter { members.contains($0.id) }
+        let candidate = pins.filter { !members.contains($0.id) }, newFolders = folders.filter { $0.id != id }
+        try save(candidate, folders: newFolders)
+        pins = candidate; folders = newFolders
+        publishChange()
+        if refreshingID == id { cancelled = true; await folderWorker?.cancel() }
+        for pin in retired { try? FileManager.default.removeItem(at: directory.appendingPathComponent(pin.blobID.uuidString)) }
+    }
+
+    private static func validateFolders(_ folders: [OfflineFolderPin], pins: [OfflinePin]) throws {
+        guard folders.count <= maximumFolders, Set(folders.map(\.id)).count == folders.count else { throw OfflineFileError.invalidLibrary }
+        let files = Dictionary(uniqueKeysWithValues: pins.map { ($0.id, $0) })
+        var owned = Set<UUID>(), routes = Set<Data>()
+        for folder in folders {
+            let dirs = Set(folder.directories.map { Data($0.utf8) })
+            guard OfflineFolderPin.validPath(folder.path), !folder.name.isEmpty,
+                  folder.routeKey.count == 64, folder.routeKey.allSatisfy({ $0.isHexDigit }),
+                  folder.directories.count <= 256, dirs.count == folder.directories.count, dirs.contains(Data(folder.path.utf8)),
+                  folder.skippedLinks >= 0, folder.skippedLinks <= 10_000,
+                  folder.skippedOtherEntries >= 0, folder.skippedOtherEntries <= 10_000,
+                  routes.insert(Data((folder.routeKey + folder.path).utf8)).inserted else { throw OfflineFileError.invalidLibrary }
+            for path in folder.directories {
+                guard OfflineFolderPin.validPath(path), RemoteResourcePath.contains(path, in: folder.path),
+                      path.utf8.elementsEqual(folder.path.utf8) || dirs.contains(Data(RemotePath.parent(of: path).utf8)) else {
+                    throw OfflineFileError.invalidLibrary
+                }
+            }
+            var paths = Set<Data>()
+            for id in folder.fileIDs {
+                guard owned.insert(id).inserted, let pin = files[id],
+                      pin.connectionID == folder.connectionID, pin.routeKey == folder.routeKey,
+                      RemoteResourcePath.contains(pin.path, in: folder.path),
+                      dirs.contains(Data(RemotePath.parent(of: pin.path).utf8)),
+                      paths.insert(Data(pin.path.utf8)).inserted else { throw OfflineFileError.invalidLibrary }
+            }
+        }
     }
 }
