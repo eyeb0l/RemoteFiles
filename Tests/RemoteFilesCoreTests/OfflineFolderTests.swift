@@ -60,6 +60,30 @@ private actor FolderFixture: RemoteFileService {
 }
 
 final class OfflineFolderTests: XCTestCase {
+    func testStoreCancellationAndRemovalReturnWhileListingIgnoresCancellation() async throws {
+        for removing in [false, true] {
+            let (_, store, service) = try setup()
+            let folder = try await store.pinFolder(profile: profile, path: path, service: service)
+            await service.configure(holdListing: true)
+            let returned = expectation(description: "Store cancellation returns before the listing finishes")
+            let saving = Task {
+                defer { returned.fulfill() }
+                return try await store.pinFolder(profile: self.profile, path: self.path, service: service)
+            }
+            try await waitFor { await service.waiting() }
+            if removing { try await store.removeFolder(folder.id) }
+            else { await store.cancelAll() }
+            await fulfillment(of: [returned], timeout: 3)
+            let saved = await store.librarySnapshot()
+            XCTAssertEqual(saved.folders.map(\.id), removing ? [] : [folder.id])
+            // Release even on a failed prompt-return assertion so teardown never hides it.
+            await service.release()
+            do { _ = try await saving.value; XCTFail("Cancelled refresh must not publish") }
+            catch is CancellationError { }
+            await store.cancelAndDrain()
+        }
+    }
+
     func testCancellingSnapshotDoesNotCancelCoalescedForegroundListing() async throws {
         let (_, store, service) = try setup()
         await service.configure(holdListing: true)

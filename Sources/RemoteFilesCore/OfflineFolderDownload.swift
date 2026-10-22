@@ -22,6 +22,8 @@ actor OfflineFolderDownload {
     let limits: OfflineFolderLimits
     let progress: OfflineFolderProgressHandler
     private var work: Task<PreparedOfflineFolder, Error>?
+    private var preparation: Task<PreparedOfflineFolder, Error>?
+    private var cancelled = false
     private var exporter: RemoteOriginalExporter?
 
     init(directory: URL, profile: ConnectionProfile, path: String, includeHidden: Bool, service: any RemoteFileService,
@@ -32,20 +34,30 @@ actor OfflineFolderDownload {
         self.countLimit = countLimit; self.limits = limits; self.progress = progress
     }
     func prepare() async throws -> PreparedOfflineFolder {
+        try Task.checkCancellation()
+        guard !cancelled else { throw CancellationError() }
         let task = Task { try await walk() }; work = task
         let expired = OfflineDeadlineFlag()
+        let pending = Task {
+            try await SFTPRemoteFileService.detachedDeadline(seconds: limits.seconds, onTimeout: {
+                expired.set(); task.cancel(); Task { await self.cancel() }
+            }) { try await task.value }
+        }
+        preparation = pending
         do {
             return try await withTaskCancellationHandler {
-                try await SFTPRemoteFileService.detachedDeadline(seconds: limits.seconds, onTimeout: {
-                    expired.set(); task.cancel(); Task { await self.cancel() }
-                }) { try await task.value }
-            } onCancel: { task.cancel(); Task { await self.cancel() } }
+                try await pending.value
+            } onCancel: { pending.cancel(); task.cancel(); Task { await self.cancel() } }
         } catch {
             if expired.isSet { throw OfflineFileError.folderLimit("10 minute time") }
             throw error
         }
     }
-    func cancel() async { work?.cancel(); await exporter?.cancelAll() }
+    func cancel() async {
+        cancelled = true
+        preparation?.cancel(); work?.cancel()
+        await exporter?.cancelAll()
+    }
     func cancelAndDrain() async {
         await cancel()
         _ = await work?.result
