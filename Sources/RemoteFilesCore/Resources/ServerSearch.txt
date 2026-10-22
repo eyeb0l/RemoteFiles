@@ -11,6 +11,7 @@ output_bytes = 0
 entries_seen = 0
 expired = False
 scanning = True
+root_fd = None
 
 class Unsupported(Exception): pass
 class ResourceLimit(Exception): pass
@@ -29,8 +30,8 @@ def check_time():
         raise Expired()
 
 def open_directory(parts):
-    # Resolve every component with O_NOFOLLOW, including ancestors of the search root.
-    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    # Start from the directory opened by SFTP, never from the exec-visible absolute path.
+    fd = os.dup(root_fd)
     try:
         for part in parts:
             next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
@@ -136,11 +137,34 @@ try:
         raise Unsupported()
     signal.signal(signal.SIGALRM, alarm)
     signal.setitimer(signal.ITIMER_REAL, r['seconds'])
-    canonical = os.path.realpath(root)
+    handle = r.get('rootHandle', '')
+    # Linux procfs exposes the SFTP process's held descriptor. Require the same mount namespace
+    # so traversal below that descriptor sees the same nested mounts. An inherited descriptor
+    # is also supported for callers that already run the helper in the owning process namespace.
+    match = re.fullmatch(r'/proc/([1-9][0-9]*)/fd/([0-9]+)', handle)
+    if match:
+        try:
+            # A PID can name another process when procfs mounts use different PID namespaces.
+            # Bind it to the SFTP channel's kernel pipe/socket identity before borrowing a fd.
+            owner = r.get('ownerToken', '')
+            if not re.fullmatch(r'(pipe|socket):\[[0-9]+\]', owner):
+                raise Unsupported()
+            if os.readlink('/proc/' + match[1] + '/fd/0') != owner:
+                raise Unsupported()
+            if not os.path.samestat(os.stat('/proc/' + match[1] + '/ns/mnt'), os.stat('/proc/self/ns/mnt')):
+                raise Unsupported()
+        except OSError:
+            raise Unsupported()
+    elif not re.fullmatch(r'/dev/fd/[0-9]+', handle):
+        raise Unsupported()
+    try:
+        root_fd = os.open(handle, os.O_RDONLY | os.O_DIRECTORY) if match else os.dup(int(handle.rsplit('/', 1)[-1]))
+        if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
+            raise Unsupported()
+    except OSError:
+        raise Unsupported()
     check_time()
-    if canonical != root:
-        result['error'] = 'outsideRoot'
-    else:
+    if root_fd is not None:
         queue = collections.deque([(root, 0)])
         while queue and not result['stop']:
             check_time()
@@ -150,7 +174,8 @@ try:
             path, depth = queue.popleft()
             fd = None
             try:
-                fd = open_directory(path.strip('/').split('/') if path != '/' else [])
+                relative = path[len(root):].strip('/')
+                fd = open_directory(relative.split('/') if relative else [])
                 names = []
                 with os.scandir(fd) as listing:
                     for entry in listing:
@@ -210,6 +235,8 @@ except (AttributeError, NotImplementedError):
 finally:
     try:
         scanning = False
+        if root_fd is not None:
+            os.close(root_fd)
         if hasattr(signal, 'setitimer'):
             signal.setitimer(signal.ITIMER_REAL, 0)
     except Expired:

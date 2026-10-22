@@ -33,23 +33,43 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching {
 
     func searchFolders(query: String, root: String, profile: ConnectionProfile, includeHidden: Bool,
                        limits: RemoteFolderSearch.Limits, content: RemoteFolderSearch.ContentLimits?) async throws -> RemoteFolderSearch.Update? {
-        let command: String
         do {
-            command = try ServerFolderSearch.command(query: query, root: root, includeHidden: includeHidden,
+            _ = try ServerFolderSearch.command(query: query, root: root, includeHidden: includeHidden,
                                                      limits: limits, content: content)
         } catch ServerFolderSearch.Failure.unsupported { return nil }
         let session = try await session(for: profile)
         guard !session.serverSearchUnavailable else { return nil }
-        // SFTP and exec can expose different filesystem namespaces. Resolve via SFTP first and
-        // require the helper to see that same canonical path; otherwise use ordinary SFTP search.
+        // Canonical strings alone cannot bind SFTP and exec namespaces. The dedicated SFTP
+        // channel below holds the actual root directory open for the helper to borrow.
         let canonical = try await perform(session: session) { sftp in
             try await sftp.getRealPath(atPath: Self.validated(root))
         }
         guard canonical.utf8.elementsEqual(root.utf8) else { throw RemoteDocumentLinkError.outsideConnection }
         measurements.serverSearchAttempts += 1
         do {
-            let output = try await Self.executeSearchCommand(client: session.client, command: command,
-                timeout: UInt64(limits.timeLimit.components.seconds + 1) + timeoutSeconds)
+            let timeout = UInt64(limits.timeLimit.components.seconds + 1) + timeoutSeconds
+            let output = try await performOnDedicatedChannel(session: session, timeout: timeout) { sftp in
+                let proc = try await sftp.getRealPath(atPath: "/proc/self")
+                guard Self.searchProcessPath(proc) else { throw ServerFolderSearch.Failure.unsupported }
+                let owner = try await sftp.readSymbolicLink(atPath: proc + "/fd/0")
+                guard owner.range(of: #"^(pipe|socket):\[[0-9]+\]$"#, options: .regularExpression) != nil else {
+                    throw ServerFolderSearch.Failure.unsupported
+                }
+                let before = try await Self.searchDescriptors(sftp: sftp, process: proc)
+                let directory = try await sftp.openFile(filePath: root, flags: .read)
+                do {
+                    let after = try await Self.searchDescriptors(sftp: sftp, process: proc)
+                    let handle = try Self.searchRootHandle(process: proc, root: root, before: before, after: after)
+                    let command = try ServerFolderSearch.command(query: query, root: root, includeHidden: includeHidden,
+                        limits: limits, content: content, rootHandle: handle, ownerToken: owner)
+                    let output = try await Self.executeSearchCommand(client: session.client, command: command, timeout: timeout)
+                    try await directory.close()
+                    return output
+                } catch {
+                    try? await directory.close()
+                    throw error
+                }
+            }
             try Task.checkCancellation()
             guard session.client.isConnected else { throw RemoteFileError.connectionEnded }
             measurements.bytesReceived += output.readableBytes
@@ -71,12 +91,53 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching {
             case let error as NIOSSHError where error.type == .channelSetupRejected:
                 session.serverSearchUnavailable = true
                 return nil
-            case RemoteFileError.notFound, RemoteFileError.permissionDenied:
-                // An exec namespace may not expose a path that is accessible through SFTP.
+            case let status as SFTPMessage.Status where status.errorCode == .failure || status.errorCode == .unsupportedOperation:
+                session.serverSearchUnavailable = true
+                return nil
+            case RemoteFileError.notFound, RemoteFileError.permissionDenied, RemoteFileError.unsupportedFile:
+                // No accessible procfs/descriptor capability: retain the ordinary SFTP search.
+                session.serverSearchUnavailable = true
                 return nil
             default: throw Self.mapped(error)
             }
         }
+    }
+
+    nonisolated static func searchProcessPath(_ path: String) -> Bool {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+        return parts.count == 3 && parts[0].isEmpty && parts[1] == "proc"
+            && !parts[2].isEmpty && parts[2].allSatisfy { $0.isASCII && $0.isNumber }
+            && Int(parts[2]).map { $0 > 0 } == true
+    }
+
+    nonisolated static func searchRootHandle(process: String, root: String, before: [String: String],
+                                             after: [String: String]) throws -> String {
+        let added = after.filter { before[$0.key] == nil }
+        guard searchProcessPath(process), added.count == 1, let descriptor = added.first,
+              !descriptor.key.isEmpty, descriptor.key.allSatisfy({ $0.isASCII && $0.isNumber }),
+              descriptor.value.utf8.elementsEqual(root.utf8) else { throw ServerFolderSearch.Failure.unsupported }
+        return process + "/fd/" + descriptor.key
+    }
+
+    /// The channel is private to this search. Resolve only descriptors that remain open after
+    /// READDIR closes its own handle; the sole new descriptor must be the requested directory.
+    nonisolated private static func searchDescriptors(sftp: SFTPClient, process: String) async throws -> [String: String] {
+        let entries = try await sftp.listDirectory(atPath: process + "/fd", resolvingPath: false)
+            .flatMap(\.components).map(\.filename).filter { !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }
+        guard entries.count <= 128 else { throw ServerFolderSearch.Failure.unsupported }
+        var descriptors: [String: String] = [:]
+        for entry in entries {
+            do { descriptors[entry] = try await sftp.getRealPath(atPath: process + "/fd/" + entry) }
+            catch {
+                // READDIR's descriptor has already closed; pipes and sockets have no real path.
+                let mapped = Self.mapped(error)
+                switch mapped {
+                case RemoteFileError.notFound, RemoteFileError.permissionDenied: continue
+                default: throw mapped
+                }
+            }
+        }
+        return descriptors
     }
 
     /// A peer can defer acknowledging channel close until its process exits. Return cancellation

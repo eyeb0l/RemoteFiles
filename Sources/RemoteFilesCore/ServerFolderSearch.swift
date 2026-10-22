@@ -16,6 +16,8 @@ enum ServerFolderSearch {
     struct Request: Encodable {
         let root: String
         let query: String
+        let rootHandle: String?
+        let ownerToken: String?
         let hidden: Bool
         let depth: Int
         let folders: Int
@@ -28,7 +30,7 @@ enum ServerFolderSearch {
     }
 
     static func command(query: String, root: String, includeHidden: Bool, limits: RemoteFolderSearch.Limits,
-                        content: RemoteFolderSearch.ContentLimits?) throws -> String {
+                        content: RemoteFolderSearch.ContentLimits?, rootHandle: String? = nil, ownerToken: String? = nil) throws -> String {
         guard root.hasPrefix("/"), !root.contains("\0"), root == "/" || !root.hasSuffix("/"),
               !root.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }) else { throw Failure.unsupported }
         // Cap custom limits too: a server cannot cause unbounded allocations or a long-running job.
@@ -39,7 +41,7 @@ enum ServerFolderSearch {
             throw Failure.unsupported // Keep larger custom budgets on the existing SFTP implementation.
         }
         let parts = limits.timeLimit.components
-        let request = Request(root: root, query: query, hidden: includeHidden, depth: limits.maxDepth,
+        let request = Request(root: root, query: query, rootHandle: rootHandle, ownerToken: ownerToken, hidden: includeHidden, depth: limits.maxDepth,
             folders: limits.maxFolders, seconds: Double(parts.seconds) + Double(parts.attoseconds) / 1e18,
             files: content?.maxFiles, fileBytes: content?.maxFileBytes, totalBytes: content?.maxTotalBytes,
             textExtensions: Array(DocumentPolicy.searchTextExtensions), excludedExtensions: Array(DocumentPolicy.searchExcludedExtensions))

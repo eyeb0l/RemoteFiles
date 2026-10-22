@@ -103,10 +103,28 @@ final class ServerFolderSearchTests: XCTestCase {
         XCTAssertEqual(result.contentMatches.first?.snippet, "Café [x].*")
     }
 
+    func testRootHandleRequiresOneNewDescriptorWithTheExactSFTPTarget() throws {
+        let before = ["0": "/dev/null", "3": "/elsewhere"]
+        let after = before.merging(["4": "/docs"]) { _, new in new }
+        XCTAssertEqual(try SFTPRemoteFileService.searchRootHandle(process: "/proc/123", root: "/docs", before: before, after: after),
+                       "/proc/123/fd/4")
+        for invalid in [before, before.merging(["4": "/other/docs"]) { _, new in new },
+                        before.merging(["4": "/docs", "5": "/docs"]) { _, new in new },
+                        before.merging(["../4": "/docs"]) { _, new in new }] {
+            XCTAssertThrowsError(try SFTPRemoteFileService.searchRootHandle(process: "/proc/123", root: "/docs", before: before, after: invalid))
+        }
+        for process in ["/proc/self", "/proc/0", "/proc/123/../456", "/virtual/proc/123"] {
+            XCTAssertThrowsError(try SFTPRemoteFileService.searchRootHandle(process: process, root: "/docs", before: before, after: after))
+        }
+    }
+
     #if os(macOS)
     private func runHelper(root: String, query: String, hidden: Bool = false,
-                           limits: RemoteFolderSearch.Limits = .init(), content: RemoteFolderSearch.ContentLimits? = nil) throws -> RemoteFolderSearch.Update {
-        let command = try ServerFolderSearch.command(query: query, root: root, includeHidden: hidden, limits: limits, content: content)
+                           limits: RemoteFolderSearch.Limits = .init(), content: RemoteFolderSearch.ContentLimits? = nil,
+                           handleRoot: String? = nil, provideHandle: Bool = true) throws -> RemoteFolderSearch.Update {
+        let helper = try ServerFolderSearch.command(query: query, root: root, includeHidden: hidden, limits: limits, content: content,
+                                                     rootHandle: provideHandle ? "/dev/fd/9" : nil)
+        let command = "exec 9<" + ServerFolderSearch.quote(handleRoot ?? root) + "; " + helper
         let process = Process(), output = Pipe(), errors = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/sh"); process.arguments = ["-c", command]
         process.standardOutput = output; process.standardError = errors
@@ -161,9 +179,23 @@ final class ServerFolderSearchTests: XCTestCase {
         XCTAssertEqual(bytes.stop, .byteLimit); XCTAssertLessThanOrEqual(bytes.chargedBytes, 3)
         let timed = try runHelper(root: root.path, query: "needle", limits: .init(timeLimit: .nanoseconds(1)))
         XCTAssertEqual(timed.stop, .timeLimit)
-        let alias = root.appendingPathComponent("alias")
-        try FileManager.default.createSymbolicLink(atPath: alias.path, withDestinationPath: root.path)
-        XCTAssertThrowsError(try runHelper(root: alias.path, query: "needle"))
+
+    }
+
+    func testHelperRequiresHeldDirectoryAndIgnoresDifferentExecNamespace() throws {
+        let sftpRoot = try fixture(), execRoot = try fixture()
+        try Data("SFTP needle".utf8).write(to: sftpRoot.appendingPathComponent("identity.txt"))
+        try Data("EXEC secret needle".utf8).write(to: execRoot.appendingPathComponent("identity.txt"))
+        XCTAssertThrowsError(try runHelper(root: execRoot.path, query: "needle", content: .init(), provideHandle: false)) {
+            guard case ServerFolderSearch.Failure.unsupported = $0 else { return XCTFail("Missing identity must fall back") }
+        }
+        // Both namespaces can contain the same absolute path and matching metadata. The helper
+        // must scan the held SFTP directory and must never reopen the exec-visible path.
+        let result = try runHelper(root: execRoot.path, query: "needle", content: .init(), handleRoot: sftpRoot.path)
+        let match = try XCTUnwrap(result.contentMatches.first { $0.entry.name == "identity.txt" })
+        XCTAssertEqual(match.entry.path, execRoot.appendingPathComponent("identity.txt").path)
+        XCTAssertEqual(match.snippet, "SFTP needle")
+        XCTAssertFalse(result.contentMatches.contains { $0.snippet.contains("EXEC secret") })
     }
 
     func testHelperDeadlineCleanupAlwaysReturnsACompleteResponse() throws {

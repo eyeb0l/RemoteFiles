@@ -501,6 +501,14 @@ public final class SFTPClient: Sendable {
         return realpath.path
     }
 
+    /// Reads a symbolic link target without resolving it.
+    public func readSymbolicLink(atPath path: String) async throws -> String {
+        guard case let .name(target) = try await sendRequest(.readlink(.init(requestId: self.allocateRequestId(), path: path))),
+              target.components.count == 1 else { throw SFTPError.invalidResponse }
+        return target.path
+    }
+
+
 }
 
 extension SSHClient {

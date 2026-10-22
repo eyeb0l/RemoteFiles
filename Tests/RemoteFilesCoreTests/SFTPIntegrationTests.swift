@@ -21,6 +21,8 @@ final class SFTPIntegrationTests: XCTestCase {
             hostKeyValidator: .custom(TrustValidator(store: stores.trust, endpoint: fixture.endpoint))))
         addTeardownBlock { try? await client.close() }
         let sftp = try await client.openSFTP()
+        let link = try await sftp.readSymbolicLink(atPath: fixture.files + "/report-link.md")
+        XCTAssertEqual(link, "report.md", "READLINK must return the raw target")
         for command in ["printf '%02000d' 0", "printf '%02000d' 0 >&2"] {
             do {
                 _ = try await SFTPRemoteFileService.executeSearchCommand(client: client, command: command,
@@ -49,10 +51,20 @@ final class SFTPIntegrationTests: XCTestCase {
         } catch RemoteFileError.timedOut { }
         XCTAssertLessThan(ContinuousClock.now - started, .seconds(3), "The deadline must not wait for the process to exit")
         _ = try await sftp.getRealPath(atPath: fixture.files)
+        // Exercise the remote helper with a genuinely held directory as well. The production
+        // adapter obtains its descriptor from SFTP procfs; this portable fixture inherits one.
+        let root = fixture.files + "/docs"
+        let helper = try ServerFolderSearch.command(query: "Linked source", root: root, includeHidden: false,
+                                                    limits: .init(), content: .init(), rootHandle: "/dev/fd/9")
+        let output = try await SFTPRemoteFileService.executeSearchCommand(client: client,
+            command: "exec 9<" + ServerFolderSearch.quote(root) + "; " + helper, timeout: 5)
+        let found = try ServerFolderSearch.decode(Data(output.readableBytesView), query: "Linked source", root: root,
+                                                  includeHidden: false, limits: .init(), content: .init())
+        XCTAssertEqual(found.contentMatches.map(\.entry.name), ["source.md"])
         try await sftp.close()
     }
 
-    func testServerSearchUsesSSHAndSFTPOnlyAccountsFallBackOncePerSession() async throws {
+    func testServerSearchFallsBackOncePerSessionWithoutNamespaceHandleAccess() async throws {
         let fixture = try Fixture()
         for restricted in [false, true] {
             let stores = try Stores(fixture: fixture)
@@ -75,9 +87,11 @@ final class SFTPIntegrationTests: XCTestCase {
             }
             XCTAssertEqual(contents, ["source.md"], "The link outside the search root must never be read")
             let metrics = await service.metrics()
-            XCTAssertEqual(metrics.serverSearchAttempts, restricted ? 1 : 2)
-            XCTAssertEqual(metrics.serverSearchOperations, restricted ? 0 : 2)
-            XCTAssertEqual(metrics.fileOperations, restricted ? 1 : 0, "Server search avoids SFTP file reads")
+            // This fixture runs on macOS, where procfs cannot bind the two channel namespaces.
+            // Command access alone must never enable server search.
+            XCTAssertEqual(metrics.serverSearchAttempts, 1)
+            XCTAssertEqual(metrics.serverSearchOperations, 0)
+            XCTAssertEqual(metrics.fileOperations, 1, "Unverified namespaces must read through SFTP")
             XCTAssertEqual(metrics.connections, 1, "Exec rejection must leave browsing connected")
         }
     }
