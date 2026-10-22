@@ -29,9 +29,9 @@ def check_time():
         alarm(None, None)
         raise Expired()
 
-def open_directory(parts):
-    # Start from the directory opened by SFTP, never from the exec-visible absolute path.
-    fd = os.dup(root_fd)
+def open_directory(parts, absolute=False):
+    # Pin the verified root, then resolve descendants relative to that descriptor.
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY) if absolute else os.dup(root_fd)
     try:
         for part in parts:
             next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
@@ -137,31 +137,27 @@ try:
         raise Unsupported()
     signal.signal(signal.SIGALRM, alarm)
     signal.setitimer(signal.ITIMER_REAL, r['seconds'])
+    identity = r.get('identity')
     handle = r.get('rootHandle', '')
-    # Linux procfs exposes the SFTP process's held descriptor. Require the same mount namespace
-    # so traversal below that descriptor sees the same nested mounts. An inherited descriptor
-    # is also supported for callers that already run the helper in the owning process namespace.
-    match = re.fullmatch(r'/proc/([1-9][0-9]*)/fd/([0-9]+)', handle)
-    if match:
-        try:
-            # A PID can name another process when procfs mounts use different PID namespaces.
-            # Bind it to the SFTP channel's kernel pipe/socket identity before borrowing a fd.
-            owner = r.get('ownerToken', '')
-            if not re.fullmatch(r'(pipe|socket):\[[0-9]+\]', owner):
-                raise Unsupported()
-            if os.readlink('/proc/' + match[1] + '/fd/0') != owner:
-                raise Unsupported()
-            if not os.path.samestat(os.stat('/proc/' + match[1] + '/ns/mnt'), os.stat('/proc/self/ns/mnt')):
-                raise Unsupported()
-        except OSError:
-            raise Unsupported()
-    elif not re.fullmatch(r'/dev/fd/[0-9]+', handle):
-        raise Unsupported()
     try:
-        root_fd = os.open(handle, os.O_RDONLY | os.O_DIRECTORY) if match else os.dup(int(handle.rsplit('/', 1)[-1]))
-        if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
+        if identity is not None:
+            # Compare kernel identities before listing/reading user data. SFTP keeps its root
+            # open throughout, preventing inode reuse. No cross-process inspection is needed.
+            if os.readlink('/proc/self/ns/mnt') != identity['namespace']:
+                raise Unsupported()
+            root_fd = open_directory(root.strip('/').split('/') if root != '/' else [], absolute=True)
+            with open('/proc/self/fdinfo/' + str(root_fd), encoding='ascii') as info:
+                fields = dict(line.split(':', 1) for line in info.read(4097).splitlines() if ':' in line)
+            if os.fstat(root_fd).st_ino != identity['inode'] or int(fields['mnt_id']) != identity['mountID']:
+                raise Unsupported()
+        elif re.fullmatch(r'/dev/fd/[0-9]+', handle):
+            # Also usable by callers that already hold the directory in this process.
+            root_fd = os.dup(int(handle.rsplit('/', 1)[-1]))
+            if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
+                raise Unsupported()
+        else:
             raise Unsupported()
-    except OSError:
+    except (OSError, KeyError, ValueError):
         raise Unsupported()
     check_time()
     if root_fd is not None:

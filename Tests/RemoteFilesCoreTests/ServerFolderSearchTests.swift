@@ -103,6 +103,18 @@ final class ServerFolderSearchTests: XCTestCase {
         XCTAssertEqual(result.contentMatches.first?.snippet, "Café [x].*")
     }
 
+    func testKernelRootIdentityRequiresUnambiguousInodeMountAndNamespace() throws {
+        let identity = try ServerFolderSearch.RootIdentity(fdinfo: "pos:\t0\nflags:\t0100000\nmnt_id:\t42\nino:\t123456\n", namespace: "mnt:[4026531840]")
+        XCTAssertEqual(identity.inode, 123456); XCTAssertEqual(identity.mountID, 42)
+        for info in ["mnt_id: 42", "ino: 1", "ino: -1\nmnt_id: 42", "ino: 0\nmnt_id: 42",
+                     "ino: 1\nino: 2\nmnt_id: 42", "ino: 1\nmnt_id: 42\nmnt_id: 43"] {
+            XCTAssertThrowsError(try ServerFolderSearch.RootIdentity(fdinfo: info, namespace: "mnt:[123]"))
+        }
+        for namespace in ["/proc/self/ns/mnt", "pid:[123]", "mnt:[abc]", "mnt:[123]\n"] {
+            XCTAssertThrowsError(try ServerFolderSearch.RootIdentity(fdinfo: "ino: 1\nmnt_id: 42", namespace: namespace))
+        }
+    }
+
     func testRootHandleRequiresOneNewDescriptorWithTheExactSFTPTarget() throws {
         let before = ["0": "/dev/null", "3": "/elsewhere"]
         let after = before.merging(["4": "/docs"]) { _, new in new }

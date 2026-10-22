@@ -99,7 +99,6 @@ file upload is added.
 `SFTPClient.readSymbolicLink` exposes the existing SFTP READLINK request and requires one
 returned name. Its request enum wiring is added, and the dormant serializer is corrected
 to emit READLINK (19), rather than SYMLINK (20). An OpenSSH regression verifies the raw
-relative target. Server search uses it to bind a procfs PID to the dedicated SFTP channel's
-kernel pipe/socket identity before borrowing its held directory descriptor. This prevents
-PID-number collisions across procfs namespaces from selecting another process. No new
-SFTP write operations or protocol extensions are introduced.
+relative target. Server search uses it to require live directory descriptors and obtain the
+SFTP process's mount namespace through its own procfs entries. No new SFTP write operations
+or protocol extensions are introduced.

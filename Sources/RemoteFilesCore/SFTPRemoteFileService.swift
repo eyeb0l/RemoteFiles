@@ -40,7 +40,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching {
         let session = try await session(for: profile)
         guard !session.serverSearchUnavailable else { return nil }
         // Canonical strings alone cannot bind SFTP and exec namespaces. The dedicated SFTP
-        // channel below holds the actual root directory open for the helper to borrow.
+        // channel below pins the directory while the helper verifies its kernel mount/inode identity.
         let canonical = try await perform(session: session) { sftp in
             try await sftp.getRealPath(atPath: Self.validated(root))
         }
@@ -51,17 +51,24 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching {
             let output = try await performOnDedicatedChannel(session: session, timeout: timeout) { sftp in
                 let proc = try await sftp.getRealPath(atPath: "/proc/self")
                 guard Self.searchProcessPath(proc) else { throw ServerFolderSearch.Failure.unsupported }
-                let owner = try await sftp.readSymbolicLink(atPath: proc + "/fd/0")
-                guard owner.range(of: #"^(pipe|socket):\[[0-9]+\]$"#, options: .regularExpression) != nil else {
-                    throw ServerFolderSearch.Failure.unsupported
-                }
+                let namespace = try await sftp.readSymbolicLink(atPath: proc + "/ns/mnt")
                 let before = try await Self.searchDescriptors(sftp: sftp, process: proc)
                 let directory = try await sftp.openFile(filePath: root, flags: .read)
                 do {
                     let after = try await Self.searchDescriptors(sftp: sftp, process: proc)
                     let handle = try Self.searchRootHandle(process: proc, root: root, before: before, after: after)
+                    let info = try await sftp.openFile(filePath: handle.replacingOccurrences(of: "/fd/", with: "/fdinfo/"), flags: .read)
+                    let bytes: Data
+                    do {
+                        let read = try await BoundedPreviewReader.read(initialSize: nil, limit: 4096) { offset, amount in
+                            try await info.read(from: offset, length: amount)
+                        }
+                        bytes = read.0
+                        try await info.close()
+                    } catch { try? await info.close(); throw error }
+                    let identity = try ServerFolderSearch.RootIdentity(fdinfo: String(decoding: bytes, as: UTF8.self), namespace: namespace)
                     let command = try ServerFolderSearch.command(query: query, root: root, includeHidden: includeHidden,
-                        limits: limits, content: content, rootHandle: handle, ownerToken: owner)
+                        limits: limits, content: content, identity: identity)
                     let output = try await Self.executeSearchCommand(client: session.client, command: command, timeout: timeout)
                     try await directory.close()
                     return output
@@ -127,7 +134,14 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching {
         guard entries.count <= 128 else { throw ServerFolderSearch.Failure.unsupported }
         var descriptors: [String: String] = [:]
         for entry in entries {
-            do { descriptors[entry] = try await sftp.getRealPath(atPath: process + "/fd/" + entry) }
+            do {
+                let path = process + "/fd/" + entry
+                // OpenSSH REALPATH permits a missing final component. READLINK must first prove
+                // this descriptor still exists after READDIR closed its temporary handle.
+                let target = try await sftp.readSymbolicLink(atPath: path)
+                guard target.hasPrefix("/") else { continue } // Pipes/sockets are not directory roots.
+                descriptors[entry] = try await sftp.getRealPath(atPath: path)
+            }
             catch {
                 // READDIR's descriptor has already closed; pipes and sockets have no real path.
                 let mapped = Self.mapped(error)

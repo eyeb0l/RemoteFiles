@@ -13,11 +13,28 @@ enum ServerFolderSearch {
     static let candidateLimit = 10_000
     enum Failure: Error { case unsupported, invalidResponse, resourceLimit }
 
+    struct RootIdentity: Encodable, Sendable {
+        let inode: UInt64
+        let mountID: UInt64
+        let namespace: String
+
+        init(fdinfo: String, namespace: String) throws {
+            func number(_ key: String) throws -> UInt64 {
+                let values = fdinfo.split(separator: "\n").filter { $0.hasPrefix(key + ":") }
+                guard values.count == 1, let value = values.first?.split(separator: ":").last,
+                      let number = UInt64(value.trimmingCharacters(in: .whitespaces)), number > 0 else { throw Failure.unsupported }
+                return number
+            }
+            guard namespace.range(of: #"\Amnt:\[[0-9]+\]\z"#, options: .regularExpression) != nil else { throw Failure.unsupported }
+            inode = try number("ino"); mountID = try number("mnt_id"); self.namespace = namespace
+        }
+    }
+
     struct Request: Encodable {
         let root: String
         let query: String
         let rootHandle: String?
-        let ownerToken: String?
+        let identity: RootIdentity?
         let hidden: Bool
         let depth: Int
         let folders: Int
@@ -30,7 +47,7 @@ enum ServerFolderSearch {
     }
 
     static func command(query: String, root: String, includeHidden: Bool, limits: RemoteFolderSearch.Limits,
-                        content: RemoteFolderSearch.ContentLimits?, rootHandle: String? = nil, ownerToken: String? = nil) throws -> String {
+                        content: RemoteFolderSearch.ContentLimits?, rootHandle: String? = nil, identity: RootIdentity? = nil) throws -> String {
         guard root.hasPrefix("/"), !root.contains("\0"), root == "/" || !root.hasSuffix("/"),
               !root.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }) else { throw Failure.unsupported }
         // Cap custom limits too: a server cannot cause unbounded allocations or a long-running job.
@@ -41,7 +58,7 @@ enum ServerFolderSearch {
             throw Failure.unsupported // Keep larger custom budgets on the existing SFTP implementation.
         }
         let parts = limits.timeLimit.components
-        let request = Request(root: root, query: query, rootHandle: rootHandle, ownerToken: ownerToken, hidden: includeHidden, depth: limits.maxDepth,
+        let request = Request(root: root, query: query, rootHandle: rootHandle, identity: identity, hidden: includeHidden, depth: limits.maxDepth,
             folders: limits.maxFolders, seconds: Double(parts.seconds) + Double(parts.attoseconds) / 1e18,
             files: content?.maxFiles, fileBytes: content?.maxFileBytes, totalBytes: content?.maxTotalBytes,
             textExtensions: Array(DocumentPolicy.searchTextExtensions), excludedExtensions: Array(DocumentPolicy.searchExcludedExtensions))
