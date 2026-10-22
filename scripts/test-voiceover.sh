@@ -46,7 +46,8 @@ if [ -n "${REMOTEFILES_CI_COMPILATION_CACHE:-}" ]; then
   ci_options=(COMPILATION_CACHE_ENABLE_CACHING=YES COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS=YES
     "COMPILATION_CACHE_CAS_PATH=$REMOTEFILES_CI_COMPILATION_CACHE" COMPILER_INDEX_STORE_ENABLE=NO)
 fi
-if xcodebuild -jobs 2 -project "$fixture/RemoteFiles.xcodeproj" -scheme RemoteFiles "${package_options[@]}" "${ci_options[@]}" \
+# Bash 3.2 treats empty arrays as unset under nounset; retain quoting when populated.
+if xcodebuild -jobs 2 -project "$fixture/RemoteFiles.xcodeproj" -scheme RemoteFiles ${package_options[@]+"${package_options[@]}"} ${ci_options[@]+"${ci_options[@]}"} \
   -configuration Debug -destination "platform=iOS Simulator,id=$simulator" \
   -derivedDataPath "$derived" -resultBundlePath "$output/voiceover.xcresult" \
   -only-testing:"$test_identifier" -parallel-testing-enabled NO \

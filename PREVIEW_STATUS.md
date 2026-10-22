@@ -1,5 +1,9 @@
 # RemoteFiles preview status
 
+**22 October 2026: individual offline copies.**
+
+Files can be kept in a protected, device-local Offline library with explicit updates/removal and saved dates. Local readers and original sharing use verified leases; failed or cancelled refreshes keep the last committed copy. The library is bounded to 100 files, 128 MiB per original and 512 MiB of committed originals, and Demo is isolated. Folder pinning, synchronization, and external Markdown resources remain deferred. See [offline files](docs/OFFLINE_FILES.md), including synthetic iPhone/iPad screenshots and the distinction between simulator checks and physical locked-device acceptance.
+
 **22 October 2026: jump-host connections and iPad workspace.**
 
 Connections can use one SSH bastion with separate identities and host-key verification. Regular-width iPad windows show the library, folder and reader together; iPhone keeps stack navigation. Route changes isolate resource caches, and editing/deleting the visible connection clears old routes. See [jump hosts](docs/JUMP_HOSTS.md) and [iPad workspace](docs/IPAD.md), including simulator screenshots. Local verification covered two-server OpenSSH, hosted core tests, full iPhone UI, focused iPhone/iPad lifecycle and form checks, VoiceOver and unsigned Release compilation. Two VoiceOver cases required isolated fixture state; the fresh-simulator speech-service limitation and retained rerun evidence are recorded in the PR. Physical iPad/windowing and production-bastion acceptance are not claimed.

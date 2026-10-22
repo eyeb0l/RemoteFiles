@@ -10,6 +10,7 @@ private actor BackgroundExportService: RemoteFileService {
     private var blocked: CheckedContinuation<Void, Error>?
     private(set) var destination: URL?
     private(set) var disconnects = 0
+    private(set) var downloads = 0
     private var bytes = Data("old server bytes".utf8)
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
         .init(path: path, entries: [])
@@ -20,6 +21,7 @@ private actor BackgroundExportService: RemoteFileService {
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { bytes }
     func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String,
                       destination: URL, limit: Int) async throws -> RemoteEntry {
+        downloads += 1
         self.destination = destination
         try bytes.write(to: destination)
         if disconnects == 0 {
@@ -253,6 +255,104 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
         let relaunched = try AppModel(directory: directory, fileService: service); await relaunched.load()
         XCTAssertTrue(relaunched.metadata.recents.isEmpty); XCTAssertEqual(relaunched.metadata.favourites, [recent])
     }
+    func testBusyOfflineSaveInAnotherWindowDoesNotCancelTheOwner() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = BackgroundExportService()
+        let owner = try AppModel(directory: directory, fileService: service)
+        let second = try AppModel(directory: directory, fileService: BackgroundExportService())
+        await owner.load(); await second.load()
+        XCTAssertTrue(owner.offlineStore === second.offlineStore)
+        let profile = ConnectionProfile(name: "Shared offline", host: "fixture.invalid", username: "reader", identityID: UUID(), startingDirectory: "/fixture")
+        let file = RemoteEntry(name: "original.txt", path: "/fixture/original.txt", kind: .file)
+        owner.pinOffline(profile: profile, entry: file)
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !(await service.waiting()), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        second.pinOffline(profile: profile, entry: file)
+        let settled = ContinuousClock.now + .seconds(5)
+        while second.pinningName != nil, ContinuousClock.now < settled { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertNotNil(second.errorMessage)
+        let waiting = await service.waiting()
+        XCTAssertTrue(waiting, "A busy caller must not cancel another window’s transfer")
+        XCTAssertNotNil(owner.pinningName)
+        owner.isForeground = false; await owner.background()
+        XCTAssertNil(owner.pinningName); XCTAssertTrue(owner.offlinePins.isEmpty)
+    }
+
+    func testOfflineShareItemRetainsTheFileWhenReaderAndPinAreRemoved() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = BackgroundExportService(), model = try AppModel(directory: directory, fileService: service)
+        await service.disconnect(); await model.load()
+        let profile = ConnectionProfile(name: "Offline share", host: "fixture.invalid", username: "reader", identityID: UUID(), startingDirectory: "/fixture")
+        model.pinOffline(profile: profile, entry: .init(name: "copy.txt", path: "/fixture/copy.txt", kind: .file))
+        let deadline = ContinuousClock.now + .seconds(5)
+        while model.pinningName != nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        let store = try XCTUnwrap(model.offlineStore), pin = try XCTUnwrap(model.offlinePins.first)
+        var lease: OfflineFileLease? = try await store.lease(pin.id)
+        let url = try XCTUnwrap(lease?.url)
+        var share: OfflineShareItem? = OfflineShareItem(lease: try XCTUnwrap(lease))
+        lease = nil
+        await model.removeOfflinePin(pin)
+        XCTAssertEqual(try Data(contentsOf: try XCTUnwrap(share?.lease.url)), Data("changed server bytes\r\n東京  ".utf8))
+        share = nil
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testOfflineSaveCancelsOnBackgroundAndLeavesNoLateCopy() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = BackgroundExportService(), model = try AppModel(directory: directory, fileService: service)
+        await model.load()
+        let profile = ConnectionProfile(name: "Offline lifecycle", host: "fixture.invalid", username: "reader", identityID: UUID(), startingDirectory: "/fixture")
+        let entry = RemoteEntry(name: "original.txt", path: "/fixture/original.txt", kind: .file)
+        model.pinOffline(profile: profile, entry: entry)
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !(await service.waiting()), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        let waiting = await service.waiting()
+        XCTAssertTrue(waiting)
+        let partial = await service.destination
+        model.isForeground = false
+        await model.background()
+        XCTAssertNil(model.pinningName)
+        XCTAssertTrue(model.offlinePins.isEmpty)
+        XCTAssertNil(model.errorMessage, "An abandoned save must not show a late failure")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(partial).path))
+        model.isForeground = true
+        model.pinOffline(profile: profile, entry: entry)
+        let resumed = ContinuousClock.now + .seconds(5)
+        while model.pinningName != nil, ContinuousClock.now < resumed { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.offlinePins.count, 1)
+        let store = try XCTUnwrap(model.offlineStore), pin = try XCTUnwrap(model.offlinePins.first)
+        let lease = try await store.lease(pin.id)
+        XCTAssertEqual(try Data(contentsOf: lease.url), Data("changed server bytes\r\n東京  ".utf8))
+    }
+
+    func testOfflineCopySurvivesConnectionDeletionAndRejectsChangedRefreshRoute() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = BackgroundExportService(), model = try AppModel(directory: directory, fileService: service)
+        await service.disconnect() // This mock's subsequent downloads complete without suspension.
+        await model.load()
+        var profile = ConnectionProfile(name: "Offline route", host: "fixture.invalid", username: "reader", identityID: UUID(), startingDirectory: "/fixture")
+        model.metadata.connections = [profile]; await model.persist()
+        model.pinOffline(profile: profile, entry: .init(name: "copy.txt", path: "/fixture/copy.txt", kind: .file))
+        let deadline = ContinuousClock.now + .seconds(5)
+        while model.pinningName != nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        let pin = try XCTUnwrap(model.offlinePins.first)
+        profile.host = "another.invalid"; model.metadata.connections = [profile]
+        model.refreshOfflinePin(pin)
+        XCTAssertNotNil(model.errorMessage); XCTAssertNil(model.pinningName)
+        await model.removeConnection(profile)
+        let reopened = try AppModel(directory: directory, fileService: service); await reopened.load()
+        XCTAssertTrue(reopened.metadata.connections.isEmpty)
+        XCTAssertEqual(reopened.offlinePins.count, 1)
+        let store = try XCTUnwrap(reopened.offlineStore), lease = try await store.lease(pin.id)
+        XCTAssertEqual(try Data(contentsOf: lease.url), Data("changed server bytes\r\n東京  ".utf8))
+        let downloads = await service.downloads
+        XCTAssertEqual(downloads, 1, "Refresh on a changed route and local reading must not download")
+    }
+
     func testProductionBackgroundCancelsAndDrainsExportClearsCacheAndNewExporterReadsChangedBytes() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

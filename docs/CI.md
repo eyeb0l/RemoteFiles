@@ -4,6 +4,11 @@
 
 ## Ordinary pull requests
 
+The VoiceOver launcher also works with macOS’s stock Bash when optional package
+or compiler-cache settings are absent. Its empty-array handling preserves each
+configured argument (including paths with spaces), and launcher regressions
+check that collecting lifecycle logs cannot turn a failed Xcode run into success.
+
 Every PR and main push runs **Repository checks** on Linux: Python runner/scope
 regressions, generated-project consistency and whitespace across the complete
 change, including every commit in a PR. Documentation-only changes start no Mac

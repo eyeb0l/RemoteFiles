@@ -13,6 +13,7 @@ A native iPhone app for browsing and reading files on your Mac or Unix server ov
 ## What you can do
 
 - Browse remote folders, search names or UTF-8 file contents in subfolders, save favourites, and return to recent files.
+- Keep individual files in an [Offline library](docs/OFFLINE_FILES.md), read saved copies without SFTP, and update them on request.
 - Read Markdown or highlighted source, find text, jump to headings, and remember your reading position.
 - Preview images, PDFs, audio, video, and static HTML/SVG.
 - Copy source or save an original file to Files.

@@ -462,6 +462,35 @@ final class SFTPIntegrationTests: XCTestCase {
         } catch RemoteResourceError.outsideDocument { }
     }
 
+    func testOfflinePinUsesCanonicalRootAndReadsSavedBytesAfterDisconnect() async throws {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Offline original")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("offline-sftp-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try OfflineFileStore(directory: directory)
+        let pin = try await store.pin(profile: profile,
+            entry: .init(name: "original.txt", path: fixture.files + "/original.txt", kind: .file),
+            allowedRoot: profile.startingDirectory, service: service)
+        await service.disconnect()
+        let lease = try await store.lease(pin.id)
+        XCTAssertEqual(try Data(contentsOf: lease.url), Data("é 東京\r\n\ttrailing spaces  \r\n".utf8))
+        do {
+            _ = try await store.pin(profile: profile,
+                entry: .init(name: "outside-export.txt", path: fixture.files + "/outside-export.txt", kind: .file),
+                allowedRoot: profile.startingDirectory, service: service)
+            XCTFail("Pinning must reject a symlink outside the configured root")
+        } catch OriginalFileExportError.outsideRoot { }
+        await store.cancelAndDrain()
+        let saved = await store.snapshot()
+        XCTAssertEqual(saved.map(\.id), [pin.id])
+    }
+
     func testOrdinaryUnencryptedAndEncryptedOpenSSHAuthentication() async throws {
         let fixture = try Fixture()
         for (filename, passphrase) in [("plain", Optional<String>.none), ("encrypted", Optional("fixture-passphrase"))] {

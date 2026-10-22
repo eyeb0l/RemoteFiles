@@ -69,6 +69,22 @@ ordinary code changes, and adds UI, VoiceOver and Release jobs for sensitive
 changes or explicit requests. See [CI policy and timing](CI.md). `--lane` reports
 its selected coverage explicitly; it does not count unrequested lanes as passed.
 
+### Offline copies
+
+`OfflineFileTests` verifies exact originals, persistent metadata, atomic refresh,
+corrupt/symlinked local files, count/byte/lease limits, and cancellation with late
+writers. `AppModelLifecycleTests` covers background cancellation, changed/deleted
+connections and ownership of a shared store across windows. The OpenSSH suite
+pins a real fixture file, reads it after disconnect, and rejects a canonical-root
+escape. The Demo UI journey pins, disconnects, reopens after relaunch, removes
+the copy and checks that the remote original is still readable. These methods
+are part of the normal generated inventories; they add no allowed skips.
+
+The offline reader has no SFTP/resource service. Its media/renderer policies are
+the existing bounded preview policies. Simulator permissions/backup-exclusion
+checks do not establish locked-device Data Protection; physical acceptance is
+listed in [offline files](OFFLINE_FILES.md).
+
 ### Bounded file-content search
 
 `FileContentSearchTests` covers source matching, Unicode line/snippet handling,

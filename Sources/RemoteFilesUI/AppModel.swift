@@ -11,11 +11,12 @@ final class AppModel {
         }
     }
     enum Sheet: Identifiable {
-        case connection(UUID?), keys, trust(HostEndpoint, HostKeyDetails), changed(HostEndpoint, HostKeyDetails, HostKeyDetails), unlock(IdentityMetadata)
+        case connection(UUID?), keys, offlineFiles, trust(HostEndpoint, HostKeyDetails), changed(HostEndpoint, HostKeyDetails, HostKeyDetails), unlock(IdentityMetadata)
         var id: String {
             switch self {
             case .connection: return "connection"
             case .keys: return "keys"
+            case .offlineFiles: return "offlineFiles"
             case .trust: return "trust"
             case .changed: return "changed"
             case .unlock: return "unlock"
@@ -34,6 +35,15 @@ final class AppModel {
     /// The real (or injected) transport, restored when leaving Demo.
     private let connectionService: any RemoteFileService
     let resourceDirectory: URL
+    let offlineDirectory: URL
+    private(set) var offlineStore: OfflineFileStore?
+    private(set) var offlinePins: [OfflinePin] = []
+    private(set) var offlineError: String?
+    private(set) var pinningName: String?
+    private(set) var pinProgress = DownloadProgress()
+    private(set) var cancellingPin = false
+    private var pinTask: Task<Void, Never>?
+    private var pinToken: UUID?
     private var resourceService: RemoteResourceResolver?
     private var exportService: RemoteOriginalExporter?
     var originalExporter: RemoteOriginalExporter {
@@ -69,6 +79,7 @@ final class AppModel {
          preferences: UserDefaults = .standard, identities: IdentityStore = IdentityStore()) throws {
         self.preferences = preferences
         self.identities = identities
+        offlineDirectory = directory.appendingPathComponent("Offline-v1", isDirectory: true)
         resourceDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("RemoteImages-v1")
         metadataStore = try MetadataStore(fileURL: directory.appendingPathComponent("library-v1.json"))
         readingPositions = ReadingPositionStore(fileURL: directory.appendingPathComponent("reading-positions-v1.json"))
@@ -77,7 +88,70 @@ final class AppModel {
         connectionService = fileService ?? CoalescingFileService(base: SFTPRemoteFileService(identityStore: identities, trustStore: trust, metadataStore: metadataStore))
         service = connectionService
     }
-    func load() async { metadata = await metadataStore.snapshot() }
+    func load() async {
+        metadata = await metadataStore.snapshot()
+        await loadOfflineLibrary()
+    }
+    private func loadOfflineLibrary() async {
+        offlineStore = nil; offlinePins = []; offlineError = nil
+        do {
+            let directory = demo ? offlineDirectory.appendingPathComponent("Demo", isDirectory: true) : offlineDirectory
+            let store = try await OfflineFileStore.shared(directory: directory)
+            offlineStore = store
+            offlinePins = await store.snapshot()
+        } catch { offlineError = error.localizedDescription }
+    }
+    func offlinePin(profile: ConnectionProfile, path: String) -> OfflinePin? {
+        offlinePins.first { $0.matches(profile, path: path) }
+    }
+    func pinOffline(profile: ConnectionProfile, entry: RemoteEntry) {
+        guard pinTask == nil, isForeground, !isDisconnecting, disconnectWork == nil,
+              let store = offlineStore else { return }
+        let token = UUID(), revision = sessionRevision, transport = service
+        pinToken = token; pinningName = entry.exportFilename ?? entry.name
+        pinProgress = .init(); cancellingPin = false
+        pinTask = Task {
+            do {
+                _ = try await store.pin(profile: profile, entry: entry, allowedRoot: profile.startingDirectory,
+                                        service: transport) { [weak self] progress in
+                    await self?.updatePinProgress(progress, token: token)
+                }
+            } catch is CancellationError { }
+            catch {
+                if !Task.isCancelled, revision == sessionRevision, isForeground {
+                    handle(error, profile: profile)
+                    if sheet == nil || sheet?.id == "offlineFiles" { errorMessage = error.localizedDescription }
+                }
+            }
+            // A cancelled future-backed transfer can still be draining. Keep the UI slot until
+            // its private output is gone; disconnect closes the channel before waiting here.
+            await store.waitForCancelledTransfer()
+            guard pinToken == token else { return }
+            offlinePins = await store.snapshot()
+            pinTask = nil; pinToken = nil; pinningName = nil; cancellingPin = false
+        }
+    }
+    private func updatePinProgress(_ progress: DownloadProgress, token: UUID) {
+        guard pinToken == token, !cancellingPin else { return }
+        pinProgress = progress
+    }
+    func cancelOfflinePin() {
+        guard pinTask != nil else { return }
+        cancellingPin = true; pinTask?.cancel()
+    }
+    func removeOfflinePin(_ pin: OfflinePin) async {
+        guard let store = offlineStore else { return }
+        do { try await store.remove(pin.id); offlinePins = await store.snapshot() }
+        catch { errorMessage = error.localizedDescription }
+    }
+    func refreshOfflinePin(_ pin: OfflinePin) {
+        guard let profile = profile(pin.connectionID), pin.matches(profile, path: pin.path) else {
+            errorMessage = "This connection has changed or was removed. The saved copy is still available. Save a new copy from the current connection to update it."
+            return
+        }
+        pinOffline(profile: profile, entry: .init(name: RemotePath.name(of: pin.path), path: pin.path,
+                                                kind: .file, exportFilename: pin.filename))
+    }
     func prepareReadingPosition(_ position: DocumentReadingPosition, text: String, profile: ConnectionProfile, path: String) async {
         await position.prepare(text: text, store: demo ? nil : readingPositions, connectionID: profile.id, path: path)
     }
@@ -241,11 +315,14 @@ final class AppModel {
         isDisconnecting = false
     }
     private func closeSession() async {
+        let previousPin = pinTask
+        cancelOfflinePin()
         let previousExporter = exportService
         await previousExporter?.cancelAll()
         await resourceService?.cancelAll(); resourceService = nil
         await publicKeyInstaller.cancelAll()
         await service.disconnect()
+        await previousPin?.value
         await RemoteImageDecoder.shared.clear()
         await SourceHighlighting.shared.clear()
         await previousExporter?.cancelAndDrain()
@@ -330,7 +407,7 @@ final class AppModel {
         if enabled {
             realMetadata = metadata
             metadata = AppMetadata()
-            let profile = ConnectionProfile(name: "Studio Server · Demo", host: "demo.invalid", username: "demo", identityID: UUID(), startingDirectory: "/Projects")
+            let profile = ConnectionProfile(id: UUID(uuidString: "A0000000-0000-0000-0000-000000000001")!, name: "Studio Server · Demo", host: "demo.invalid", username: "demo", identityID: UUID(uuidString: "A0000000-0000-0000-0000-000000000002")!, startingDirectory: "/Projects")
             metadata.connections = [profile]
             metadata.favourites = [.init(connectionID: profile.id, path: "/Projects", name: "Projects"), .init(connectionID: profile.id, path: "/Projects/Reports", name: "Reports")]
             service = CoalescingFileService(base: DemoRemoteFileService())
@@ -339,6 +416,7 @@ final class AppModel {
             service = connectionService
         }
         demo = enabled
+        await loadOfflineLibrary()
     }
 }
 
