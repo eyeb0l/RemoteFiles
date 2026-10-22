@@ -195,7 +195,7 @@ public final class SSHClient {
     }
 
     public func jump(to settings: SSHClientSettings) async throws -> SSHClient {
-        let originatorAddress = try SocketAddress(ipAddress: "fe80::1", port: 22)
+        let originatorAddress = try SocketAddress(ipAddress: "127.0.0.1", port: 0)
         let inboundChannelHandler = SSHClientInboundChannelHandler()
         let channel = try await self.createDirectTCPIPChannel(
             using: SSHChannelType.DirectTCPIP(
@@ -204,7 +204,8 @@ public final class SSHClient {
                 originatorAddress: originatorAddress
             )
         ) { channel in
-            SSHClientSession.addHandlers(
+            settings.onChannelCreated?(channel)
+            return SSHClientSession.addHandlers(
                 on: channel,
                 inboundChannelHandler: inboundChannelHandler,
                 settings: settings

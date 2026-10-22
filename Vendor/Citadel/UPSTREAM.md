@@ -73,3 +73,12 @@ needs distinct authentication and public-key-format identifiers (RFC 8332).
 Generated Ed25519 identities, cipher/KDF limits and host-key defaults are unchanged.
 Runtime `ssh-keygen` import/fingerprint tests and independent OpenSSH authentication
 cover every supported curve, encrypted/unencrypted originals and RSA SHA-2 fallback.
+
+### Jump-host channel lifecycle
+
+`SSHClient.jump(to:)` now calls `SSHClientSettings.onChannelCreated` before adding the nested
+SSH handlers, matching direct connections. RemoteFiles tracks both the outer socket and the
+forwarded child, so cancellation, deadline, failed destination trust and disconnect retire the
+whole attempt. The direct-tcpip originator is a loopback placeholder with port zero; no local
+listening port or agent forwarding is created. Both hop and destination retain their own
+host-key validators and authentication methods.

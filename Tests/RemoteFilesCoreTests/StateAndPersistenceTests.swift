@@ -4,6 +4,18 @@ import XCTest
 
 @MainActor
 final class StateAndPersistenceTests: XCTestCase {
+    func testJumpHostRoundTripAndLegacyProfileDecoding() throws {
+        var profile = ConnectionProfile(name: "Private server", host: "private.internal", username: "reader", identityID: UUID())
+        let legacy = try JSONEncoder().encode(profile)
+        XCTAssertNil(try JSONDecoder().decode(ConnectionProfile.self, from: legacy).jumpHost)
+        profile.jumpHost = JumpHost(host: "bastion.example", port: 2222, username: "jump", identityID: UUID())
+        let restored = try JSONDecoder().decode(ConnectionProfile.self, from: JSONEncoder().encode(profile))
+        XCTAssertEqual(restored, profile); XCTAssertEqual(profile.identityIDs.count, 2)
+        XCTAssertTrue(restored.hasValidSSHEndpoints)
+        profile.jumpHost?.port = 0; XCTAssertFalse(profile.hasValidSSHEndpoints)
+        profile.jumpHost?.port = 22; profile.jumpHost?.host = "bad host"; XCTAssertFalse(profile.hasValidSSHEndpoints)
+    }
+
     private func profile(id: UUID = UUID()) -> ConnectionProfile {
         .init(id: id, name: "Fixture Mac", host: "fixture.invalid", username: "fixture", identityID: UUID(), startingDirectory: "/Approved fixtures")
     }

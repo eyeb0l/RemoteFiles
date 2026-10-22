@@ -4,8 +4,10 @@ set -euo pipefail
 umask 077
 fixture="$(mktemp -d /private/tmp/remotefiles-openssh.XXXXXX)"
 server_pid=""
+jump_pid=""
 logger_pid=""
 cleanup() {
+  if [ -n "$jump_pid" ]; then kill "$jump_pid" 2>/dev/null || true; wait "$jump_pid" 2>/dev/null || true; fi
   if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi
   # With sshd stopped, ask the timestamping follower to drain the log to its end and exit.
   # It ignores the process-group INT/TERM a timed-out runner sends; bound the wait, then kill it.
@@ -23,11 +25,15 @@ cleanup() {
     if [ "$drained" = 1 ]; then cp "$fixture/sshd-timestamped.log" "$REMOTEFILES_SSHD_LOG" 2>/dev/null || true
     elif [ -f "$fixture/sshd.log" ]; then cp "$fixture/sshd.log" "$REMOTEFILES_SSHD_LOG" 2>/dev/null || true; fi
   fi
+  if [ -n "${REMOTEFILES_SSHD_LOG:-}" ] && [ -f "$fixture/jump-sshd.log" ]; then cp "$fixture/jump-sshd.log" "${REMOTEFILES_SSHD_LOG%.log}-jump.log" 2>/dev/null || true; fi
   rm -rf "$fixture"
 }
 trap cleanup EXIT INT TERM
 port="${REMOTEFILES_TEST_PORT:-22222}"
+jump_port="${REMOTEFILES_TEST_JUMP_PORT:-$((port + 1))}"
 ssh-keygen -q -t ed25519 -N '' -f "$fixture/host"
+ssh-keygen -q -t ed25519 -N '' -f "$fixture/jump-host"
+ssh-keygen -q -t ed25519 -N '' -f "$fixture/jump-key"
 ssh-keygen -q -t ed25519 -N '' -f "$fixture/plain"
 ssh-keygen -q -t ed25519 -N 'fixture-passphrase' -f "$fixture/encrypted"
 ssh-keygen -q -t ed25519 -a 32 -N 'fixture-passphrase' -f "$fixture/unsupported"
@@ -83,6 +89,21 @@ CONFIG
 if /usr/sbin/sshd -t -f "$fixture/sshd_config" -o PerSourcePenalties=no 2>/dev/null; then
   echo 'PerSourcePenalties no' >> "$fixture/sshd_config"
 fi
+# A second independent server is the bastion. It accepts only its own identity and can forward
+# only to loopback fixture listeners; tests prove both host keys and both accounts are checked.
+sed -e "s/^Port .*/Port $jump_port/" \
+    -e "s|^HostKey .*|HostKey $fixture/jump-host|" \
+    -e "s|^PidFile .*|PidFile $fixture/jump.pid|" \
+    -e "s|^AuthorizedKeysFile .*|AuthorizedKeysFile $fixture/jump-key.pub|" \
+    "$fixture/sshd_config" > "$fixture/jump_config"
+printf '\nAllowTcpForwarding local\nPermitOpen 127.0.0.1:*\n' >> "$fixture/jump_config"
+TZ= /usr/sbin/sshd -D -e -f "$fixture/jump_config" >> "$fixture/jump-sshd.log" 2>&1 &
+jump_pid=$!
+for ((i=0; i<30; i++)); do
+  if ! kill -0 "$jump_pid" 2>/dev/null; then cat "$fixture/jump-sshd.log"; exit 1; fi
+  if /usr/bin/nc -z 127.0.0.1 "$jump_port" 2>/dev/null; then break; fi
+  sleep 0.1
+done
 # Tests read sshd.log directly (including assertions that lines are absent), so sshd writes it
 # synchronously. A follower adds read-time timestamps (within 50 ms) to a separate evidence copy.
 : > "$fixture/sshd.log"
@@ -118,10 +139,12 @@ for ((i=0; i<30; i++)); do
 done
 export REMOTEFILES_SFTP_FIXTURE="$fixture"
 export REMOTEFILES_SFTP_PORT="$port"
+export REMOTEFILES_SFTP_JUMP_PORT="$jump_port"
 export REMOTEFILES_SFTP_USER="$(id -un)"
 # xcodebuild forwards TEST_RUNNER_* into iOS XCTest processes (without prefix).
 export TEST_RUNNER_REMOTEFILES_SFTP_FIXTURE="$REMOTEFILES_SFTP_FIXTURE"
 export TEST_RUNNER_REMOTEFILES_SFTP_PORT="$REMOTEFILES_SFTP_PORT"
+export TEST_RUNNER_REMOTEFILES_SFTP_JUMP_PORT="$jump_port"
 export TEST_RUNNER_REMOTEFILES_SFTP_USER="$REMOTEFILES_SFTP_USER"
 if [ "$#" -eq 0 ]; then set -- swift test --filter SFTPIntegrationTests; fi
 if "$@"; then

@@ -4,6 +4,7 @@ import RemoteFilesCore
 import UIKit
 
 struct ReaderView: View {
+    @Environment(\.workspaceNavigation) private var workspaceNavigate
     @Bindable var model: AppModel
     let profile: ConnectionProfile
     let entry: RemoteEntry
@@ -183,7 +184,10 @@ struct ReaderView: View {
                     return
                 }
                 if target.path.utf8.elementsEqual(entry.path.utf8), let fragment { revealHeading(fragment) }
-                else { model.routes.append(.file(profile.id, fragment.map { target.openingHeading($0) } ?? target)) }
+                else {
+                    let route = AppModel.Route.file(profile.id, fragment.map { target.openingHeading($0) } ?? target)
+                    if let workspaceNavigate { workspaceNavigate(route) } else { model.routes.append(route) }
+                }
             } catch {
                 guard !Task.isCancelled, linkRequestID == token, model.isForeground, model.sessionRevision == revision else { return }
                 linkError = error.localizedDescription

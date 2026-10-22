@@ -43,7 +43,7 @@ The optional VoiceOver runner copies the project into its output directory and s
 
 Use the signed simulator test command for the actual Keychain tests: an unsigned simulator test host returns Keychain error `-34018`. The fixture launcher forwards its environment into iOS XCTest through `TEST_RUNNER_REMOTEFILES_*`; do not run the integration test command without the launcher and count skipped server tests as passed. `-collect-test-diagnostics never` avoids diagnostic collection unrelated to this bounded test run.
 
-The OpenSSH fixture binds loopback port 22222 (override `REMOTEFILES_TEST_PORT`), authorises only generated test keys in a temporary file, uses its own host keys/config, disables passwords/PAM, and cleans up on exit. It does not edit the Mac’s SSH configuration or existing keys. It runs under the current account, so tests intentionally touch only its generated fixture directory. Starting this fixture requires permission to run local loopback networking in restricted environments.
+The OpenSSH fixture binds loopback port 22222 (override `REMOTEFILES_TEST_PORT`) and starts a separate bastion on the next port (override `REMOTEFILES_TEST_JUMP_PORT`). Reserve both ports. Each server authorises only its own generated test keys in a temporary file, uses its own host keys/config, disables passwords/PAM, and cleans up on exit. It does not edit the Mac’s SSH configuration or existing keys. It runs under the current account, so tests intentionally touch only its generated fixture directory. Starting this fixture requires permission to run local loopback networking in restricted environments.
 
 ### Latency benchmark
 

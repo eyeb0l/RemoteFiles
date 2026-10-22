@@ -15,12 +15,28 @@ struct ConnectionEditor: View {
     @State private var identityID: UUID?
     @State private var resetTrust = false
     @State private var saving = false
+    @State private var useJumpHost = false
+    @State private var jumpHost = ""
+    @State private var jumpPort = "22"
+    @State private var jumpUsername = ""
+    @State private var jumpIdentityID: UUID?
+    @State private var resetJumpTrust = false
+    private var connection: ConnectionProfile? {
+        guard let identityID, let targetPort = Int(port) else { return nil }
+        let hop: JumpHost?
+        if useJumpHost {
+            guard let jumpIdentityID, let hopPort = Int(jumpPort) else { return nil }
+            hop = JumpHost(host: jumpHost.trimmingCharacters(in: .whitespacesAndNewlines), port: hopPort,
+                           username: jumpUsername.trimmingCharacters(in: .whitespacesAndNewlines), identityID: jumpIdentityID)
+        } else { hop = nil }
+        return ConnectionProfile(id: existing?.id ?? UUID(), name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                                 host: host.trimmingCharacters(in: .whitespacesAndNewlines), port: targetPort,
+                                 username: username.trimmingCharacters(in: .whitespacesAndNewlines), identityID: identityID,
+                                 startingDirectory: directory, usesTailscale: tailscale, jumpHost: hop)
+    }
     private var valid: Bool {
-        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !host.contains(where: \.isWhitespace) && !host.contains("/") &&
-        !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        (1...65535).contains(Int(port) ?? 0) && identityID != nil
+        guard let connection else { return false }
+        return !connection.name.isEmpty && connection.hasValidSSHEndpoints
     }
     var body: some View {
         Form {
@@ -46,8 +62,31 @@ struct ConnectionEditor: View {
             } footer: {
                 Text("Leave blank to use the server’s default directory, or enter an absolute path. Paths starting with ~ are not expanded. Tailscale tips do not change how the app connects.")
             }
+            Section {
+                Toggle("Use Jump Host", isOn: $useJumpHost)
+                if useJumpHost {
+                    TextField("Jump hostname or IP address", text: $jumpHost).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                    TextField("Jump account username", text: $jumpUsername).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    LabeledContent("Jump SSH port") {
+                        TextField("22", text: $jumpPort).keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing).accessibilityLabel("Jump SSH port")
+                    }
+                    Picker("Jump Host Identity", selection: $jumpIdentityID) {
+                        Text("Choose a key").tag(nil as UUID?)
+                        ForEach(model.metadata.identities) { key in Text(key.name).tag(Optional(key.id)) }
+                    }
+                    if existing?.jumpHost != nil {
+                        Button("Reset Trusted Jump Host Key", role: .destructive) { resetJumpTrust = true }
+                    }
+                }
+            } header: { Text("Jump host") } footer: {
+                Text("Connect through one SSH server to reach the destination. The jump host must allow TCP forwarding. Each server’s fingerprint is verified separately; private keys stay on this device. The destination hostname is resolved from the jump host.")
+            }
             Section("Advanced") {
-                TextField("SSH port", text: $port).keyboardType(.numberPad)
+                LabeledContent("Destination SSH port") {
+                    TextField("22", text: $port).keyboardType(.numberPad)
+                        .multilineTextAlignment(.trailing).accessibilityLabel("SSH port")
+                }
                 if existing != nil { Button("Reset Trusted Host Key", role: .destructive) { resetTrust = true } }
             }
             Section("Before you connect") {
@@ -64,10 +103,9 @@ struct ConnectionEditor: View {
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") {
-                    guard let identityID else { return }
+                    guard let value = connection, valid else { return }
                     saving = true
                     Task {
-                        let value = ConnectionProfile(id: existing?.id ?? UUID(), name: name.trimmingCharacters(in: .whitespacesAndNewlines), host: host.trimmingCharacters(in: .whitespacesAndNewlines), port: Int(port) ?? 22, username: username.trimmingCharacters(in: .whitespacesAndNewlines), identityID: identityID, startingDirectory: directory, usesTailscale: tailscale)
                         await model.saveConnection(value)
                         saving = false
                         if model.errorMessage == nil { dismiss() }
@@ -78,10 +116,26 @@ struct ConnectionEditor: View {
         .onAppear {
             if name.isEmpty, let existing {
                 name = existing.name; host = existing.host; username = existing.username
+                if let jump = existing.jumpHost {
+                    useJumpHost = true; jumpHost = jump.host; jumpPort = String(jump.port)
+                    jumpUsername = jump.username; jumpIdentityID = jump.identityID
+                }
                 port = String(existing.port); directory = existing.startingDirectory; tailscale = existing.usesTailscale; identityID = existing.identityID
             }
             if identityID == nil { identityID = model.metadata.identities.first?.id }
+            if jumpIdentityID == nil { jumpIdentityID = identityID }
         }
+        .confirmationDialog("Forget this jump host’s trusted key?", isPresented: $resetJumpTrust, titleVisibility: .visible) {
+            Button("Reset Jump Host Trust", role: .destructive) {
+                guard let existing else { return }
+                Task { await model.resetJumpHostTrust(for: existing) }
+            }
+        } message: {
+            if let jump = existing?.jumpHost {
+                Text("The next connection through \(jump.host):\(String(jump.port)) will require you to verify the jump host fingerprint again.")
+            }
+        }
+
         .confirmationDialog("Forget this host’s trusted key?", isPresented: $resetTrust, titleVisibility: .visible) {
             Button("Reset Host Trust", role: .destructive) {
                 guard let existing else { return }

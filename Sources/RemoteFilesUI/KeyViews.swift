@@ -60,7 +60,7 @@ private struct IdentityDetailsView: View {
     @State private var showInstallation = false
     @State private var biometricUnlock = false
     @State private var biometricMessage: String?
-    private var connections: [ConnectionProfile] { model.metadata.connections.filter { $0.identityID == identity.id } }
+    private var connections: [ConnectionProfile] { model.metadata.connections.filter { $0.identityIDs.contains(identity.id) } }
     private var biometryName: String { BiometricUnlock.name ?? "Face ID" }
 
     var body: some View {
@@ -105,7 +105,7 @@ private struct IdentityDetailsView: View {
         .navigationTitle(identity.name)
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showInstallation) {
-            NavigationStack { PublicKeyInstallationView(model: model, identity: identity, connection: connections.first) }
+            NavigationStack { PublicKeyInstallationView(model: model, identity: identity, connection: model.installationConnection(for: identity)) }
         }
         .task { biometricUnlock = await model.identities.hasBiometricUnlock(identity) }
         .confirmationDialog("Delete this SSH identity from this device?", isPresented: $confirmDeletion, titleVisibility: .visible) {

@@ -152,6 +152,7 @@ struct FolderListing: Sendable {
 }
 
 struct FolderView: View {
+    @Environment(\.workspaceNavigation) private var workspaceNavigate
     @Bindable var model: AppModel
     let profile: ConnectionProfile
     let requestedPath: String
@@ -302,13 +303,13 @@ struct FolderView: View {
         let entry = row.entry
         if let destination = entry.followingLink() {
             // Resolved while listing: open the target directly.
-            NavigationLink(value: route(destination)) { entryRow(row, subtitle: subtitle) }
+            WorkspaceLink(route: route(destination)) { entryRow(row, subtitle: subtitle) }
         } else if entry.kind == .symlink {
             Button { resolve(entry) } label: {
                 entryRow(row, subtitle: subtitle).overlay(alignment: .trailing) { if resolving == entry.path { ProgressView() } }
             }.disabled(resolving != nil)
         } else {
-            NavigationLink(value: route(entry)) { entryRow(row, subtitle: subtitle) }
+            WorkspaceLink(route: route(entry)) { entryRow(row, subtitle: subtitle) }
         }
     }
     private func entryRow(_ row: FolderRow, subtitle: String) -> some View {
@@ -331,7 +332,7 @@ struct FolderView: View {
                 let routed = RemoteEntry(name: target.name, path: target.path, kind: target.kind,
                                          size: target.size, modifiedAt: target.modifiedAt,
                                          navigationRoot: target.navigationRoot, exportFilename: entry.name)
-                model.routes.append(route(routed))
+                if let workspaceNavigate { workspaceNavigate(route(routed)) } else { model.routes.append(route(routed)) }
             } catch { if !Task.isCancelled, !model.isDisconnecting, model.sessionRevision == revision { self.error = error.localizedDescription; model.handle(error, profile: profile) } }
         }
     }

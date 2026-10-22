@@ -5,6 +5,40 @@ import Security
 
 @MainActor
 final class RemoteFilesUITests: XCTestCase {
+    func testAdaptiveWorkspaceKeepsLibraryFolderAndReaderOnIPad() throws {
+        continueAfterFailure = false
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        if isPad { XCUIDevice.shared.orientation = .landscapeLeft }
+        defer { if isPad { XCUIDevice.shared.orientation = .portrait } }
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
+        let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Latest report")).firstMatch
+        if isPad {
+            XCTAssertTrue(report.waitForExistence(timeout: 10)); report.tap()
+        } else { revealFolderRow(report, in: app).tap() }
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+        if isPad {
+            XCTAssertTrue(projects.isHittable, "Library remains available alongside the reader")
+            XCTAssertTrue(report.isHittable, "Opening a preview keeps its folder visible")
+            XCTAssertLessThan(projects.frame.midX, report.frame.midX)
+            XCTAssertLessThan(report.frame.midX, app.scrollViews["Rendered Markdown document"].frame.midX)
+            attachScreenshot("iPad library folder and reader")
+            let reports = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports, Folder")).firstMatch
+            XCTAssertTrue(reports.isHittable); reports.tap()
+            XCTAssertTrue(app.navigationBars["Reports"].waitForExistence(timeout: 10))
+            XCTAssertTrue(app.staticTexts["Choose a file"].waitForExistence(timeout: 5), "Changing folders clears the old preview")
+            app.buttons["Previous Folder"].tap()
+            XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 5))
+            projects.tap()
+            XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 5))
+        } else {
+            app.navigationBars.buttons["Projects"].tap()
+            XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 5))
+        }
+    }
+
     func testFindHeadingsAndHeadingLinksInReader() throws {
         continueAfterFailure = false
         let app = launchDemoReader(filename: "Navigation guide.md")
@@ -405,6 +439,18 @@ final class RemoteFilesUITests: XCTestCase {
         attachScreenshot("Physical normal Home")
         add.tap()
         XCTAssertTrue(app.textFields["Hostname or IP address"].waitForExistence(timeout: 5))
+        let jump = app.switches["Use Jump Host"]
+        for _ in 0..<5 { if jump.exists && jump.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(jump.exists && jump.isHittable)
+        jump.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        let hopHost = app.textFields["Jump hostname or IP address"]
+        for _ in 0..<4 { if hopHost.exists && hopHost.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(hopHost.exists && hopHost.isHittable)
+        let hopAccount = app.textFields["Jump account username"]
+        for _ in 0..<4 { if hopAccount.exists && hopAccount.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(hopAccount.exists && hopAccount.isHittable)
+        XCTAssertFalse(app.buttons["Save"].isEnabled, "An incomplete routed connection cannot be saved")
+        attachScreenshot("Jump host connection setup")
         app.buttons["Cancel"].tap()
         XCTAssertTrue(add.waitForExistence(timeout: 5))
     }

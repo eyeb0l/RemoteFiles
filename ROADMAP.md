@@ -14,8 +14,12 @@ The preview stays read only. These are deliberate future decisions, not hidden o
 
 Editing and uploads need conflict detection and safe replacement before transfer queues or recursive operations. No remote writes are implemented in this preview.
 
+## Implemented navigation and routing
+
+[Single jump-host connections](docs/JUMP_HOSTS.md) and an [adaptive iPad workspace](docs/IPAD.md) are implemented. Physical bastion and iPad windowing acceptance remain separate.
+
 ## Later possibilities
 
-File Provider; deliberate offline pinning/sync; server-side search; jump hosts; FTP/FTPS or other protocols; an optional terminal handoff; deeper Tailscale discovery/onboarding; dedicated iPad layouts. A VPN, companion Mac service, accounts, analytics, monetisation, backend, and App Store release preparation are outside this preview.
+File Provider; deliberate offline pinning/sync; server-side search; multiple jump hops; FTP/FTPS or other protocols; an optional terminal handoff; deeper Tailscale discovery/onboarding; additional iPad keyboard and multiwindow workflows. A VPN, companion Mac service, accounts, analytics, monetisation, backend, and App Store release preparation are outside this preview.
 
 Private-key export, automatic key installation, Mermaid, mathematical notation, raw HTML rendering, generic download management, and background SSH transfers are deferred.

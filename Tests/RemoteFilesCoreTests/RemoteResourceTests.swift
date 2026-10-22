@@ -478,6 +478,23 @@ final class RemoteResourceTests: XCTestCase {
         }
         downloads = await service.downloads
         XCTAssertEqual(downloads, 5, "A different account, endpoint or identity must never share bytes")
+        var tunneled = doc.profile
+        tunneled.jumpHost = JumpHost(host: "bastion.example", username: "jump", identityID: UUID())
+        let routed = try await resolver.localFile(for: "a.png", in: .init(profile: tunneled, path: doc.path))
+        XCTAssertNotEqual(routed, first, "Direct and tunneled private hostnames must not share cached bytes")
+        var normalized = tunneled; normalized.jumpHost?.host = "BASTION.EXAMPLE"
+        let sameRoute = try await resolver.localFile(for: "a.png", in: .init(profile: normalized, path: doc.path))
+        XCTAssertEqual(sameRoute, routed)
+        for change in [{ (p: inout JumpHost) in p.host = "other-bastion.example" }, { $0.port = 2222 },
+                       { $0.username = "another-jump-account" }, { $0.identityID = UUID() }] {
+            var other = tunneled, hop = try XCTUnwrap(tunneled.jumpHost)
+            change(&hop); other.jumpHost = hop
+            _ = try await resolver.localFile(for: "a.png", in: .init(profile: other, path: doc.path))
+        }
+        downloads = await service.downloads
+        XCTAssertEqual(downloads, 10, "Every jump endpoint, account and identity has isolated cached resources")
+        let directAgain = try await resolver.localFile(for: "a.png", in: doc)
+        XCTAssertEqual(directAgain, first, "Direct connections retain their existing cache keys")
     }
     func testDiskBudgetAndProfileIsolation() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

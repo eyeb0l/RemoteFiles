@@ -57,17 +57,19 @@ public struct RemoteFilesRootView: View {
 
 struct AppNavigation: View {
     @Bindable var model: AppModel
+    @Environment(\.horizontalSizeClass) private var sizeClass
     var body: some View {
-        NavigationStack(path: $model.routes) {
-            HomeView(model: model)
-                .navigationDestination(for: AppModel.Route.self) { route in
-                    switch route {
-                    case .folder(let id, let path):
-                        if let profile = model.profile(id) { FolderView(model: model, profile: profile, requestedPath: path) }
-                    case .file(let id, let entry):
-                        if let profile = model.profile(id) { ReaderView(model: model, profile: profile, entry: entry) }
-                    }
+        Group {
+            if sizeClass == .regular && UIDevice.current.userInterfaceIdiom == .pad {
+                IPadWorkspace(model: model)
+            } else {
+                NavigationStack(path: $model.routes) {
+                    HomeView(model: model)
+                        .navigationDestination(for: AppModel.Route.self) { route in
+                            RouteDestination(model: model, route: route)
+                        }
                 }
+            }
         }
         .tint(.indigo)
         .disabled(model.isDisconnecting)
@@ -85,6 +87,89 @@ struct AppNavigation: View {
         .alert("RemoteFiles", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK") { model.errorMessage = nil }
         } message: { Text(model.errorMessage ?? "") }
+    }
+}
+
+/// Links push on iPhone; in the split workspace they select the appropriate column instead.
+private struct WorkspaceNavigationKey: EnvironmentKey {
+    static let defaultValue: ((AppModel.Route) -> Void)? = nil
+}
+extension EnvironmentValues {
+    var workspaceNavigation: ((AppModel.Route) -> Void)? {
+        get { self[WorkspaceNavigationKey.self] }
+        set { self[WorkspaceNavigationKey.self] = newValue }
+    }
+}
+struct WorkspaceLink<Label: View>: View {
+    @Environment(\.workspaceNavigation) private var navigate
+    let route: AppModel.Route
+    @ViewBuilder var label: () -> Label
+    var body: some View {
+        if let navigate {
+            Button { navigate(route) } label: { label().frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle()) }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(.isLink)
+        } else {
+            NavigationLink(value: route, label: label)
+        }
+    }
+}
+
+private struct RouteDestination: View {
+    @Bindable var model: AppModel
+    let route: AppModel.Route
+    @ViewBuilder var body: some View {
+        switch route {
+        case .folder(let id, let path):
+            if let profile = model.profile(id) { FolderView(model: model, profile: profile, requestedPath: path) }
+        case .file(let id, let entry):
+            if let profile = model.profile(id) { ReaderView(model: model, profile: profile, entry: entry) }
+        }
+    }
+}
+
+private struct IPadWorkspace: View {
+    @Bindable var model: AppModel
+    @State private var visibility: NavigationSplitViewVisibility = .all
+    var body: some View {
+        NavigationSplitView(columnVisibility: $visibility) {
+            HomeView(model: model)
+                .listStyle(.sidebar)
+                .environment(\.workspaceNavigation, { model.routes = [$0] })
+                .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
+                .accessibilityIdentifier("workspace-library")
+        } content: {
+            NavigationStack {
+                if let folder = model.workspaceFolder {
+                    RouteDestination(model: model, route: folder)
+                        .id(folder)
+                        .toolbar {
+                            if model.canGoBackInWorkspace {
+                                ToolbarItem(placement: .topBarLeading) {
+                                    Button("Previous Folder", systemImage: "chevron.left") { model.goBackInWorkspace() }
+                                }
+                            }
+                        }
+                } else {
+                    ContentUnavailableView("Choose a folder", systemImage: "folder", description: Text("Select a connection or favourite from the library."))
+                }
+            }
+            .environment(\.workspaceNavigation, { model.openInWorkspace($0) })
+            .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 420)
+            .accessibilityIdentifier("workspace-folder")
+        } detail: {
+            NavigationStack {
+                if let file = model.workspaceFile {
+                    RouteDestination(model: model, route: file).id(file)
+                } else {
+                    ContentUnavailableView("Choose a file", systemImage: "doc.text", description: Text("Open a file to read it alongside its folder."))
+                        .navigationTitle("Preview")
+                }
+            }
+            .environment(\.workspaceNavigation, { model.openInWorkspace($0) })
+            .accessibilityIdentifier("workspace-reader")
+        }
+        .navigationSplitViewStyle(.balanced)
     }
 }
 
@@ -118,7 +203,7 @@ struct HomeView: View {
             if !model.metadata.favourites.isEmpty {
                 Section {
                     ForEach(model.metadata.favourites) { location in
-                        NavigationLink(value: AppModel.Route.folder(location.connectionID, location.path)) {
+                        WorkspaceLink(route: AppModel.Route.folder(location.connectionID, location.path)) {
                             LocationRow(name: location.name, subtitle: "\(model.profile(location.connectionID)?.name ?? "Server") · \(location.path)", symbol: "folder.fill", color: .indigo)
                         }
                     }
@@ -133,7 +218,7 @@ struct HomeView: View {
             }
             Section {
                 ForEach(model.metadata.connections) { profile in
-                    NavigationLink(value: AppModel.Route.folder(profile.id, profile.startingDirectory)) {
+                    WorkspaceLink(route: AppModel.Route.folder(profile.id, profile.startingDirectory)) {
                         LocationRow(name: profile.name, subtitle: "\(profile.host) · \(model.connectionStates[profile.id] ?? "Disconnected")", symbol: "server.rack", color: .secondary)
                     }
                     .contextMenu {
@@ -158,7 +243,7 @@ struct HomeView: View {
             if !model.metadata.recents.isEmpty {
                 Section("Recently opened") {
                     ForEach(model.metadata.recents) { location in
-                        NavigationLink(value: AppModel.Route.file(location.connectionID, .init(name: location.name, path: location.path, kind: .file))) {
+                        WorkspaceLink(route: AppModel.Route.file(location.connectionID, .init(name: location.name, path: location.path, kind: .file))) {
                             LocationRow(name: location.name, subtitle: model.profile(location.connectionID)?.name ?? "Server", symbol: "doc.text", color: .secondary)
                         }
                         .accessibilityIdentifier("recent-\(location.id.uuidString)")

@@ -168,3 +168,20 @@ cache state, build/test/boot phases and full workflow duration separately. Keep
 full acceptance before merging CI/scheme changes and verify the resulting main
 push as well. The implementation does not assert a speedup until those hosted
 measurements exist; first-boot contention is a hypothesis to test.
+
+## Jump-host fixture
+
+The isolated OpenSSH launcher also starts a loopback bastion with its own host key and
+an independent authorized identity. The main fixture port defaults to 22222; its bastion
+uses the next port, or `REMOTEFILES_TEST_JUMP_PORT` when set. Reserve both when running
+lanes locally in parallel. Hosted tests receive both ports through `TEST_RUNNER_` variables.
+The bastion permits forwarding only to loopback test listeners. Both servers are stopped
+on exit; `<lane>-sshd-jump.log` retains the bastion log beside the destination log.
+
+## Local VoiceOver fixture state
+
+Use a fresh disposable simulator for a full VoiceOver lane. The small-feature fixtures retain
+installation and recent-entry state across app launches. Reusing their app container can start
+with an already-installed mock public key or an already-removed seeded recent entry. A fresh
+output directory alone does not reset that simulator state. Diagnose these failures before
+rerunning the affected methods on a fresh device; retain both the original failure and rerun evidence.

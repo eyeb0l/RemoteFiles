@@ -163,12 +163,18 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
     }
     /// Keys on what determines the bytes: the account that read them and the remote location.
     /// Renaming a connection or editing its starting folder keeps its cached resources, while a
-    /// different endpoint, account or identity never shares them. JSON keeps fields unambiguous.
+    /// different endpoint, account, identity or jump route never shares them. JSON keeps fields unambiguous.
     private func cacheKey(path: String, document: RemoteDocumentLocation) throws -> String {
         let profile = document.profile
         let endpoint = HostEndpoint(host: profile.host, port: profile.port)
-        let fields = [endpoint.host, String(endpoint.port), profile.username, profile.identityID.uuidString,
+        var fields = [endpoint.host, String(endpoint.port), profile.username, profile.identityID.uuidString,
                       document.resourceRoot, path]
+        // A private hostname can identify different filesystems through different bastions.
+        // Keep direct keys unchanged, but never reuse their bytes for a tunneled route.
+        if let hop = profile.jumpHost {
+            let jump = HostEndpoint(host: hop.host, port: hop.port)
+            fields += ["jump-host", jump.host, String(jump.port), hop.username, hop.identityID.uuidString]
+        }
         return SHA256.hash(data: try JSONEncoder().encode(fields)).map { String(format: "%02x", $0) }.joined()
     }
     public func invalidate(_ reference: String, in document: RemoteDocumentLocation) {
