@@ -235,6 +235,31 @@ final class SFTPIntegrationTests: XCTestCase {
         await service.disconnect()
     }
 
+    func testContentSearchReadsSourceOverSFTPAndNeverFollowsEscapeLinks() async throws {
+        let fixture = try Fixture(), stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Content search")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        var matches: [RemoteFolderSearch.ContentMatch] = []
+        var final: RemoteFolderSearch.Update?
+        for try await update in RemoteFolderSearch.contents(matching: "INDEPENDENT openssh", below: fixture.files,
+            profile: profile, service: service, includeHidden: false, limits: .init(maxDepth: 0),
+            contentLimits: .init(maxFileBytes: 1024)) {
+            matches += update.contentMatches
+            if update.isFinished { final = update }
+        }
+        XCTAssertEqual(matches.map(\.entry.path), [fixture.files + "/report.md"], "A linked alias is not read or duplicated")
+        XCTAssertEqual(matches.first?.line, 3)
+        XCTAssertTrue(matches.first?.snippet.contains("independent OpenSSH") == true)
+        let completed = try XCTUnwrap(final)
+        XCTAssertNil(completed.stop); XCTAssertGreaterThan(completed.skippedFiles, 0)
+        XCTAssertEqual(completed.unreadableFiles, 1, "The fixture's denied file remains unreadable")
+        XCTAssertGreaterThan(completed.skippedDeepFolders, 0)
+    }
+
     func testResourceStreamUsesSessionAndRejectsSymlinkEscape() async throws {
         let fixture = try Fixture()
         let stores = try Stores(fixture: fixture)
@@ -353,6 +378,34 @@ final class SFTPIntegrationTests: XCTestCase {
     }
 
     #if os(macOS)
+    func testContentSearchRejectsAnEntireRootRedirectedAfterListing() async throws {
+        let fixture = try Fixture(), stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Search boundary")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        let root = fixture.files + "/search-root"
+        let original = root + "-original"
+        try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: false)
+        defer {
+            try? FileManager.default.removeItem(atPath: root)
+            try? FileManager.default.removeItem(atPath: original)
+        }
+        try Data("needle in the selected folder".utf8).write(to: URL(fileURLWithPath: root + "/source.md"))
+        let listing = try await service.listDirectory(profile: profile, path: root)
+        XCTAssertEqual(listing.path, root)
+        let before = try await service.readSearchFile(profile: profile, path: root + "/source.md", canonicalRoot: root, limit: 1024)
+        XCTAssertEqual(String(decoding: before, as: UTF8.self), "needle in the selected folder")
+        try FileManager.default.moveItem(atPath: root, toPath: original)
+        try FileManager.default.createSymbolicLink(atPath: root, withDestinationPath: fixture.files + "/docs")
+        do {
+            _ = try await service.readSearchFile(profile: profile, path: root + "/source.md", canonicalRoot: root, limit: 1024)
+            XCTFail("A selected search root must not move with a newly installed alias")
+        } catch RemoteDocumentLinkError.outsideConnection { }
+    }
+
     func testConfinedRefreshRejectsChangedSymlinkAndReconnectReadsChangedServerBytes() async throws {
         let fixture = try Fixture()
         let stores = try Stores(fixture: fixture)

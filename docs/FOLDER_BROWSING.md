@@ -2,7 +2,7 @@
 
 [Documentation](README.md) · [RemoteFiles](../README.md)
 
-Folders list their contents with folders first. Use **Folder actions** to refresh, show hidden files, add a favourite, or choose how the folder is sorted. The search field filters this folder, or searches names in its subfolders.
+Folders list their contents with folders first. Use **Folder actions** to refresh, show hidden files, add a favourite, or choose how the folder is sorted. The search field filters this folder, searches names in its subfolders, or searches file contents.
 
 | Linked folder | File and broken links | Sorted by size |
 | --- | --- | --- |
@@ -40,6 +40,7 @@ Type in the search field, then choose a scope:
 
 - **This Folder:** filters the names already listed, instantly.
 - **Subfolders:** searches names in this folder and every folder below it. Matching ignores case.
+- **Contents:** searches source text in this folder and its subfolders. Results show the first matching line and a short snippet; matching ignores case and treats the query literally.
 
 <img src="screenshots/folder-browsing/subfolder-search.jpg" width="240" alt="Searching Projects for review: matches in this folder, in Reports, and in Reports/2026, after searching five folders">
 
@@ -51,4 +52,22 @@ Subfolder search lists folders over the same SFTP connection, so it works on any
 - **What it skips:** links are matched by name but never followed, so the search stays inside the folder and can't loop. Hidden files and folders are skipped unless **Show Hidden Files** is on. A folder that can't be read, has gone, or times out is counted and skipped. A timeout closes the shared SFTP channel, so a folder whose listing fails with it is listed once more; if the connection has really ended, the search stops with an error.
 - **Limits:** a search lists at most 1,000 folders, goes at most 16 levels down, shows at most 500 matches, and starts no new listings after 30 seconds, including recovery retries. If an interrupted listing needs a retry after that deadline, the search stops with the time limit and keeps results already reported; it does not count the interrupted folder as unreadable. The line above the results says how many folders were searched, how many couldn't be read, and which limit stopped it. To go further, open a subfolder and search from there.
 
-Each folder takes at least one round trip to list, four at a time, so searching a large tree over cellular or Tailscale is much slower than a server-side `find`. Searching file contents is not supported.
+Each folder takes at least one round trip to list, four at a time, so searching a large tree over cellular or Tailscale is much slower than a server-side `find`.
+
+## Searching file contents
+
+Choose **Contents** after typing a phrase. This reads supported text files over SFTP; it needs no shell, server index, or companion service. It searches Markdown, source code, configuration files, HTML and SVG source, and the reader's other text candidates, including extensionless files. Only valid UTF-8 without binary control bytes is searched. PDFs, images, archives, audio and video are skipped. There is no OCR, regular-expression matching or rendered-text extraction.
+
+| iPhone | iPad folder column |
+| --- | --- |
+| <img src="screenshots/folder-browsing/contents-search-iphone.png" width="240" alt="Contents search finds distance disappear in three reports, showing source line 13"> | <img src="screenshots/folder-browsing/contents-search-ipad.png" width="420" alt="The same content search in the iPad folder column beside the library and preview pane"> |
+
+*Screenshots from passing simulator tests using demo files.*
+
+Matches appear as each file is checked, nearest folder first and by name within each folder, with one result per file. The line number refers to the source; opening a result uses the ordinary reader and its existing reading position. Use **Find in Document** to move between matches there. Completed results stay when you return; refresh starts a new search. The same controls and results work in the iPad folder column.
+
+The search lists up to 1,000 folders, descends at most 16 levels, reads at most 500 candidate files, and retains at most 500 matching files. Each file must fit within 256 KiB, with a conservative 16 MiB file-data read budget; directory listings and SSH protocol overhead are additional. Files advertised as larger are skipped without reading; unknown or stale sizes are still bounded by the transport. Failed reads reserve their entire possible transfer, including the EOF sentinel, so repeated failures cannot evade the budget. Reads run one at a time, alongside the bounded directory-listing window. No new listing, read or recovery retry starts after the 30-second scheduling budget; requests already sent may finish within their own transport deadline. Results already found are retained when a limit is reached.
+
+Hidden files/folders follow **Show Hidden Files**. Listed symbolic links are never read or traversed. Each file read rechecks canonical confinement to the selected search folder, so a file replaced by an outside link cannot supply results. A folder moved outside that boundary is skipped. Unreadable, missing and timed-out files are counted; an interrupted connection is retried once within the same budgets, and persistent connection or trust failures remain errors. Names search still makes no file-content reads.
+
+Changing the query or scope, refreshing, navigating away from the folder, backgrounding or disconnecting cancels the search. The iPad folder can stay visible while you read a result, so its bounded search can continue there. File contents and snippets are not written to an index or search cache, and the query is not sent to a shell or external service. Cellular data usage can be substantial: search from a narrower folder for faster results.

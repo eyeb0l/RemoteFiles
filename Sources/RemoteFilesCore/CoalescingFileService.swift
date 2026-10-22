@@ -61,6 +61,13 @@ public actor CoalescingFileService: RemoteFileService {
         try Task.checkCancellation()
         return bytes
     }
+    public func readSearchFile(profile: ConnectionProfile, path: String, canonicalRoot: String, limit: Int) async throws -> Data {
+        try Task.checkCancellation()
+        // Search cancellation must never cancel a foreground preview of the same file.
+        let bytes = try await base.readSearchFile(profile: profile, path: path, canonicalRoot: canonicalRoot, limit: limit)
+        try Task.checkCancellation()
+        return bytes
+    }
     public func resolveDocumentLink(profile: ConnectionProfile, documentPath: String, reference: String) async throws -> RemoteEntry {
         try Task.checkCancellation()
         let entry = try await base.resolveDocumentLink(profile: profile, documentPath: documentPath, reference: reference)

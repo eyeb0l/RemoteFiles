@@ -99,11 +99,31 @@ final class FolderBrowsingTests: XCTestCase {
         for other in [FolderSearchState.Key(query: "notes", root: "/p", includeHidden: false, sessionRevision: 1, refresh: 0),
                       FolderSearchState.Key(query: "review", root: "/p", includeHidden: true, sessionRevision: 1, refresh: 0),
                       FolderSearchState.Key(query: "review", root: "/p", includeHidden: false, sessionRevision: 2, refresh: 0),
+                      FolderSearchState.Key(query: "review", root: "/p", includeHidden: false, sessionRevision: 1, refresh: 0, scope: .contents),
                       FolderSearchState.Key(query: "review", root: "/p", includeHidden: false, sessionRevision: 1, refresh: 1)] {
             XCTAssertFalse(state.isFinished(for: other))
         }
         state.error = "The SSH connection ended."
         XCTAssertFalse(state.isFinished(for: key), "A failed search is tried again")
+    }
+
+    func testContentSearchProgressAndStaleUpdatesDoNotReplaceAnotherScope() async throws {
+        let profile = ConnectionProfile(name: "Demo", host: "demo", username: "reader", identityID: UUID())
+        let key = FolderSearchState.Key(query: "distance disappear", root: "/Projects/Reports", includeHidden: false,
+                                       sessionRevision: 1, refresh: 0, scope: .contents)
+        var state = FolderSearchState(key: key)
+        for try await update in RemoteFolderSearch.contents(matching: key.query, below: key.root, profile: profile,
+            service: DemoRemoteFileService(delayNanoseconds: 0), includeHidden: false) {
+            state.apply(update, for: key)
+        }
+        XCTAssertTrue(state.isFinished(for: key)); XCTAssertEqual(state.rows.count, 3)
+        XCTAssertTrue(state.rows.allSatisfy { $0.snippet?.contains("Line 13") == true })
+        XCTAssertTrue(state.summary.contains("Checked 5 files."))
+        var other = key; other.scope = .subfolders
+        state = FolderSearchState(key: other)
+        var late = RemoteFolderSearch.Update(); late.isFinished = true; late.matches = [file("old.md")]
+        state.apply(late, for: key)
+        XCTAssertTrue(state.rows.isEmpty); XCTAssertFalse(state.progress.isFinished)
     }
 
     @MainActor func testCancellingASearchNeverCancelsTheSameFolderOpenedMeanwhile() async throws {

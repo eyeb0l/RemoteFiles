@@ -123,6 +123,11 @@ public actor SFTPRemoteFileService: RemoteFileService {
         try await boundedRead(profile: profile, path: path, allowedRoot: allowedRoot, limit: limit, since: nil).0 ?? Data()
     }
 
+    public func readSearchFile(profile: ConnectionProfile, path: String, canonicalRoot: String, limit: Int) async throws -> Data {
+        try await boundedRead(profile: profile, path: path, allowedRoot: canonicalRoot, limit: limit,
+                              since: nil, requiresCanonicalRoot: true).0 ?? Data()
+    }
+
     public func readFileIfChanged(profile: ConnectionProfile, path: String, allowedRoot: String?, limit: Int,
                                   since: RemoteFileVersion?) async throws -> RemoteFileRead {
         let (bytes, version) = try await boundedRead(profile: profile, path: path, allowedRoot: allowedRoot, limit: limit, since: since)
@@ -132,7 +137,7 @@ public actor SFTPRemoteFileService: RemoteFileService {
     /// Returns nil bytes only when `since` matches the current file. Root confinement is
     /// checked before that comparison, so an unchanged answer never skips the boundary.
     private func boundedRead(profile: ConnectionProfile, path: String, allowedRoot: String?, limit: Int,
-                             since: RemoteFileVersion?) async throws -> (Data?, RemoteFileVersion?) {
+                             since: RemoteFileVersion?, requiresCanonicalRoot: Bool = false) async throws -> (Data?, RemoteFileVersion?) {
         guard limit >= 0, limit < Int.max else { throw RemoteFileError.tooLarge(max(0, limit)) }
         let started = Date()
         let session = try await session(for: profile)
@@ -140,6 +145,7 @@ public actor SFTPRemoteFileService: RemoteFileService {
             var target = try Self.validated(path)
             if let allowedRoot {
                 let root = try await sftp.getRealPath(atPath: Self.validated(allowedRoot))
+                if requiresCanonicalRoot, !root.utf8.elementsEqual(allowedRoot.utf8) { throw RemoteDocumentLinkError.outsideConnection }
                 target = try await sftp.getRealPath(atPath: target)
                 guard RemoteResourcePath.contains(target, in: root) else { throw RemoteDocumentLinkError.outsideConnection }
             }

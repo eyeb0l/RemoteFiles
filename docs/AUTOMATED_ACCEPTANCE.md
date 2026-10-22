@@ -69,6 +69,23 @@ ordinary code changes, and adds UI, VoiceOver and Release jobs for sensitive
 changes or explicit requests. See [CI policy and timing](CI.md). `--lane` reports
 its selected coverage explicitly; it does not count unrequested lanes as passed.
 
+### Bounded file-content search
+
+`FileContentSearchTests` covers source matching, Unicode line/snippet handling,
+binary/hidden/link/size exclusions, incremental updates, read/file/match/depth/time
+budgets, failed-read accounting, and cancellation that cannot publish late bytes
+or cancel a foreground preview. `FolderBrowsingTests` covers Contents scope
+identity, retained completed results and rejection of updates for an obsolete scope.
+
+`SFTPIntegrationTests.testContentSearchReadsSourceOverSFTPAndNeverFollowsEscapeLinks`
+checks real bounded source reads with the disposable server. The macOS-only
+`testContentSearchRejectsAnEntireRootRedirectedAfterListing` replaces only a
+synthetic fixture directory with a symlink and checks the fixed canonical boundary.
+The UI journey `testContentSearchShowsSourceSnippetsAndKeepsResultsWhenOpeningAFile`
+checks snippet/line accessibility labels, recursive results, reader navigation and
+scope changes, with an adaptive iPad path. These checks do not establish physical
+device interaction or cellular performance.
+
 ### Recursive search timeout recovery
 
 `SFTPIntegrationTests.testSubfolderSearchRecoversListingsInterruptedByAPeersDeadline`

@@ -301,6 +301,36 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(filtered.waitForExistence(timeout: 10))
         XCTAssertFalse(nested.exists, "This Folder filters only the folder's own names")
     }
+
+    func testContentSearchShowsSourceSnippetsAndKeepsResultsWhenOpeningAFile() throws {
+        continueAfterFailure = false
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        if isPad { XCUIDevice.shared.orientation = .landscapeLeft }
+        defer { if isPad { XCUIDevice.shared.orientation = .portrait } }
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        let reports = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports, Folder")).firstMatch
+        XCTAssertTrue(reports.waitForExistence(timeout: 10)); reports.tap()
+        let search = app.searchFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 10)); search.tap(); search.typeText("distance disappear")
+        app.buttons["Contents"].tap()
+        let nested = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Quarterly review.md,")).firstMatch
+        XCTAssertTrue(nested.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(nested.label.contains("In 2026")); XCTAssertTrue(nested.label.contains("Line 13"))
+        XCTAssertTrue(nested.label.contains("Good tools make the distance disappear."))
+        let summary = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Searched 2 folders. Checked 5 files.")).firstMatch
+        XCTAssertTrue(summary.waitForExistence(timeout: 10), app.debugDescription)
+        search.typeText("\n")
+        attachScreenshot("File contents search results")
+        nested.tap()
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+        if !isPad { app.navigationBars.buttons["Reports"].tap() }
+        XCTAssertTrue(nested.exists && summary.exists, "The completed content search remains when its result opens")
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Searching…")).firstMatch.exists)
+        app.buttons["This Folder"].tap()
+        XCTAssertTrue(app.staticTexts["No matching names"].waitForExistence(timeout: 5), "Contents are not file names")
+    }
     func testSourceSyntaxHighlightingAndMarkdownSource() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
