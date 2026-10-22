@@ -15,6 +15,7 @@
 - [SSH key support](KEY_SUPPORT.md) and [public-key installation](PUBLIC_KEY_INSTALLATION.md).
 - [Remote images](REMOTE_IMAGES.md), [audio and video](AUDIO_VIDEO.md), and [static HTML](HTML_PREVIEWS.md).
 - [Document links](DOCUMENT_LINKS.md), [original-file export](ORIGINAL_EXPORT.md), and [JSON/SVG previews](READER.md#json-and-svg-previews).
+- [Offline files](OFFLINE_FILES.md): individual saved copies, explicit updates, local previews and storage limits.
 - [App icon](APP_ICON.md): assets, appearance variants, and export workflow.
 
 ## Architecture and performance

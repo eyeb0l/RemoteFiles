@@ -6,6 +6,8 @@ public struct PreparedOriginalFile: Identifiable, Sendable {
     public let id: UUID
     public let url: URL
     public let filename: String
+    /// Canonical source name for preview format; export keeps the selected alias.
+    public let sourceFilename: String
     public let expiresAt: Date
 }
 
@@ -73,7 +75,7 @@ public actor RemoteOriginalExporter {
     /// The selected name is retained even if an in-root symlink resolves to a different
     /// name. `allowedRoot` may be ".": the transport canonicalizes it on the server.
     public func prepare(profile: ConnectionProfile, entry: RemoteEntry,
-                        allowedRoot: String) async throws -> PreparedOriginalFile {
+                        allowedRoot: String, progress: @escaping DownloadProgressHandler = { _ in }) async throws -> PreparedOriginalFile {
         try Task.checkCancellation()
         guard transfer == nil, prepared == nil else { throw OriginalFileExportError.alreadyPreparing }
         guard entry.kind == .file || entry.kind == .symlink else { throw OriginalFileExportError.notRegularFile }
@@ -88,7 +90,7 @@ public actor RemoteOriginalExporter {
                     let result: Result<PreparedOriginalFile, Error>
                     do {
                         result = .success(try await self.fetch(id: id, profile: profile, entry: entry,
-                                                              allowedRoot: allowedRoot, directory: temporaryDirectory))
+                                                              allowedRoot: allowedRoot, directory: temporaryDirectory, progress: progress))
                     } catch {
                         result = .failure(Self.exportError(error))
                     }
@@ -166,7 +168,8 @@ public actor RemoteOriginalExporter {
     }
 
     private func fetch(id: UUID, profile: ConnectionProfile, entry: RemoteEntry,
-                       allowedRoot: String, directory temporaryDirectory: URL) async throws -> PreparedOriginalFile {
+                       allowedRoot: String, directory temporaryDirectory: URL,
+                       progress: @escaping DownloadProgressHandler) async throws -> PreparedOriginalFile {
         try Task.checkCancellation()
         let fm = FileManager.default
         try fm.createDirectory(at: directory, withIntermediateDirectories: true,
@@ -190,7 +193,7 @@ public actor RemoteOriginalExporter {
         #endif
         let file = temporaryDirectory.appendingPathComponent(entry.exportFilename ?? entry.name, isDirectory: false)
         let remote = try await service.downloadFile(profile: profile, path: entry.path, allowedRoot: allowedRoot,
-                                                    destination: file, limit: fileLimit)
+                                                    destination: file, limit: fileLimit, progress: progress)
         try Task.checkCancellation()
         guard remote.kind == .file else { throw OriginalFileExportError.notRegularFile }
         if let size = remote.size, size > UInt64(fileLimit) { throw OriginalFileExportError.tooLarge(fileLimit) }
@@ -204,7 +207,7 @@ public actor RemoteOriginalExporter {
         #if os(iOS)
         try fm.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: file.path)
         #endif
-        return PreparedOriginalFile(id: id, url: file, filename: entry.exportFilename ?? entry.name,
+        return PreparedOriginalFile(id: id, url: file, filename: entry.exportFilename ?? entry.name, sourceFilename: remote.name,
                                     expiresAt: Date().addingTimeInterval(retentionSeconds))
     }
 

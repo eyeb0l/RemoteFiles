@@ -44,6 +44,13 @@ native Files picker saves a copy. Temporary exports expire after ten minutes
 and are removed on dismissal, navigation away, disconnect or backgrounding.
 See [original export](ORIGINAL_EXPORT.md).
 
+## Offline copies
+
+**Document actions → Keep Offline** saves an individual original for the library’s
+**Offline Files** collection. Copies open without SFTP, show their saved date, and
+update only on request. Folder context menus offer the same action. See
+[offline files](OFFLINE_FILES.md) for limits, local preview differences and lifecycle.
+
 ## JSON and SVG previews
 
 Source lines wrap visually by default; **Document actions → Wrap Lines** turns

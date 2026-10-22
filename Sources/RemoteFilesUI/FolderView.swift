@@ -334,12 +334,14 @@ struct FolderView: View {
         if let destination = entry.followingLink() {
             // Resolved while listing: open the target directly.
             WorkspaceLink(route: route(destination)) { entryRow(row, subtitle: subtitle, snippet: snippet) }
+                .contextMenu { OfflinePinActions(model: model, profile: profile, entry: destination) }
         } else if entry.kind == .symlink {
             Button { resolve(entry) } label: {
                 entryRow(row, subtitle: subtitle, snippet: snippet).overlay(alignment: .trailing) { if resolving == entry.path { ProgressView() } }
             }.disabled(resolving != nil)
         } else {
             WorkspaceLink(route: route(entry)) { entryRow(row, subtitle: subtitle, snippet: snippet) }
+                .contextMenu { OfflinePinActions(model: model, profile: profile, entry: entry) }
         }
     }
     private func entryRow(_ row: FolderRow, subtitle: String, snippet: String?) -> some View {

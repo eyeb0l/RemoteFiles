@@ -89,6 +89,7 @@ struct ReaderView: View {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button("Refresh", systemImage: "arrow.clockwise") { refreshID += 1 }
+                    OfflinePinActions(model: model, profile: profile, entry: entry)
                     if case .text(let text, _) = preview {
                         Button([.html, .svg].contains(DocumentPolicy.kind(filename: entry.name)) ? "Find in Source" : "Find in Document", systemImage: "magnifyingglass") {
                             // Static HTML/SVG keep their native preview; search their literal source.

@@ -5,6 +5,89 @@ import Security
 
 @MainActor
 final class RemoteFilesUITests: XCTestCase {
+    func testOfflineCopyOpensAfterDisconnectAndRelaunchAndCanBeRemoved() throws {
+        continueAfterFailure = false
+        let app = launchDemoReader(filename: "Navigation guide.md")
+        app.buttons["Document actions"].tap()
+        if app.buttons["Remove Offline Copy"].exists {
+            app.buttons["Remove Offline Copy"].tap()
+            app.buttons["Document actions"].tap()
+        }
+        XCTAssertTrue(app.buttons["Keep Offline"].waitForExistence(timeout: 5))
+        app.buttons["Keep Offline"].tap()
+        // Disconnect uses the production cancel/drain path. Wait for commit before doing so.
+        let saved = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.otherElements["offline-save-progress"])
+        wait(for: [saved], timeout: 15)
+        app.buttons["Document actions"].tap()
+        XCTAssertTrue(app.buttons["Update Offline Copy"].waitForExistence(timeout: 5))
+        app.buttons["Disconnect"].tap()
+        let library = app.buttons["offline-library"]
+        XCTAssertTrue(library.waitForExistence(timeout: 10)); library.tap()
+        let file = app.buttons["offline-file-Navigation guide.md"]
+        XCTAssertTrue(file.waitForExistence(timeout: 10))
+        attachScreenshot("Offline library with saved file")
+        file.tap()
+        XCTAssertTrue(app.staticTexts["offline-copy-date"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.buttons["Share Original"].exists)
+        attachScreenshot("Offline Markdown copy after disconnect")
+        XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
+        app.activate()
+        XCTAssertTrue(app.staticTexts["offline-copy-date"].waitForExistence(timeout: 10), "Return to the same offline reader")
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15), "Reopen protected local bytes on activation")
+        XCTAssertTrue(app.buttons["Share Original"].exists)
+
+        app.terminate(); app.launch()
+        XCTAssertTrue(library.waitForExistence(timeout: 15)); library.tap()
+        XCTAssertTrue(file.waitForExistence(timeout: 10)); file.tap()
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+        app.navigationBars.buttons["Offline Files"].tap()
+        XCTAssertTrue(file.waitForExistence(timeout: 5)); file.press(forDuration: 1)
+        app.buttons["Remove Offline Copy"].tap()
+        XCTAssertTrue(app.staticTexts["No offline files"].waitForExistence(timeout: 5), app.debugDescription)
+        app.buttons["Done"].tap()
+        // Removing a local copy must leave the remote demo original readable.
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 10)); projects.tap()
+        let original = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Navigation guide.md,")).firstMatch
+        revealFolderRow(original, in: app).tap()
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+    }
+
+    func testOfflineAudioPinnedFromFolderKeepsLocalPlaybackControls() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        let audio = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Sample audio.m4a,")).firstMatch
+        revealFolderRow(audio, in: app).press(forDuration: 1)
+        if app.buttons["Remove Offline Copy"].exists {
+            app.buttons["Remove Offline Copy"].tap()
+            audio.press(forDuration: 1)
+        }
+        XCTAssertTrue(app.buttons["Keep Offline"].waitForExistence(timeout: 5)); app.buttons["Keep Offline"].tap()
+        let saved = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.otherElements["offline-save-progress"])
+        wait(for: [saved], timeout: 15)
+        audio.tap()
+        XCTAssertTrue(app.sliders["Playback position"].waitForExistence(timeout: 20))
+        app.buttons["Document actions"].tap()
+        XCTAssertTrue(app.buttons["Update Offline Copy"].waitForExistence(timeout: 5))
+        app.buttons["Disconnect"].tap()
+        let library = app.buttons["offline-library"]
+        XCTAssertTrue(library.waitForExistence(timeout: 10)); library.tap()
+        let file = app.buttons["offline-file-Sample audio.m4a"]
+        XCTAssertTrue(file.waitForExistence(timeout: 10)); file.tap()
+        XCTAssertTrue(app.staticTexts["offline-copy-date"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.sliders["Playback position"].waitForExistence(timeout: 20), app.debugDescription)
+        app.buttons["Play"].tap()
+        XCTAssertTrue(app.buttons["Pause"].waitForExistence(timeout: 5)); app.buttons["Pause"].tap()
+        attachScreenshot("Offline local audio playback")
+        app.navigationBars.buttons["Offline Files"].tap()
+        XCTAssertTrue(file.waitForExistence(timeout: 5)); file.press(forDuration: 1)
+        app.buttons["Remove Offline Copy"].tap()
+    }
+
     func testAdaptiveWorkspaceKeepsLibraryFolderAndReaderOnIPad() throws {
         continueAfterFailure = false
         let isPad = UIDevice.current.userInterfaceIdiom == .pad
@@ -89,7 +172,7 @@ final class RemoteFilesUITests: XCTestCase {
         if wasUnwrapped {
             toggle.tap(); app.buttons["Document actions"].tap()
         }
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+        dismissDocumentActions(in: app)
         let original = source.label
         let wrappedHeight = source.frame.height
         XCTAssertLessThanOrEqual(source.frame.width, app.frame.width)
@@ -128,7 +211,7 @@ final class RemoteFilesUITests: XCTestCase {
         app.buttons["Document actions"].tap(); app.buttons["Copy Source"].tap()
         app.buttons["Document actions"].tap()
         XCTAssertTrue(app.buttons["Source Copied"].waitForExistence(timeout: 5))
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        dismissDocumentActions(in: app)
         app.buttons["Rendered"].tap()
         XCTAssertTrue(app.webViews.staticTexts["HTML preview"].waitForExistence(timeout: 15))
         app.buttons["Document actions"].tap(); app.buttons["Refresh"].tap()
@@ -189,7 +272,7 @@ final class RemoteFilesUITests: XCTestCase {
         app.buttons["Document actions"].tap(); app.buttons["Copy Source"].tap()
         app.buttons["Document actions"].tap()
         XCTAssertTrue(app.buttons["Source Copied"].waitForExistence(timeout: 5))
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+        dismissDocumentActions(in: app)
         app.navigationBars.buttons["Projects"].tap()
         let svg = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Icon.svg,")).firstMatch
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
@@ -352,7 +435,7 @@ final class RemoteFilesUITests: XCTestCase {
         app.buttons["Document actions"].tap()
         XCTAssertTrue(app.buttons["Source Copied"].waitForExistence(timeout: 5))
         // Dismiss the native menu before navigating back.
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+        dismissDocumentActions(in: app)
         app.navigationBars.buttons["Projects"].tap()
         let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly review.md,")).firstMatch
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
@@ -656,6 +739,14 @@ final class RemoteFilesUITests: XCTestCase {
                       "Cancelling export should leave the reader's existing actions usable")
     }
 
+    private func dismissDocumentActions(in app: XCUIApplication) {
+        // The trailing-anchored native menu can cover the title and screen centre.
+        // Its left margin remains outside the menu; assert dismissal before proceeding.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).tap()
+        XCTAssertFalse(app.buttons["Source Copied"].exists, "The native actions menu must be dismissed before navigating or changing reading mode")
+        XCTAssertFalse(app.buttons["Copy Source"].exists)
+    }
+
     private func launchDemoReader(filename: String, markdown: Bool = true) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["--demo"]
@@ -677,15 +768,19 @@ final class RemoteFilesUITests: XCTestCase {
     @discardableResult
     private func revealFolderRow(_ row: XCUIElement, in app: XCUIApplication,
                                  searchingDown: Bool = true) -> XCUIElement {
-        let list = app.collectionViews.firstMatch
+        // iPad keeps a separate sidebar list and puts search above the folder. Scroll
+        // the folder's own viewport; only a bottom search bar obscures its lower rows.
+        let list = app.collectionViews.matching(NSPredicate(format: "identifier != %@", "workspace-library")).firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 10), app.debugDescription)
         for _ in 0..<16 {
             let search = app.searchFields.firstMatch
-            let bottom = min(list.frame.maxY, search.exists ? search.frame.minY - 16 : .greatestFiniteMagnitude)
-            if row.exists, row.isHittable, row.frame.minY >= list.frame.minY, row.frame.maxY <= bottom { return row }
+            let bottomSearch = search.exists && search.frame.minY > list.frame.midY
+            let top = search.exists && !bottomSearch ? max(list.frame.minY, search.frame.maxY + 16) : list.frame.minY
+            let bottom = bottomSearch ? min(list.frame.maxY, search.frame.minY - 16) : list.frame.maxY
+            if row.exists, row.isHittable, row.frame.minY >= top, row.frame.maxY <= bottom { return row }
             let down = row.exists ? row.frame.maxY > bottom : searchingDown
-            let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.65 : 0.35))
-            let to = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.35 : 0.65))
+            let from = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.65 : 0.35))
+            let to = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.35 : 0.65))
             from.press(forDuration: 0.05, thenDragTo: to)
         }
         XCTFail("Could not reveal folder row clear of the bars.\n" + app.debugDescription)

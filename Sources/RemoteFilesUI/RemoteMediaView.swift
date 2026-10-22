@@ -211,7 +211,7 @@ struct RemoteMediaView: View {
     }
 }
 
-private struct PlaybackControls: View {
+struct PlaybackControls: View {
     let playback: RemotePlaybackController
     var openFullScreen: (() -> Void)? = nil
     @State private var scrubbing = false
@@ -254,7 +254,7 @@ private struct PlaybackControls: View {
     }
 }
 
-private struct NativePlaybackView: UIViewControllerRepresentable {
+struct NativePlaybackView: UIViewControllerRepresentable {
     let player: AVPlayer
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
@@ -278,7 +278,7 @@ private enum MediaPreviewError: LocalizedError {
     var errorDescription: String? { "This file is not a readable PDF, or its PDF data is damaged." }
 }
 
-private struct PDFDocumentView: UIViewRepresentable {
+struct PDFDocumentView: UIViewRepresentable {
     let document: PDFDocument
     func makeUIView(context: Context) -> PDFView {
         let view = PDFView()

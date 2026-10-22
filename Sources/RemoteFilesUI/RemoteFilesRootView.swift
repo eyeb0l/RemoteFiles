@@ -73,16 +73,19 @@ struct AppNavigation: View {
         }
         .tint(.indigo)
         .disabled(model.isDisconnecting)
+        .safeAreaInset(edge: .bottom) { if model.sheet == nil { OfflinePinProgress(model: model) } }
         .sheet(item: $model.sheet) { sheet in
             NavigationStack {
                 switch sheet {
                 case .connection(let id): ConnectionEditor(model: model, existing: id.flatMap(model.profile))
                 case .keys: KeyManagerView(model: model)
+                case .offlineFiles: OfflineFilesView(model: model)
                 case .trust(let endpoint, let key): TrustView(model: model, endpoint: endpoint, key: key)
                 case .changed(let endpoint, let previous, let current): ChangedHostView(model: model, endpoint: endpoint, previous: previous, current: current)
                 case .unlock(let identity): UnlockKeyView(model: model, identity: identity)
                 }
             }
+            .safeAreaInset(edge: .bottom) { OfflinePinProgress(model: model) }
         }
         .alert("RemoteFiles", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK") { model.errorMessage = nil }
@@ -182,6 +185,12 @@ struct HomeView: View {
     }
     var body: some View {
         List {
+            Section {
+                Button { model.sheet = .offlineFiles } label: {
+                    LocationRow(name: "Offline Files", subtitle: "\(model.offlinePins.count) saved on this device", symbol: "pin.fill", color: .indigo)
+                }
+                .accessibilityIdentifier("offline-library")
+            }
             if model.metadata.connections.isEmpty {
                 Section {
                     VStack(spacing: 16) {
