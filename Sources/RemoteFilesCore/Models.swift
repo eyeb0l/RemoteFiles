@@ -147,6 +147,8 @@ public protocol RemoteFileService: Sendable {
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data
     func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry
     func readDocumentFile(profile: ConnectionProfile, path: String, allowedRoot: String, limit: Int) async throws -> Data
+    /// Search roots are already canonical: reject a root redirected since the listing was read.
+    func readSearchFile(profile: ConnectionProfile, path: String, canonicalRoot: String, limit: Int) async throws -> Data
     /// Returns `.unchanged` without transferring bytes when `since` still matches the file.
     /// A non-nil `allowedRoot` applies the same canonical confinement as `readDocumentFile`.
     func readFileIfChanged(profile: ConnectionProfile, path: String, allowedRoot: String?, limit: Int, since: RemoteFileVersion?) async throws -> RemoteFileRead
@@ -167,6 +169,10 @@ public extension RemoteFileService {
         return entry
     }
     func readDocumentFile(profile: ConnectionProfile, path: String, allowedRoot: String, limit: Int) async throws -> Data {
+        throw RemoteFileError.unsupportedFile
+    }
+    func readSearchFile(profile: ConnectionProfile, path: String, canonicalRoot: String, limit: Int) async throws -> Data {
+        // Adapters must opt in to preserving the original canonical boundary, not just a root alias.
         throw RemoteFileError.unsupportedFile
     }
     /// Adapters without file versions always transfer the bytes.

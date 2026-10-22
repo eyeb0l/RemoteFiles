@@ -18,6 +18,8 @@ Editing and uploads need conflict detection and safe replacement before transfer
 
 [Single jump-host connections](docs/JUMP_HOSTS.md) and an [adaptive iPad workspace](docs/IPAD.md) are implemented. Physical bastion and iPad windowing acceptance remain separate.
 
+[Folder search](docs/FOLDER_BROWSING.md#searching-file-contents) includes bounded client-side UTF-8 content search with source-line snippets. Server-side indexing, PDF/OCR search and persistent content indexes remain future work.
+
 ## Later possibilities
 
 File Provider; deliberate offline pinning/sync; server-side search; multiple jump hops; FTP/FTPS or other protocols; an optional terminal handoff; deeper Tailscale discovery/onboarding; additional iPad keyboard and multiwindow workflows. A VPN, companion Mac service, accounts, analytics, monetisation, backend, and App Store release preparation are outside this preview.

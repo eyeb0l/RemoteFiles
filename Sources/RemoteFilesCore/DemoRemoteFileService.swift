@@ -113,6 +113,9 @@ public actor DemoRemoteFileService: RemoteFileService {
         guard RemoteResourcePath.contains(canonical, in: root) else { throw RemoteDocumentLinkError.outsideConnection }
         return try await readFile(profile: profile, path: canonical, limit: limit)
     }
+    public func readSearchFile(profile: ConnectionProfile, path: String, canonicalRoot: String, limit: Int) async throws -> Data {
+        try await readDocumentFile(profile: profile, path: path, allowedRoot: canonicalRoot, limit: limit)
+    }
     public func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String,
                              destination: URL, limit: Int) async throws -> RemoteEntry {
         try await downloadFile(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination, limit: limit, progress: { _ in })

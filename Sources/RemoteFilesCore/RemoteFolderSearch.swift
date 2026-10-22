@@ -21,11 +21,18 @@ public enum RemoteFolderSearch {
     }
 
     /// Why a search ended before every folder was listed.
-    public enum Stop: Sendable, Equatable { case folderLimit, matchLimit, timeLimit }
+    public enum Stop: Sendable, Equatable { case folderLimit, matchLimit, timeLimit, fileLimit, byteLimit }
 
     public struct Update: Sendable {
         /// Matches found since the previous update, sorted by name within each folder.
         public var matches: [RemoteEntry] = []
+        public var contentMatches: [ContentMatch] = []
+        public var filesSearched = 0
+        public var skippedFiles = 0
+        public var unreadableFiles = 0
+        public var bytesRead = 0
+        /// Upper bound charged for reads, including unsuccessful reads and an EOF sentinel.
+        public var chargedBytes = 0
         public var foldersSearched = 0
         /// Folders that could not be listed, for example for lack of permission. The search goes on.
         public var unreadableFolders = 0
@@ -49,7 +56,7 @@ public enum RemoteFolderSearch {
             let walk = Task {
                 do {
                     try await search(query: query, root: root, profile: profile, service: service,
-                                     includeHidden: includeHidden, limits: limits) { continuation.yield($0) }
+                                     includeHidden: includeHidden, limits: limits, content: nil) { continuation.yield($0) }
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -61,8 +68,8 @@ public enum RemoteFolderSearch {
 
     private struct Folder: Sendable { let path: String; let depth: Int }
 
-    private static func search(query: String, root: String, profile: ConnectionProfile, service: any RemoteFileService,
-                               includeHidden: Bool, limits: Limits, report: (Update) -> Void) async throws {
+    static func search(query: String, root: String, profile: ConnectionProfile, service: any RemoteFileService,
+                               includeHidden: Bool, limits: Limits, content: ContentLimits?, report: (Update) -> Void) async throws {
         let deadline = ContinuousClock.now + limits.timeLimit
         var queue = [Folder(path: root, depth: 0)]
         // Folders are listed up to the window ahead, but reported strictly in queue order: nearer
@@ -108,6 +115,10 @@ public enum RemoteFolderSearch {
                     var update = Update()
                     switch result {
                     case .success(let snapshot):
+                        if content != nil, !RemoteResourcePath.contains(snapshot.path, in: root) {
+                            progress.unreadableFolders += 1
+                            break // A listed folder may have become a link since its parent was read.
+                        }
                         progress.foldersSearched += 1
                         let visible = snapshot.entries.filter { includeHidden || !$0.name.hasPrefix(".") }
                             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
@@ -115,13 +126,20 @@ public enum RemoteFolderSearch {
                             if folder.depth < limits.maxDepth { queue.append(Folder(path: entry.path, depth: folder.depth + 1)) }
                             else { progress.skippedDeepFolders += 1 }
                         }
-                        let found = visible.filter { $0.name.localizedCaseInsensitiveContains(query) }
-                        let kept = found.prefix(limits.maxMatches - matched)
-                        matched += kept.count
-                        update.matches = Array(kept)
-                        // At the limit, stop unless this was the last folder there is to list.
-                        if matched == limits.maxMatches, kept.count < found.count || reported < queue.count {
-                            progress.stop = .matchLimit
+                        if let content {
+                            try await scan(visible, query: query, root: root, profile: profile,
+                                service: service, limits: content, matchLimit: limits.maxMatches, deadline: deadline,
+                                matched: &matched, progress: &progress, report: report)
+                            if matched >= limits.maxMatches, reported < queue.count { progress.stop = .matchLimit }
+                        } else {
+                            let found = visible.filter { $0.name.localizedCaseInsensitiveContains(query) }
+                            let kept = found.prefix(max(0, limits.maxMatches - matched))
+                            matched += kept.count
+                            update.matches = Array(kept)
+                            // At the limit, stop unless this was the last folder there is to list.
+                            if matched == limits.maxMatches, kept.count < found.count || reported < queue.count {
+                                progress.stop = .matchLimit
+                            }
                         }
                     case .failure(let error):
                         if error is CancellationError { throw error }
@@ -131,11 +149,12 @@ public enum RemoteFolderSearch {
                     update.foldersSearched = progress.foldersSearched
                     update.unreadableFolders = progress.unreadableFolders
                     update.skippedDeepFolders = progress.skippedDeepFolders
+                    update.copyContentProgress(from: progress)
                     update.stop = progress.stop
                     report(update)
-                    if progress.stop == .matchLimit { break }
+                    if progress.stop == .matchLimit || (content != nil && stopsReading(progress.stop)) { break }
                 }
-                if progress.stop == .matchLimit { group.cancelAll(); break }
+                if progress.stop == .matchLimit || (content != nil && stopsReading(progress.stop)) { group.cancelAll(); break }
                 startListings()
             }
         }
@@ -144,9 +163,14 @@ public enum RemoteFolderSearch {
         final.foldersSearched = progress.foldersSearched
         final.unreadableFolders = progress.unreadableFolders
         final.skippedDeepFolders = progress.skippedDeepFolders
+        final.copyContentProgress(from: progress)
         final.stop = progress.stop
         final.isFinished = true
         report(final)
+    }
+
+    private static func stopsReading(_ stop: Stop?) -> Bool {
+        stop == .matchLimit || stop == .fileLimit || stop == .byteLimit || stop == .timeLimit
     }
 
     private static func endsConnection(_ error: Error) -> Bool {

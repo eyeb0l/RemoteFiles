@@ -11,7 +11,7 @@
 
 ## Feature guides
 
-- [Folder browsing](FOLDER_BROWSING.md): symbolic links, sorting, and searching subfolders.
+- [Folder browsing](FOLDER_BROWSING.md): symbolic links, sorting, and searching names or file contents in subfolders.
 - [SSH key support](KEY_SUPPORT.md) and [public-key installation](PUBLIC_KEY_INSTALLATION.md).
 - [Remote images](REMOTE_IMAGES.md), [audio and video](AUDIO_VIDEO.md), and [static HTML](HTML_PREVIEWS.md).
 - [Document links](DOCUMENT_LINKS.md), [original-file export](ORIGINAL_EXPORT.md), and [JSON/SVG previews](READER.md#json-and-svg-previews).
