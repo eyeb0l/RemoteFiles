@@ -4,11 +4,84 @@ import Crypto
 import NIOSSH
 import NIOCore
 import NIOPosix
+import Citadel
 @testable import RemoteFilesCore
 
 /// Real OpenSSH checks are opt-in; the isolated launcher supplies temporary paths.
 /// A skip without that fixture must never be reported as an authentication pass.
 final class SFTPIntegrationTests: XCTestCase {
+    func testBoundedSearchExecClosesOnOutputOverflowCancellationAndDeadlineWithoutClosingSFTP() async throws {
+        let fixture = try Fixture(), stores = try Stores(fixture: fixture)
+        let identity = try await stores.identity.generate(name: "Exec lifecycle")
+        try fixture.authorize(identity.publicKey)
+        try await stores.trustFixtureHost()
+        let key = try await stores.identity.unlock(identity)
+        let client = try await SSHClient.connect(to: SSHClientSettings(host: "127.0.0.1", port: fixture.port,
+            authenticationMethod: { key.authentication(username: fixture.username) },
+            hostKeyValidator: .custom(TrustValidator(store: stores.trust, endpoint: fixture.endpoint))))
+        addTeardownBlock { try? await client.close() }
+        let sftp = try await client.openSFTP()
+        for command in ["printf '%02000d' 0", "printf '%02000d' 0 >&2"] {
+            do {
+                _ = try await SFTPRemoteFileService.executeSearchCommand(client: client, command: command,
+                                                                        timeout: 5, maxResponseSize: 64)
+                XCTFail("Both output streams must be bounded")
+            } catch CitadelError.commandOutputTooLarge { }
+            _ = try await sftp.getRealPath(atPath: fixture.files)
+        }
+        let opened = expectation(description: "Search channel opened")
+        let task = Task {
+            try await SFTPRemoteFileService.executeSearchCommand(client: client, command: "sleep 5",
+                timeout: 5, maxResponseSize: 64, onChannelCreated: { opened.fulfill() })
+        }
+        await fulfillment(of: [opened], timeout: 5)
+        let cancelled = ContinuousClock.now
+        task.cancel()
+        do { _ = try await task.value; XCTFail("Cancellation must surface") }
+        catch is CancellationError { }
+        XCTAssertLessThan(ContinuousClock.now - cancelled, .seconds(2), "Do not await remote close acknowledgement")
+        _ = try await sftp.getRealPath(atPath: fixture.files)
+        let started = ContinuousClock.now
+        do {
+            _ = try await SFTPRemoteFileService.executeSearchCommand(client: client, command: "sleep 5",
+                                                                    timeout: 1, maxResponseSize: 64)
+            XCTFail("Deadline must surface")
+        } catch RemoteFileError.timedOut { }
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(3), "The deadline must not wait for the process to exit")
+        _ = try await sftp.getRealPath(atPath: fixture.files)
+        try await sftp.close()
+    }
+
+    func testServerSearchUsesSSHAndSFTPOnlyAccountsFallBackOncePerSession() async throws {
+        let fixture = try Fixture()
+        for restricted in [false, true] {
+            let stores = try Stores(fixture: fixture)
+            let identity = try await stores.identity.generate(name: "Search fixture")
+            try fixture.authorize((restricted ? "command=\"internal-sftp\" " : "") + identity.publicKey)
+            let profile = try await stores.profile(identity: identity)
+            try await stores.trustFixtureHost()
+            let service = stores.service()
+            addTeardownBlock { await service.disconnect() }
+            var names: [String] = []
+            for try await update in RemoteFolderSearch.names(matching: "report", below: fixture.files, profile: profile,
+                                                             service: service, includeHidden: false) {
+                names += update.matches.map(\.name)
+            }
+            XCTAssertEqual(Set(names), ["report.md", "report-link.md", "large-report.md"])
+            var contents: [String] = []
+            for try await update in RemoteFolderSearch.contents(matching: "Linked source", below: fixture.files + "/docs",
+                                                                profile: profile, service: service, includeHidden: false) {
+                contents += update.contentMatches.map(\.entry.name)
+            }
+            XCTAssertEqual(contents, ["source.md"], "The link outside the search root must never be read")
+            let metrics = await service.metrics()
+            XCTAssertEqual(metrics.serverSearchAttempts, restricted ? 1 : 2)
+            XCTAssertEqual(metrics.serverSearchOperations, restricted ? 0 : 2)
+            XCTAssertEqual(metrics.fileOperations, restricted ? 1 : 0, "Server search avoids SFTP file reads")
+            XCTAssertEqual(metrics.connections, 1, "Exec rejection must leave browsing connected")
+        }
+    }
+
     private func jumpFixture() async throws -> (Fixture, Stores, ConnectionProfile) {
         let fixture = try Fixture(), stores = try Stores(fixture: fixture)
         guard let port = Int(ProcessInfo.processInfo.environment["REMOTEFILES_SFTP_JUMP_PORT"] ?? "") else {

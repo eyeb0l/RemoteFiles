@@ -1,0 +1,221 @@
+# RemoteFiles read-only search helper, protocol 1. Executed in memory with Python -I -S -B.
+import base64, collections, errno, json, os, re, signal, stat, sys, time
+
+r = json.loads(base64.b64decode(sys.argv[1]))
+root = r['root']
+result = dict(version=1, root=root, candidates=[], folders=0, unreadableFolders=0,
+              deepFolders=0, files=0, skippedFiles=0, unreadableFiles=0, bytes=0,
+              charged=0, stop=None, error=None)
+started = time.monotonic()
+output_bytes = 0
+entries_seen = 0
+expired = False
+scanning = True
+
+class Unsupported(Exception): pass
+class ResourceLimit(Exception): pass
+class Expired(Exception): pass
+
+def alarm(signum, frame):
+    global expired
+    if scanning and not expired:
+        expired = True
+        result['stop'] = 'timeLimit'
+        raise Expired()
+
+def check_time():
+    if expired or time.monotonic() - started >= r['seconds']:
+        alarm(None, None)
+        raise Expired()
+
+def open_directory(parts):
+    # Resolve every component with O_NOFOLLOW, including ancestors of the search root.
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts:
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return fd
+    except BaseException:
+        # A deadline may arrive just after close completed. Preserve that exception instead of
+        # replacing it with EBADF from cleanup (the next descriptor is reclaimed at process exit).
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+def candidate(name, data):
+    # Unicode is always a candidate: the app applies its exact Foundation matching semantics.
+    query = r['query']
+    if not query.isascii() or not name.isascii():
+        return True
+    if data is None:
+        return query.lower() in name.lower()
+    if any(byte >= 128 for byte in data):
+        return True
+    return query.lower().encode('ascii') in data.lower()
+
+def natural(name):
+    return [(0, int(p)) if p.isdigit() else (1, p.lower()) for p in re.split(r'([0-9]+)', name)]
+
+def add(path, kind, info, data=None):
+    global output_bytes
+    item = dict(path=path, kind=kind, size=info.st_size, modified=info.st_mtime)
+    if data is not None:
+        item['data'] = base64.b64encode(data).decode('ascii')
+    output_bytes += len(json.dumps(item)) + 2
+    if len(result['candidates']) >= 10000 or output_bytes > 23 * 1024 * 1024:
+        raise ResourceLimit()
+    result['candidates'].append(item)
+
+def scan_file(fd, name, path, info):
+    suffix = name.lower().rsplit('.', 1)[-1]
+    text = suffix in r['textExtensions'] or suffix in ('md', 'markdown') or '.' not in name or name.startswith('.')
+    if suffix in r['excludedExtensions'] or not text or info.st_size > r['fileBytes']:
+        result['skippedFiles'] += 1
+        return
+    if result['files'] >= r['files']:
+        result['stop'] = 'fileLimit'
+        return
+    remaining = r['totalBytes'] - result['charged']
+    if remaining <= 1:
+        result['stop'] = 'byteLimit'
+        return
+    limit = min(r['fileBytes'], remaining - 1)
+    result['files'] += 1
+    result['charged'] += limit + 1
+    file_fd = None
+    try:
+        check_time()
+        # O_NONBLOCK prevents a file replaced by a FIFO from hanging the job. fstat rejects it.
+        file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+            result['skippedFiles'] += 1
+            return
+        chunks = []
+        count = 0
+        while count <= limit:
+            check_time()
+            chunk = os.read(file_fd, min(65536, limit + 1 - count))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            count += len(chunk)
+        if count > limit:
+            if limit < r['fileBytes']:
+                result['stop'] = 'byteLimit'
+            else:
+                result['skippedFiles'] += 1
+            return
+        data = b''.join(chunks)
+        result['charged'] -= limit + 1 - count
+        result['bytes'] += count
+        if any((byte < 32 and byte not in (9, 10, 13)) or byte == 127 for byte in data):
+            result['skippedFiles'] += 1
+            return
+        try:
+            data.decode('utf-8')
+        except UnicodeDecodeError:
+            result['skippedFiles'] += 1
+            return
+        if data and candidate(name, data):
+            add(path, 'file', info, data)
+    except OSError:
+        result['unreadableFiles'] += 1
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+
+try:
+    # POSIX descriptor-relative operations are required. Windows/older runtimes fall back to SFTP.
+    if sys.version_info < (3, 7) or os.open not in os.supports_dir_fd or os.stat not in os.supports_dir_fd or os.scandir not in os.supports_fd:
+        raise Unsupported()
+    if not hasattr(os, 'O_NOFOLLOW') or not hasattr(signal, 'setitimer'):
+        raise Unsupported()
+    signal.signal(signal.SIGALRM, alarm)
+    signal.setitimer(signal.ITIMER_REAL, r['seconds'])
+    canonical = os.path.realpath(root)
+    check_time()
+    if canonical != root:
+        result['error'] = 'outsideRoot'
+    else:
+        queue = collections.deque([(root, 0)])
+        while queue and not result['stop']:
+            check_time()
+            if result['folders'] + result['unreadableFolders'] >= r['folders']:
+                result['stop'] = 'folderLimit'
+                break
+            path, depth = queue.popleft()
+            fd = None
+            try:
+                fd = open_directory(path.strip('/').split('/') if path != '/' else [])
+                names = []
+                with os.scandir(fd) as listing:
+                    for entry in listing:
+                        check_time()
+                        entries_seen += 1
+                        if entries_seen > 100000:
+                            raise ResourceLimit()
+                        names.append(entry.name)
+                names.sort(key=natural)
+                result['folders'] += 1
+                for name in names:
+                    check_time()
+                    if not r['hidden'] and name.startswith('.'):
+                        continue
+                    # Unrepresentable filesystem bytes cannot be safely mapped to Swift paths.
+                    if any(0xD800 <= ord(c) <= 0xDFFF for c in name):
+                        raise Unsupported()
+                    child = os.path.join(path, name)
+                    try:
+                        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    except OSError:
+                        continue
+                    mode = info.st_mode
+                    kind = 'directory' if stat.S_ISDIR(mode) else 'file' if stat.S_ISREG(mode) else 'symlink' if stat.S_ISLNK(mode) else 'other'
+                    if kind == 'directory':
+                        if depth < r['depth']:
+                            # Do not retain an unbounded queue even for a very wide directory.
+                            if len(queue) < r['folders']:
+                                queue.append((child, depth + 1))
+                        else:
+                            result['deepFolders'] += 1
+                    if r.get('files') is None:
+                        if candidate(name, None):
+                            add(child, kind, info)
+                    elif kind == 'file':
+                        scan_file(fd, name, child, info)
+                    elif kind != 'directory':
+                        result['skippedFiles'] += 1
+                    if result['stop']:
+                        break
+            except OSError as error:
+                if depth == 0:
+                    result['error'] = 'permissionDenied' if error.errno == errno.EACCES else 'notFound' if error.errno == errno.ENOENT else 'outsideRoot'
+                    break
+                result['unreadableFolders'] += 1
+            finally:
+                if fd is not None:
+                    os.close(fd)
+except Expired:
+    result['stop'] = 'timeLimit'
+except Unsupported:
+    result['error'] = 'unsupported'
+except ResourceLimit:
+    result['error'] = 'resourceLimit'
+except (AttributeError, NotImplementedError):
+    result['error'] = 'unsupported'
+finally:
+    try:
+        scanning = False
+        if hasattr(signal, 'setitimer'):
+            signal.setitimer(signal.ITIMER_REAL, 0)
+    except Expired:
+        scanning = False
+        result['stop'] = 'timeLimit'
+
+if result['error']:
+    result['candidates'] = []
+print(json.dumps(result, ensure_ascii=True, separators=(',', ':')))

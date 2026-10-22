@@ -60,17 +60,16 @@ final class TTYHandler: ChannelDuplexHandler {
         guard case .byteBuffer(var bytes) = data.data, !isIgnoringInput else {
             return
         }
+
+        guard bytes.readableBytes <= maxResponseSize - response.readableBytes - errorBuffer.readableBytes else {
+            isIgnoringInput = true
+            done.fail(CitadelError.commandOutputTooLarge)
+            context.close(promise: nil)
+            return
+        }
         
         switch data.type {
         case .channel:
-            if
-                response.readableBytes + bytes.readableBytes > maxResponseSize
-            {
-                isIgnoringInput = true
-                done.fail(CitadelError.commandOutputTooLarge)
-                return
-            }
-            
             // Channel data is forwarded on, the pipe channel will handle it.
             response.writeBuffer(&bytes)
             return
@@ -107,6 +106,13 @@ extension SSHClient {
     ///   - `SSHClient.CommandFailed` if the command returns a non-zero exit status
     ///   - `TTYSTDError` if there was output to stderr
     public func executeCommand(_ command: String, maxResponseSize: Int = .max) async throws -> ByteBuffer {
+        try await executeBoundedCommand(command, maxResponseSize: maxResponseSize, onChannelCreated: { _ in })
+    }
+
+    /// Bounded stdout and stderr, with child-channel ownership for cancellation and deadlines.
+    /// The callback runs before the exec request, including for channels opened after cancellation.
+    public func executeBoundedCommand(_ command: String, maxResponseSize: Int,
+                                      onChannelCreated: @escaping @Sendable (Channel) -> Void) async throws -> ByteBuffer {
         let promise = eventLoop.makePromise(of: ByteBuffer.self)
         
         let channel: Channel
@@ -115,7 +121,8 @@ extension SSHClient {
             channel = try await eventLoop.flatSubmit { [eventLoop, sshHandler = session.sshHandler] in
                 let createChannel = eventLoop.makePromise(of: Channel.self)
                 sshHandler.value.createChannel(createChannel) { channel, _ in
-                    channel.pipeline.addHandlers(
+                    onChannelCreated(channel)
+                    return channel.pipeline.addHandlers(
                         TTYHandler(
                             maxResponseSize: maxResponseSize,
                             done: promise
