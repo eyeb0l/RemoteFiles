@@ -1,7 +1,7 @@
 import Foundation
 
-/// Finds names below a folder by listing its subfolders with the ordinary file service, so it
-/// needs no shell access and stays read-only. Links are matched by name but never followed, which
+/// Finds names below a folder with optional read-only server assistance, falling back to the
+/// ordinary file service when command access is unavailable. Links are matched by name but never followed, which
 /// keeps the walk inside the folder and free of loops. Depth, folders listed, matches and time are
 /// all bounded; whatever was found before a limit is kept.
 public enum RemoteFolderSearch {
@@ -70,6 +70,15 @@ public enum RemoteFolderSearch {
 
     static func search(query: String, root: String, profile: ConnectionProfile, service: any RemoteFileService,
                                includeHidden: Bool, limits: Limits, content: ContentLimits?, report: (Update) -> Void) async throws {
+        try Task.checkCancellation()
+        if let server = service as? any ServerFolderSearching,
+           let update = try await server.searchFolders(query: query, root: root, profile: profile,
+                                                       includeHidden: includeHidden, limits: limits, content: content) {
+            try Task.checkCancellation()
+            report(update)
+            return
+        }
+        try Task.checkCancellation()
         let deadline = ContinuousClock.now + limits.timeLimit
         var queue = [Folder(path: root, depth: 0)]
         // Folders are listed up to the window ahead, but reported strictly in queue order: nearer

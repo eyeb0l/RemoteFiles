@@ -16,6 +16,21 @@ public enum DocumentPreview: Equatable, Sendable {
 public enum DocumentPolicy {
     public static let previewByteLimit = 2 * 1_024 * 1_024
 
+    static let searchTextExtensions: Set<String> = [
+        "txt", "text", "log", "json", "jsonl", "ndjson", "yaml", "yml", "toml", "ini", "conf", "config",
+        "env", "properties", "csv", "tsv", "xml", "html", "htm", "css", "scss", "less", "svg", "sql",
+        "swift", "m", "mm", "h", "c", "cc", "cpp", "hpp", "rs", "go", "py", "rb", "php", "java", "kt",
+        "kts", "js", "jsx", "ts", "tsx", "sh", "bash", "zsh", "fish", "ps1", "r", "lua", "dart",
+        "vue", "svelte", "graphql", "gql", "gitignore", "gitattributes", "editorconfig", "lock",
+        "rst", "adoc", "diff", "patch", "ipynb", "proto", "tf", "tfvars", "cfg", "bat", "mk",
+    ]
+
+    static let searchExcludedExtensions: Set<String> = [
+        "jpg", "jpeg", "png", "heic", "heif", "gif", "tif", "tiff", "webp", "bmp", "pdf",
+        "mp4", "m4v", "mov", "3gp", "3g2", "mp3", "m4a", "m4b", "aac", "wav", "wave", "aif",
+        "aiff", "aifc", "caf", "flac", "ac3", "eac3"
+    ]
+
     public static func kind(filename: String) -> DocumentKind {
         let name = filename.split(separator: "/").last.map(String.init)?.lowercased() ?? ""
         let suffix = name.split(separator: ".", omittingEmptySubsequences: false).last.map(String.init) ?? ""
@@ -26,16 +41,9 @@ public enum DocumentPolicy {
         if ["mp3", "m4a", "m4b", "aac", "wav", "wave", "aif", "aiff", "aifc", "caf", "flac", "ac3", "eac3"].contains(suffix) { return .audio }
         if suffix == "svg" { return .svg }
         if ["html", "htm"].contains(suffix) { return .html }
-        let textExtensions: Set<String> = [
-            "txt", "text", "log", "json", "jsonl", "ndjson", "yaml", "yml", "toml", "ini", "conf", "config",
-            "env", "properties", "csv", "tsv", "xml", "html", "htm", "css", "scss", "less", "svg", "sql",
-            "swift", "m", "mm", "h", "c", "cc", "cpp", "hpp", "rs", "go", "py", "rb", "php", "java", "kt",
-            "kts", "js", "jsx", "ts", "tsx", "sh", "bash", "zsh", "fish", "ps1", "r", "lua", "dart",
-            "vue", "svelte", "graphql", "gql", "gitignore", "gitattributes", "editorconfig", "lock",
-            "rst", "adoc", "diff", "patch", "ipynb", "proto", "tf", "tfvars", "cfg", "bat", "mk",
-        ]
+
         // Extensionless names (including dotfiles) are candidates; byte validation remains mandatory.
-        if !name.contains(".") || name.first == "." || textExtensions.contains(suffix) { return .plainText }
+        if !name.contains(".") || name.first == "." || searchTextExtensions.contains(suffix) { return .plainText }
         return .unsupported
     }
 

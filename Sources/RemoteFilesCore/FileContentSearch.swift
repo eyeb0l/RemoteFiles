@@ -19,8 +19,8 @@ public extension RemoteFolderSearch {
         public let snippet: String
     }
 
-    /// Reads candidate UTF-8 files one at a time, while the existing bounded walk lists folders.
-    /// No shell, persistent index or on-disk content cache is used. Canonical reads stay within root.
+    /// Uses server assistance when available, otherwise reads candidate UTF-8 files one at a time.
+    /// No persistent index or on-disk content cache is used. Canonical reads stay within root.
     static func contents(matching query: String, below root: String, profile: ConnectionProfile,
                          service: any RemoteFileService, includeHidden: Bool,
                          limits: Limits = Limits(), contentLimits: ContentLimits = ContentLimits()) -> AsyncThrowingStream<Update, Error> {
@@ -110,7 +110,7 @@ extension RemoteFolderSearch {
         }
     }
 
-    private static func firstMatch(in text: String, query: String, entry: RemoteEntry) -> ContentMatch? {
+    static func firstMatch(in text: String, query: String, entry: RemoteEntry) -> ContentMatch? {
         guard let range = text.range(of: query, options: [.caseInsensitive]) else { return nil }
         let before = text[..<range.lowerBound]
         let line = before.reduce(1) { $1.isNewline ? $0 + 1 : $0 }

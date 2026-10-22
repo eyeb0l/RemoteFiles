@@ -82,3 +82,23 @@ forwarded child, so cancellation, deadline, failed destination trust and disconn
 whole attempt. The direct-tcpip originator is a loopback placeholder with port zero; no local
 listening port or agent forwarding is created. Both hop and destination retain their own
 host-key validators and authentication methods.
+
+### Bounded search command lifecycle
+
+`SSHClient.executeBoundedCommand` exposes child-channel creation before the exec request,
+so RemoteFiles can close only that channel on cancellation or deadline, including a late
+channel-open completion. The existing buffered exec method delegates to it. `TTYHandler`
+bounds stdout and stderr together and closes the child on overflow; previously stderr was
+unbounded and overflowing stdout left the channel open. The existing exit-status behavior
+is retained. Isolated OpenSSH tests exercise both output streams, cancellation, deadlines,
+and continued SFTP use over the same SSH connection. No PTY, agent forwarding, or remote
+file upload is added.
+
+### Read-only descriptor identity lookup
+
+`SFTPClient.readSymbolicLink` exposes the existing SFTP READLINK request and requires one
+returned name. Its request enum wiring is added, and the dormant serializer is corrected
+to emit READLINK (19), rather than SYMLINK (20). An OpenSSH regression verifies the raw
+relative target. Server search uses it to require live directory descriptors and obtain the
+SFTP process's mount namespace through its own procfs entries. No new SFTP write operations
+or protocol extensions are introduced.
