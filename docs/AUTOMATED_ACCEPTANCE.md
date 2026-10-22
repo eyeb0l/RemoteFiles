@@ -71,6 +71,15 @@ its selected coverage explicitly; it does not count unrequested lanes as passed.
 
 ### Offline copies
 
+`OfflineFolderTests` covers complete recursive snapshots, empty/hidden folders,
+skipped links, legacy metadata, independent overlapping copies, byte-sensitive
+names, atomic replacement, count/byte/traversal bounds, cancellation/deadlines,
+redirects and corrupt membership. The folder UI journey browses a nested saved
+document after disconnect, backgrounding and relaunch, then removes the snapshot.
+The OpenSSH folder check rejects changed canonical roots and aliases before
+downloading and verifies locally saved bytes after disconnect. No skips or
+deadlines are added to accommodate these checks.
+
 `OfflineFileTests` verifies exact originals, persistent metadata, atomic refresh,
 corrupt/symlinked local files, count/byte/lease limits, and cancellation with late
 writers. `AppModelLifecycleTests` covers background cancellation, changed/deleted

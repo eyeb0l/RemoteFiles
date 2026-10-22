@@ -20,6 +20,7 @@ struct OfflinePinActions: View {
     let model: AppModel
     let profile: ConnectionProfile
     let entry: RemoteEntry
+    var includeHidden = false
     var body: some View {
         if entry.kind == .file {
             let pin = model.offlinePin(profile: profile, path: entry.path)
@@ -32,6 +33,8 @@ struct OfflinePinActions: View {
                     Task { await model.removeOfflinePin(pin) }
                 }
             }
+        } else if entry.kind == .directory {
+            OfflineFolderPinActions(model: model, profile: profile, path: entry.path, includeHidden: includeHidden)
         }
     }
 }
@@ -50,6 +53,12 @@ struct OfflinePinProgress: View {
                 if let fraction = model.pinProgress.fraction { ProgressView(value: fraction) }
                 else { ProgressView().frame(maxWidth: .infinity) }
                 Text(model.pinProgress.sizeLabel()).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                if let folder = model.folderPinProgress {
+                    Text("\(folder.files) files saved · \(folder.folders) folders read")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let file = folder.currentFile { Text(file).font(.caption).lineLimit(1) }
+                    if folder.skippedLinks > 0 { Text("\(folder.skippedLinks) symbolic links skipped").font(.caption).foregroundStyle(.secondary) }
+                }
             }
             .padding().background(.bar)
             .accessibilityIdentifier("offline-save-progress")
@@ -71,11 +80,28 @@ struct OfflineFilesView: View {
             }
             if let error = model.offlineError {
                 ContentUnavailableView("Offline library unavailable", systemImage: "exclamationmark.folder", description: Text(error))
-            } else if model.offlinePins.isEmpty {
-                ContentUnavailableView("No offline files", systemImage: "pin", description: Text("Choose Keep Offline in a file’s actions menu or its folder context menu."))
+            } else if model.offlinePins.isEmpty && model.offlineFolders.isEmpty {
+                ContentUnavailableView("No offline files", systemImage: "pin", description: Text("Choose Keep Offline in a file’s actions menu, or Keep Folder Offline in Folder actions."))
                     .accessibilityIdentifier("offline-empty")
             }
-            ForEach(model.offlinePins) { pin in
+            ForEach(model.offlineFolders) { folder in
+                NavigationLink(value: OfflineFolderRoute(folderID: folder.id, path: folder.path)) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Label(folder.name, systemImage: "folder.fill")
+                        Text(folder.connectionName + " · " + folder.path).font(.caption).foregroundStyle(.secondary)
+                        Text("\(folder.fileIDs.count) files · saved \(folder.savedAt.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }.padding(.vertical, 4)
+                }
+                .accessibilityIdentifier("offline-folder-" + folder.name)
+                .contextMenu { OfflineFolderLibraryActions(model: model, folder: folder) }
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    Button("Remove", systemImage: "trash", role: .destructive) { Task { await model.removeOfflineFolder(folder) } }
+                    Button("Update", systemImage: "arrow.clockwise") { model.refreshOfflineFolder(folder) }
+                        .disabled(model.pinningName != nil || !model.isForeground)
+                }
+            }
+            ForEach(model.standaloneOfflinePins) { pin in
                 NavigationLink {
                     if let store = model.offlineStore { OfflineReaderView(pin: pin, store: store) }
                 } label: {
@@ -105,6 +131,9 @@ struct OfflineFilesView: View {
         }
         .navigationTitle("Offline Files")
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        .navigationDestination(for: OfflineFolderRoute.self) { route in
+            OfflineFolderView(model: model, route: route)
+        }
     }
 }
 

@@ -20,10 +20,10 @@ Editing and uploads need conflict detection and safe replacement before transfer
 
 [Folder search](docs/FOLDER_BROWSING.md#searching-file-contents) includes bounded client-side UTF-8 content search with source-line snippets. Server-side indexing, PDF/OCR search and persistent content indexes remain future work.
 
-[Individual offline copies](docs/OFFLINE_FILES.md) are implemented with an explicit local library and manual updates. Physical locked-device and real-server offline acceptance remain separate.
+[Offline files and folder snapshots](docs/OFFLINE_FILES.md) are implemented with an explicit local library and manual updates. Physical locked-device and real-server offline acceptance remain separate.
 
 ## Later possibilities
 
-File Provider; offline folder pinning and synchronization; server-side search; multiple jump hops; FTP/FTPS or other protocols; an optional terminal handoff; deeper Tailscale discovery/onboarding; additional iPad keyboard and multiwindow workflows. A VPN, companion Mac service, accounts, analytics, monetisation, backend, and App Store release preparation are outside this preview.
+File Provider; offline synchronization; server-side search; multiple jump hops; FTP/FTPS or other protocols; an optional terminal handoff; deeper Tailscale discovery/onboarding; additional iPad keyboard and multiwindow workflows. A VPN, companion Mac service, accounts, analytics, monetisation, backend, and App Store release preparation are outside this preview.
 
 Private-key export, automatic key installation, Mermaid, mathematical notation, raw HTML rendering, generic download management, and background SSH transfers are deferred.

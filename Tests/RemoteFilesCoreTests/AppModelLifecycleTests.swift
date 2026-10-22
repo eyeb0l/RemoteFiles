@@ -68,6 +68,49 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
 }
 
 @MainActor final class AppModelLifecycleTests: XCTestCase {
+    func testOfflineFoldersPropagateAcrossWindowsKeepRouteChecksAndRemainLocalAfterConnectionRemoval() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let owner = try AppModel(directory: directory, fileService: BackgroundExportService())
+        let second = try AppModel(directory: directory, fileService: BackgroundExportService())
+        await owner.load(); await owner.setDemo(true)
+        await second.load(); await second.setDemo(true)
+        if let demo = owner.searchService as? DemoRemoteFileService {
+            await demo.configure(delayNanoseconds: 0, failure: nil)
+        }
+        let profile = try XCTUnwrap(owner.metadata.connections.first)
+        owner.pinOffline(profile: profile, entry: .init(name: "Reports", path: "/Projects/Reports", kind: .directory))
+        try await waitForOfflineState { owner.pinningName == nil && second.offlineFolders.count == 1 }
+        let folder = try XCTUnwrap(owner.offlineFolders.first)
+        XCTAssertEqual(folder.fileIDs.count, 5); XCTAssertEqual(owner.offlinePins.count, 5)
+        XCTAssertTrue(owner.standaloneOfflinePins.isEmpty); XCTAssertNil(owner.folderPinProgress)
+        XCTAssertEqual(second.offlineFolders, [folder]); XCTAssertEqual(second.offlinePins.count, 5)
+        owner.metadata.connections[0].host = "changed.invalid"
+        owner.refreshOfflineFolder(folder)
+        XCTAssertNotNil(owner.errorMessage); XCTAssertNil(owner.pinningName)
+        await owner.removeConnection(owner.metadata.connections[0])
+        XCTAssertEqual(owner.offlineFolders, [folder])
+        let store = try XCTUnwrap(owner.offlineStore), lease = try await store.lease(try XCTUnwrap(folder.fileIDs.first))
+        XCTAssertFalse(try Data(contentsOf: lease.url).isEmpty)
+        await owner.removeOfflineFolder(folder)
+        try await waitForOfflineState { second.offlineFolders.isEmpty && second.offlinePins.isEmpty }
+    }
+
+    func testBackgroundCancelsFolderTraversalAndDemoSwitchDoesNotMixLibraries() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try AppModel(directory: directory, fileService: BackgroundExportService())
+        await model.load(); await model.setDemo(true)
+        let profile = try XCTUnwrap(model.metadata.connections.first)
+        model.pinOffline(profile: profile, entry: .init(name: "Reports", path: "/Projects/Reports", kind: .directory))
+        XCTAssertNotNil(model.folderPinProgress)
+        model.isForeground = false; await model.background()
+        XCTAssertNil(model.pinningName); XCTAssertTrue(model.offlineFolders.isEmpty); XCTAssertTrue(model.offlinePins.isEmpty)
+        model.isForeground = true
+        await model.setDemo(false)
+        XCTAssertTrue(model.offlineFolders.isEmpty); XCTAssertTrue(model.offlinePins.isEmpty)
+    }
+
     func testWorkspaceKeepsFolderAlongsidePreviewAndSharesRoutesWithCompactNavigation() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

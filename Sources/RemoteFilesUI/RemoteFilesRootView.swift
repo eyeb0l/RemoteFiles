@@ -80,6 +80,7 @@ struct AppNavigation: View {
                 case .connection(let id): ConnectionEditor(model: model, existing: id.flatMap(model.profile))
                 case .keys: KeyManagerView(model: model)
                 case .offlineFiles: OfflineFilesView(model: model)
+                case .offlineFolder(let profile, let path, let hidden): OfflineFolderSetupView(model: model, profile: profile, path: path, includeHidden: hidden)
                 case .trust(let endpoint, let key): TrustView(model: model, endpoint: endpoint, key: key)
                 case .changed(let endpoint, let previous, let current): ChangedHostView(model: model, endpoint: endpoint, previous: previous, current: current)
                 case .unlock(let identity): UnlockKeyView(model: model, identity: identity)
@@ -187,7 +188,7 @@ struct HomeView: View {
         List {
             Section {
                 Button { model.sheet = .offlineFiles } label: {
-                    LocationRow(name: "Offline Files", subtitle: "\(model.offlinePins.count) saved on this device", symbol: "pin.fill", color: .indigo)
+                    LocationRow(name: "Offline Files", subtitle: "\(model.offlinePins.count) files · \(model.offlineFolders.count) folders saved", symbol: "pin.fill", color: .indigo)
                 }
                 .accessibilityIdentifier("offline-library")
             }

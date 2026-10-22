@@ -251,6 +251,9 @@ struct FolderView: View {
                     Button(model.isFavourite(profile.id, path: path) ? "Remove Favourite" : "Add Favourite", systemImage: model.isFavourite(profile.id, path: path) ? "star.slash" : "star") { Task { await model.favourite(profile: profile, path: path) } }.disabled(listing == nil)
                     Button("Refresh", systemImage: "arrow.clockwise") { refreshID += 1 }
                     Toggle("Show Hidden Files", isOn: $showHidden)
+                    if let listing {
+                        OfflineFolderPinActions(model: model, profile: profile, path: listing.path, includeHidden: showHidden)
+                    }
                     Picker("Sort By", systemImage: "arrow.up.arrow.down", selection: sortSelection) {
                         ForEach(FolderSortOrder.allCases, id: \.self) { Text($0.title).tag($0) }
                     }.pickerStyle(.menu)
@@ -334,14 +337,14 @@ struct FolderView: View {
         if let destination = entry.followingLink() {
             // Resolved while listing: open the target directly.
             WorkspaceLink(route: route(destination)) { entryRow(row, subtitle: subtitle, snippet: snippet) }
-                .contextMenu { OfflinePinActions(model: model, profile: profile, entry: destination) }
+                .contextMenu { OfflinePinActions(model: model, profile: profile, entry: destination, includeHidden: showHidden) }
         } else if entry.kind == .symlink {
             Button { resolve(entry) } label: {
                 entryRow(row, subtitle: subtitle, snippet: snippet).overlay(alignment: .trailing) { if resolving == entry.path { ProgressView() } }
             }.disabled(resolving != nil)
         } else {
             WorkspaceLink(route: route(entry)) { entryRow(row, subtitle: subtitle, snippet: snippet) }
-                .contextMenu { OfflinePinActions(model: model, profile: profile, entry: entry) }
+                .contextMenu { OfflinePinActions(model: model, profile: profile, entry: entry, includeHidden: showHidden) }
         }
     }
     private func entryRow(_ row: FolderRow, subtitle: String, snippet: String?) -> some View {

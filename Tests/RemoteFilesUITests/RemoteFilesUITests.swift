@@ -5,6 +5,54 @@ import Security
 
 @MainActor
 final class RemoteFilesUITests: XCTestCase {
+    func testOfflineFolderSnapshotBrowsesSubfoldersAfterDisconnectBackgroundAndRelaunch() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        let reports = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports,")).firstMatch
+        revealFolderRow(reports, in: app).tap()
+        app.buttons["Folder actions"].tap()
+        if app.buttons["Remove Offline Folder"].exists {
+            app.buttons["Remove Offline Folder"].tap()
+            app.buttons["Folder actions"].tap()
+        }
+        XCTAssertTrue(app.buttons["Keep Folder Offline"].waitForExistence(timeout: 5)); app.buttons["Keep Folder Offline"].tap()
+        XCTAssertTrue(app.switches["Include Hidden Files"].waitForExistence(timeout: 5))
+        app.buttons["Save Folder Offline"].tap()
+        let saved = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.otherElements["offline-save-progress"])
+        wait(for: [saved], timeout: 15)
+        app.buttons["Folder actions"].tap()
+        XCTAssertTrue(app.buttons["Update Offline Folder"].waitForExistence(timeout: 5))
+        app.buttons["Disconnect"].tap()
+        let library = app.buttons["offline-library"]
+        XCTAssertTrue(library.waitForExistence(timeout: 10)); library.tap()
+        let folder = app.buttons["offline-folder-Reports"]
+        XCTAssertTrue(folder.waitForExistence(timeout: 10)); folder.tap()
+        XCTAssertTrue(app.staticTexts["offline-folder-date"].waitForExistence(timeout: 5))
+        let nested = app.buttons["offline-subfolder-2026"]
+        XCTAssertTrue(nested.waitForExistence(timeout: 5)); nested.tap()
+        let file = app.buttons["offline-file-Quarterly review.md"]
+        XCTAssertTrue(file.waitForExistence(timeout: 5)); file.tap()
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.buttons["Share Original"].exists)
+        attachScreenshot("Saved folder nested Markdown reader")
+        XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5)); app.activate()
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+        app.terminate(); app.launch()
+        XCTAssertTrue(library.waitForExistence(timeout: 15)); library.tap()
+        XCTAssertTrue(folder.waitForExistence(timeout: 10)); folder.tap()
+        attachScreenshot("Offline folder snapshot and subfolders")
+        XCTAssertTrue(nested.waitForExistence(timeout: 5)); nested.tap()
+        XCTAssertTrue(file.waitForExistence(timeout: 5)); file.tap()
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+        app.navigationBars.buttons["2026"].tap()
+        app.buttons["Saved folder actions"].tap(); app.buttons["Remove Offline Folder"].tap()
+        // The removed snapshot stops presenting rows, while the live demo original stays intact.
+        XCTAssertTrue(app.staticTexts["Saved folder unavailable"].waitForExistence(timeout: 5))
+    }
+
     func testOfflineCopyOpensAfterDisconnectAndRelaunchAndCanBeRemoved() throws {
         continueAfterFailure = false
         let app = launchDemoReader(filename: "Navigation guide.md")
