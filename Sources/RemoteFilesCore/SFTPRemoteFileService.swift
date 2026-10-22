@@ -9,7 +9,7 @@ import NIOSSH
 /// Read-only SFTP adapter. The SSH connection is reused, and listings, metadata and document
 /// reads share one SFTP channel per session. Streaming downloads own a child channel, so
 /// cancelling one also releases all of its remote file handles.
-public actor SFTPRemoteFileService: RemoteFileService {
+public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching {
     private let identityStore: IdentityStore
     private let trustStore: HostTrustStore
     private let metadataStore: MetadataStore
@@ -30,6 +30,146 @@ public actor SFTPRemoteFileService: RemoteFileService {
     }
 
     public func metrics() -> TransportMetrics { measurements }
+
+    func searchFolders(query: String, root: String, profile: ConnectionProfile, includeHidden: Bool,
+                       limits: RemoteFolderSearch.Limits, content: RemoteFolderSearch.ContentLimits?) async throws -> RemoteFolderSearch.Update? {
+        do {
+            _ = try ServerFolderSearch.command(query: query, root: root, includeHidden: includeHidden,
+                                                     limits: limits, content: content)
+        } catch ServerFolderSearch.Failure.unsupported { return nil }
+        let session = try await session(for: profile)
+        guard !session.serverSearchUnavailable else { return nil }
+        // Canonical strings alone cannot bind SFTP and exec namespaces. The dedicated SFTP
+        // channel below pins the directory while the helper verifies its kernel mount/inode identity.
+        let canonical = try await perform(session: session) { sftp in
+            try await sftp.getRealPath(atPath: Self.validated(root))
+        }
+        guard canonical.utf8.elementsEqual(root.utf8) else { throw RemoteDocumentLinkError.outsideConnection }
+        measurements.serverSearchAttempts += 1
+        do {
+            let timeout = UInt64(limits.timeLimit.components.seconds + 1) + timeoutSeconds
+            let output = try await performOnDedicatedChannel(session: session, timeout: timeout) { sftp in
+                let proc = try await sftp.getRealPath(atPath: "/proc/self")
+                guard Self.searchProcessPath(proc) else { throw ServerFolderSearch.Failure.unsupported }
+                let namespace = try await sftp.readSymbolicLink(atPath: proc + "/ns/mnt")
+                let before = try await Self.searchDescriptors(sftp: sftp, process: proc)
+                let directory = try await sftp.openFile(filePath: root, flags: .read)
+                do {
+                    let after = try await Self.searchDescriptors(sftp: sftp, process: proc)
+                    let handle = try Self.searchRootHandle(process: proc, root: root, before: before, after: after)
+                    let info = try await sftp.openFile(filePath: handle.replacingOccurrences(of: "/fd/", with: "/fdinfo/"), flags: .read)
+                    let bytes: Data
+                    do {
+                        let read = try await BoundedPreviewReader.read(initialSize: nil, limit: 4096) { offset, amount in
+                            try await info.read(from: offset, length: amount)
+                        }
+                        bytes = read.0
+                        try await info.close()
+                    } catch { try? await info.close(); throw error }
+                    let identity = try ServerFolderSearch.RootIdentity(fdinfo: String(decoding: bytes, as: UTF8.self), namespace: namespace)
+                    let command = try ServerFolderSearch.command(query: query, root: root, includeHidden: includeHidden,
+                        limits: limits, content: content, identity: identity)
+                    let output = try await Self.executeSearchCommand(client: session.client, command: command, timeout: timeout)
+                    try await directory.close()
+                    return output
+                } catch {
+                    try? await directory.close()
+                    throw error
+                }
+            }
+            try Task.checkCancellation()
+            guard session.client.isConnected else { throw RemoteFileError.connectionEnded }
+            measurements.bytesReceived += output.readableBytes
+            let update = try ServerFolderSearch.decode(Data(output.readableBytesView), query: query, root: root,
+                                                       includeHidden: includeHidden, limits: limits, content: content)
+            measurements.serverSearchOperations += 1
+            return update
+        } catch {
+            try Task.checkCancellation()
+            guard session.client.isConnected else { throw RemoteFileError.connectionEnded }
+            // Failed capability checks are remembered only for this authenticated session.
+            // Connection loss, deadlines and trust errors are never disguised as unsupported search.
+            switch error {
+            case ServerFolderSearch.Failure.resourceLimit, CitadelError.commandOutputTooLarge:
+                return nil // A narrower subsequent search can still use this capable server.
+            case is ServerFolderSearch.Failure, is SSHClient.CommandFailed, is TTYSTDError:
+                session.serverSearchUnavailable = true
+                return nil
+            case let error as NIOSSHError where error.type == .channelSetupRejected:
+                session.serverSearchUnavailable = true
+                return nil
+            case let status as SFTPMessage.Status where status.errorCode == .failure || status.errorCode == .unsupportedOperation:
+                session.serverSearchUnavailable = true
+                return nil
+            case RemoteFileError.notFound, RemoteFileError.permissionDenied, RemoteFileError.unsupportedFile:
+                // No accessible procfs/descriptor capability: retain the ordinary SFTP search.
+                session.serverSearchUnavailable = true
+                return nil
+            default: throw Self.mapped(error)
+            }
+        }
+    }
+
+    nonisolated static func searchProcessPath(_ path: String) -> Bool {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+        return parts.count == 3 && parts[0].isEmpty && parts[1] == "proc"
+            && !parts[2].isEmpty && parts[2].allSatisfy { $0.isASCII && $0.isNumber }
+            && Int(parts[2]).map { $0 > 0 } == true
+    }
+
+    nonisolated static func searchRootHandle(process: String, root: String, before: [String: String],
+                                             after: [String: String]) throws -> String {
+        let added = after.filter { before[$0.key] == nil }
+        guard searchProcessPath(process), added.count == 1, let descriptor = added.first,
+              !descriptor.key.isEmpty, descriptor.key.allSatisfy({ $0.isASCII && $0.isNumber }),
+              descriptor.value.utf8.elementsEqual(root.utf8) else { throw ServerFolderSearch.Failure.unsupported }
+        return process + "/fd/" + descriptor.key
+    }
+
+    /// The channel is private to this search. Resolve only descriptors that remain open after
+    /// READDIR closes its own handle; the sole new descriptor must be the requested directory.
+    nonisolated private static func searchDescriptors(sftp: SFTPClient, process: String) async throws -> [String: String] {
+        let entries = try await sftp.listDirectory(atPath: process + "/fd", resolvingPath: false)
+            .flatMap(\.components).map(\.filename).filter { !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }
+        guard entries.count <= 128 else { throw ServerFolderSearch.Failure.unsupported }
+        var descriptors: [String: String] = [:]
+        for entry in entries {
+            do {
+                let path = process + "/fd/" + entry
+                // OpenSSH REALPATH permits a missing final component. READLINK must first prove
+                // this descriptor still exists after READDIR closed its temporary handle.
+                let target = try await sftp.readSymbolicLink(atPath: path)
+                guard target.hasPrefix("/") else { continue } // Pipes/sockets are not directory roots.
+                descriptors[entry] = try await sftp.getRealPath(atPath: path)
+            }
+            catch {
+                // READDIR's descriptor has already closed; pipes and sockets have no real path.
+                let mapped = Self.mapped(error)
+                switch mapped {
+                case RemoteFileError.notFound, RemoteFileError.permissionDenied: continue
+                default: throw mapped
+                }
+            }
+        }
+        return descriptors
+    }
+
+    /// A peer can defer acknowledging channel close until its process exits. Return cancellation
+    /// and deadlines immediately while the owned child drains; late-created channels close too.
+    nonisolated static func executeSearchCommand(client: SSHClient, command: String, timeout: UInt64,
+                                                 maxResponseSize: Int = ServerFolderSearch.outputLimit,
+                                                 onChannelCreated: @escaping @Sendable () -> Void = {}) async throws -> ByteBuffer {
+        let control = SocketControl()
+        return try await withTaskCancellationHandler {
+            defer { control.close() }
+            return try await detachedDeadline(seconds: timeout, onTimeout: { control.close() }) {
+                try Task.checkCancellation()
+                return try await client.executeBoundedCommand(command, maxResponseSize: maxResponseSize, onChannelCreated: {
+                    control.install($0); onChannelCreated()
+                })
+            }
+        } onCancel: { control.close() }
+    }
 
     /// Most READDIR requests a listing keeps in flight. OpenSSH answers up to 100 names each, so
     /// eight keep its sequential server busy across a cellular round trip.
@@ -582,6 +722,8 @@ public actor SFTPRemoteFileService: RemoteFileService {
 }
 
 public struct TransportMetrics: Sendable {
+    public fileprivate(set) var serverSearchAttempts = 0
+    public fileprivate(set) var serverSearchOperations = 0
     public fileprivate(set) var connections = 0
     public fileprivate(set) var sftpChannels = 0
     public fileprivate(set) var directoryOperations = 0
@@ -601,6 +743,7 @@ private final class LiveSession: @unchecked Sendable {
     // Actor-isolated to SFTPRemoteFileService; closing the SSH socket also closes this channel.
     var sftp: SharedSFTPChannel?
     var openingSFTP: Task<SharedSFTPChannel, Error>?
+    var serverSearchUnavailable = false
     init(profile: ConnectionProfile, client: SSHClient, control: SocketControl, bastion: SSHClient? = nil) {
         self.profile = profile; self.client = client; self.control = control; self.bastion = bastion
     }
