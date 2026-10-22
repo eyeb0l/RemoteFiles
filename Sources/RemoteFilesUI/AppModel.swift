@@ -2,6 +2,14 @@
 import SwiftUI
 import RemoteFilesCore
 
+/// Cancels a subscription when its window goes away, without requiring actor-isolated work
+/// in AppModel's nonisolated deinitializer.
+private final class OfflineLibraryObservation {
+    let task: Task<Void, Never>
+    init(_ task: Task<Void, Never>) { self.task = task }
+    deinit { task.cancel() }
+}
+
 @MainActor @Observable
 final class AppModel {
     enum Route: Hashable {
@@ -44,6 +52,8 @@ final class AppModel {
     private(set) var cancellingPin = false
     private var pinTask: Task<Void, Never>?
     private var pinToken: UUID?
+    private var offlineObservation: OfflineLibraryObservation?
+    private var offlineLibraryToken = UUID()
     private var resourceService: RemoteResourceResolver?
     private var exportService: RemoteOriginalExporter?
     var originalExporter: RemoteOriginalExporter {
@@ -93,13 +103,23 @@ final class AppModel {
         await loadOfflineLibrary()
     }
     private func loadOfflineLibrary() async {
+        offlineObservation = nil
+        let token = UUID(); offlineLibraryToken = token
         offlineStore = nil; offlinePins = []; offlineError = nil
         do {
             let directory = demo ? offlineDirectory.appendingPathComponent("Demo", isDirectory: true) : offlineDirectory
             let store = try await OfflineFileStore.shared(directory: directory)
-            offlineStore = store
-            offlinePins = await store.snapshot()
-        } catch { offlineError = error.localizedDescription }
+            let pins = await store.snapshot()
+            guard offlineLibraryToken == token else { return }
+            offlineStore = store; offlinePins = pins
+            offlineObservation = OfflineLibraryObservation(Task { [weak self] in
+                for await _ in await store.changes() {
+                    let pins = await store.snapshot()
+                    guard !Task.isCancelled, self?.offlineLibraryToken == token else { return }
+                    self?.offlinePins = pins
+                }
+            })
+        } catch { if offlineLibraryToken == token { offlineError = error.localizedDescription } }
     }
     func offlinePin(profile: ConnectionProfile, path: String) -> OfflinePin? {
         offlinePins.first { $0.matches(profile, path: path) }
@@ -331,7 +351,9 @@ final class AppModel {
         connectionStates = [:]; clearCaches()
     }
     func background() async {
-        sheet = nil
+        // Offline navigation owns no connection or credentials. Keep its stack while the reader
+        // releases protected local resources; transient trust/key/edit sheets still disappear.
+        if case .offlineFiles = sheet { } else { sheet = nil }
         await disconnect()
     }
     /// Breadcrumb navigation: pop back to a folder already in the stack instead of pushing a

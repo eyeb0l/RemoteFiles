@@ -31,6 +31,13 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
         XCTAssertTrue(app.buttons["Share Original"].exists)
         attachScreenshot("Offline Markdown copy after disconnect")
+        XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
+        app.activate()
+        XCTAssertTrue(app.staticTexts["offline-copy-date"].waitForExistence(timeout: 10), "Return to the same offline reader")
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15), "Reopen protected local bytes on activation")
+        XCTAssertTrue(app.buttons["Share Original"].exists)
+
         app.terminate(); app.launch()
         XCTAssertTrue(library.waitForExistence(timeout: 15)); library.tap()
         XCTAssertTrue(file.waitForExistence(timeout: 10)); file.tap()

@@ -85,6 +85,7 @@ public actor OfflineFileStore {
     private var draining: Task<Void, Never>?
     private var leases: [WeakOfflineLease] = []
     private var refreshingID: UUID?
+    private var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
 
     public init(directory: URL, fileLimit: Int = maximumFileBytes, storageLimit: Int = maximumStoredBytes,
                 countLimit: Int = maximumFiles) throws {
@@ -131,6 +132,19 @@ public actor OfflineFileStore {
     }
 
     public func snapshot() -> [OfflinePin] { pins.sorted { $0.savedAt > $1.savedAt } }
+
+    /// Every window observes commits. Buffer just one invalidation; consumers fetch the latest
+    /// snapshot, so a slow/background window neither builds a queue nor replays stale metadata.
+    public func changes() -> AsyncStream<Void> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        observers[id] = continuation
+        continuation.onTermination = { [weak self] _ in Task { await self?.removeObserver(id) } }
+        continuation.yield(())
+        return stream
+    }
+    private func removeObserver(_ id: UUID) { observers.removeValue(forKey: id) }
+    private func publishChange() { for observer in observers.values { observer.yield(()) } }
 
     /// Decode only a bounded prefix, on the store actor rather than the UI actor.
     public func textPreview(_ lease: OfflineFileLease) throws -> DocumentPreview {
@@ -181,6 +195,7 @@ public actor OfflineFileStore {
             var candidate = pins.filter { $0.id != pin.id }; candidate.append(pin)
             try save(candidate)
             pins = candidate; unpublished = nil
+            publishChange()
             if let previous { try? FileManager.default.removeItem(at: directory.appendingPathComponent(previous.blobID.uuidString)) }
             await worker.release(prepared.id)
             finish(transferID)
@@ -218,6 +233,7 @@ public actor OfflineFileStore {
         guard let pin = pins.first(where: { $0.id == id }) else { return }
         let candidate = pins.filter { $0.id != id }
         try save(candidate); pins = candidate
+        publishChange()
         if refreshingID == id {
             cancelled = true
             if let worker = exporter { Task { await worker.cancelAll() } }

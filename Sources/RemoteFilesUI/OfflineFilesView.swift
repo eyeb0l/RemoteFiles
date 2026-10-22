@@ -168,7 +168,9 @@ struct OfflineReaderView: View {
                 ToolbarItem(placement: .primaryAction) { Toggle("Source", isOn: $source) }
             }
         }
-        .task { await load() }
+        .task(id: scenePhase) {
+            if scenePhase == .active { await load() }
+        }
         .onDisappear { release() }
         .onChange(of: scenePhase) { _, phase in if phase == .background { release() } }
     }
