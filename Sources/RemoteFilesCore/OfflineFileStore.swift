@@ -156,7 +156,8 @@ public actor OfflineFileStore {
     }
 
     public func pin(profile: ConnectionProfile, entry: RemoteEntry, allowedRoot: String,
-                    service: any RemoteFileService, progress: @escaping DownloadProgressHandler = { _ in }) async throws -> OfflinePin {
+                    service: any RemoteFileService, operationID: UUID = UUID(),
+                    progress: @escaping DownloadProgressHandler = { _ in }) async throws -> OfflinePin {
         try Task.checkCancellation()
         guard operation == nil else { throw OfflineFileError.busy }
         guard entry.path.hasPrefix("/") else { throw RemoteFileError.invalidPath }
@@ -166,7 +167,7 @@ public actor OfflineFileStore {
         let used = pins.filter { $0.id != previous?.id }.reduce(0) { $0 + $1.byteCount }
         let available = storageLimit - used
         guard available > 0 else { throw OfflineFileError.storageFull }
-        let transferID = UUID()
+        let transferID = operationID
         let transferRoot = directory.appendingPathComponent(".transfers")
         try Self.protectDirectory(transferRoot)
         let temporary = transferRoot.appendingPathComponent(transferID.uuidString)
@@ -217,9 +218,13 @@ public actor OfflineFileStore {
     }
 
     public func cancelAll() async { cancelled = true; await exporter?.cancelAll() }
-    /// Wait without cancelling a different window's transfer. `pin` installs this drain before
-    /// returning an error; cancelling its caller already targets that operation's own worker.
-    public func waitForCancelledTransfer() async { let pending = draining; await pending?.value }
+    /// Only the caller that installed a drain may join it. A rejected/busy request must never
+    /// wait for an unrelated window's uncooperative transport to finish cancelling.
+    public func waitForCancelledTransfer(_ operationID: UUID) async {
+        guard operation == operationID else { return }
+        let pending = draining
+        await pending?.value
+    }
     public func cancelAndDrain() async {
         let current = exporter, token = operation, previousDrain = draining
         cancelled = true

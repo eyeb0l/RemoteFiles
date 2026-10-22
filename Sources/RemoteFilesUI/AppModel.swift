@@ -133,19 +133,25 @@ final class AppModel {
         pinTask = Task {
             do {
                 _ = try await store.pin(profile: profile, entry: entry, allowedRoot: profile.startingDirectory,
-                                        service: transport) { [weak self] progress in
+                                        service: transport, operationID: token) { [weak self] progress in
                     await self?.updatePinProgress(progress, token: token)
                 }
             } catch is CancellationError { }
             catch {
                 if !Task.isCancelled, revision == sessionRevision, isForeground {
-                    handle(error, profile: profile)
+                    if isSecurityError(error) { handle(error, profile: profile) }
+                    else if let remote = error as? RemoteFileError {
+                        switch remote {
+                        case .connectionEnded, .timedOut, .unavailable: handle(error, profile: profile)
+                        default: break
+                        }
+                    }
                     if sheet == nil || sheet?.id == "offlineFiles" { errorMessage = error.localizedDescription }
                 }
             }
             // A cancelled future-backed transfer can still be draining. Keep the UI slot until
             // its private output is gone; disconnect closes the channel before waiting here.
-            await store.waitForCancelledTransfer()
+            await store.waitForCancelledTransfer(token)
             guard pinToken == token else { return }
             offlinePins = await store.snapshot()
             pinTask = nil; pinToken = nil; pinningName = nil; cancellingPin = false

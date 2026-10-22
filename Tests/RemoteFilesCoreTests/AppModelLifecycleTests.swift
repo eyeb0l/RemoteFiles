@@ -12,6 +12,8 @@ private actor BackgroundExportService: RemoteFileService {
     private(set) var disconnects = 0
     private(set) var downloads = 0
     private var bytes = Data("old server bytes".utf8)
+    private var downloadFailure: Error?
+    func failDownloads(_ error: Error) { downloadFailure = error }
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
         .init(path: path, entries: [])
     }
@@ -22,6 +24,7 @@ private actor BackgroundExportService: RemoteFileService {
     func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String,
                       destination: URL, limit: Int) async throws -> RemoteEntry {
         downloads += 1
+        if let downloadFailure { throw downloadFailure }
         self.destination = destination
         try bytes.write(to: destination)
         if disconnects == 0 {
@@ -301,6 +304,63 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
         model.sheet = .keys
         await model.background()
         XCTAssertNil(model.sheet, "Credential presentation remains transient")
+    }
+
+    func testLocalOfflineRejectionKeepsHealthyConnectionButTransportFailureDoesNot() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = BackgroundExportService(), model = try AppModel(directory: directory, fileService: service)
+        await model.load()
+        let profile = ConnectionProfile(name: "Healthy SSH", host: "fixture.invalid", username: "reader", identityID: UUID(), startingDirectory: "/fixture")
+        model.connectionStates[profile.id] = "Connected"
+        model.pinOffline(profile: profile, entry: .init(name: "large.bin", path: "/fixture/large.bin", kind: .file,
+            size: UInt64(OfflineFileStore.maximumFileBytes) + 1))
+        try await waitForOfflineState { model.pinningName == nil }
+        XCTAssertNotNil(model.errorMessage)
+        XCTAssertEqual(model.connectionStates[profile.id], "Connected", "A local size limit is not an SSH failure")
+        let downloads = await service.downloads
+        XCTAssertEqual(downloads, 0)
+        await service.failDownloads(RemoteFileError.connectionEnded)
+        model.errorMessage = nil
+        model.pinOffline(profile: profile, entry: .init(name: "copy.txt", path: "/fixture/copy.txt", kind: .file))
+        try await waitForOfflineState { model.pinningName == nil }
+        XCTAssertEqual(model.connectionStates[profile.id], "Disconnected", "Transport failures still update connection state")
+        let identity = IdentityMetadata(id: profile.identityID, name: "Locked", publicKey: "", fingerprint: "", requiresPassphrase: true, keychainReference: "fixture")
+        await service.failDownloads(ConnectionIdentityUnlockRequired(identity: identity))
+        model.pinOffline(profile: profile, entry: .init(name: "copy.txt", path: "/fixture/copy.txt", kind: .file))
+        try await waitForOfflineState { model.pinningName == nil }
+        XCTAssertEqual(model.sheet?.id, "unlock", "Security failures still present the unlock flow")
+    }
+    func testBusySaveAndBackgroundNeverWaitForAnotherWindowsDrain() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = BackgroundExportService(), secondService = BackgroundExportService()
+        let second = try AppModel(directory: directory, fileService: secondService)
+        await second.load()
+        let store = try XCTUnwrap(second.offlineStore)
+        addTeardownBlock { await service.disconnect(); await store.cancelAndDrain() }
+        let profile = ConnectionProfile(name: "Other window", host: "fixture.invalid", username: "reader", identityID: UUID(), startingDirectory: "/fixture")
+        let entry = RemoteEntry(name: "copy.txt", path: "/fixture/copy.txt", kind: .file)
+        let owner = Task { try await store.pin(profile: profile, entry: entry, allowedRoot: "/fixture", service: service) }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !(await service.waiting()), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        let waiting = await service.waiting()
+        XCTAssertTrue(waiting)
+        owner.cancel()
+        do { _ = try await owner.value; XCTFail("Owner must return cancellation after installing its drain") }
+        catch is CancellationError { }
+        second.connectionStates[profile.id] = "Connected"
+        second.pinOffline(profile: profile, entry: entry)
+        try await waitForOfflineState { second.pinningName == nil }
+        XCTAssertNotNil(second.errorMessage)
+        XCTAssertEqual(second.connectionStates[profile.id], "Connected", "Busy is local, not a connection failure")
+        var backgroundFinished = false
+        let background = Task { await second.background(); backgroundFinished = true }
+        try await waitForOfflineState { backgroundFinished }
+        let ownerStillWaiting = await service.waiting()
+        XCTAssertTrue(ownerStillWaiting, "Neither rejection nor another window's background may drain/cancel the owner")
+        // Always unblock the fixture, including on a failed assertion, so a regression cannot hang tests.
+        await service.disconnect(); await background.value
     }
 
     func testBusyOfflineSaveInAnotherWindowDoesNotCancelTheOwner() async throws {
