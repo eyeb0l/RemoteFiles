@@ -145,12 +145,15 @@ final class RemoteFilesUITests: XCTestCase {
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
+        // Layout follows size classes, so an unfolded iPhone Duo shows the workspace too.
+        let usesWorkspace = app.staticTexts["Choose a file"].waitForExistence(timeout: 2)
+        if isPad { XCTAssertTrue(usesWorkspace, "A landscape iPad shows the split workspace") }
         let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Latest report")).firstMatch
-        if isPad {
+        if usesWorkspace {
             XCTAssertTrue(report.waitForExistence(timeout: 10)); report.tap()
         } else { revealFolderRow(report, in: app).tap() }
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
-        if isPad {
+        if usesWorkspace {
             XCTAssertTrue(projects.isHittable, "Library remains available alongside the reader")
             XCTAssertTrue(report.isHittable, "Opening a preview keeps its folder visible")
             XCTAssertLessThan(projects.frame.midX, report.frame.midX)
@@ -443,6 +446,8 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         let reports = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports, Folder")).firstMatch
         XCTAssertTrue(reports.waitForExistence(timeout: 10)); reports.tap()
+        let usesWorkspace = app.staticTexts["Choose a file"].waitForExistence(timeout: 2)
+        if isPad { XCTAssertTrue(usesWorkspace, "A landscape iPad shows the split workspace") }
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.waitForExistence(timeout: 10)); search.tap(); search.typeText("distance disappear")
         app.buttons["Contents"].tap()
@@ -456,7 +461,7 @@ final class RemoteFilesUITests: XCTestCase {
         attachScreenshot("File contents search results")
         nested.tap()
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
-        if !isPad { app.navigationBars.buttons["Reports"].tap() }
+        if !usesWorkspace { app.navigationBars.buttons["Reports"].tap() }
         XCTAssertTrue(nested.exists && summary.exists, "The completed content search remains when its result opens")
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Searching…")).firstMatch.exists)
         app.buttons["This Folder"].tap()

@@ -143,6 +143,14 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
         await model.disconnectAndGoHome(); XCTAssertNil(model.workspaceFile); XCTAssertNil(model.workspaceFolder)
     }
 
+    func testWorkspaceLayoutFollowsSizeClassesRatherThanDevice() {
+        XCTAssertTrue(AppNavigation.usesWorkspace(horizontal: .regular, vertical: .regular), "A regular iPad window or unfolded iPhone Duo")
+        XCTAssertFalse(AppNavigation.usesWorkspace(horizontal: .regular, vertical: .compact), "A landscape phone keeps stack navigation")
+        XCTAssertFalse(AppNavigation.usesWorkspace(horizontal: .compact, vertical: .regular), "A folded phone or narrow window")
+        XCTAssertFalse(AppNavigation.usesWorkspace(horizontal: .compact, vertical: .compact))
+        XCTAssertFalse(AppNavigation.usesWorkspace(horizontal: nil, vertical: nil))
+    }
+
     func testEditingAndDeletingTheVisibleConnectionRetireItsWorkspaceRoutes() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

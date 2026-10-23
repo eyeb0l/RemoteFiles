@@ -57,10 +57,17 @@ public struct RemoteFilesRootView: View {
 
 struct AppNavigation: View {
     @Bindable var model: AppModel
-    @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    /// Three columns need room in both directions, whatever the device: a regular iPad window or
+    /// an unfolded iPhone Duo. A landscape phone is regular-width but compact-height, so it keeps
+    /// the stack. Both layouts share `routes`, so folding or resizing keeps the current folder/file.
+    static func usesWorkspace(horizontal: UserInterfaceSizeClass?, vertical: UserInterfaceSizeClass?) -> Bool {
+        horizontal == .regular && vertical == .regular
+    }
     var body: some View {
         Group {
-            if sizeClass == .regular && UIDevice.current.userInterfaceIdiom == .pad {
+            if Self.usesWorkspace(horizontal: horizontalSizeClass, vertical: verticalSizeClass) {
                 IPadWorkspace(model: model)
             } else {
                 NavigationStack(path: $model.routes) {
