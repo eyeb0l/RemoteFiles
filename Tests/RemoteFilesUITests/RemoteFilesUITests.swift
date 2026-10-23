@@ -143,29 +143,42 @@ final class RemoteFilesUITests: XCTestCase {
         defer { if isPad { XCUIDevice.shared.orientation = .portrait } }
         let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
-        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        // With no folder chosen the library opens itself, even where it has to overlay.
+        waitUntilHittable(projects); projects.tap()
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
         // Layout follows size classes, so an unfolded iPhone Duo shows the workspace too.
         let usesWorkspace = app.staticTexts["Choose a file"].waitForExistence(timeout: 2)
         if isPad { XCTAssertTrue(usesWorkspace, "A landscape iPad shows the split workspace") }
         let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Latest report")).firstMatch
+        // An iPad window tiles all three columns; an unfolded iPhone Duo overlays the library,
+        // which closes once it has opened the folder.
+        if usesWorkspace && isPad { XCTAssertTrue(projects.isHittable, "A tiled library stays open") }
+        if usesWorkspace && !isPad {
+            let closed = expectation(for: NSPredicate(format: "hittable == false"), evaluatedWith: projects)
+            closed.expectationDescription = "An overlaid library closes once it opens a folder"
+            wait(for: [closed], timeout: 10)
+        }
+        revealFolderRow(report, in: app).tap()
+        let reader = app.scrollViews["Rendered Markdown document"]
+        XCTAssertTrue(reader.waitForExistence(timeout: 15))
         if usesWorkspace {
-            XCTAssertTrue(report.waitForExistence(timeout: 10)); report.tap()
-        } else { revealFolderRow(report, in: app).tap() }
-        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
-        if usesWorkspace {
-            XCTAssertTrue(projects.isHittable, "Library remains available alongside the reader")
-            XCTAssertTrue(report.isHittable, "Opening a preview keeps its folder visible")
-            XCTAssertLessThan(projects.frame.midX, report.frame.midX)
-            XCTAssertLessThan(report.frame.midX, app.scrollViews["Rendered Markdown document"].frame.midX)
-            attachScreenshot("iPad library folder and reader")
+            waitUntilHittable(reader, "An overlaid folder closes once it opens a file")
+            if isPad {
+                XCTAssertTrue(projects.isHittable, "Library remains available alongside the reader")
+                XCTAssertLessThan(projects.frame.midX, report.frame.midX)
+            }
+            // A portrait iPhone Duo overlays the folder too; elsewhere it stays beside the reader.
+            if isPad { XCTAssertTrue(report.isHittable, "Opening a preview keeps its folder visible") }
+            if report.isHittable { XCTAssertLessThan(report.frame.midX, reader.frame.midX) }
+            attachScreenshot("Workspace library folder and reader")
             let reports = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports, Folder")).firstMatch
-            XCTAssertTrue(reports.isHittable); reports.tap()
+            revealWorkspaceColumn(containing: app.navigationBars["Projects"], in: app)
+            revealFolderRow(reports, in: app, searchingDown: false).tap()
             XCTAssertTrue(app.navigationBars["Reports"].waitForExistence(timeout: 10))
             XCTAssertTrue(app.staticTexts["Choose a file"].waitForExistence(timeout: 5), "Changing folders clears the old preview")
             app.buttons["Previous Folder"].tap()
             XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 5))
-            projects.tap()
+            revealWorkspaceColumn(containing: projects, in: app); projects.tap()
             XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 5))
         } else {
             app.navigationBars.buttons["Projects"].tap()
@@ -443,9 +456,9 @@ final class RemoteFilesUITests: XCTestCase {
         defer { if isPad { XCUIDevice.shared.orientation = .portrait } }
         let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
-        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        waitUntilHittable(projects); projects.tap()
         let reports = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports, Folder")).firstMatch
-        XCTAssertTrue(reports.waitForExistence(timeout: 10)); reports.tap()
+        waitUntilHittable(reports); reports.tap()
         let usesWorkspace = app.staticTexts["Choose a file"].waitForExistence(timeout: 2)
         if isPad { XCTAssertTrue(usesWorkspace, "A landscape iPad shows the split workspace") }
         let search = app.searchFields.firstMatch
@@ -462,6 +475,8 @@ final class RemoteFilesUITests: XCTestCase {
         nested.tap()
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
         if !usesWorkspace { app.navigationBars.buttons["Reports"].tap() }
+        // A portrait iPhone Duo closes its folder overlay over the reader; bring it back.
+        if usesWorkspace { revealWorkspaceColumn(containing: nested, in: app) }
         XCTAssertTrue(nested.exists && summary.exists, "The completed content search remains when its result opens")
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Searching…")).firstMatch.exists)
         app.buttons["This Folder"].tap()
@@ -863,6 +878,22 @@ final class RemoteFilesUITests: XCTestCase {
         return link
     }
 
+    private func waitUntilHittable(_ element: XCUIElement, _ message: String = "", timeout: TimeInterval = 15) {
+        let hittable = expectation(for: NSPredicate(format: "exists == true AND hittable == true"), evaluatedWith: element)
+        hittable.expectationDescription = message.isEmpty ? element.description : message
+        wait(for: [hittable], timeout: timeout)
+    }
+    /// A narrow workspace, such as an unfolded iPhone Duo, closes its library and folder overlays
+    /// after a selection. Each sidebar button tap brings back one more column.
+    private func revealWorkspaceColumn(containing element: XCUIElement, in app: XCUIApplication) {
+        for _ in 0..<2 {
+            if element.waitForExistence(timeout: 2), element.isHittable { return }
+            let toggle = app.buttons.matching(NSPredicate(format: "identifier == %@ OR label IN %@", "ToggleSidebar", ["Show Sidebar", "Hide Sidebar"]))
+                .allElementsBoundByIndex.first { $0.isHittable }
+            XCTAssertNotNil(toggle, app.debugDescription); toggle?.tap()
+        }
+        waitUntilHittable(element)
+    }
     private func attachScreenshot(_ name: String) {
         let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         attachment.name = name
