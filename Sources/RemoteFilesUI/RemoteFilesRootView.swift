@@ -57,10 +57,17 @@ public struct RemoteFilesRootView: View {
 
 struct AppNavigation: View {
     @Bindable var model: AppModel
-    @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    /// Three columns need room in both directions, whatever the device: a regular iPad window or
+    /// an unfolded iPhone Duo. A landscape phone is regular-width but compact-height, so it keeps
+    /// the stack. Both layouts share `routes`, so folding or resizing keeps the current folder/file.
+    static func usesWorkspace(horizontal: UserInterfaceSizeClass?, vertical: UserInterfaceSizeClass?) -> Bool {
+        horizontal == .regular && vertical == .regular
+    }
     var body: some View {
         Group {
-            if sizeClass == .regular && UIDevice.current.userInterfaceIdiom == .pad {
+            if Self.usesWorkspace(horizontal: horizontalSizeClass, vertical: verticalSizeClass) {
                 IPadWorkspace(model: model)
             } else {
                 NavigationStack(path: $model.routes) {
@@ -132,16 +139,55 @@ private struct RouteDestination: View {
     }
 }
 
+/// Where each workspace column was last laid out. A plain class so layout updates don't redraw.
+private final class WorkspaceColumnFrames {
+    var library = CGRect.zero, folder = CGRect.zero, reader = CGRect.zero
+    /// Side-by-side columns only touch; an overlaid column covers the one beneath it.
+    static func overlaps(_ a: CGRect, _ b: CGRect) -> Bool { a.intersection(b).width > 1 }
+}
+
 private struct IPadWorkspace: View {
     @Bindable var model: AppModel
     @State private var visibility: NavigationSplitViewVisibility = .all
+    @State private var frames = WorkspaceColumnFrames()
+    @State private var collapsedAfterSelection = false
+    @State private var libraryRevealAttempts = 0
+    @State private var libraryRevealRequest = 0
+    private struct LibraryReveal: Equatable { let visibility: NavigationSplitViewVisibility; let request: Int }
+    /// A window too narrow for three columns, such as an unfolded iPhone Duo, slides the library
+    /// and folder over the reader. Close those overlays once they've done their job. A hidden
+    /// library or folder keeps its last frame, so each check reads only columns on screen: the
+    /// selecting one, the folder whenever the library shows, and the reader, which as the detail
+    /// column is never hidden and so follows every resize.
+    private func openFromLibrary(_ route: AppModel.Route) {
+        model.routes = [route]
+        if case .file = route, WorkspaceColumnFrames.overlaps(frames.library, frames.reader) {
+            collapse(to: .detailOnly)
+        } else if WorkspaceColumnFrames.overlaps(frames.library, frames.folder) || WorkspaceColumnFrames.overlaps(frames.library, frames.reader) {
+            collapse(to: .doubleColumn)
+        }
+    }
+    private func openFromFolder(_ route: AppModel.Route) {
+        model.openInWorkspace(route)
+        if case .file = route, WorkspaceColumnFrames.overlaps(frames.folder, frames.reader) { collapse(to: .detailOnly) }
+    }
+    private func collapse(to columns: NavigationSplitViewVisibility) {
+        collapsedAfterSelection = true
+        visibility = columns
+    }
+    private func revealLibrary() {
+        guard model.workspaceFolder == nil else { return }
+        libraryRevealAttempts = 3
+        libraryRevealRequest += 1
+    }
     var body: some View {
         NavigationSplitView(columnVisibility: $visibility) {
             HomeView(model: model)
                 .listStyle(.sidebar)
-                .environment(\.workspaceNavigation, { model.routes = [$0] })
+                .environment(\.workspaceNavigation, openFromLibrary)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
                 .accessibilityIdentifier("workspace-library")
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames.library = $0 }
         } content: {
             NavigationStack {
                 if let folder = model.workspaceFolder {
@@ -158,9 +204,10 @@ private struct IPadWorkspace: View {
                     ContentUnavailableView("Choose a folder", systemImage: "folder", description: Text("Select a connection or favourite from the library."))
                 }
             }
-            .environment(\.workspaceNavigation, { model.openInWorkspace($0) })
+            .environment(\.workspaceNavigation, openFromFolder)
             .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 420)
             .accessibilityIdentifier("workspace-folder")
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames.folder = $0 }
         } detail: {
             NavigationStack {
                 if let file = model.workspaceFile {
@@ -172,8 +219,25 @@ private struct IPadWorkspace: View {
             }
             .environment(\.workspaceNavigation, { model.openInWorkspace($0) })
             .accessibilityIdentifier("workspace-reader")
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames.reader = $0 }
         }
         .navigationSplitViewStyle(.balanced)
+        // A narrow window collapses the library at launch, leaving only empty placeholders.
+        // While there's no folder, open it once the system has settled on its columns; that
+        // can take two requests, since a reader-only window first opens just the folder.
+        // Each launch, resize or cleared folder reveals it once, so closing it again sticks.
+        .task(id: LibraryReveal(visibility: visibility, request: libraryRevealRequest)) {
+            guard libraryRevealAttempts > 0, model.workspaceFolder == nil else { return }
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, model.workspaceFolder == nil else { return }
+            if visibility == .all { libraryRevealAttempts = 0 } else { libraryRevealAttempts -= 1; visibility = .all }
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { old, width in
+            // Narrowing already collapses columns; a wider window may now fit what we closed.
+            if collapsedAfterSelection, width > old { collapsedAfterSelection = false; visibility = .all }
+            revealLibrary()
+        }
+        .onChange(of: model.workspaceFolder == nil) { _, noFolder in if noFolder { revealLibrary() } }
     }
 }
 
