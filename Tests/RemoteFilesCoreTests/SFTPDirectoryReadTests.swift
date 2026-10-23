@@ -174,15 +174,18 @@ final class SFTPDirectoryReadTests: XCTestCase {
 
     func testOpenFileAttributesUseHandleBasedFstat() async throws {
         let server = try await FakeSFTPServer.start(FakeDirectory(entries: [], fileSize: 42))
+        addTeardownBlock { try? await server.stop() }
         let client = try await server.connect()
+        addTeardownBlock { try? await client.close() }
         let sftp = try await client.openSFTP(logger: FakeSFTPServer.quietLogger)
         let file = try await sftp.openFile(filePath: "/fake/file", flags: .read)
+        addTeardownBlock {
+            if file.isActive { try? await file.close() }
+        }
         let attributes = try await file.readAttributes()
         XCTAssertEqual(attributes.size, 42)
         try await file.close()
         XCTAssertEqual(server.recorder.requests, ["open", "fstat", "close"])
-        try await client.close()
-        try await server.stop()
     }
 
     @discardableResult
