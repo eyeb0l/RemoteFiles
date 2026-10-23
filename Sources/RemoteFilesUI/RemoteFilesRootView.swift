@@ -18,6 +18,7 @@ public struct RemoteFilesRootView: View {
                 ContentUnavailableView("Library unavailable", systemImage: "exclamationmark.folder", description: Text(startupError))
             } else { ProgressView("Opening library…") }
         }
+        .privacySensitive()
         .task {
             guard model == nil, startupError == nil else { return }
             do {
@@ -44,6 +45,9 @@ public struct RemoteFilesRootView: View {
             }
         }
         #if canImport(UIKit)
+        .background(RootWindowPrivacyInstaller(isVisible: scenePhase != .active))
+        #endif
+        #if canImport(UIKit)
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
             model?.clearCaches()
             Task {
@@ -54,6 +58,96 @@ public struct RemoteFilesRootView: View {
         #endif
     }
 }
+
+#if canImport(UIKit)
+/// SwiftUI overlays live beneath a presented sheet. This zero-sized bridge also
+/// installs the same shield directly on the window, above every presentation,
+/// so connection editors and readers cannot leak through an app-switcher snapshot.
+struct RootWindowPrivacyInstaller: UIViewRepresentable {
+    let isVisible: Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeUIView(context: Context) -> UIView { UIView(frame: .zero) }
+    func updateUIView(_ view: UIView, context: Context) {
+        context.coordinator.update(anchor: view, isVisible: isVisible)
+    }
+    static func dismantleUIView(_ view: UIView, coordinator: Coordinator) {
+        coordinator.dismantle()
+    }
+
+    @MainActor final class Coordinator {
+        private weak var window: UIWindow?
+        private var desiredVisibility = false
+        private var revision = 0
+        private let shield: UIView = {
+            let shield = UIView(frame: .zero)
+            shield.backgroundColor = .systemBackground
+            shield.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            shield.isAccessibilityElement = true
+            shield.accessibilityLabel = "RemoteFiles is hidden while inactive"
+            shield.accessibilityIdentifier = "privacy-cover"
+            shield.accessibilityViewIsModal = true
+
+            let image = UIImageView(image: UIImage(systemName: "lock.fill"))
+            image.tintColor = .systemIndigo
+            image.contentMode = .scaleAspectFit
+            image.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 36, weight: .semibold)
+            let label = UILabel()
+            label.text = "RemoteFiles Locked"
+            label.textColor = .systemIndigo
+            label.font = .preferredFont(forTextStyle: .headline)
+            let stack = UIStackView(arrangedSubviews: [image, label])
+            stack.axis = .vertical; stack.alignment = .center; stack.spacing = 12
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            shield.addSubview(stack)
+            NSLayoutConstraint.activate([
+                stack.centerXAnchor.constraint(equalTo: shield.centerXAnchor),
+                stack.centerYAnchor.constraint(equalTo: shield.centerYAnchor),
+            ])
+            return shield
+        }()
+
+        func update(anchor: UIView, isVisible: Bool) {
+            desiredVisibility = isVisible
+            revision &+= 1
+            let scheduledRevision = revision
+            guard isVisible else { removeShield(); return }
+            guard let target = anchor.window else {
+                DispatchQueue.main.async { [weak self, weak anchor] in
+                    guard let self, let anchor else { return }
+                    guard self.desiredVisibility, self.revision == scheduledRevision,
+                          let target = anchor.window else { return }
+                    self.install(in: target)
+                }
+                return
+            }
+            install(in: target)
+        }
+
+        private func install(in target: UIWindow) {
+            if window !== target || shield.superview !== target {
+                shield.removeFromSuperview()
+                window = target
+                shield.frame = target.bounds
+                target.addSubview(shield)
+            } else {
+                target.bringSubviewToFront(shield)
+            }
+        }
+
+        func dismantle() {
+            desiredVisibility = false
+            revision &+= 1
+            removeShield()
+        }
+
+        private func removeShield() {
+            shield.removeFromSuperview()
+            window = nil
+        }
+    }
+}
+#endif
 
 struct AppNavigation: View {
     @Bindable var model: AppModel

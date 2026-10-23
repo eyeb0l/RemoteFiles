@@ -62,7 +62,14 @@ let package = Package(
             ],
             swiftSettings: strictConcurrencySettings
         ),
-
+        .testTarget(
+            name: "NIOSSHTests",
+            dependencies: [
+                "NIOSSH",
+                .product(name: "NIOCore", package: "swift-nio"),
+            ],
+            swiftSettings: strictConcurrencySettings
+        ),
     ]
 )
 

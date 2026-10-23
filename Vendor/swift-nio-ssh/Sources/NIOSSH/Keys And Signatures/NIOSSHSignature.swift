@@ -335,11 +335,11 @@ private struct ECDSASignatureHelper {
         UInt64
     ) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
-    private init(r: ByteBuffer, s: ByteBuffer, pointSize: Int) {
-        precondition(MemoryLayout<ECDSASignatureHelper>.size >= pointSize, "Invalid width for ECDSA signature helper.")
+    private init(r: ByteBuffer, s: ByteBuffer, pointSize: Int) throws {
+        precondition(MemoryLayout<ECDSASignatureHelper>.size >= pointSize * 2, "Invalid width for ECDSA signature helper.")
 
-        let rByteView = r.mpIntView
-        let sByteView = s.mpIntView
+        let rByteView = try r.validatedECDSAScalarMPInt(maximumBytes: pointSize)
+        let sByteView = try s.validatedECDSAScalarMPInt(maximumBytes: pointSize)
 
         let rByteStartingOffset = pointSize - rByteView.count
         let sByteStartingOffset = pointSize - sByteView.count
@@ -357,21 +357,38 @@ private struct ECDSASignatureHelper {
     }
 
     static func toECDSASignature<Signature: ECDSASignatureProtocol>(r: ByteBuffer, s: ByteBuffer) throws -> Signature {
-        let helper = ECDSASignatureHelper(r: r, s: s, pointSize: Signature.pointSize)
+        let helper = try ECDSASignatureHelper(r: r, s: s, pointSize: Signature.pointSize)
         return try withUnsafeBytes(of: helper.storage) { storagePtr in
             try Signature(rawRepresentation: UnsafeRawBufferPointer(rebasing: storagePtr.prefix(Signature.pointSize * 2)))
         }
     }
 }
 
-private extension ByteBuffer {
-    // A view onto the mpInt bytes. Strips off a leading 0 if it is present for
-    // size reasons.
-    var mpIntView: ByteBufferView {
+extension ByteBuffer {
+    /// Validates the RFC 4251 mpint encoding used for an ECDSA scalar and returns
+    /// its unsigned magnitude. ECDSA scalars must be positive and nonzero. A
+    /// single leading zero is accepted only when it is required to keep the
+    /// two's-complement mpint positive.
+    internal func validatedECDSAScalarMPInt(maximumBytes: Int) throws -> ByteBufferView {
         var baseView = self.readableBytesView
-        if baseView.first == 0 {
-            baseView = baseView.dropFirst()
+
+        guard let first = baseView.first else {
+            throw NIOSSHError.invalidSSHMessage(reason: "ECDSA signature scalar must be nonzero")
         }
+
+        if first == 0 {
+            guard baseView.count > 1, baseView[baseView.index(after: baseView.startIndex)] & 0x80 != 0 else {
+                throw NIOSSHError.invalidSSHMessage(reason: "ECDSA signature scalar has a non-canonical mpint encoding")
+            }
+            baseView = baseView.dropFirst()
+        } else if first & 0x80 != 0 {
+            throw NIOSSHError.invalidSSHMessage(reason: "ECDSA signature scalar must not be negative")
+        }
+
+        guard baseView.count <= maximumBytes else {
+            throw NIOSSHError.invalidSSHMessage(reason: "ECDSA signature scalar exceeds the curve width")
+        }
+
         return baseView
     }
 }

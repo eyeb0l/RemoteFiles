@@ -61,44 +61,69 @@ Prism.languages.git={comment:/^#.*/m,deleted:/^[-–].*/m,inserted:/^\+.*/m,stri
 !function(e){var n=/\$(?:\w[a-z\d]*(?:_[^\x00-\x1F\s"'\\()$]*)?|\{[^}\s"'\\]+\})/i;e.languages.nginx={comment:{pattern:/(^|[\s{};])#.*/,lookbehind:!0,greedy:!0},directive:{pattern:/(^|\s)\w(?:[^;{}"'\\\s]|\\.|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\s+(?:#.*(?!.)|(?![#\s])))*?(?=\s*[;{])/,lookbehind:!0,greedy:!0,inside:{string:{pattern:/((?:^|[^\\])(?:\\\\)*)(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/,lookbehind:!0,greedy:!0,inside:{escape:{pattern:/\\["'\\nrt]/,alias:"entity"},variable:n}},comment:{pattern:/(\s)#.*/,lookbehind:!0,greedy:!0},keyword:{pattern:/^\S+/,greedy:!0},boolean:{pattern:/(\s)(?:off|on)(?!\S)/,lookbehind:!0},number:{pattern:/(\s)\d+[a-z]*(?!\S)/i,lookbehind:!0},variable:n}},punctuation:/[{};]/}}(Prism);
 
 // Helper function to flatten Prism tokens into simple objects
-function flattenPrismTokens(tokens) {
+function flattenPrismTokens(tokens, maximumTokens, maximumOutputLength) {
   var result = [];
+  var outputLength = 0;
+  var visited = 0;
+  var maximumNodes = maximumTokens * 8;
+  var stack = [];
+  for (var initial = tokens.length - 1; initial >= 0; initial--) {
+    stack.push({ token: tokens[initial], parentType: null });
+  }
 
-  function flatten(token, parentType) {
+  while (stack.length > 0) {
+    var item = stack.pop();
+    var token = item.token;
+    var parentType = item.parentType;
+    visited += 1;
+    if (visited > maximumNodes) { return null; }
     if (typeof token === 'string') {
       if (token.length > 0) {
+        outputLength += token.length;
         result.push({ content: token, type: parentType || 'plain' });
       }
     } else if (Array.isArray(token)) {
-      token.forEach(function(t) { flatten(t, parentType); });
+      for (var index = token.length - 1; index >= 0; index--) {
+        stack.push({ token: token[index], parentType: parentType });
+      }
     } else if (token && typeof token === 'object') {
       var type = token.type || parentType || 'plain';
       if (typeof token.content === 'string') {
         if (token.content.length > 0) {
+          outputLength += token.content.length;
           result.push({ content: token.content, type: type });
         }
       } else if (Array.isArray(token.content)) {
-        token.content.forEach(function(t) { flatten(t, type); });
+        for (var child = token.content.length - 1; child >= 0; child--) {
+          stack.push({ token: token.content[child], parentType: type });
+        }
       } else if (token.content && typeof token.content === 'object') {
-        flatten(token.content, type);
+        stack.push({ token: token.content, parentType: type });
       }
+    }
+    if (result.length > maximumTokens || outputLength > maximumOutputLength) {
+      return null;
     }
   }
 
-  tokens.forEach(function(token) { flatten(token, null); });
   return result;
 }
 
 // Export tokenization function
-function tokenizeCode(code, language) {
+function tokenizeCode(code, language, maximumTokens, maximumOutputLength) {
   try {
+    if (!Number.isSafeInteger(maximumTokens) || maximumTokens < 1 ||
+        !Number.isSafeInteger(maximumOutputLength) || maximumOutputLength < 0 ||
+        code.length > maximumOutputLength) {
+      return null;
+    }
     var grammar = Prism.languages[language];
     if (!grammar) {
       return [{ content: code, type: 'plain' }];
     }
     var tokens = Prism.tokenize(code, grammar);
-    return flattenPrismTokens(tokens);
+    return flattenPrismTokens(tokens, maximumTokens, maximumOutputLength);
   } catch (e) {
-    return [{ content: code, type: 'plain' }];
+    return null;
   }
 }

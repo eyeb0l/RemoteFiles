@@ -116,15 +116,95 @@ final class SFTPDirectoryReadTests: XCTestCase {
         try await server.stop()
     }
 
+    func testEntryLimitDrainsOutstandingReadsAndCloses() async throws {
+        let recorder = try await list(
+            FakeDirectory(entries: thousand, batch: 3, holdMilliseconds: 10),
+            concurrentReads: 8,
+            maximumEntries: 5
+        ) { _ in
+            XCTFail("An oversized listing must not be returned")
+        } failure: { error in
+            guard case SFTPError.directoryListingEntryLimitExceeded(5) = error else {
+                return XCTFail("Unexpected \(error)")
+            }
+        }
+        XCTAssertEqual(recorder.requests.filter { $0 == "close" }.count, 1)
+        XCTAssertEqual(recorder.requests.last, "close")
+        XCTAssertLessThanOrEqual(recorder.readdirs, 9, "The client must stop refilling after the limit is crossed")
+    }
+
+    func testMetadataLimitDrainsOutstandingReadsAndCloses() async throws {
+        let oversized = String(repeating: "x", count: 4_096)
+        let recorder = try await list(
+            FakeDirectory(entries: ["a", oversized], batch: 1, holdMilliseconds: 10),
+            concurrentReads: 4,
+            maximumMetadataBytes: 1_024
+        ) { _ in
+            XCTFail("An oversized listing must not be returned")
+        } failure: { error in
+            guard case SFTPError.directoryListingMetadataLimitExceeded(1_024) = error else {
+                return XCTFail("Unexpected \(error)")
+            }
+        }
+        XCTAssertEqual(recorder.requests.filter { $0 == "close" }.count, 1)
+        XCTAssertEqual(recorder.requests.last, "close")
+    }
+
+    func testRejectsZeroAndOversizedSFTPPacketLengths() async throws {
+        for length in [UInt32(0), UInt32(1_048_577)] {
+            let server = try await FakeSFTPServer.start(FakeDirectory(entries: [], invalidInitialPacketLength: length))
+            let client = try await server.connect()
+            let started = Date()
+            let watchdog = Task {
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                try? await client.close()
+            }
+            do {
+                _ = try await client.openSFTP(logger: FakeSFTPServer.quietLogger)
+                XCTFail("Packet length \(length) must be rejected")
+            } catch {
+                // The decoder error closes the subsystem channel, which fails initialization.
+            }
+            watchdog.cancel()
+            XCTAssertLessThan(Date().timeIntervalSince(started), 1, "The length prefix must be rejected immediately")
+            try? await client.close()
+            try await server.stop()
+        }
+    }
+
+    func testOpenFileAttributesUseHandleBasedFstat() async throws {
+        let server = try await FakeSFTPServer.start(FakeDirectory(entries: [], fileSize: 42))
+        addTeardownBlock { try? await server.stop() }
+        let client = try await server.connect()
+        addTeardownBlock { try? await client.close() }
+        let sftp = try await client.openSFTP(logger: FakeSFTPServer.quietLogger)
+        let file = try await sftp.openFile(filePath: "/fake/file", flags: .read)
+        addTeardownBlock {
+            if file.isActive { try? await file.close() }
+        }
+        let attributes = try await file.readAttributes()
+        XCTAssertEqual(attributes.size, 42)
+        try await file.close()
+        XCTAssertEqual(server.recorder.requests, ["open", "fstat", "close"])
+    }
+
     @discardableResult
     private func list(_ directory: FakeDirectory, concurrentReads: Int,
+                      maximumEntries: Int = 10_000,
+                      maximumMetadataBytes: Int = 16 * 1024 * 1024,
                       success: ([String]) -> Void,
                       failure: ((Error) -> Void)? = nil) async throws -> FakeRecorder {
         let server = try await FakeSFTPServer.start(directory)
         let client = try await server.connect()
         let sftp = try await client.openSFTP(logger: FakeSFTPServer.quietLogger)
         do {
-            let groups = try await sftp.listDirectory(atPath: "/fake", resolvingPath: false, concurrentReads: concurrentReads)
+            let groups = try await sftp.listDirectory(
+                atPath: "/fake",
+                resolvingPath: false,
+                concurrentReads: concurrentReads,
+                maximumEntries: maximumEntries,
+                maximumMetadataBytes: maximumMetadataBytes
+            )
             success(groups.flatMap(\.components).map(\.filename))
             if failure != nil { XCTFail("Listing unexpectedly succeeded") }
         } catch {
@@ -149,6 +229,8 @@ private struct FakeDirectory: Sendable {
     var failureCode: UInt32 = 4
     var invalidReaddir: Int?
     var closeStatus: UInt32 = 0
+    var invalidInitialPacketLength: UInt32?
+    var fileSize: UInt64 = 0
 }
 
 private final class FakeRecorder: @unchecked Sendable {
@@ -262,10 +344,25 @@ private final class FakeSFTPHandler: ChannelDuplexHandler {
     private func handle(_ packet: inout ByteBuffer, context: ChannelHandlerContext) {
         guard let type: UInt8 = packet.readInteger() else { return }
         if type == 1 { // INIT -> VERSION 3
+            if let length = directory.invalidInitialPacketLength {
+                return sendRawLength(length, context: context)
+            }
             return send(context) { $0.writeInteger(UInt8(2)); $0.writeInteger(UInt32(3)) }
         }
         guard let id: UInt32 = packet.readInteger() else { return }
         switch type {
+        case 3: // OPEN
+            recorder.record("open")
+            send(context) { $0.writeInteger(UInt8(102)); $0.writeInteger(id); $0.writeFakeString("file") }
+        case 8: // FSTAT
+            recorder.record("fstat")
+            send(context) {
+                $0.writeInteger(UInt8(105)); $0.writeInteger(id)
+                $0.writeInteger(UInt32(1)); $0.writeInteger(directory.fileSize)
+            }
+        case 17: // STAT
+            recorder.record("stat")
+            status(id, code: 4, context: context)
         case 11: // OPENDIR
             recorder.record("opendir")
             send(context) { $0.writeInteger(UInt8(102)); $0.writeInteger(id); $0.writeFakeString("dir") }
@@ -339,6 +436,12 @@ private final class FakeSFTPHandler: ChannelDuplexHandler {
         var packet = context.channel.allocator.buffer(capacity: payload.readableBytes + 4)
         packet.writeInteger(UInt32(payload.readableBytes))
         packet.writeBuffer(&payload)
+        context.writeAndFlush(wrapOutboundOut(SSHChannelData(type: .channel, data: .byteBuffer(packet))), promise: nil)
+    }
+
+    private func sendRawLength(_ length: UInt32, context: ChannelHandlerContext) {
+        var packet = context.channel.allocator.buffer(capacity: 4)
+        packet.writeInteger(length)
         context.writeAndFlush(wrapOutboundOut(SSHChannelData(type: .channel, data: .byteBuffer(packet))), promise: nil)
     }
 }

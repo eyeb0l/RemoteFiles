@@ -56,6 +56,24 @@ before EOF, task cancellation, or a reply other than names or EOF (upstream sile
 one) stops new requests, drains those in flight, closes the handle and fails the listing. RemoteFiles
 passes 8.
 
+The vendored SFTP decoder rejects a zero-length frame and any frame larger than 1 MiB as soon as its
+four-byte length prefix arrives. Both client and server `ByteToMessageHandler` instances use the matching
+1 MiB-plus-prefix cumulation cap. SFTP v3 has no negotiated maximum; RemoteFiles requests file data in
+64 KiB chunks, so the cap preserves its normal transfers while bounding memory committed to an
+attacker-controlled incomplete frame.
+
+`listDirectory` also bounds retained results to 10,000 entries and 16 MiB of decoded filename, longname,
+attribute-extension, and per-entry storage by default. Both limits are optional parameters so a caller or
+test may select a smaller bound. Crossing either limit stops issuing `READDIR`, drains the already-issued
+pipeline window, sends one `CLOSE`, and then throws the corresponding `SFTPError`; the existing 1,000-entry
+fixture remains below both defaults.
+
+`SFTPFile.readAttributes()` sends `FSTAT` for the open handle rather than repeating pathname `STAT`.
+RemoteFiles uses those attributes to validate size and type after `OPEN`, so they now describe the opened
+object if a pathname is concurrently replaced. This is defense in depth for path races; SFTP v3 still has
+no portable handle-relative open operation and this change alone does not make canonicalize-then-open
+atomic.
+
 ## RSA and ECDSA identity imports
 
 `ModernIdentityKeys.swift` adds import-only OpenSSH ECDSA P-256/P-384/P-521 parsers

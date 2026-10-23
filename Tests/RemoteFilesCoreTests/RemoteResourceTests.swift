@@ -510,6 +510,89 @@ final class RemoteResourceTests: XCTestCase {
         let count = await service.downloads
         XCTAssertEqual(count, 3, "Different connection identities must never share cached bytes")
     }
+    func testCacheIsProtectedBeforeTransferAndRevalidatedBeforeHit() async throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? fm.removeItem(at: dir) }
+        try fm.createDirectory(at: dir, withIntermediateDirectories: false,
+                               attributes: [.posixPermissions: 0o755])
+        let stale = dir.appendingPathComponent(UUID().uuidString + ".partial")
+        try Data("abandoned".utf8).write(to: stale)
+        let service = ProtectedDestinationTransportMock()
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        let doc = location
+
+        let file = try await resolver.localFile(for: "protected.png", in: doc)
+
+        XCTAssertFalse(fm.fileExists(atPath: stale.path), "Previous-lifecycle partials must be removed before transfer")
+        let capturedAttributes = await service.destinationAttributes
+        let observed = try XCTUnwrap(capturedAttributes)
+        XCTAssertEqual(observed[.type] as? FileAttributeType, .typeRegular)
+        XCTAssertEqual(((observed[.posixPermissions] as? NSNumber)?.intValue ?? 0) & 0o777, 0o600)
+        var directoryAttributes = try fm.attributesOfItem(atPath: dir.path)
+        XCTAssertEqual(((directoryAttributes[.posixPermissions] as? NSNumber)?.intValue ?? 0) & 0o777, 0o700)
+        XCTAssertEqual(try dir.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+        #if os(iOS)
+        // iOS Simulator can accept protection attributes without reporting a
+        // Data Protection class; physical devices must report `.complete`.
+        if let protection = observed[.protectionKey] as? FileProtectionType {
+            XCTAssertEqual(protection, .complete)
+        }
+        if let protection = directoryAttributes[.protectionKey] as? FileProtectionType {
+            XCTAssertEqual(protection, .complete)
+        }
+        #endif
+
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
+        try fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file.path)
+        let reused = try await resolver.localFile(for: "protected.png", in: doc)
+        XCTAssertEqual(reused, file)
+        directoryAttributes = try fm.attributesOfItem(atPath: dir.path)
+        let fileAttributes = try fm.attributesOfItem(atPath: file.path)
+        XCTAssertEqual(((directoryAttributes[.posixPermissions] as? NSNumber)?.intValue ?? 0) & 0o777, 0o700)
+        XCTAssertEqual(((fileAttributes[.posixPermissions] as? NSNumber)?.intValue ?? 0) & 0o777, 0o600)
+        let downloads = await service.downloads
+        XCTAssertEqual(downloads, 1)
+
+        let outside = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? fm.removeItem(at: outside) }
+        try Data("not cached".utf8).write(to: outside)
+        try fm.removeItem(at: file)
+        try fm.createSymbolicLink(at: file, withDestinationURL: outside)
+        let replaced = try await resolver.localFile(for: "protected.png", in: doc)
+        XCTAssertEqual(replaced, file)
+        XCTAssertEqual(try Data(contentsOf: replaced), Data("protected image".utf8))
+        XCTAssertEqual(try Data(contentsOf: outside), Data("not cached".utf8), "Cache validation must not follow a substituted symlink")
+        let redownloads = await service.downloads
+        XCTAssertEqual(redownloads, 2)
+    }
+
+    func testSharedCacheSweepPreservesAnotherResolverActivePartial() async throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? fm.removeItem(at: dir) }
+        let suspendedService = SuspendedDestinationTransportMock()
+        let firstResolver = RemoteResourceResolver(service: suspendedService, directory: dir)
+        let first = Task { try await firstResolver.localFile(for: "first.png", in: location) }
+        await suspendedService.waitUntilStarted()
+
+        let secondService = ProtectedDestinationTransportMock()
+        let secondResolver = RemoteResourceResolver(service: secondService, directory: dir)
+        let second = try await secondResolver.localFile(for: "second.png", in: location)
+        XCTAssertEqual(try Data(contentsOf: second), Data("protected image".utf8))
+        XCTAssertEqual(
+            try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "partial" }.count,
+            1,
+            "A second window must not sweep an active same-process transfer"
+        )
+
+        await suspendedService.release()
+        let firstFile = try await first.value
+        XCTAssertEqual(try Data(contentsOf: firstFile), Data("first image".utf8))
+        XCTAssertTrue(try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+            .allSatisfy { $0.pathExtension != "partial" })
+    }
 }
 private actor ImageExistenceTransportMock: RemoteFileService {
     private var lookupError: RemoteFileError?
@@ -546,6 +629,58 @@ private actor ImageTransportMock: RemoteFileService {
         return .init(name: "a.png", path: path, kind: .file, size: 11)
     }
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { listings += 1; throw RemoteFileError.unsupportedFile }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.unsupportedFile }
+    func disconnect() async {}
+}
+
+private actor ProtectedDestinationTransportMock: RemoteFileService {
+    private(set) var downloads = 0
+    private(set) var destinationAttributes: [FileAttributeKey: Any]?
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String,
+                      destination: URL, limit: Int) async throws -> RemoteEntry {
+        downloads += 1
+        destinationAttributes = try FileManager.default.attributesOfItem(atPath: destination.path)
+        let handle = try FileHandle(forWritingTo: destination)
+        defer { try? handle.close() }
+        try handle.write(contentsOf: Data("protected image".utf8))
+        return .init(name: "protected.png", path: path, kind: .file, size: 15)
+    }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.unsupportedFile }
+    func disconnect() async {}
+}
+
+private actor SuspendedDestinationTransportMock: RemoteFileService {
+    private var started = false
+    private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { startedWaiters.append($0) }
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String,
+                      destination: URL, limit: Int) async throws -> RemoteEntry {
+        started = true
+        let waiters = startedWaiters
+        startedWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { releaseContinuation = $0 }
+        let handle = try FileHandle(forWritingTo: destination)
+        defer { try? handle.close() }
+        try handle.write(contentsOf: Data("first image".utf8))
+        return .init(name: "first.png", path: path, kind: .file, size: 11)
+    }
+
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
     func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.unsupportedFile }
     func disconnect() async {}

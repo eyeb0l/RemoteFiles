@@ -55,7 +55,12 @@ model in a later navigation change.
   canonical path stays inside the document folder reuses the bytes; anything else downloads
   again with the full boundary check. SFTP times have one-second resolution, so document
   **Refresh** still invalidates and re-downloads its images. At most two bounded partial transfers add up to 256 MiB transient
-  disk usage. Failed/cancelled partials are removed; old orphan files expire during cleanup.
+  disk usage. The cache directory is revalidated as a real directory with mode `0700`,
+  backup exclusion and complete iOS file protection before every hit or transfer.
+  Partial files are created with mode `0600` and complete protection before remote bytes
+  are written; completed entries are revalidated before reuse. Failed/cancelled partials
+  are removed, and partials abandoned by a previous process are removed on first use.
+  Process-scoped names keep one window's cleanup from deleting another window's active transfer.
   Cache filenames hash the normalized endpoint, username, identity, document root and
   canonicalized lexical path, so renaming a connection or editing its starting folder keeps
   cached images, while different accounts/identities/endpoints never share entries. This is `Library/Caches`,

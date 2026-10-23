@@ -40,7 +40,10 @@ public final class SFTPClient: Sendable {
     fileprivate static func setupChannelHanders(channel: Channel, logger: Logger) -> EventLoopFuture<SFTPClient> {
         let responses = SFTPResponses(sftpVersion: channel.eventLoop.makePromise())
         
-        let deserializeHandler = ByteToMessageHandler(SFTPMessageParser())
+        let deserializeHandler = ByteToMessageHandler(
+            SFTPMessageParser(),
+            maximumBufferSize: SFTPMessageParser.maximumBufferSize
+        )
         let serializeHandler = MessageToByteHandler(SFTPMessageSerializer())
         let sftpInboundHandler = SFTPClientInboundHandler(responses: responses, logger: logger)
         
@@ -145,6 +148,8 @@ public final class SFTPClient: Sendable {
     ///   - path: The path to list
     ///   - resolvingPath: Whether to canonicalize `path` with `realpath` first
     ///   - concurrentReads: The most READDIR requests kept in flight; 1 reads one batch at a time
+    ///   - maximumEntries: Maximum entries retained across all returned batches
+    ///   - maximumMetadataBytes: Maximum cumulative decoded filename, longname, and attribute metadata
     /// - Returns: Array of directory entries
     /// - Throws: SFTPError if the request fails
     ///
@@ -160,8 +165,16 @@ public final class SFTPClient: Sendable {
     public func listDirectory(
         atPath path: String,
         resolvingPath: Bool = true,
-        concurrentReads: Int = 1
+        concurrentReads: Int = 1,
+        maximumEntries: Int = 10_000,
+        maximumMetadataBytes: Int = 16 * 1024 * 1024
     ) async throws -> [SFTPMessage.Name] {
+        guard maximumEntries >= 0 else {
+            throw SFTPError.directoryListingEntryLimitExceeded(maximumEntries)
+        }
+        guard maximumMetadataBytes >= 0 else {
+            throw SFTPError.directoryListingMetadataLimitExceeded(maximumMetadataBytes)
+        }
         var path = path
         var oldPath: String
 
@@ -194,6 +207,27 @@ public final class SFTPClient: Sendable {
         var returned: Set<String>?
         var closing: EventLoopFuture<SFTPResponse>?
         var failure: Error?
+        var entryCount = 0
+        var metadataBytes = 0
+        func append(_ name: SFTPMessage.Name) throws {
+            let nextEntryCount = entryCount.addingReportingOverflow(name.components.count)
+            guard !nextEntryCount.overflow, nextEntryCount.partialValue <= maximumEntries else {
+                throw SFTPError.directoryListingEntryLimitExceeded(maximumEntries)
+            }
+
+            var nextMetadataBytes = metadataBytes
+            for component in name.components {
+                let componentBytes = component.directoryListingMetadataBytes
+                let sum = nextMetadataBytes.addingReportingOverflow(componentBytes)
+                guard !sum.overflow, sum.partialValue <= maximumMetadataBytes else {
+                    throw SFTPError.directoryListingMetadataLimitExceeded(maximumMetadataBytes)
+                }
+                nextMetadataBytes = sum.partialValue
+            }
+            names.append(name)
+            entryCount = nextEntryCount.partialValue
+            metadataBytes = nextMetadataBytes
+        }
         func fill() {
             while failure == nil, closing == nil, inFlight.count < window {
                 if Task.isCancelled { failure = CancellationError(); return }
@@ -207,7 +241,7 @@ public final class SFTPClient: Sendable {
                 guard failure == nil else { continue }
                 switch response {
                 case .name(let name) where closing == nil:
-                    names.append(name)
+                    try append(name)
                     fill()
                 case .name(let name):
                     // Only a server that reorders one handle's requests, or rewinds after EOF, answers names
@@ -215,7 +249,7 @@ public final class SFTPClient: Sendable {
                     var seen = returned ?? Set(names.flatMap { $0.components.map(\.filename) })
                     let fresh = name.components.filter { seen.insert($0.filename).inserted }
                     returned = seen
-                    if !fresh.isEmpty { names.append(.init(requestId: name.requestId, components: fresh)) }
+                    if !fresh.isEmpty { try append(.init(requestId: name.requestId, components: fresh)) }
                 case .status(let status) where status.errorCode == .eof && closing == nil:
                     closing = self.sendRequestFuture(.closeFile(.init(requestId: self.allocateRequestId(), handle: handle.handle)))
                 case .status(let status) where status.errorCode == .eof:
@@ -637,6 +671,29 @@ extension SSHClient {
                 }
             }
         }.get()
+    }
+}
+
+private extension SFTPPathComponent {
+    /// A conservative accounting of heap-backed decoded metadata retained by a directory listing.
+    var directoryListingMetadataBytes: Int {
+        var bytes = MemoryLayout<SFTPPathComponent>.stride
+        for value in [filename, longname] {
+            let sum = bytes.addingReportingOverflow(value.utf8.count)
+            if sum.overflow { return .max }
+            bytes = sum.partialValue
+        }
+        for (key, value) in attributes.extended {
+            let element = bytes.addingReportingOverflow(MemoryLayout<(String, String)>.stride)
+            if element.overflow { return .max }
+            bytes = element.partialValue
+            for string in [key, value] {
+                let sum = bytes.addingReportingOverflow(string.utf8.count)
+                if sum.overflow { return .max }
+                bytes = sum.partialValue
+            }
+        }
+        return bytes
     }
 }
 

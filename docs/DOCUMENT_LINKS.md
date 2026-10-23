@@ -21,6 +21,14 @@ resource-download policy. Automatic Markdown image paths remain confined to the
 source document's own directory tree; enabling document parent links does not
 widen image access.
 
+The transport also re-resolves the canonical root and target after opening and
+reads metadata through the open file handle, which detects a stable namespace
+replacement before bytes move. This remains a client policy for a trusted SSH
+server, not an atomic filesystem jail: portable SFTP v3 has no descriptor-relative
+`openat`/no-follow operation. Accounts whose namespace can be changed concurrently
+by an adversary require a server-side jail, immutable root, or server helper that
+performs that atomic open.
+
 Heading fragments (`#heading`) navigate locally or accompany a relative Markdown
 file link. The reader separates the fragment before asking the existing confined
 transport to resolve the file; fragments never enter filesystem paths. Parsed
