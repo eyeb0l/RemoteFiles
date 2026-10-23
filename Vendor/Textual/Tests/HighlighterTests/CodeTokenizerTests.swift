@@ -80,4 +80,27 @@ extension CodeTokenizerTests {
       #expect(tokens.contains { $0.type == .keyword })
     }
   }
+
+  @Test
+  @available(watchOS, unavailable)
+  func oversizedUTF8InputFallsBackBeforeTokenization() async throws {
+    let tokenizer = try #require(CodeTokenizer())
+    let code = String(repeating: "é", count: CodeTokenizer.maximumCodeBytes / 2 + 1)
+
+    let tokens = await tokenizer.tokenize(code: code, language: "swift")
+
+    #expect(tokens == [.init(content: code, type: .plain)])
+  }
+
+  @Test
+  @available(watchOS, unavailable)
+  func excessiveTokenOutputFallsBackLosslessly() async throws {
+    let tokenizer = try #require(CodeTokenizer())
+    let code = Array(repeating: "let value = 1", count: 4_001).joined(separator: "\n")
+    #expect(code.utf8.count < CodeTokenizer.maximumCodeBytes)
+
+    let tokens = await tokenizer.tokenize(code: code, language: "swift")
+
+    #expect(tokens == [.init(content: code, type: .plain)])
+  }
 }

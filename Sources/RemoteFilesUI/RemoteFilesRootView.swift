@@ -12,11 +12,22 @@ public struct RemoteFilesRootView: View {
     @State private var lifecycleTask: Task<Void, Never>?
     public init() {}
     public var body: some View {
-        Group {
-            if let model { AppNavigation(model: model) }
-            else if let startupError {
-                ContentUnavailableView("Library unavailable", systemImage: "exclamationmark.folder", description: Text(startupError))
-            } else { ProgressView("Opening library…") }
+        ZStack {
+            Group {
+                if let model { AppNavigation(model: model) }
+                else if let startupError {
+                    ContentUnavailableView("Library unavailable", systemImage: "exclamationmark.folder", description: Text(startupError))
+                } else { ProgressView("Opening library…") }
+            }
+            .privacySensitive()
+            .disabled(scenePhase != .active)
+            .accessibilityHidden(scenePhase != .active)
+
+            if scenePhase != .active {
+                RootPrivacyCover()
+                    .transition(.identity)
+                    .zIndex(1)
+            }
         }
         .task {
             guard model == nil, startupError == nil else { return }
@@ -44,6 +55,9 @@ public struct RemoteFilesRootView: View {
             }
         }
         #if canImport(UIKit)
+        .background(RootWindowPrivacyInstaller(isVisible: scenePhase != .active))
+        #endif
+        #if canImport(UIKit)
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
             model?.clearCaches()
             Task {
@@ -52,6 +66,103 @@ public struct RemoteFilesRootView: View {
             }
         }
         #endif
+    }
+}
+
+#if canImport(UIKit)
+/// SwiftUI overlays live beneath a presented sheet. This zero-sized bridge also
+/// installs the same shield directly on the window, above every presentation,
+/// so connection editors and readers cannot leak through an app-switcher snapshot.
+private struct RootWindowPrivacyInstaller: UIViewRepresentable {
+    let isVisible: Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeUIView(context: Context) -> UIView { UIView(frame: .zero) }
+    func updateUIView(_ view: UIView, context: Context) {
+        context.coordinator.update(anchor: view, isVisible: isVisible)
+    }
+    static func dismantleUIView(_ view: UIView, coordinator: Coordinator) {
+        coordinator.remove()
+    }
+
+    @MainActor final class Coordinator {
+        private weak var window: UIWindow?
+        private let shield: UIView = {
+            let shield = UIView(frame: .zero)
+            shield.backgroundColor = .systemBackground
+            shield.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            shield.isAccessibilityElement = true
+            shield.accessibilityLabel = "RemoteFiles is hidden while inactive"
+            shield.accessibilityIdentifier = "privacy-cover"
+            shield.accessibilityViewIsModal = true
+
+            let image = UIImageView(image: UIImage(systemName: "lock.fill"))
+            image.tintColor = .systemIndigo
+            image.contentMode = .scaleAspectFit
+            image.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 36, weight: .semibold)
+            let label = UILabel()
+            label.text = "RemoteFiles Locked"
+            label.textColor = .systemIndigo
+            label.font = .preferredFont(forTextStyle: .headline)
+            let stack = UIStackView(arrangedSubviews: [image, label])
+            stack.axis = .vertical; stack.alignment = .center; stack.spacing = 12
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            shield.addSubview(stack)
+            NSLayoutConstraint.activate([
+                stack.centerXAnchor.constraint(equalTo: shield.centerXAnchor),
+                stack.centerYAnchor.constraint(equalTo: shield.centerYAnchor),
+            ])
+            return shield
+        }()
+
+        func update(anchor: UIView, isVisible: Bool, retryIfNeeded: Bool = true) {
+            guard isVisible else { remove(); return }
+            guard let target = anchor.window else {
+                guard retryIfNeeded else { return }
+                DispatchQueue.main.async { [weak self, weak anchor] in
+                    guard let self, let anchor else { return }
+                    self.update(anchor: anchor, isVisible: true, retryIfNeeded: false)
+                }
+                return
+            }
+            if window !== target || shield.superview !== target {
+                shield.removeFromSuperview()
+                window = target
+                shield.frame = target.bounds
+                target.addSubview(shield)
+            } else {
+                target.bringSubviewToFront(shield)
+            }
+        }
+
+        func remove() {
+            shield.removeFromSuperview()
+            window = nil
+        }
+    }
+}
+#endif
+
+/// An opaque, interactive top layer prevents the app switcher snapshot from
+/// retaining remote filenames or document contents. It appears for `.inactive`
+/// as well as `.background`, because snapshot capture begins before backgrounding.
+private struct RootPrivacyCover: View {
+    var body: some View {
+        Color(uiColor: .systemBackground)
+            .ignoresSafeArea()
+            .overlay {
+                VStack(spacing: 12) {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 36, weight: .semibold))
+                    Text("RemoteFiles Locked")
+                        .font(.headline)
+                }
+                .foregroundStyle(.indigo)
+            }
+            .contentShape(Rectangle())
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("RemoteFiles is hidden while inactive")
+            .accessibilityIdentifier("privacy-cover")
     }
 }
 

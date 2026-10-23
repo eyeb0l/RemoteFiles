@@ -2,12 +2,27 @@ import NIO
 
 struct SFTPMessageParser: ByteToMessageDecoder {
     typealias InboundOut = SFTPMessage
+
+    /// SFTP v3 has no negotiated packet maximum. RemoteFiles reads file data in 64 KiB chunks,
+    /// while leaving ample room for directory and extension replies from other implementations.
+    static let maximumPacketSize: UInt32 = 1024 * 1024
+    static let maximumBufferSize = Int(maximumPacketSize) + MemoryLayout<UInt32>.size
     
     mutating func decode(context: ChannelHandlerContext, buffer: inout ByteBuffer) throws -> DecodingState {
         let oldReaderIndex = buffer.readerIndex
         
+        guard let length = buffer.readInteger(as: UInt32.self) else {
+            buffer.moveReaderIndex(to: oldReaderIndex)
+            return .needMoreData
+        }
+        guard length > 0 else {
+            throw SFTPError.invalidPacketLength(length)
+        }
+        guard length <= Self.maximumPacketSize else {
+            throw SFTPError.packetTooLarge(length: length, maximum: Self.maximumPacketSize)
+        }
+
         guard
-            let length = buffer.readInteger(as: UInt32.self),
             let typeByte = buffer.readInteger(as: UInt8.self),
             var payload = buffer.readSlice(length: Int(length) - 1) // 1 for the already parsed type
         else {

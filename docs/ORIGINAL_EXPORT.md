@@ -9,12 +9,18 @@ Unsupported preview types and empty files can still be exported.
 
 Only regular files within the connection’s canonical starting folder can export.
 The SFTP transport checks REALPATH for the configured root and target, rejects
-escaping symlinks, and enforces the 128 MiB limit on every received chunk. The
+escaping symlinks, rechecks stable root/target paths after opening, reads metadata
+from the open handle, and enforces the 128 MiB limit on every received chunk. The
 exporter also checks advertised, returned and final disk size. There is at most
 one transfer or prepared output. Preparation times out after 180 seconds. A
 cancelled worker cannot publish a late file or permit an overlapping transfer
 until it drains. Disconnect retires the transport and drains the old exporter
 before creating a replacement.
+
+This confinement is a client policy for a trusted SSH server. Portable SFTP v3
+cannot atomically open a child beneath an anchored directory without following
+links, so an account namespace controlled by a concurrent adversary requires a
+server-side jail, immutable root, or an atomic server helper.
 
 The action changes to **Cancel Export Preparation** during download. Navigation
 away, backgrounding, disabled state, selected input changes and exporter/service

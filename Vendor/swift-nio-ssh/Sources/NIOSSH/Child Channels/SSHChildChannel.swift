@@ -685,6 +685,16 @@ private extension SSHChildChannel {
     private func deliverPendingWrites() {
         while self.pendingWritesFromChannel.hasMark, self.writabilityManager.windowSpaceOnNetwork > 0, var write = self.pendingWritesFromChannel.first {
             let maxWriteLength = min(self.writabilityManager.windowSpaceOnNetwork, Int(self.peerMaxMessageSize))
+            guard maxWriteLength > 0 || write.0.readableBytes == 0 else {
+                self.errorEncountered(
+                    error: NIOSSHError.protocolViolation(
+                        protocolName: "channel",
+                        violation: "peer maximum packet size cannot make forward progress"
+                    )
+                )
+                return
+            }
+
             let (actualWrite, excess) = write.0.trim(maxLength: maxWriteLength)
             write.0 = actualWrite
 
@@ -711,6 +721,20 @@ private extension SSHChildChannel {
     private func failPendingWrites(error: Error) {
         while self.pendingWritesFromChannel.count > 0 {
             self.pendingWritesFromChannel.removeFirst().1?.fail(error)
+        }
+    }
+}
+
+extension SSHChildChannel {
+    /// SSH peers control this value, and zero would make a non-empty write split into an
+    /// endless sequence of zero-byte fragments. Small nonzero values remain valid for
+    /// compatibility with peers that advertise packet sizes below the RFC recommendation.
+    static func validatePeerMaximumPacketSize(_ maximumPacketSize: UInt32) throws {
+        guard maximumPacketSize > 0 else {
+            throw NIOSSHError.protocolViolation(
+                protocolName: "channel",
+                violation: "peer advertised a zero maximum packet size"
+            )
         }
     }
 }
@@ -756,6 +780,7 @@ extension SSHChildChannel {
     }
 
     private func handleInboundChannelOpen(_ message: SSHMessage.ChannelOpenMessage) throws {
+        try Self.validatePeerMaximumPacketSize(message.maximumPacketSize)
         self.state.receiveChannelOpen(message)
 
         // Window size starts at zero, so we treat this as an increment. However, we disregard whether this changed
@@ -769,6 +794,7 @@ extension SSHChildChannel {
     }
 
     private func handleInboundChannelOpenConfirmation(_ message: SSHMessage.ChannelOpenConfirmationMessage) throws {
+        try Self.validatePeerMaximumPacketSize(message.maximumPacketSize)
         try self.state.receiveChannelOpenConfirmation(message)
 
         // Window size starts at zero, so we treat this as an increment. However, we disregard whether this changed

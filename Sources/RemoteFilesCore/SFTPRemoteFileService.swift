@@ -283,17 +283,31 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching {
         let session = try await session(for: profile)
         let result = try await perform(session: session) { sftp -> (Data?, RemoteFileVersion?, Int) in
             var target = try Self.validated(path)
+            var canonicalRoot: String?
             if let allowedRoot {
                 let root = try await sftp.getRealPath(atPath: Self.validated(allowedRoot))
                 if requiresCanonicalRoot, !root.utf8.elementsEqual(allowedRoot.utf8) { throw RemoteDocumentLinkError.outsideConnection }
                 target = try await sftp.getRealPath(atPath: target)
                 guard RemoteResourcePath.contains(target, in: root) else { throw RemoteDocumentLinkError.outsideConnection }
+                canonicalRoot = root
             }
             if let since, RemoteFileVersion(attributes: try await sftp.getAttributes(at: target)) == since {
                 return (nil, since, 0)
             }
             let file = try await sftp.openFile(filePath: target, flags: .read)
             do {
+                if let canonicalRoot {
+                    // SFTP v3 has no portable openat/no-follow operation. Re-resolving both
+                    // paths after OPEN catches stable namespace replacement before bytes move;
+                    // the server must still provide a jail or immutable root for an atomic boundary.
+                    let currentRoot = try await sftp.getRealPath(atPath: canonicalRoot)
+                    let currentTarget = try await sftp.getRealPath(atPath: target)
+                    guard currentRoot.utf8.elementsEqual(canonicalRoot.utf8),
+                          currentTarget.utf8.elementsEqual(target.utf8),
+                          RemoteResourcePath.contains(currentTarget, in: currentRoot) else {
+                        throw RemoteDocumentLinkError.outsideConnection
+                    }
+                }
                 // The version is taken before the bytes, so a concurrent write reads as changed next time.
                 let attributes = try await file.readAttributes()
                 let (bytes, requests) = try await BoundedPreviewReader.read(initialSize: attributes.size, limit: limit) { offset, amount in
@@ -343,26 +357,40 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching {
             }
             guard RemoteResourcePath.contains(canonical, in: root) else { throw RemoteResourceError.outsideDocument }
             let file = try await sftp.openFile(filePath: canonical, flags: .read)
-            let attributes = try await file.readAttributes()
-            let entry = Self.entry(name: RemotePath.name(of: canonical), path: canonical, attributes: attributes)
-            guard entry.kind == .file else { throw RemoteFileError.unsupportedFile }
-            if let size = attributes.size, size > UInt64(limit) { throw RemoteFileError.tooLarge(limit) }
-            FileManager.default.createFile(atPath: destination.path, contents: nil)
-            let handle = try FileHandle(forWritingTo: destination)
-            defer { try? handle.close() }
-            var count = 0
-            await progress(.init(totalBytes: attributes.size))
-            _ = try await BoundedPreviewReader.stream(initialSize: attributes.size, limit: limit, window: 16, readChunk: { offset, amount in
-                try await file.read(from: offset, length: amount)
-            }) { chunk in
-                try handle.write(contentsOf: Data(chunk.readableBytesView))
-                count += chunk.readableBytes
-                await progress(.init(receivedBytes: UInt64(count), totalBytes: attributes.size))
+            do {
+                // This post-OPEN stability check catches durable path replacement before
+                // publication. Atomic confinement still requires a server-side jail or helper.
+                let currentRoot = try await sftp.getRealPath(atPath: root)
+                let currentTarget = try await sftp.getRealPath(atPath: canonical)
+                guard currentRoot.utf8.elementsEqual(root.utf8),
+                      currentTarget.utf8.elementsEqual(canonical.utf8),
+                      RemoteResourcePath.contains(currentTarget, in: currentRoot) else {
+                    throw RemoteResourceError.outsideDocument
+                }
+                let attributes = try await file.readAttributes()
+                let entry = Self.entry(name: RemotePath.name(of: canonical), path: canonical, attributes: attributes)
+                guard entry.kind == .file else { throw RemoteFileError.unsupportedFile }
+                if let size = attributes.size, size > UInt64(limit) { throw RemoteFileError.tooLarge(limit) }
+                FileManager.default.createFile(atPath: destination.path, contents: nil)
+                let handle = try FileHandle(forWritingTo: destination)
+                defer { try? handle.close() }
+                var count = 0
+                await progress(.init(totalBytes: attributes.size))
+                _ = try await BoundedPreviewReader.stream(initialSize: attributes.size, limit: limit, window: 16, readChunk: { offset, amount in
+                    try await file.read(from: offset, length: amount)
+                }) { chunk in
+                    try handle.write(contentsOf: Data(chunk.readableBytesView))
+                    count += chunk.readableBytes
+                    await progress(.init(receivedBytes: UInt64(count), totalBytes: attributes.size))
+                }
+                try await file.close()
+                try Task.checkCancellation()
+                await progress(.init(receivedBytes: UInt64(count), totalBytes: UInt64(count), isComplete: true))
+                return (entry, count)
+            } catch {
+                try? await file.close()
+                throw error
             }
-            try await file.close()
-            try Task.checkCancellation()
-            await progress(.init(receivedBytes: UInt64(count), totalBytes: UInt64(count), isComplete: true))
-            return (entry, count)
         }
         measurements.fileOperations += 1; measurements.bytesReceived += result.1
         return result.0

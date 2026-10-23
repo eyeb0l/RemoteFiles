@@ -14,7 +14,7 @@ resources are not loaded. Script-only app entry pages explain why there is no
 static content to display. Source keeps the original highlighted HTML and the
 existing copy/export actions. See [HTML previews](HTML_PREVIEWS.md).
 
-Source files and the Markdown **Source** tab have automatic syntax highlighting in light and dark appearances, using the filename to select the bundled grammar (including Swift, JavaScript/TypeScript, Python, JSON, YAML, shell, HTML/CSS and SQL). Plain source appears immediately; tokenization and color preparation happen off the main actor. Selection and **Copy Source** retain the original text. Unknown formats, sources above 256 KiB, and results above 16,000 tokens stay plain to bound rendering work; the existing 2 MiB text-preview limit is unchanged. The tokenizer runs locally and loads no remote scripts. Its token cache holds at most two documents within an estimated 2 MiB budget and clears on disconnect/background or memory warning. Leaving the source view cancels publication of unfinished highlighting.
+Source files and the Markdown **Source** tab have automatic syntax highlighting in light and dark appearances, using the filename to select the bundled grammar (including Swift, JavaScript/TypeScript, Python, JSON, YAML, shell, HTML/CSS and SQL). Plain source appears immediately; tokenization and color preparation happen off the main actor. Selection and **Copy Source** retain the original text. Unknown formats, sources above 256 KiB, and results above 16,000 tokens stay plain to bound rendering work; the existing 2 MiB text-preview limit is unchanged. Rendered Markdown code fences use the same 256 KiB / 16,000-token budget and fall back losslessly to plain code when either limit is reached. The tokenizer runs locally and loads no remote scripts. Its token cache holds at most two documents within an estimated 2 MiB budget and clears on disconnect/background or memory warning. Leaving the source view cancels publication of unfinished highlighting.
 
 ## Document navigation and original export
 
@@ -31,6 +31,11 @@ for up to 200 connection/path pairs. Changed text starts at the top. Positions
 save after scrolling pauses and when leaving the reader or backgrounding; Demo
 does not write reading history. Pixel positions are approximate if the screen
 size or text settings change.
+
+When the scene becomes inactive or backgrounded, an opaque window-level privacy
+cover sits above readers and presented sheets before the system captures an app
+switcher snapshot. Returning active removes the cover without changing navigation,
+reader position, or presentation state.
 
 Rendered Markdown can open relative Markdown/text/image/PDF/audio/video links within the
 connection’s canonical starting folder. Native Back keeps separate Rendered and

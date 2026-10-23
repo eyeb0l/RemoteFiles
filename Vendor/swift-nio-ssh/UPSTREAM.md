@@ -10,3 +10,9 @@ blob and fingerprint keep their original encoding. This permits RFC 8332 RSA SHA
 with `ssh-rsa` public keys. Built-in keys keep their existing algorithm. No host-key negotiation,
 legacy RSA verification or algorithm defaults are changed. Regression coverage includes an
 independent OpenSSH server with SHA-1 RSA authentication explicitly disabled.
+
+Local security hardening validates encrypted packet-length arithmetic before sizing a read,
+rejects a peer channel maximum packet size of zero while preserving small nonzero values, and
+validates ECDSA signature mpints as canonical positive, nonzero, curve-width-bounded integers
+before copying them into fixed-width storage. The package retains a focused local test target for
+these untrusted wire-format boundaries.

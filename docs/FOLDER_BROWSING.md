@@ -4,6 +4,11 @@
 
 Folders list their contents with folders first. Use **Folder actions** to refresh, show hidden files, add a favourite, or choose how the folder is sorted. The search field filters this folder, searches names in its subfolders, or searches file contents.
 
+One directory response is bounded to 10,000 entries and 16 MiB of decoded name
+and attribute metadata. Crossing either limit closes the remote directory and
+shows an error; RemoteFiles never presents a silently truncated folder. Individual
+SFTP frames are capped at 1 MiB before the client buffers their declared body.
+
 | Linked folder | File and broken links | Sorted by size |
 | --- | --- | --- |
 | <img src="screenshots/folder-browsing/linked-folder.jpg" width="240" alt="Current reports, a link to a folder, listed with the other folders"> | <img src="screenshots/folder-browsing/file-and-broken-links.jpg" width="240" alt="Latest report described as a link to a file, and Old notes as a broken link"> | <img src="screenshots/folder-browsing/sorted-by-size.jpg" width="240" alt="Files sorted from largest to smallest after the folders"> |

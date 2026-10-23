@@ -30,6 +30,12 @@ Local changes:
   initializer previously ran that work on the main-actor caller. Initialization
   still happens once, actor access stays serialized, and a missing context or
   resource still returns plain tokens.
+- `CodeTokenizer.swift`, `Prism/prism-bundle.js`: Prism input is capped at
+  256 KiB before entering JavaScriptCore. Flattening uses bounded iterative
+  traversal with 16,000-token and lossless-output limits; invalid or over-budget
+  bridge results fall back to one plain token containing the exact source. This
+  applies the app's existing source-highlighting budget to rendered Markdown
+  fences and prevents token amplification from growing an unbounded Swift array.
 - `BlockContent.swift`: type erase at the existing heterogeneous block boundary
   with explicit `AnyView` returns. This avoids a nested `ConditionalContent`
   metadata tree spanning all Markdown block implementations on first display;

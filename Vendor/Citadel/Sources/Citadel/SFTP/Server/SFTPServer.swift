@@ -95,7 +95,10 @@ enum SFTPServerSubsystem {
         logger: Logger,
         username: String?
     ) -> EventLoopFuture<Void> {
-        let deserializeHandler = ByteToMessageHandler(SFTPMessageParser())
+        let deserializeHandler = ByteToMessageHandler(
+            SFTPMessageParser(),
+            maximumBufferSize: SFTPMessageParser.maximumBufferSize
+        )
         let serializeHandler = MessageToByteHandler(SFTPMessageSerializer())
         let sftpInboundHandler = SFTPServerInboundHandler(
             logger: logger,

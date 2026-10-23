@@ -24,6 +24,10 @@ private struct ImageViewerFixture: View {
     let resolver: ImageReloadResolver
     var body: some View { RemoteImageViewer(item: item, resolver: resolver).environment(\.scenePhase, phase.value) }
 }
+private struct RootPhaseFixture: View {
+    let phase: ImageViewerPhase
+    var body: some View { RemoteFilesRootView().environment(\.scenePhase, phase.value) }
+}
 
 @MainActor final class ImageLifecycleTests: XCTestCase {
     private func png() throws -> URL {
@@ -61,6 +65,9 @@ private struct ImageViewerFixture: View {
             // Ignore toolbar symbols and the unavailable-view's photo icon.
             view is UIScrollView && view.subviews.contains { ($0 as? UIImageView)?.image != nil }
         }
+    }
+    private func hasAccessibilityIdentifier(_ identifier: String, in window: UIWindow) -> Bool {
+        views(window).contains { $0.accessibilityIdentifier == identifier }
     }
     private func waitUntil(_ condition: () async -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
@@ -161,6 +168,23 @@ private struct ImageViewerFixture: View {
         XCTAssertGreaterThan(inline.cost, 0)
         XCTAssertGreaterThan(viewer.cost, 0)
         await RemoteImageDecoder.shared.clear()
+    }
+
+    func testRootPrivacyCoverTracksInactiveAndBackgroundPhases() async throws {
+        let previousWindow = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows).first { $0.isKeyWindow }
+        let phase = ImageViewerPhase()
+        let window = try host(RootPhaseFixture(phase: phase))
+        defer { window.isHidden = true; window.rootViewController = nil; previousWindow?.makeKey() }
+
+        XCTAssertFalse(hasAccessibilityIdentifier("privacy-cover", in: window))
+        phase.value = .inactive
+        try await waitUntil { self.hasAccessibilityIdentifier("privacy-cover", in: window) }
+        phase.value = .background
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(hasAccessibilityIdentifier("privacy-cover", in: window))
+        phase.value = .active
+        try await waitUntil { !self.hasAccessibilityIdentifier("privacy-cover", in: window) }
     }
 }
 #endif

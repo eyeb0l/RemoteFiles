@@ -62,12 +62,13 @@ public enum RemoteResourcePath {
 }
 
 public enum RemoteResourceError: LocalizedError, Sendable {
-    case outsideDocument, notImage
+    case outsideDocument, notImage, insecureCache
     case missingFile(String)
     public var errorDescription: String? {
         switch self {
         case .outsideDocument: return "This image link points outside the document’s folder. Open its folder directly to access it."
         case .notImage: return "This file is not a supported image, or its image data is damaged."
+        case .insecureCache: return "The protected image cache is unavailable."
         case .missingFile(let path): return "File not found at:\n\(path)\n\nIt may have been moved or deleted."
         }
     }
@@ -97,6 +98,10 @@ public extension RemoteResourceResolving {
 /// At most two streaming transfers; others wait in arrival order. A flight owns multiple cancellable consumers; the last
 /// consumer leaving cancels that flight. The transport owns its SFTP operation channel.
 public actor RemoteResourceResolver: RemoteResourceResolving {
+    /// All resolver instances in this process share the cache. Prefixing active
+    /// partials prevents one window's first-use sweep from deleting another
+    /// window's in-flight transfer while still identifying prior-process debris.
+    private static let partialProcessPrefix = UUID().uuidString + "-"
     private struct Flight {
         let id: UUID
         let task: Task<Void, Never>
@@ -112,6 +117,7 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
     // A refresh separates new consumers from an older transfer without cancelling it.
     private var generations: [String: UUID] = [:]
     private var transfers = 0
+    private var cleanedAbandonedPartials = false
     // Fetches waiting for a transfer slot, oldest first. A released slot passes straight to the next one.
     private var slotWaiters: [(id: UUID, continuation: CheckedContinuation<Void, Error>)] = []
     public init(service: any RemoteFileService, directory: URL, diskLimit: Int = 256 * 1024 * 1024,
@@ -205,6 +211,7 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
     public func clearCache() {
         cancelAll()
         try? FileManager.default.removeItem(at: directory)
+        cleanedAbandonedPartials = false
     }
     private func cancel(key: String, waiter: UUID) {
         guard let continuation = flights[key]?.waiters.removeValue(forKey: waiter) else { return }
@@ -241,11 +248,10 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
     }
     private func fetch(key: String, flightKey: String, generation: UUID?, id: UUID, path: String, document: RemoteDocumentLocation) async throws -> URL {
         let fm = FileManager.default
-        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
-        var excluded = URLResourceValues(); excluded.isExcludedFromBackup = true
-        var cacheDirectory = directory; try? cacheDirectory.setResourceValues(excluded)
+        try prepareCacheDirectory()
         let target = directory.appendingPathComponent(key).appendingPathExtension("resource")
-        if let attrs = try? fm.attributesOfItem(atPath: target.path),
+        let targetAttributes = try validateCachedFile(at: target)
+        if let attrs = targetAttributes,
            let modified = attrs[.modificationDate] as? Date,
            Date().timeIntervalSince(modified) < freshness {
             try? fm.setAttributes([.creationDate: Date()], ofItemAtPath: target.path)
@@ -253,7 +259,7 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
             await report(.init(receivedBytes: size, totalBytes: size, isComplete: true), key: flightKey, id: id)
             try Task.checkCancellation()
             if generations[key] == generation, fm.fileExists(atPath: target.path) { return target }
-        } else if let cached = Self.storedVersion(at: target),
+        } else if targetAttributes != nil, let cached = Self.storedVersion(at: target),
                   let current = try? await service.resolveEntry(profile: document.profile, path: path),
                   current.kind == .file, RemoteResourcePath.contains(current.path, in: document.resourceRoot),
                   RemoteFileVersion(size: current.size, modifiedAt: current.modifiedAt) == cached {
@@ -270,8 +276,12 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         try await acquireTransferSlot()
         defer { releaseTransferSlot() }
         try Task.checkCancellation()
-        let temp = directory.appendingPathComponent(UUID().uuidString + ".partial")
+        let temp = directory.appendingPathComponent(Self.partialProcessPrefix + UUID().uuidString + ".partial")
         defer { try? fm.removeItem(at: temp) }
+        guard fm.createFile(atPath: temp.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
+            throw RemoteResourceError.insecureCache
+        }
+        try protectCacheFile(temp)
         let downloaded: RemoteEntry
         do {
             downloaded = try await service.downloadFile(profile: document.profile, path: path, allowedRoot: document.resourceRoot,
@@ -294,10 +304,125 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
             Self.storeVersion(version, at: temp)
         }
         try fm.moveItem(at: temp, to: destination)
-        #if os(iOS)
-        try? fm.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: destination.path)
-        #endif
+        do {
+            try protectCacheFile(destination)
+        } catch {
+            try? fm.removeItem(at: destination)
+            throw error
+        }
         return destination
+    }
+
+    /// The cache may outlive the process, so its containment and protection are
+    /// checked before every hit or transfer. Partial files can only belong to a
+    /// previous resolver lifetime when the first operation starts.
+    private func prepareCacheDirectory() throws {
+        let fm = FileManager.default
+        if let mode = try Self.fileMode(at: directory) {
+            guard mode & S_IFMT == S_IFDIR else {
+                throw RemoteResourceError.insecureCache
+            }
+        } else {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true,
+                                   attributes: [.posixPermissions: 0o700])
+        }
+        guard let directoryMode = try Self.fileMode(at: directory), directoryMode & S_IFMT == S_IFDIR else {
+            throw RemoteResourceError.insecureCache
+        }
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        #if os(iOS)
+        try fm.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: directory.path)
+        #endif
+        var values = URLResourceValues(); values.isExcludedFromBackup = true
+        var cacheDirectory = directory
+        try cacheDirectory.setResourceValues(values)
+
+        let protected = try fm.attributesOfItem(atPath: directory.path)
+        guard ((protected[.posixPermissions] as? NSNumber)?.intValue ?? -1) & 0o777 == 0o700,
+              try directory.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true else {
+            throw RemoteResourceError.insecureCache
+        }
+        #if os(iOS)
+        #if targetEnvironment(simulator)
+        guard (protected[.protectionKey] as? FileProtectionType).map({ $0 == .complete }) ?? true else {
+            throw RemoteResourceError.insecureCache
+        }
+        #else
+        guard protected[.protectionKey] as? FileProtectionType == .complete else {
+            throw RemoteResourceError.insecureCache
+        }
+        #endif
+        #endif
+
+        if !cleanedAbandonedPartials {
+            for child in try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+                where child.pathExtension == "partial"
+                    && !child.lastPathComponent.hasPrefix(Self.partialProcessPrefix) {
+                do {
+                    try fm.removeItem(at: child)
+                } catch let error as NSError
+                    where (error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError)
+                        || (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT)) {
+                    // Another resolver may have enumerated and removed the same
+                    // stale prior-process entry concurrently.
+                }
+            }
+            cleanedAbandonedPartials = true
+        }
+    }
+
+    /// Returns secure attributes for a reusable regular file. Non-regular cache
+    /// entries are discarded without following them and treated as a miss.
+    private func validateCachedFile(at url: URL) throws -> [FileAttributeKey: Any]? {
+        let fm = FileManager.default
+        guard let mode = try Self.fileMode(at: url) else { return nil }
+        guard mode & S_IFMT == S_IFREG else {
+            try fm.removeItem(at: url)
+            return nil
+        }
+        try protectCacheFile(url)
+        return try fm.attributesOfItem(atPath: url.path)
+    }
+
+    private func protectCacheFile(_ url: URL) throws {
+        let fm = FileManager.default
+        guard let initialMode = try Self.fileMode(at: url), initialMode & S_IFMT == S_IFREG else {
+            throw RemoteResourceError.insecureCache
+        }
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        #if os(iOS)
+        try fm.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
+        #endif
+        let attributes = try fm.attributesOfItem(atPath: url.path)
+        guard let finalMode = try Self.fileMode(at: url), finalMode & S_IFMT == S_IFREG,
+              attributes[.type] as? FileAttributeType == .typeRegular,
+              ((attributes[.posixPermissions] as? NSNumber)?.intValue ?? -1) & 0o777 == 0o600 else {
+            throw RemoteResourceError.insecureCache
+        }
+        #if os(iOS)
+        #if targetEnvironment(simulator)
+        guard (attributes[.protectionKey] as? FileProtectionType).map({ $0 == .complete }) ?? true else {
+            throw RemoteResourceError.insecureCache
+        }
+        #else
+        guard attributes[.protectionKey] as? FileProtectionType == .complete else {
+            throw RemoteResourceError.insecureCache
+        }
+        #endif
+        #endif
+    }
+
+    /// `FileManager` metadata may follow links on some filesystems. `lstat`
+    /// keeps cache validation anchored to the directory entry itself.
+    private static func fileMode(at url: URL) throws -> mode_t? {
+        var metadata = stat()
+        let result: Int32 = url.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return Int32(-1) }
+            return lstat(path, &metadata)
+        }
+        if result == 0 { return metadata.st_mode }
+        if errno == ENOENT { return nil }
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
     }
     private func acquireTransferSlot() async throws {
         try Task.checkCancellation()
