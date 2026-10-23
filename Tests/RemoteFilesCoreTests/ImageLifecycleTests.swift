@@ -186,5 +186,21 @@ private struct RootPhaseFixture: View {
         phase.value = .active
         try await waitUntil { !self.hasAccessibilityIdentifier("privacy-cover", in: window) }
     }
+
+    func testDeferredRootPrivacyCoverDoesNotReturnAfterBecomingActive() async throws {
+        let coordinator = RootWindowPrivacyInstaller.Coordinator()
+        let anchor = UIView(frame: .zero)
+        coordinator.update(anchor: anchor, isVisible: true)
+        coordinator.update(anchor: anchor, isVisible: false)
+
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.addSubview(anchor)
+        let deferredUpdateHandled = expectation(description: "deferred privacy-cover update handled")
+        DispatchQueue.main.async { deferredUpdateHandled.fulfill() }
+        await fulfillment(of: [deferredUpdateHandled], timeout: 1)
+
+        XCTAssertFalse(hasAccessibilityIdentifier("privacy-cover", in: window))
+    }
 }
 #endif

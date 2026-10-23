@@ -12,23 +12,13 @@ public struct RemoteFilesRootView: View {
     @State private var lifecycleTask: Task<Void, Never>?
     public init() {}
     public var body: some View {
-        ZStack {
-            Group {
-                if let model { AppNavigation(model: model) }
-                else if let startupError {
-                    ContentUnavailableView("Library unavailable", systemImage: "exclamationmark.folder", description: Text(startupError))
-                } else { ProgressView("Opening library…") }
-            }
-            .privacySensitive()
-            .disabled(scenePhase != .active)
-            .accessibilityHidden(scenePhase != .active)
-
-            if scenePhase != .active {
-                RootPrivacyCover()
-                    .transition(.identity)
-                    .zIndex(1)
-            }
+        Group {
+            if let model { AppNavigation(model: model) }
+            else if let startupError {
+                ContentUnavailableView("Library unavailable", systemImage: "exclamationmark.folder", description: Text(startupError))
+            } else { ProgressView("Opening library…") }
         }
+        .privacySensitive()
         .task {
             guard model == nil, startupError == nil else { return }
             do {
@@ -73,7 +63,7 @@ public struct RemoteFilesRootView: View {
 /// SwiftUI overlays live beneath a presented sheet. This zero-sized bridge also
 /// installs the same shield directly on the window, above every presentation,
 /// so connection editors and readers cannot leak through an app-switcher snapshot.
-private struct RootWindowPrivacyInstaller: UIViewRepresentable {
+struct RootWindowPrivacyInstaller: UIViewRepresentable {
     let isVisible: Bool
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -82,11 +72,13 @@ private struct RootWindowPrivacyInstaller: UIViewRepresentable {
         context.coordinator.update(anchor: view, isVisible: isVisible)
     }
     static func dismantleUIView(_ view: UIView, coordinator: Coordinator) {
-        coordinator.remove()
+        coordinator.dismantle()
     }
 
     @MainActor final class Coordinator {
         private weak var window: UIWindow?
+        private var desiredVisibility = false
+        private var revision = 0
         private let shield: UIView = {
             let shield = UIView(frame: .zero)
             shield.backgroundColor = .systemBackground
@@ -115,16 +107,24 @@ private struct RootWindowPrivacyInstaller: UIViewRepresentable {
             return shield
         }()
 
-        func update(anchor: UIView, isVisible: Bool, retryIfNeeded: Bool = true) {
-            guard isVisible else { remove(); return }
+        func update(anchor: UIView, isVisible: Bool) {
+            desiredVisibility = isVisible
+            revision &+= 1
+            let scheduledRevision = revision
+            guard isVisible else { removeShield(); return }
             guard let target = anchor.window else {
-                guard retryIfNeeded else { return }
                 DispatchQueue.main.async { [weak self, weak anchor] in
                     guard let self, let anchor else { return }
-                    self.update(anchor: anchor, isVisible: true, retryIfNeeded: false)
+                    guard self.desiredVisibility, self.revision == scheduledRevision,
+                          let target = anchor.window else { return }
+                    self.install(in: target)
                 }
                 return
             }
+            install(in: target)
+        }
+
+        private func install(in target: UIWindow) {
             if window !== target || shield.superview !== target {
                 shield.removeFromSuperview()
                 window = target
@@ -135,36 +135,19 @@ private struct RootWindowPrivacyInstaller: UIViewRepresentable {
             }
         }
 
-        func remove() {
+        func dismantle() {
+            desiredVisibility = false
+            revision &+= 1
+            removeShield()
+        }
+
+        private func removeShield() {
             shield.removeFromSuperview()
             window = nil
         }
     }
 }
 #endif
-
-/// An opaque, interactive top layer prevents the app switcher snapshot from
-/// retaining remote filenames or document contents. It appears for `.inactive`
-/// as well as `.background`, because snapshot capture begins before backgrounding.
-private struct RootPrivacyCover: View {
-    var body: some View {
-        Color(uiColor: .systemBackground)
-            .ignoresSafeArea()
-            .overlay {
-                VStack(spacing: 12) {
-                    Image(systemName: "lock.fill")
-                        .font(.system(size: 36, weight: .semibold))
-                    Text("RemoteFiles Locked")
-                        .font(.headline)
-                }
-                .foregroundStyle(.indigo)
-            }
-            .contentShape(Rectangle())
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("RemoteFiles is hidden while inactive")
-            .accessibilityIdentifier("privacy-cover")
-    }
-}
 
 struct AppNavigation: View {
     @Bindable var model: AppModel
