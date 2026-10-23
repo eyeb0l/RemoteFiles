@@ -155,8 +155,10 @@ private struct IPadWorkspace: View {
     @State private var libraryRevealRequest = 0
     private struct LibraryReveal: Equatable { let visibility: NavigationSplitViewVisibility; let request: Int }
     /// A window too narrow for three columns, such as an unfolded iPhone Duo, slides the library
-    /// and folder over the reader. Close those overlays once they've done their job. Only the
-    /// selecting column's frame is current, since a hidden column keeps its last frame.
+    /// and folder over the reader. Close those overlays once they've done their job. A hidden
+    /// library or folder keeps its last frame, so each check reads only columns on screen: the
+    /// selecting one, the folder whenever the library shows, and the reader, which as the detail
+    /// column is never hidden and so follows every resize.
     private func openFromLibrary(_ route: AppModel.Route) {
         model.routes = [route]
         if case .file = route, WorkspaceColumnFrames.overlaps(frames.library, frames.reader) {
