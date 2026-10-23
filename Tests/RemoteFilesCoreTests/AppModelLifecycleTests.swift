@@ -68,6 +68,24 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
 }
 
 @MainActor final class AppModelLifecycleTests: XCTestCase {
+    func testOfflineStoreIsSharedWhenAnotherWindowOpensAfterLibraryCreation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let owner = try AppModel(directory: directory, fileService: BackgroundExportService())
+        await owner.load()
+        let realStore = try XCTUnwrap(owner.offlineStore)
+        let second = try AppModel(directory: directory, fileService: BackgroundExportService())
+        await second.load()
+        XCTAssertTrue(realStore === second.offlineStore)
+        await owner.setDemo(true)
+        let demoStore = try XCTUnwrap(owner.offlineStore)
+        await second.setDemo(true)
+        XCTAssertTrue(demoStore === second.offlineStore)
+        XCTAssertFalse(realStore === demoStore)
+        await second.setDemo(false)
+        XCTAssertTrue(realStore === second.offlineStore)
+    }
+
     func testOfflineFoldersPropagateAcrossWindowsKeepRouteChecksAndRemainLocalAfterConnectionRemoval() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
