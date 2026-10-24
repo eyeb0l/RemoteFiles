@@ -83,11 +83,14 @@ deadlines are added to accommodate these checks.
 `OfflineFileTests` verifies exact originals, persistent metadata, atomic refresh,
 corrupt/symlinked local files, count/byte/lease limits, and cancellation with late
 writers. `AppModelLifecycleTests` covers background cancellation, changed/deleted
-connections and ownership of a shared store across windows. The OpenSSH suite
-pins a real fixture file, reads it after disconnect, and rejects a canonical-root
-escape. The Demo UI journey pins, disconnects, reopens after relaunch, removes
-the copy and checks that the remote original is still readable. These methods
-are part of the normal generated inventories; they add no allowed skips.
+connections and ownership of a shared store across windows, including a window
+opened after its library directory is created. `OfflineFileTests` also checks
+actor reuse across equivalent absolute, relative and directory-hinted URLs.
+The OpenSSH suite pins a real fixture file, reads it after disconnect, and
+rejects a canonical-root escape. The Demo UI journey pins, disconnects, reopens
+after relaunch, removes the copy and checks that the remote original is still
+readable. These methods are part of the normal generated inventories; they add
+no allowed skips.
 
 The offline reader has no SFTP/resource service. Its media/renderer policies are
 the existing bounded preview policies. Simulator permissions/backup-exclusion
@@ -125,6 +128,16 @@ The scheduling wrapper never injects snapshots or errors. The existing
 `FolderSearchTests` still cover persistent connection failure and root errors;
 `testConnectionRecoveryDoesNotStartAListingAfterTheSearchDeadline` covers the
 retry's scheduling budget separately.
+
+`FolderSearchTests.testNewlyDiscoveredFoldersAreConsumedAfterTheLastListingFinishes`
+and the corresponding `FileContentSearchTests` regression walk nested trees with
+one and four listing slots. They require every discovered folder and match to
+be consumed even when the previous listing was the last outstanding child.
+Run these suites in optimized builds as well as Debug when changing scheduling:
+
+```sh
+swift test -c release --filter 'FolderSearchTests|FileContentSearchTests|OfflineFileTests'
+```
 
 Run just this investigation's suites on a supported Mac with:
 

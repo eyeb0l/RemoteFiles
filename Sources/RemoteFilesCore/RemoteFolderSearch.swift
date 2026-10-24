@@ -67,6 +67,12 @@ public enum RemoteFolderSearch {
     }
 
     private struct Folder: Sendable { let path: String; let depth: Int }
+    // Keep the queue index attached to its result across task-group suspension points.
+    // Optimized tuple results can repeat an earlier index and leave descendants unreported.
+    private struct Listing: Sendable {
+        let index: Int
+        let result: Result<DirectorySnapshot, Error>
+    }
 
     static func search(query: String, root: String, profile: ConnectionProfile, service: any RemoteFileService,
                                includeHidden: Bool, limits: Limits, content: ContentLimits?, report: (Update) -> Void) async throws {
@@ -86,24 +92,23 @@ public enum RemoteFolderSearch {
         var started = 0, reported = 0, running = 0
         var finished: [Int: Result<DirectorySnapshot, Error>] = [:], retried: Set<Int> = []
         var progress = Update(), matched = 0
-        try await withThrowingTaskGroup(of: (Int, Result<DirectorySnapshot, Error>).self) { group in
-            func list(_ index: Int) {
-                let path = queue[index].path
-                running += 1
-                group.addTask {
-                    do { return (index, .success(try await service.listDirectory(profile: profile, path: path))) }
-                    catch { return (index, .failure(error)) }
-                }
-            }
-            func startListings() {
+        try await withThrowingTaskGroup(of: Listing.self) { group in
+            // Refill before polling, including after consuming the last child, and finish only
+            // when there are no queued listings to start and no outstanding results to consume.
+            while true {
+                try Task.checkCancellation()
                 while running < limits.concurrentListings, started < queue.count, progress.stop == nil {
-                    guard started < limits.maxFolders else { progress.stop = .folderLimit; return }
-                    guard ContinuousClock.now < deadline else { progress.stop = .timeLimit; return }
-                    list(started); started += 1
+                    guard started < limits.maxFolders else { progress.stop = .folderLimit; break }
+                    guard ContinuousClock.now < deadline else { progress.stop = .timeLimit; break }
+                    let index = started, path = queue[index].path
+                    group.addTask {
+                        do { return Listing(index: index, result: .success(try await service.listDirectory(profile: profile, path: path))) }
+                        catch { return Listing(index: index, result: .failure(error)) }
+                    }
+                    running += 1; started += 1
                 }
-            }
-            startListings()
-            while let (index, result) = try await group.next() {
+                guard running > 0, let listing = try await group.next() else { break }
+                let index = listing.index, result = listing.result
                 running -= 1
                 try Task.checkCancellation()
                 if case .failure(let error) = result, index > 0, endsConnection(error), retried.insert(index).inserted {
@@ -115,7 +120,12 @@ public enum RemoteFolderSearch {
                         group.cancelAll()
                         break
                     }
-                    list(index)
+                    let path = queue[index].path
+                    group.addTask {
+                        do { return Listing(index: index, result: .success(try await service.listDirectory(profile: profile, path: path))) }
+                        catch { return Listing(index: index, result: .failure(error)) }
+                    }
+                    running += 1
                     continue
                 }
                 finished[index] = result
@@ -164,7 +174,6 @@ public enum RemoteFolderSearch {
                     if progress.stop == .matchLimit || (content != nil && stopsReading(progress.stop)) { break }
                 }
                 if progress.stop == .matchLimit || (content != nil && stopsReading(progress.stop)) { group.cancelAll(); break }
-                startListings()
             }
         }
         try Task.checkCancellation()

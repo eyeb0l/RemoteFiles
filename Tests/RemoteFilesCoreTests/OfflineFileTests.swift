@@ -49,6 +49,28 @@ final class OfflineFileTests: XCTestCase {
         try await store.pin(profile: profile, entry: entry(name), allowedRoot: profile.startingDirectory, service: service)
     }
 
+    func testSharedStoreReusesDirectoryAfterCreationAndAcrossURLVariants() async throws {
+        let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path))
+        let first = try await OfflineFileStore.shared(directory: dir)
+        let pin = try await save(first, OfflineTransport())
+        let variants = [
+            URL(fileURLWithPath: dir.path),
+            URL(fileURLWithPath: dir.path, isDirectory: true),
+            URL(fileURLWithPath: dir.path + "/unused/../", isDirectory: true),
+            URL(fileURLWithPath: dir.lastPathComponent, relativeTo: dir.deletingLastPathComponent())
+        ]
+        for url in variants {
+            let reopened = try await OfflineFileStore.shared(directory: url)
+            XCTAssertTrue(first === reopened, "Directory creation and URL spelling must not change the owning actor")
+            try await reopened.remove(pin.id)
+            let remaining = await first.snapshot()
+            XCTAssertTrue(remaining.isEmpty, "Every caller must see the same in-memory library")
+        }
+        let other = try await OfflineFileStore.shared(directory: dir.appendingPathComponent("Demo", isDirectory: true))
+        XCTAssertFalse(first === other, "Separate libraries must keep separate actors")
+    }
+
     func testOriginalBytesAndAliasPersistWithPrivateFilesAndBoundedPreview() async throws {
         let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
         let bytes = Data(" \tCafé 東京\r\nsecond line  \r\n".utf8), service = OfflineTransport(Data(" \tCafé 東京\r\nsecond line  \r\n".utf8))

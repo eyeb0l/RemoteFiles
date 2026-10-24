@@ -72,6 +72,27 @@ final class FolderSearchTests: XCTestCase {
         XCTAssertEqual(withHidden.paths, ["/r/.cache/.needle", "/r/.cache/needle-hidden.txt"])
     }
 
+    func testNewlyDiscoveredFoldersAreConsumedAfterTheLastListingFinishes() async throws {
+        var tree: [String: [RemoteEntry]] = [:], expected: [String] = []
+        var path = "/r"
+        for depth in 0..<12 {
+            let match = path + "/needle.txt", child = path + "/next"
+            expected.append(match)
+            tree[path] = [file(match)] + (depth < 11 ? [folder(child)] : [])
+            path = child
+        }
+        for window in [1, 4] {
+            let service = TreeService(tree)
+            let result = try await search(service, "needle", limits: .init(concurrentListings: window))
+            XCTAssertEqual(result.paths, expected, "A completed listing can discover more work even when no peer listing remains")
+            XCTAssertEqual(result.final.foldersSearched, tree.count)
+            XCTAssertNil(result.final.stop)
+            let listed = await service.listed
+            XCTAssertEqual(Set(listed), Set(tree.keys))
+            XCTAssertEqual(listed.count, tree.count, "Every discovered folder is listed exactly once")
+        }
+    }
+
     func testUnreadableSubfoldersAreCountedWhileConnectionAndStartingFolderFailuresEndTheSearch() async throws {
         let tree = ["/r": [folder("/r/locked"), folder("/r/gone"), folder("/r/slow"), folder("/r/ok"), file("/r/needle.txt")],
                     "/r/ok": [file("/r/ok/needle-2.txt")]]

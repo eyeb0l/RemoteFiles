@@ -71,6 +71,27 @@ final class FileContentSearchTests: XCTestCase {
         return (matches, try XCTUnwrap(final))
     }
 
+    func testContentSearchConsumesFoldersDiscoveredAfterTheLastListingFinishes() async throws {
+        var tree: [String: [RemoteEntry]] = [:], data: [String: Data] = [:], expected: [String] = []
+        var path = "/r"
+        for depth in 0..<8 {
+            let match = path + "/source.txt", child = path + "/next"
+            expected.append(match); data[match] = bytes("needle")
+            tree[path] = [file(match)] + (depth < 7 ? [folder(child)] : [])
+            path = child
+        }
+        for window in [1, 4] {
+            let service = ContentTreeService(tree, contents: data)
+            let result = try await search(service, limits: .init(concurrentListings: window))
+            XCTAssertEqual(result.matches.map(\.entry.path), expected)
+            XCTAssertEqual(result.final.foldersSearched, tree.count)
+            XCTAssertEqual(result.final.filesSearched, expected.count)
+            XCTAssertNil(result.final.stop)
+            let reads = await service.reads
+            XCTAssertEqual(reads.map(\.path), expected)
+        }
+    }
+
     func testFindsFirstLiteralSourceMatchWithUnicodeLineAndBoundedSnippet() async throws {
         let tree = ["/r": [file("/r/name-only-needle.md"), file("/r/unicode.txt"), file("/r/page.html"), file("/r/long.json")]]
         let service = ContentTreeService(tree, contents: [
