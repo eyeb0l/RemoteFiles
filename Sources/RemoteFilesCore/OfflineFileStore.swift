@@ -142,6 +142,31 @@ public actor OfflineFileStore {
     public func snapshot() -> [OfflinePin] { pins.sorted { $0.savedAt > $1.savedAt } }
     public func folderSnapshot() -> [OfflineFolderPin] { folders.sorted { $0.savedAt > $1.savedAt } }
 
+    /// Resolve only against committed library metadata, without a connection or filesystem URL.
+    /// Folder members stay in their own snapshot; standalone copies use the same saved route.
+    public func resolveDocumentLink(from source: OfflinePin, reference: String) throws -> OfflinePin {
+        try Task.checkCancellation()
+        guard let current = pins.first(where: { $0.id == source.id }), current.blobID == source.blobID else {
+            throw OfflineDocumentLinkError.sourceChanged
+        }
+        let folder = folders.first { $0.fileIDs.contains(source.id) }
+        let target: String
+        do {
+            target = try RemoteDocumentLinkPath.resolve(reference, relativeTo: current.path,
+                                                       connectionRoot: folder?.path ?? "/")
+        } catch RemoteDocumentLinkError.outsideConnection where folder != nil {
+            throw OfflineDocumentLinkError.outsideFolder
+        }
+        let members = Set(folder?.fileIDs ?? [])
+        let allMembers = Set(folders.flatMap(\.fileIDs))
+        guard let pin = pins.first(where: {
+            $0.connectionID == current.connectionID && $0.routeKey == current.routeKey &&
+            $0.path.utf8.elementsEqual(target.utf8) &&
+            (folder != nil ? members.contains($0.id) : !allMembers.contains($0.id))
+        }) else { throw OfflineDocumentLinkError.notSaved }
+        return pin
+    }
+
     /// Every window observes commits. Buffer just one invalidation; consumers fetch the latest
     /// snapshot, so a slow/background window neither builds a queue nor replays stale metadata.
     public func changes() -> AsyncStream<Void> {

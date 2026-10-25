@@ -60,6 +60,60 @@ private actor FolderFixture: RemoteFileService {
 }
 
 final class OfflineFolderTests: XCTestCase {
+    func testDocumentLinksStayInTheirSnapshotAndPreserveByteNames() async throws {
+        let (dir, store, service) = try setup()
+        let names = ["guide.md", "caf\u{e9}.txt", "cafe\u{301}.txt", "literal%20name.txt"]
+        await service.set(path, entries: names.map { .init(name: $0, path: path + "/" + $0, kind: .file) } +
+            [.init(name: "Nested", path: path + "/Nested", kind: .directory),
+             .init(name: ".hidden.md", path: path + "/.hidden.md", kind: .file)])
+        let folder = try await store.pinFolder(profile: profile, path: path, service: service)
+        let pins = await store.snapshot()
+        let source = try XCTUnwrap(pins.first { $0.filename == "guide.md" })
+        let nested = try await store.resolveDocumentLink(from: source, reference: "Nested/%E6%9D%B1%E4%BA%AC.txt")
+        let parent = try await store.resolveDocumentLink(from: nested, reference: "../guide.md")
+        XCTAssertEqual(parent.id, source.id)
+        for name in names.dropFirst() {
+            let reference = try XCTUnwrap(name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed))
+            let target = try await store.resolveDocumentLink(from: source, reference: reference)
+            XCTAssertTrue(target.path.utf8.elementsEqual((path + "/" + name).utf8))
+        }
+        for reference in [".hidden.md", "loop/guide.md", "missing.md"] {
+            do { _ = try await store.resolveDocumentLink(from: source, reference: reference); XCTFail(reference) }
+            catch OfflineDocumentLinkError.notSaved { }
+        }
+        // An overlapping snapshot and an individual copy cannot replace this snapshot's members.
+        let overlap = try await store.pinFolder(profile: profile, path: path + "/Nested", service: service)
+        let standalone = try await store.pin(profile: profile,
+            entry: .init(name: "guide.md", path: source.path, kind: .file), allowedRoot: "/root", service: service)
+        do { _ = try await store.resolveDocumentLink(from: standalone, reference: "Nested/東京.txt"); XCTFail("Standalone must not select a folder member") }
+        catch OfflineDocumentLinkError.notSaved { }
+        do { _ = try await store.resolveDocumentLink(from: source, reference: "../Docs-other/guide.md"); XCTFail("Folder boundary") }
+        catch OfflineDocumentLinkError.outsideFolder { }
+        let reopened = try OfflineFileStore(directory: dir)
+        let restored = try await reopened.resolveDocumentLink(from: source, reference: "Nested/東京.txt")
+        XCTAssertEqual(restored.id, nested.id)
+        XCTAssertTrue(folder.fileIDs.contains(restored.id)); XCTAssertFalse(overlap.fileIDs.contains(restored.id))
+        try await store.removeFolder(folder.id)
+        do { _ = try await store.resolveDocumentLink(from: source, reference: "Nested/東京.txt"); XCTFail("Removed snapshot must not fall back") }
+        catch OfflineDocumentLinkError.sourceChanged { }
+    }
+
+    func testDocumentLinksRejectOldFolderRevisionAndCancellation() async throws {
+        let (_, store, service) = try setup()
+        _ = try await store.pinFolder(profile: profile, path: path, service: service)
+        let before = await store.snapshot(), source = try XCTUnwrap(before.first { $0.filename == "one.txt" })
+        _ = try await store.pinFolder(profile: profile, path: path, service: service)
+        do { _ = try await store.resolveDocumentLink(from: source, reference: "Nested/東京.txt"); XCTFail("Old revision") }
+        catch OfflineDocumentLinkError.sourceChanged { }
+        let currentPins = await store.snapshot(), current = try XCTUnwrap(currentPins.first { $0.id == source.id })
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await store.resolveDocumentLink(from: current, reference: "Nested/東京.txt")
+        }
+        do { _ = try await task.value; XCTFail("Cancelled link must not publish") }
+        catch is CancellationError { }
+    }
+
     func testStoreCancellationAndRemovalReturnWhileListingIgnoresCancellation() async throws {
         for removing in [false, true] {
             let (_, store, service) = try setup()

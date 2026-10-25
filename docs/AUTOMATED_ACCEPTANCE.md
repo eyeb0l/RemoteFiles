@@ -92,6 +92,13 @@ after relaunch, removes the copy and checks that the remote original is still
 readable. These methods are part of the normal generated inventories; they add
 no allowed skips.
 
+Offline-link checks in `OfflineFileTests` and `OfflineFolderTests` cover saved-route
+and snapshot isolation, parent/nested/percent-encoded paths, Unicode byte names,
+missing/excluded destinations, stale/removed sources, relaunch and cancellation.
+The Demo UI journeys follow local and linked heading fragments, navigate nested
+saved documents, return with Back and recover from missing/out-of-folder links
+after disconnect.
+
 The offline reader has no SFTP/resource service. Its media/renderer policies are
 the existing bounded preview policies. Simulator permissions/backup-exclusion
 checks do not establish locked-device Data Protection; physical acceptance is

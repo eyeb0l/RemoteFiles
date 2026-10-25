@@ -1,8 +1,12 @@
 # RemoteFiles preview status
 
-**22 October 2026: individual offline copies.**
+**25 October 2026: offline folders and document links.**
 
-Files can be kept in a protected, device-local Offline library with explicit updates/removal and saved dates. Local readers and original sharing use verified leases; failed or cancelled refreshes keep the last committed copy. The library is bounded to 100 files, 128 MiB per original and 512 MiB of committed originals, and Demo is isolated. Folder pinning, synchronization, and external Markdown resources remain deferred. See [offline files](docs/OFFLINE_FILES.md), including synthetic iPhone/iPad screenshots and the distinction between simulator checks and physical locked-device acceptance.
+Individual files and complete folder trees can be kept in a protected, device-local Offline library with explicit updates/removal and saved dates. Folder snapshots preserve subfolders and empty directories, offer a hidden-file choice, and skip symbolic links and special files. Failed or cancelled updates keep the previous complete snapshot. The library is bounded to 32 folders, 100 files, 128 MiB per original and 512 MiB of committed originals, and Demo is isolated.
+
+Relative Markdown links open saved documents locally, including heading fragments. Folder links stay within their own snapshot; individually saved documents link to other individual copies from the same saved connection route. Missing or excluded targets explain how to save them without starting SFTP. Local readers and original sharing use verified leases. Synchronization and external Markdown resources remain deferred. See [offline files and folders](docs/OFFLINE_FILES.md), including synthetic iPhone/iPad screenshots and the distinction between simulator checks and physical locked-device acceptance.
+
+Local verification passed 43 focused offline/document-navigation tests on macOS and in the signed iOS test host, three offline UI journeys on both iPhone and iPad Simulators, two existing connected-link UI journeys on iPhone, and 38 Python repository checks. The final signed Simulator build, generated-project consistency and whitespace checks passed. Physical locked-device and real-server offline acceptance remain separate.
 
 **22 October 2026: jump-host connections and iPad workspace.**
 

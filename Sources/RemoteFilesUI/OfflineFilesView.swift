@@ -68,8 +68,26 @@ struct OfflinePinProgress: View {
 
 struct OfflineFilesView: View {
     let model: AppModel
+    @State private var path = NavigationPath()
     @Environment(\.dismiss) private var dismiss
     var body: some View {
+        NavigationStack(path: $path) {
+            library
+                .navigationTitle("Offline Files")
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+                .navigationDestination(for: OfflineFolderRoute.self) { route in
+                    OfflineFolderView(model: model, route: route)
+                }
+                .navigationDestination(for: OfflineDocumentRoute.self) { route in
+                    if let store = model.offlineStore {
+                        OfflineReaderView(pin: route.pin, store: store, initialFragment: route.fragment,
+                                          openDocument: { path.append($0) })
+                    }
+                }
+        }
+    }
+
+    private var library: some View {
         List {
             Section {
                 Text("Saved copies on this device. Updates happen only when you choose Update; they need a connection.")
@@ -102,9 +120,7 @@ struct OfflineFilesView: View {
                 }
             }
             ForEach(model.standaloneOfflinePins) { pin in
-                NavigationLink {
-                    if let store = model.offlineStore { OfflineReaderView(pin: pin, store: store) }
-                } label: {
+                NavigationLink(value: OfflineDocumentRoute(pin: pin)) {
                     VStack(alignment: .leading, spacing: 5) {
                         Label(pin.filename, systemImage: "doc.fill").foregroundStyle(.primary)
                         Text(pin.connectionName + " · " + pin.path).font(.caption).foregroundStyle(.secondary)
@@ -125,16 +141,16 @@ struct OfflineFilesView: View {
                 }
             }
             Section {
-                Text("128 MiB per file. Removing a saved copy never deletes the remote file. Markdown images and links to other remote files aren’t saved with it.")
+                Text("128 MiB per file. Removing a saved copy never deletes the remote file. Document links open copies already saved here. Markdown images aren’t loaded.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
         }
-        .navigationTitle("Offline Files")
-        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-        .navigationDestination(for: OfflineFolderRoute.self) { route in
-            OfflineFolderView(model: model, route: route)
-        }
     }
+}
+
+struct OfflineDocumentRoute: Hashable {
+    let pin: OfflinePin
+    var fragment: String? = nil
 }
 
 /// This view has no transport, resource resolver or connection. Every preview starts from a
@@ -142,6 +158,8 @@ struct OfflineFilesView: View {
 struct OfflineReaderView: View {
     let pin: OfflinePin
     let store: OfflineFileStore
+    let initialFragment: String?
+    let openDocument: (OfflineDocumentRoute) -> Void
     @Environment(\.scenePhase) private var scenePhase
     @State private var lease: OfflineFileLease?
     @State private var preview: DocumentPreview?
@@ -152,6 +170,12 @@ struct OfflineReaderView: View {
     @State private var failure: String?
     @State private var loading = true
     @State private var requestID = UUID()
+    @State private var navigation = ReaderNavigationState()
+    @State private var readingPosition = DocumentReadingPosition()
+    @State private var appliedInitialFragment = false
+    @State private var linkError: String?
+    @State private var linkTask: Task<Void, Never>?
+    @State private var linkRequestID = UUID()
     private var savedCopy: OfflinePin { lease?.pin ?? pin }
     private var kind: DocumentKind { DocumentPolicy.kind(filename: savedCopy.documentFilename) }
 
@@ -181,7 +205,8 @@ struct OfflineReaderView: View {
                 } else if let preview {
                     switch preview {
                     case .text(let text, let markdown):
-                        DocumentContentView(text: text, markdown: markdown, source: source, filename: savedCopy.documentFilename)
+                        DocumentContentView(text: text, markdown: markdown, source: source, filename: savedCopy.documentFilename,
+                                            readingPosition: readingPosition, openDocumentLink: openLink, navigation: navigation)
                     case .empty: ContentUnavailableView("This file is empty", systemImage: "doc")
                     case .tooLarge: unavailable("The file exceeds the 2 MiB text preview limit. You can share its original bytes.")
                     case .unsupportedEncodingOrBinary: unavailable("This file contains binary data or text that is not UTF-8. You can share the original.")
@@ -202,12 +227,54 @@ struct OfflineReaderView: View {
         }
         .onDisappear { release() }
         .onChange(of: scenePhase) { _, phase in if phase == .background { release() } }
+        .alert("Couldn’t open link", isPresented: Binding(get: { linkError != nil }, set: { if !$0 { linkError = nil } })) {
+            Button("OK") { linkError = nil }
+        } message: { Text(linkError ?? "") }
     }
     private func unavailable(_ message: String) -> some View {
         ContentUnavailableView("Preview not available", systemImage: "doc", description: Text(message))
     }
     private func release() {
+        cancelLink()
+        navigation.clear()
         requestID = UUID(); playback.stop(); image = nil; pdf = nil; lease = nil; preview = nil
+    }
+    private func cancelLink() {
+        linkRequestID = UUID(); linkTask?.cancel(); linkTask = nil
+    }
+    private func openLink(_ url: URL) {
+        cancelLink()
+        guard scenePhase == .active, let local = lease,
+              var components = URLComponents(string: url.absoluteString),
+              components.scheme == nil, components.host == nil else { return }
+        guard components.query == nil else { linkError = RemoteDocumentLinkError.queryUnsupported.localizedDescription; return }
+        let fragment = components.fragment
+        if components.percentEncodedPath.isEmpty, let fragment { revealHeading(fragment); return }
+        components.fragment = nil
+        guard let reference = components.string else { return }
+        let token = UUID(); linkRequestID = token; linkError = nil
+        linkTask = Task {
+            defer { if linkRequestID == token { linkTask = nil } }
+            do {
+                let target = try await store.resolveDocumentLink(from: local.pin, reference: reference)
+                try Task.checkCancellation()
+                guard linkRequestID == token, scenePhase == .active else { return }
+                if fragment != nil, DocumentPolicy.kind(filename: target.documentFilename) != .markdown {
+                    linkError = "Heading links require a Markdown document. Open the file using a link without the # heading fragment."
+                } else if target.id == local.pin.id, let fragment { revealHeading(fragment) }
+                else { openDocument(.init(pin: target, fragment: fragment)) }
+            } catch {
+                guard !Task.isCancelled, linkRequestID == token, scenePhase == .active else { return }
+                linkError = error.localizedDescription
+            }
+        }
+    }
+    private func revealHeading(_ fragment: String) {
+        guard let heading = navigation.index?.heading(fragment: fragment) else {
+            linkError = "The heading “\(fragment)” could not be found in this saved document."
+            return
+        }
+        source = false; navigation.show(heading)
     }
     private func load() async {
         let token = UUID(); requestID = token; loading = true; failure = nil
@@ -235,7 +302,17 @@ struct OfflineReaderView: View {
                 let value = try await store.textPreview(local)
                 try Task.checkCancellation()
                 guard requestID == token else { return }
+                if case .text(let text, let markdown) = value {
+                    await readingPosition.prepare(text: text, store: nil, connectionID: local.pin.connectionID, path: local.pin.path)
+                    await navigation.prepare(text: text, markdown: markdown)
+                    try Task.checkCancellation()
+                    guard requestID == token else { return }
+                }
                 preview = value
+                if !appliedInitialFragment, let initialFragment {
+                    appliedInitialFragment = true
+                    revealHeading(initialFragment)
+                }
             }
         } catch is CancellationError { }
         catch { if requestID == token, !Task.isCancelled { failure = error.localizedDescription } }

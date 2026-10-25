@@ -201,6 +201,14 @@ public actor DemoRemoteFileService: RemoteFileService {
     This nested note was opened through a relative document link.
 
     [Open parent guide](../Navigation%20guide.md)
+
+    [Jump to note heading](#linked-note-marker)
+
+    [Open heading details](Heading%20notes.md#details)
+
+    [Open nested review](2026/Quarterly%20review.md)
+
+    [Missing note](Missing.md)
     """ + "\n"
 
     public static let headingNotes = "# Heading notes\n\n" + (1...18).map {

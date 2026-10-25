@@ -111,9 +111,7 @@ struct OfflineFolderView: View {
                             .accessibilityIdentifier("offline-subfolder-" + RemotePath.name(of: child.path))
                     }
                     ForEach(files.sorted(by: { $0.filename.localizedStandardCompare($1.filename) == .orderedAscending })) { pin in
-                        NavigationLink {
-                            if let store = model.offlineStore { OfflineReaderView(pin: pin, store: store) }
-                        } label: { Label(pin.filename, systemImage: "doc.fill") }
+                        NavigationLink(value: OfflineDocumentRoute(pin: pin)) { Label(pin.filename, systemImage: "doc.fill") }
                         .accessibilityIdentifier("offline-file-" + pin.filename)
                     }
                     if directories.isEmpty && files.isEmpty {

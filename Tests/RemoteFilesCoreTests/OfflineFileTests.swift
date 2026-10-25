@@ -32,6 +32,48 @@ private actor OfflineTransport: RemoteFileService {
 }
 
 final class OfflineFileTests: XCTestCase {
+    func testDocumentLinksUseOnlyStandaloneCopiesFromTheSameSavedRouteAfterRelaunch() async throws {
+        let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try OfflineFileStore(directory: dir), service = OfflineTransport()
+        let source = try await save(store, service, "guide.md")
+        var other = profile; other.host = "other.invalid"
+        _ = try await store.pin(profile: other, entry: entry(), allowedRoot: "/root", service: service)
+        do {
+            _ = try await store.resolveDocumentLink(from: source, reference: "Notes%20%E2%80%94%20%E6%9D%B1%E4%BA%AC.txt")
+            XCTFail("A different saved route must not satisfy a link")
+        } catch OfflineDocumentLinkError.notSaved { }
+        let target = try await save(store, service)
+        let nested = try await store.pin(profile: profile,
+            entry: .init(name: "child.md", path: "/root/Nested/child.md", kind: .file), allowedRoot: "/root", service: service)
+        await service.disconnect()
+        let reopened = try OfflineFileStore(directory: dir)
+        let sibling = try await reopened.resolveDocumentLink(from: source, reference: "Notes%20%E2%80%94%20%E6%9D%B1%E4%BA%AC.txt")
+        XCTAssertEqual(sibling.id, target.id)
+        let parent = try await reopened.resolveDocumentLink(from: nested, reference: "../guide.md")
+        XCTAssertEqual(parent.id, source.id)
+        let local = try await reopened.lease(sibling.id)
+        XCTAssertEqual(try Data(contentsOf: local.url), Data("original\r\n東京  ".utf8))
+        let requests = await service.requests
+        XCTAssertEqual(requests.count, 4, "Link resolution and leases must never call the transport")
+    }
+
+    func testDocumentLinksRejectUnsafeReferencesAndStaleOrRemovedSources() async throws {
+        let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try OfflineFileStore(directory: dir), service = OfflineTransport()
+        let source = try await save(store, service, "guide.md")
+        for reference in ["file:///root/guide.md", "/root/guide.md", "//server/guide.md", "guide%00.md",
+                          "../../guide.md", "guide.md?download=1", "Archive.zip", "missing.md"] {
+            do { _ = try await store.resolveDocumentLink(from: source, reference: reference); XCTFail(reference) }
+            catch { XCTAssertTrue(error is RemoteDocumentLinkError || error is OfflineDocumentLinkError, reference) }
+        }
+        let refreshed = try await save(store, service, "guide.md")
+        do { _ = try await store.resolveDocumentLink(from: source, reference: "guide.md"); XCTFail("Stale source") }
+        catch OfflineDocumentLinkError.sourceChanged { }
+        try await store.remove(refreshed.id)
+        do { _ = try await store.resolveDocumentLink(from: refreshed, reference: "guide.md"); XCTFail("Removed source") }
+        catch OfflineDocumentLinkError.sourceChanged { }
+    }
+
     private let profile = ConnectionProfile(name: "Fixture", host: "fixture.invalid", username: "reader", identityID: UUID(), startingDirectory: "/root")
     private func directory() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent("offline-tests-" + UUID().uuidString) }
     private func entry(_ name: String = "Notes — 東京.txt", size: UInt64? = nil) -> RemoteEntry {

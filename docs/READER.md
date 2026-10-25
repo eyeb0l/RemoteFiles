@@ -53,7 +53,11 @@ See [original export](ORIGINAL_EXPORT.md).
 
 **Document actions → Keep Offline** saves an individual original for the library’s
 **Offline Files** collection. Copies open without SFTP, show their saved date, and
-update only on request. Folder context menus offer the same action. See
+update only on request. **Folder actions → Keep Folder Offline** saves a complete
+tree, including subfolders and empty directories. Relative Markdown links open
+saved documents within that snapshot, or other individual copies from the same
+saved connection route. Same-document and linked heading fragments work locally.
+Missing targets show an explanation without starting SFTP. See
 [offline files](OFFLINE_FILES.md) for limits, local preview differences and lifecycle.
 
 ## JSON and SVG previews

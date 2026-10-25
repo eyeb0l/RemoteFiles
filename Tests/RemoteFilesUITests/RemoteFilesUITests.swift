@@ -48,6 +48,34 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(file.waitForExistence(timeout: 5)); file.tap()
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
         app.navigationBars.buttons["2026"].tap()
+        app.navigationBars.buttons["Reports"].tap()
+        let linked = app.buttons["offline-file-Linked notes.md"]
+        XCTAssertTrue(linked.waitForExistence(timeout: 5)); linked.tap()
+        let scroll = app.scrollViews["Rendered Markdown document"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+        try revealDocumentLink("Jump to note heading", in: app, scroll: scroll).tap()
+        XCTAssertTrue(app.staticTexts["Linked note marker"].isHittable)
+        try revealDocumentLink("Open heading details", in: app, scroll: scroll).tap()
+        XCTAssertTrue(app.navigationBars["Heading notes.md"].waitForExistence(timeout: 10))
+        let details = app.staticTexts["Heading navigation reached the linked details section."]
+        XCTAssertTrue(details.waitForExistence(timeout: 10) && details.isHittable)
+        attachScreenshot("Offline document link to a saved heading")
+        app.navigationBars.buttons["Linked notes.md"].tap()
+        XCTAssertTrue(documentLink("Open heading details", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(documentLink("Open heading details", in: app).isHittable, "Back restores the saved reader position")
+        for (label, explanation) in [("Missing note", "isn’t saved here"), ("Open parent guide", "leaves the saved folder")] {
+            try revealDocumentLink(label, in: app, scroll: scroll).tap()
+            let alert = app.alerts["Couldn’t open link"]
+            XCTAssertTrue(alert.waitForExistence(timeout: 5))
+            XCTAssertTrue(alert.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", explanation)).firstMatch.exists)
+            alert.buttons["OK"].tap()
+            XCTAssertTrue(app.navigationBars["Linked notes.md"].exists)
+        }
+        try revealDocumentLink("Open nested review", in: app, scroll: scroll).tap()
+        XCTAssertTrue(app.navigationBars["Quarterly review.md"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["offline-copy-date"].exists)
+        app.navigationBars.buttons["Linked notes.md"].tap()
+        app.navigationBars.buttons["Reports"].tap()
         app.buttons["Saved folder actions"].tap(); app.buttons["Remove Offline Folder"].tap()
         // The removed snapshot stops presenting rows, while the live demo original stays intact.
         XCTAssertTrue(app.staticTexts["Saved folder unavailable"].waitForExistence(timeout: 5))
@@ -79,6 +107,14 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
         XCTAssertTrue(app.buttons["Share Original"].exists)
         attachScreenshot("Offline Markdown copy after disconnect")
+        try revealDocumentLink("Jump to marker 20", in: app, scroll: app.scrollViews["Rendered Markdown document"]).tap()
+        XCTAssertTrue(app.staticTexts["Reading marker 20"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Reading marker 20"].isHittable)
+        try revealDocumentLink("Open nested note", in: app, scroll: app.scrollViews["Rendered Markdown document"]).tap()
+        let missing = app.alerts["Couldn’t open link"]
+        XCTAssertTrue(missing.waitForExistence(timeout: 5))
+        XCTAssertTrue(missing.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "isn’t saved here")).firstMatch.exists)
+        missing.buttons["OK"].tap()
         XCUIDevice.shared.press(.home)
         XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
         app.activate()
