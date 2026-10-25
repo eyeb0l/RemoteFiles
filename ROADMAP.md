@@ -20,7 +20,7 @@ Editing and uploads need conflict detection and safe replacement before transfer
 
 [Folder search](docs/FOLDER_BROWSING.md#searching-file-contents) includes bounded client-side UTF-8 content search with source-line snippets. Server-side indexing, PDF/OCR search and persistent content indexes remain future work.
 
-[Offline files and folder snapshots](docs/OFFLINE_FILES.md) are implemented with an explicit local library and manual updates. Physical locked-device and real-server offline acceptance remain separate.
+[Offline files and folder snapshots](docs/OFFLINE_FILES.md) are implemented with an explicit local library, manual updates and relative Markdown links between saved documents, including heading fragments. Physical locked-device and real-server offline acceptance remain separate.
 
 ## Later possibilities
 

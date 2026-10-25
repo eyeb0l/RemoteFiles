@@ -20,7 +20,11 @@ Markdown, UTF-8 text/code, static HTML/SVG, images, PDF, audio and video reuse t
 
 Resolved links keep their selected filename for sharing and their canonical source format for previews.
 
-Each offline reader opens one saved original. Markdown images become readable placeholders, and links to other remote documents do not navigate from an offline copy, even when the referenced files are also in a saved folder. Open those files from the saved hierarchy instead. No SFTP resolver or remote image loader is given to the offline reader. Static HTML/SVG retain their resource blocking; media assets forbid external references. Explicitly tapped, policy-approved HTTP/HTTPS links may still open the browser. Offline copies do not yet have the online reader’s Find, heading navigation, image zoom viewer or saved reading positions.
+Tapping a relative Markdown link opens an already saved document locally. Within a saved folder, sibling, nested and parent paths resolve from the source document’s saved directory and stay inside that same snapshot. Overlapping folders and individual copies never substitute for its members. Individually saved documents can link to other individually saved copies from the same connection and saved route (host, account, key, starting folder and jump host). These links still work after disconnect, relaunch or connection deletion. Paths decode percent escapes once and preserve Unicode filename bytes.
+
+Same-document heading links (`#details`) and Markdown file links with a heading fragment (`notes.md#details`) reveal the heading. Back restores the previous reader’s position during navigation. Missing headings, unsaved/hidden/skipped targets, unsupported types, query strings and paths outside a saved folder show an alert and keep the current document. Absolute paths and unsafe URL schemes remain blocked. If an open source copy is updated or removed, reopen it from Offline Files before following file links; an older reader does not silently navigate into a replacement snapshot. Opening another document uses the latest committed local copy and verifies it through the normal lease checks. Following a link never saves a missing file or starts SFTP.
+
+Markdown images remain readable placeholders. No SFTP resolver or remote image loader is given to the offline reader. Static HTML/SVG retain their resource blocking; media assets forbid external references. Explicitly tapped, policy-approved HTTP/HTTPS links may still open the browser. Offline copies do not yet have Find, a heading-list menu, the image zoom viewer or reading positions saved across launches.
 
 ## Storage and lifecycle
 
@@ -39,6 +43,8 @@ Each offline reader opens one saved original. Markdown images become readable pl
 
 `OfflineFolderTests` adds recursive/empty/hidden folder cases, atomic refresh and failed replacement, shared quotas, traversal deadlines, late workers, store-driven cancellation/removal during unresponsive listings, independent single-file ownership, redirected listings/downloads and corrupt membership. Hosted model checks cover multiwindow folder updates, changed connection routes, connection deletion and background/Demo lifecycle. The folder UI journey pins Reports, disconnects, opens a nested document, backgrounds, relaunches and removes the snapshot. Real OpenSSH checks exercise canonical-root enforcement and local reads after disconnect.
 
+Offline-link regressions cover saved-route isolation, snapshot membership, parent/nested/encoded paths, distinct Unicode byte names, missing/excluded targets, changed/removed sources, relaunch and cancellation. Demo UI journeys exercise local and linked headings, nested document navigation, Back and error recovery after disconnect.
+
 Physical-device locked-file protection and real-server/network-loss acceptance remain separate from simulator results.
 
 ## Simulator examples
@@ -54,3 +60,11 @@ Synthetic Demo files only; screenshots do not establish physical-device acceptan
 | iPhone saved hierarchy | iPhone nested offline reader | iPad nested offline reader |
 | --- | --- | --- |
 | <img src="screenshots/offline-folders/iphone-folder.png" width="220" alt="Saved Reports folder with a 2026 subfolder and Markdown files"> | <img src="screenshots/offline-folders/iphone-reader.png" width="220" alt="A nested Quarterly review opened from the saved folder after disconnect"> | <img src="screenshots/offline-folders/ipad-reader.png" width="300" alt="Nested saved document in the iPad offline library sheet"> |
+
+### Links between saved documents
+
+Following `Heading notes.md#details` from another saved document after disconnect:
+
+| iPhone linked heading | iPad linked heading |
+| --- | --- |
+| <img src="screenshots/offline-folders/iphone-link.png" width="220" alt="Offline Heading notes reader revealing the linked Details heading on iPhone"> | <img src="screenshots/offline-folders/ipad-link.png" width="300" alt="Offline Details heading reached through a saved document link in the iPad sheet"> |

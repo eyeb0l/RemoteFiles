@@ -176,15 +176,20 @@ struct AppNavigation: View {
         .disabled(model.isDisconnecting)
         .safeAreaInset(edge: .bottom) { if model.sheet == nil { OfflinePinProgress(model: model) } }
         .sheet(item: $model.sheet) { sheet in
-            NavigationStack {
-                switch sheet {
-                case .connection(let id): ConnectionEditor(model: model, existing: id.flatMap(model.profile))
-                case .keys: KeyManagerView(model: model)
-                case .offlineFiles: OfflineFilesView(model: model)
-                case .offlineFolder(let profile, let path, let hidden): OfflineFolderSetupView(model: model, profile: profile, path: path, includeHidden: hidden)
-                case .trust(let endpoint, let key): TrustView(model: model, endpoint: endpoint, key: key)
-                case .changed(let endpoint, let previous, let current): ChangedHostView(model: model, endpoint: endpoint, previous: previous, current: current)
-                case .unlock(let identity): UnlockKeyView(model: model, identity: identity)
+            Group {
+                if case .offlineFiles = sheet { OfflineFilesView(model: model) }
+                else {
+                    NavigationStack {
+                        switch sheet {
+                        case .connection(let id): ConnectionEditor(model: model, existing: id.flatMap(model.profile))
+                        case .keys: KeyManagerView(model: model)
+                        case .offlineFiles: EmptyView()
+                        case .offlineFolder(let profile, let path, let hidden): OfflineFolderSetupView(model: model, profile: profile, path: path, includeHidden: hidden)
+                        case .trust(let endpoint, let key): TrustView(model: model, endpoint: endpoint, key: key)
+                        case .changed(let endpoint, let previous, let current): ChangedHostView(model: model, endpoint: endpoint, previous: previous, current: current)
+                        case .unlock(let identity): UnlockKeyView(model: model, identity: identity)
+                        }
+                    }
                 }
             }
             .safeAreaInset(edge: .bottom) { OfflinePinProgress(model: model) }

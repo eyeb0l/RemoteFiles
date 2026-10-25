@@ -5,6 +5,27 @@ Only a user tap in rendered Markdown starts a remote document navigation request
 unsafe schemes, absolute remote paths and scheme-relative URLs lose their actions.
 HTTP/HTTPS links keep the existing explicit external-open behavior.
 
+## Offline documents
+
+Relative links in saved Markdown use the local Offline library, without a transport
+or resource resolver. Folder members resolve only within their own saved snapshot;
+parent paths cannot leave its root. Individually saved documents resolve only to
+other individual copies from the same saved connection route. Links never choose
+an overlapping snapshot, another account or an edited connection route. Paths use
+the saved source directory, decode percent escapes once and preserve filename bytes.
+
+Same-document and linked Markdown heading fragments work locally. Native Back
+restores the previous reader’s in-memory position. Missing or excluded targets,
+unsupported types, queries and folder escapes keep the current reader and explain
+the failure. Before resolving a file link, the store checks that its source has
+not been updated or removed since opening; otherwise reopen the source. Every
+destination opens the latest committed copy through the existing verified local lease.
+No missing target is fetched automatically. Markdown images remain placeholders;
+static HTML/SVG and media resource policies are unchanged. See
+[offline files and folders](OFFLINE_FILES.md) for storage and lifecycle details.
+
+## Connected documents
+
 Relative paths resolve from the canonical source document directory. SFTP resolves
 both the connection's starting directory and source document with REALPATH before
 lexical resolution. `..` may reach a parent within that starting directory, but
