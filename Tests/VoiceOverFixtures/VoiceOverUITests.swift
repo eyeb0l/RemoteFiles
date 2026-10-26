@@ -8,9 +8,14 @@ import XCTest
         let json = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Long lines.json,")).firstMatch
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
         for _ in 0..<6 { if json.exists && json.isHittable { break }; app.swipeUp() }
-        XCTAssertTrue(json.exists && json.isHittable); json.tap()
-        XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 15))
+        XCTAssertTrue(json.exists && json.isHittable)
+        // Enable VoiceOver before each preview opens so the screen change
+        // establishes focus; enabling it on a settled preview can leave
+        // currentSpeech() with "No speech available". Rows are staged in touch
+        // mode, then a VoiceOver tap focuses the row and a double-tap opens it.
         try withVoiceOver {
+            try open(json, app)
+            XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 15))
             let utterances = try speech("LONG JSON", limit: 15)
             XCTAssertTrue(utterances.contains { $0.contains("Local preview sample") || $0.contains("Source text") })
             XCTAssertFalse(utterances.contains { $0.localizedCaseInsensitiveContains("double-tap to edit") })
@@ -29,20 +34,20 @@ import XCTest
         for _ in 0..<6 { if svg.exists && svg.isHittable { break }; app.swipeDown() }
         XCTAssertTrue(svg.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(svg.isHittable, app.debugDescription)
-        svg.tap()
-        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "Rendered SVG image").firstMatch.waitForExistence(timeout: 15))
-        XCTAssertTrue(app.activityIndicators.firstMatch.waitForNonExistence(timeout: 20), app.debugDescription)
         try withVoiceOver {
+            try open(svg, app)
+            XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "Rendered SVG image").firstMatch.waitForExistence(timeout: 15))
+            XCTAssertTrue(app.activityIndicators.firstMatch.waitForNonExistence(timeout: 20), app.debugDescription)
             let utterances = try speech("SVG", limit: 15)
             XCTAssertTrue(utterances.contains { $0.contains("Rendered SVG image") && $0.contains("Icon.svg") })
             XCTAssertTrue(utterances.contains { $0.contains("Source") && $0.contains("Button") })
             capture("VoiceOver SVG rendered preview", app)
-        }
-        app.buttons["Source"].tap()
-        XCTAssertTrue(app.staticTexts["Syntax highlighted source"].waitForExistence(timeout: 10))
-        try withVoiceOver {
-            let utterances = try speech("SVG SOURCE", limit: 15)
-            XCTAssertFalse(utterances.contains { $0.localizedCaseInsensitiveContains("double-tap to edit") })
+            // Stay in VoiceOver so switching modes keeps an established focus.
+            try focus("Source Button", name: "svg source", limit: 20, backward: true)
+            app.buttons["Source"].doubleTap()
+            XCTAssertTrue(app.staticTexts["Syntax highlighted source"].waitForExistence(timeout: 10))
+            let source = try speech("SVG SOURCE", limit: 15)
+            XCTAssertFalse(source.contains { $0.localizedCaseInsensitiveContains("double-tap to edit") })
             capture("VoiceOver SVG source", app)
         }
     }
@@ -100,6 +105,12 @@ import XCTest
             if duplicates >= 2 { break }
         }
         throw NSError(domain: "VoiceOverTargetNotReached", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not reach \(contains) in bounded \(name) traversal"])
+    }
+    private func open(_ row: XCUIElement, _ app: XCUIApplication) throws {
+        let label = row.label.components(separatedBy: ",").first ?? row.label
+        row.tap()
+        try focus(label, name: "open \(label)", limit: 3)
+        row.doubleTap()
     }
     private func capture(_ name: String, _ app: XCUIApplication) {
         print("VO HIERARCHY \(name)\n\(app.debugDescription)")

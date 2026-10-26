@@ -97,7 +97,12 @@ so the initial screen change establishes focus. PR #23's first VoiceOver run
 failed at its first Home speech query with `No speech available` after enabling
 the service on an already idle screen; seven other journeys passed. The startup
 ordering change retains every speech, navigation and state-restoration assertion
-and does not retry or skip service failures.
+and does not retry or skip service failures. For the same reason the long JSON
+and SVG journey enables VoiceOver before opening each preview, then focuses and
+double-taps the touch-staged row, and stays in VoiceOver to switch the SVG to
+Source. CI run 40241708814 failed with `No speech available` after re-enabling
+the service on the settled SVG Source view (the same tree had passed), and an
+Xcode 27.2 Simulator failed the same way on every settled-preview enable.
 
 `RealServerUITests` are explicitly skipped in the Simulator run. The single
 `IdentityTests/testTrustStoreWritesUseCompleteFileProtection` method may also skip
