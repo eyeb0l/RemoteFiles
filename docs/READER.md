@@ -1,85 +1,58 @@
-# Reader and preview behavior
+<a id="reader-and-preview-behavior"></a>
+# Reading and previewing files
 
 [Documentation](README.md) · [RemoteFiles](../README.md)
 
-Supported formats, navigation, export, and resource limits for the read-only reader.
+Select a file in a folder to open its preview. The reader does not edit the server file. Use **Refresh** to fetch the current version. If refresh fails, the previously loaded content stays visible and is labelled as such.
 
-## Reader scope
+<a id="reader-scope"></a>
+## What can I open?
 
-Markdown and UTF-8 text/config/code use a 2 MiB receive-time bound and explicit empty/binary/unsupported states. Standalone JPEG, PNG, HEIC/HEIF, GIF, TIFF, WebP and BMP images open with bounded SFTP caching and downsampled display; tap for full-screen zoom and Share. Animated images show their first frame. PDFs open in a native scrolling, zoomable reader. Common video and audio files open with playback and seeking controls after a bounded download. MP4/MOV/M4V/3GP video and MP3/M4A/AAC/WAV/AIFF/CAF/FLAC audio are recognized; codec compatibility depends on the device. Playback stops when leaving the preview or backgrounding. Image/PDF/audio/video transfers are capped at 128 MiB per file. See [audio and video previews](AUDIO_VIDEO.md) for the full format list and lifecycle policy. Markdown images load lazily through SFTP relative to the document directory, with bounded disk/pixel caches, retry, zoom and Share. Web/file/data image URLs never load. See [remote image policy](REMOTE_IMAGES.md). Tapped HTTP/HTTPS links may open externally; relative document links resolve within the canonical connection starting folder, and unsafe schemes remain disabled. Tables/code scroll within the rendered document. Markdown source and plain text remain read only. A failed refresh labels the previous content as previously loaded.
+| File | Preview and limits |
+| --- | --- |
+| Markdown | UTF-8 text up to 2 MiB, as a rendered document or original source. Tables and code blocks scroll within the document. |
+| Text, configuration and source code | UTF-8 text up to 2 MiB. Empty, binary and unsupported files get an explanation. |
+| HTML / HTM | UTF-8 text up to 2 MiB, as a static rendered preview or source; scripts and linked resources do not load. See [HTML previews](HTML_PREVIEWS.md). |
+| SVG | A restricted static rendering or source. See [SVG previews](#svg-previews). |
+| Images | JPEG, PNG, HEIC/HEIF, GIF, TIFF, WebP and BMP. Tap to zoom or share; animated images show their first frame. |
+| PDF | Native scrolling and zooming. |
+| Audio and video | Playback and seeking after download. Compatibility depends on the device and codec; see [audio and video](AUDIO_VIDEO.md) for the full format list. |
 
-HTML/HTM files open with **Rendered** and **Source** modes. Rendered is a static,
-local WebKit preview of document content and inline styles; scripts and linked
-resources are not loaded. Script-only app entry pages explain why there is no
-static content to display. Source keeps the original highlighted HTML and the
-existing copy/export actions. See [HTML previews](HTML_PREVIEWS.md).
+> **Download limit:** Image, PDF and media downloads are limited to 128 MiB per file. Even when a file has no supported preview, you can [save its original bytes](#save-the-original).
 
-Source files and the Markdown **Source** tab have automatic syntax highlighting in light and dark appearances, using the filename to select the bundled grammar (including Swift, JavaScript/TypeScript, Python, JSON, YAML, shell, HTML/CSS and SQL). Plain source appears immediately; tokenization and color preparation happen off the main actor. Selection and **Copy Source** retain the original text. Unknown formats, sources above 256 KiB, and results above 16,000 tokens stay plain to bound rendering work; the existing 2 MiB text-preview limit is unchanged. Rendered Markdown code fences use the same 256 KiB / 16,000-token budget and fall back losslessly to plain code when either limit is reached. The tokenizer runs locally and loads no remote scripts. Its token cache holds at most two documents within an estimated 2 MiB budget and clears on disconnect/background or memory warning. Leaving the source view cancels publication of unfinished highlighting.
+Images are downsampled for display. Playback stops when you leave the preview or the app goes into the background.
 
-## Document navigation and original export
+Markdown images load as needed over SFTP, relative to the document directory. They have bounded caches, retry, zoom and Share controls. Web, file and data image URLs never load; see [remote images](REMOTE_IMAGES.md). Tapping an HTTP or HTTPS document link may open it externally. Relative document links stay within the connection's canonical starting folder; unsafe URL schemes are blocked. See [document links](DOCUMENT_LINKS.md) for the boundary and offline behavior.
 
-**Document actions → Find in Document** searches visible Markdown or plain text,
-highlights the current result, and offers previous/next navigation. Source mode
-searches the literal source; HTML/SVG offer **Find in Source**. Searches are local,
-case/diacritic insensitive and capped at 1,000 results. **Headings** lists parsed
-Markdown headings; same-document and relative-file `#heading` links jump to them.
-Repeated headings use suffixes such as `details-1`.
+<a id="document-navigation-and-original-export"></a>
+## Find your place
 
-Text readers remember separate Rendered and Source positions across launches.
-History stores coordinates and a content fingerprint, never document contents,
-for up to 200 connection/path pairs. Changed text starts at the top. Positions
-save after scrolling pauses and when leaving the reader or backgrounding; Demo
-does not write reading history. Pixel positions are approximate if the screen
-size or text settings change.
+- **Find:** Choose **Document actions → Find in Document** to search rendered Markdown or plain text and move between matches. In Source mode it searches the literal source; HTML and SVG offer **Find in Source**. Search is local, case- and diacritic-insensitive, and limited to 1,000 results.
 
-When the scene becomes inactive or backgrounded, an opaque window-level privacy
-cover sits above readers and presented sheets before the system captures an app
-switcher snapshot. Returning active removes the cover without changing navigation,
-reader position, or presentation state.
+- **Headings and links:** **Headings** lists parsed Markdown headings. You can also follow same-document and relative-file heading links. Repeated headings have suffixes such as `details-1`. Native Back returns to the previous reader. Missing headings and unsupported query links show an explanation and leave the current document open.
 
-Rendered Markdown can open relative Markdown/text/image/PDF/audio/video links within the
-connection’s canonical starting folder. Native Back keeps separate Rendered and
-Source reading positions. Missing headings and unsupported query links show an actionable explanation.
-See [document links](DOCUMENT_LINKS.md).
+- **Reading position:** Text readers remember separate Rendered and Source positions across launches. History contains coordinates and a content fingerprint, not document contents, for up to 200 connection/path pairs. A changed document starts at the top; a different screen size or text setting can make a restored position approximate. Positions save after scrolling pauses and when leaving or backgrounding. Demo does not write reading history.
 
-The reader’s **Save Original to Files** toolbar action streams the original file
-(up to 128 MiB), preserving exact bytes and the selected filename/extension. It
-works for files without a supported preview. Preparation can be cancelled; the
-native Files picker saves a copy. Temporary exports expire after ten minutes
-and are removed on dismissal, navigation away, disconnect or backgrounding.
-See [original export](ORIGINAL_EXPORT.md).
+## Read source
 
-## Offline copies
+Use **Source** where offered to see the original text. Supported languages are highlighted locally using the filename, including Swift, JavaScript/TypeScript, Python, JSON, YAML, shell, HTML/CSS and SQL. Selection and **Copy Source** retain the original text. For unfamiliar formats or large or complex sources, the reader displays plain text instead: highlighting is limited to 256 KiB and 16,000 tokens. The same limits apply to rendered Markdown code fences; they fall back to plain code without losing content. The text-preview limit remains 2 MiB.
 
-**Document actions → Keep Offline** saves an individual original for the library’s
-**Offline Files** collection. Copies open without SFTP, show their saved date, and
-update only on request. **Folder actions → Keep Folder Offline** saves a complete
-tree, including subfolders and empty directories. Relative Markdown links open
-saved documents within that snapshot, or other individual copies from the same
-saved connection route. Same-document and linked heading fragments work locally.
-Missing targets show an explanation without starting SFTP. See
-[offline files](OFFLINE_FILES.md) for limits, local preview differences and lifecycle.
+Lines wrap by default. Choose **Document actions → Wrap Lines** to turn wrapping off and scroll horizontally; the preference is remembered. Very long lines and large documents use a width-bounded read-only view to avoid an oversized layout surface. The actions menu explains when this limit applies. Malformed JSON remains readable as source.
 
-## JSON and SVG previews
+Highlighting is prepared off the main actor; plain text appears first. The local token cache holds at most two documents within an estimated 2 MiB, and clears on disconnect, backgrounding or memory warning. No remote scripts are loaded for highlighting.
 
-Source lines wrap visually by default; **Document actions → Wrap Lines** turns
-wrapping off for horizontal scrolling and remembers your preference. Scroll
-indicators flash when opening an unwrapped source view. Very long lines and
-large documents always use a width-bounded, read-only TextKit view on iOS to
-avoid an oversized layout surface; the actions menu explains this limit.
-Selection, Copy Source and original export retain the original characters and
-bytes. The 2 MiB text limit still applies, and
-malformed JSON remains readable source rather than becoming an empty preview.
+## Save the original
 
-SVG files have **Rendered / Source** modes. Rendering supports a static subset
-(paths, shapes, groups, gradients, local references and text) up to 512 KiB,
-10,000 elements and 64 levels. Unsupported, malformed or overly complex SVGs
-show a source-accessible explanation. Scripts, event handlers, animation,
-embedded images, HTML and external resources are rejected. Only reserialized,
-allowlisted SVG enters a nonpersistent WebKit view with content JavaScript
-disabled, a restrictive content security policy, all-resource blocking and
-external navigation denied. Source and Save Original do not use that rendering
-copy. SVG rendering does not fetch images, stylesheets, fonts or other files.
+Choose **Save Original to Files** in the reader toolbar to save a copy through the native Files picker. Preparation streams the original file, up to 128 MiB, preserving its exact bytes and selected filename and extension. You can cancel preparation. Temporary exports expire after ten minutes and are removed on dismissal, navigation away, disconnect or backgrounding. See [original export](ORIGINAL_EXPORT.md) for confinement and lifecycle details.
 
-Synthetic long-line JSON and SVG examples in Explore Demo support regression
-checks. Private user attachments and screenshots are not bundled or committed.
+<a id="offline-copies"></a>
+For an on-device copy available without SFTP, choose **Document actions → Keep Offline**. To save a folder tree, choose **Folder actions → Keep Folder Offline**. Offline copies update only when requested. See [offline files and folders](OFFLINE_FILES.md) for limits, local links and preview differences.
+
+<a id="json-and-svg-previews"></a>
+## SVG previews
+
+Rendered SVG supports a static subset (paths, shapes, groups, gradients, local references and text), up to 512 KiB, 10,000 elements and 64 levels. An unsupported, malformed or overly complex SVG shows an explanation while keeping source available.
+
+Scripts, event handlers, animation, embedded images, HTML and external resources are rejected. Only reserialized, allowlisted SVG enters a nonpersistent WebKit view with JavaScript disabled, a restrictive content security policy, resource blocking and external navigation denied. The rendering copy is separate from Source and Save Original.
+
+When the app becomes inactive or backgrounded, an opaque window-level privacy cover sits above readers and presented sheets for the app switcher snapshot. Returning removes the cover without changing navigation or reader position.

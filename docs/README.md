@@ -1,38 +1,35 @@
-# Documentation
+# RemoteFiles documentation
 
-[← RemoteFiles](../README.md)
+[← Project overview](../README.md)
 
-## Start here
+Choose a guide by what you want to do.
 
-- [Connections and security](CONNECTIONS.md): SSH/SFTP setup, Tailscale, host verification, credentials, and local state.
-- [Build and test](DEVELOPMENT.md): Xcode setup, signing, dependencies, test commands, and fixture isolation. Run shell examples from the repository root.
-- [Reader and preview behavior](READER.md): formats, resource limits, syntax highlighting, navigation, and export.
-- [Contributor guide](../AGENTS.md): repository structure and contribution conventions.
+> **Reading the evidence:** Feature guides explain behavior and limits. Investigation and acceptance records also contain dated results; those results are not claims about the current build.
 
-## Feature guides
+## Use the app
 
-- [Folder browsing](FOLDER_BROWSING.md): symbolic links, sorting, and searching names or file contents in subfolders.
-- [SSH key support](KEY_SUPPORT.md) and [public-key installation](PUBLIC_KEY_INSTALLATION.md).
-- [Remote images](REMOTE_IMAGES.md), [audio and video](AUDIO_VIDEO.md), and [static HTML](HTML_PREVIEWS.md).
-- [Document links](DOCUMENT_LINKS.md), [original-file export](ORIGINAL_EXPORT.md), and [JSON/SVG previews](READER.md#json-and-svg-previews).
-- [Offline files and folders](OFFLINE_FILES.md): complete folder snapshots, individual copies, explicit updates, links between saved documents, local previews and storage limits.
-- [App icon](APP_ICON.md): assets, appearance variants, and export workflow.
+- [Connect to a server](CONNECTIONS.md): what you need, authentication, host-key trust and local data.
+- [Use a jump host](JUMP_HOSTS.md): connect through one SSH bastion and verify both hosts.
+- [Manage SSH keys](KEY_SUPPORT.md) or [install a public key](PUBLIC_KEY_INSTALLATION.md) on a compatible server. Installation is a separately confirmed server change; browsing is read only.
+- [Browse and search folders](FOLDER_BROWSING.md): sorting, hidden files, symbolic links and search limits.
+- [Read and preview files](READER.md): supported formats, navigation, source, sharing and size limits.
+- [Save files and folders for offline use](OFFLINE_FILES.md): snapshots, updates, storage limits and offline links.
+- [Use the iPad workspace](IPAD.md): navigate the library, folder and reader in different window sizes.
 
-## Architecture and performance
+For a closer look at specific behavior, see [document links](DOCUMENT_LINKS.md), [saving original files](ORIGINAL_EXPORT.md), [remote Markdown images](REMOTE_IMAGES.md), [audio and video](AUDIO_VIDEO.md) and [static HTML](HTML_PREVIEWS.md).
 
-- [SSH transport investigation](SSH_SPIKE.md) and [renderer investigation](RENDERER_SPIKE.md).
-- [Reader performance](READER_PERFORMANCE.md) and [Markdown viewport rendering](markdown-viewport-rendering.md).
+## Build, change and verify the app
+
+- [Build and test](DEVELOPMENT.md): Xcode, signing, fixtures and local commands. Run shell examples from the repository root.
+- [Contributor guide](../AGENTS.md): project layout and repository conventions.
+- [CI policy](CI.md): which lanes run, timing and how to reproduce them.
+- [Automated acceptance](AUTOMATED_ACCEPTANCE.md): runner usage, required results, allowed skips and evidence.
+- [Manual acceptance](MANUAL_ACCEPTANCE.md), [real-server acceptance](REAL_SERVER_ACCEPTANCE.md) and [device permissions and lifecycle](DEVICE_PERMISSIONS_LIFECYCLE.md): device and network checks that automated tests do not replace.
+- [App icon](APP_ICON.md): assets, appearance variants and export workflow.
+
+## Understand decisions and history
+
+- [Project status](../PREVIEW_STATUS.md) records dated build and acceptance results; [roadmap](../ROADMAP.md) describes deferred work.
+- [SSH transport investigation](SSH_SPIKE.md) and [renderer investigation](RENDERER_SPIKE.md) document earlier dependency choices and their verification.
+- [Reader performance](READER_PERFORMANCE.md) and [Markdown viewport rendering](markdown-viewport-rendering.md) explain specific performance and layout work.
 - Vendored dependency provenance: [Citadel](../Vendor/Citadel/UPSTREAM.md) and [Textual](../Vendor/Textual/UPSTREAM.md).
-
-## Verification and project status
-
-- [CI policy and timing](CI.md): quick PR checks, broader acceptance triggers and build caches.
-- [Automated acceptance](AUTOMATED_ACCEPTANCE.md): runner usage, required test lanes, and retained evidence.
-- [Manual acceptance](MANUAL_ACCEPTANCE.md), [real-server acceptance](REAL_SERVER_ACCEPTANCE.md), and [device permissions/lifecycle](DEVICE_PERMISSIONS_LIFECYCLE.md).
-- [Project status](../PREVIEW_STATUS.md): recorded results and outstanding acceptance.
-- [Roadmap](../ROADMAP.md): deferred work.
-
-Acceptance documents include historical evidence; consult their dates and stated limitations when interpreting results.
-
-- [Jump hosts](JUMP_HOSTS.md): single-bastion SSH routing and independent trust.
-- [iPad workspace](IPAD.md): library, folder and reader in an adaptive split view.

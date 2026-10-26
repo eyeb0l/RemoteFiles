@@ -1,6 +1,10 @@
 # RemoteFiles
 
-A native iPhone app for browsing and reading files on your Mac or Unix server over SFTP. Open a favourite folder, read a Markdown report, inspect source code, or preview media—and refresh when the remote file changes.
+RemoteFiles is an iPhone and iPad app for browsing and reading files on a Mac or Unix server over SFTP. It is useful when you want to check a report, look through a project, or read a file away from your computer without copying an entire directory to your device.
+
+Connect to a server you already control, choose a folder, and open files in a reader or preview. You can also save selected files or complete folders on the device for reading without a connection.
+
+> **Read-only browsing:** RemoteFiles does not edit or delete remote files. The optional public-key installer is a separate, explicitly confirmed server write. See [connections and security](docs/CONNECTIONS.md).
 
 ## A look inside
 
@@ -10,26 +14,37 @@ A native iPhone app for browsing and reading files on your Mac or Unix server ov
 
 *Screenshots from the demo workspace.*
 
-## What you can do
+On iPad, the [workspace](docs/IPAD.md) can show the library, folder and reader side by side. It adapts to the available window size.
 
-- Browse remote folders, search names or UTF-8 file contents in subfolders, save favourites, and return to recent files.
-- Keep files and complete folder trees in an [Offline library](docs/OFFLINE_FILES.md), browse and follow Markdown links between saved copies without SFTP, and update them on request.
-- Read Markdown or highlighted source, find text, jump to headings, and remember your reading position.
-- Preview images, PDFs, audio, video, and static HTML/SVG.
-- Copy source or save an original file to Files.
-- Connect directly or through an [SSH jump host](docs/JUMP_HOSTS.md), with SSH keys and explicit host verification. Browsing is read only.
-- Keep the library, folder and reader side by side in the [iPad workspace](docs/IPAD.md).
+<img src="docs/screenshots/ipad/workspace.png" width="840" alt="RemoteFiles on iPad with the library, folder list and reader visible together">
 
-## Get started
+## Try the app
 
-Requires **iOS 27.0** and **Xcode 27.0 or newer** to build. Open `RemoteFiles.xcodeproj`, select the **RemoteFiles** scheme, and run on an iOS 27 simulator or your iPhone. Choose **Settings → Explore Demo** to try sample files, or [connect your server](docs/CONNECTIONS.md).
+The project requires **Xcode 27 or newer** to build and **iOS 27 or newer** to run.
 
-See [build and test instructions](docs/DEVELOPMENT.md) for signing, command-line builds, and verification.
+1. Open `RemoteFiles.xcodeproj` and select the **RemoteFiles** scheme.
+2. Run it on an iOS simulator or your iPhone or iPad.
+3. Choose **Settings → Explore Demo** to browse sample files without a server.
+
+### Connect your own server
+
+You'll need a reachable SSH server with SFTP enabled, an account that can read the files, and an SSH key accepted by that account. Choose **Add Connection**, generate or import a key, and enter the host and account details. Verify the displayed host-key fingerprint through a trusted channel before accepting it.
+
+The [connection guide](docs/CONNECTIONS.md) covers setup, key installation and troubleshooting. A [jump host](docs/JUMP_HOSTS.md) is supported when your server is reached through a bastion.
+
+For command-line builds, signing and tests, see [build and test](docs/DEVELOPMENT.md).
+
+## Using RemoteFiles
+
+- **Find a file:** browse folders or search names and supported text contents in subfolders. Save frequently used folders as favourites; recents are references to remote files. [Folder browsing](docs/FOLDER_BROWSING.md) explains search scopes and limits.
+- **Read and preview:** open Markdown, text and source code, images, PDFs, audio, video, or static HTML/SVG. Markdown offers rendered and source views; text readers provide Find and reading-position history. Format support and size limits are in [reader and previews](docs/READER.md).
+- **Save an original:** use **Save Original to Files** to export a copy without changing the server file. [Original-file export](docs/ORIGINAL_EXPORT.md) covers its limits and lifecycle.
+- **Read offline:** choose **Keep Offline** for a file or **Keep Folder Offline** for a folder, then open the copy from **Offline Files** in the library. Saved copies are updated only when you request it; they are not automatically synchronized. Folder saves exclude symbolic links and special files, and a failed update retains the previous complete snapshot. See [offline files and folders](docs/OFFLINE_FILES.md) for storage limits and offline preview differences.
 
 ## Documentation
 
-- [Connections and security](docs/CONNECTIONS.md) — server setup, SSH keys, host trust, and local storage.
-- [Reader and previews](docs/READER.md) — supported formats, navigation, export, and limits.
+- [Connections and security](docs/CONNECTIONS.md) — server setup, SSH keys, host trust and local storage.
+- [Reader and previews](docs/READER.md) — formats, navigation, export and limits.
 - [Build and test](docs/DEVELOPMENT.md) — development setup and reproducible checks.
-- [All documentation](docs/README.md) — feature guides, architecture notes, and acceptance evidence.
+- [All documentation](docs/README.md) — feature guides, architecture notes and acceptance evidence.
 - [Project status](PREVIEW_STATUS.md) · [Roadmap](ROADMAP.md) · [Contributor guide](AGENTS.md)

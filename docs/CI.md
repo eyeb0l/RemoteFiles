@@ -2,12 +2,13 @@
 
 [Build and test](DEVELOPMENT.md) · [Automated acceptance](AUTOMATED_ACCEPTANCE.md)
 
-## Ordinary pull requests
+This page explains which checks a change receives, how to reproduce them, and
+where to find the evidence. A green CI run covers only the jobs selected for
+that change; it is not by itself evidence of a physical-device or real-server
+check. For the full local suite and its failure rules, see
+[Automated acceptance](AUTOMATED_ACCEPTANCE.md).
 
-The VoiceOver launcher also works with macOS’s stock Bash when optional package
-or compiler-cache settings are absent. Its empty-array handling preserves each
-configured argument (including paths with spaces), and launcher regressions
-check that collecting lifecycle logs cannot turn a failed Xcode run into success.
+## Ordinary pull requests
 
 Every PR and main push runs **Repository checks** on Linux: Python runner/scope
 regressions, generated-project consistency and whitespace across the complete
@@ -36,20 +37,6 @@ unchanged. The OpenSSH fixture still surrounds test execution.
 Only the methods in `SIMULATOR_ALLOWED_SKIPS` may skip in the hosted core lane:
 the physical-device Data Protection assertion and the opt-in Face ID checks. Benchmark operations run once on loopback. Missing methods,
 failures, unexpected skips and xcresult/log count mismatches fail validation.
-
-The first WebKit navigation in the core test host pays WebKit's cold start.
-`testRendererDefensesBlockActiveMarkupAndResourceRequests` normally runs first.
-On a just-booted Simulator under a host load average near 94, the GPU and
-WebContent processes each took over 8 seconds to launch, and the networking
-process took another 1.9 seconds. The local attack document then missed its old
-10-second wait. On a quieter fresh Simulator the same navigation took 2.3
-seconds, while compiling `SVGResourceBlocker` rules took 0.11 seconds. The test
-now loads an inert SVG in the production configuration first, with a 60-second
-cold-start bound. It then times the attack document against the production
-15-second SVG deadline. After warm-up, that document finished in 0.6–0.7 seconds
-on three fresh-Simulator lane runs. The `finished` precondition and the
-script/resource assertions are unchanged. The test log prints
-`RENDERER DEFENSES TIMING`, which separates rule, WebKit-start and document time.
 
 ## Changes requiring broader acceptance
 
@@ -108,7 +95,41 @@ The quick jobs have a 35-minute infrastructure ceiling and acceptance jobs 45
 minutes; these are failure bounds, not target durations. Each command retains
 its own 30-minute deadline.
 
-## Why the first workflow took nearly an hour
+## Local reproduction
+
+Run a single lane with fresh evidence outside the checkout:
+
+```sh
+python3 -B scripts/test-acceptance.py --lane macos-openssh \
+  --output /private/tmp/remotefiles-macos-NEW_RUN
+python3 -B scripts/test-acceptance.py --lane simulator-core \
+  --simulator SIMULATOR_UDID --output /private/tmp/remotefiles-core-NEW_RUN
+```
+
+Other choices are `simulator-ui`, `voiceover`, `release-device-compile`, and the
+combined `simulator` lane. Repeat `--lane` to select disjoint inventories; the
+combined Simulator lane cannot be mixed with its core/UI subsets. Omit `--lane`
+to retain the complete local acceptance run. Use `--allow-dirty` only when the
+report should identify a working-tree snapshot rather than an exact commit.
+
+## WebKit cold-start regression
+
+The first WebKit navigation in the core test host pays WebKit's cold start.
+`testRendererDefensesBlockActiveMarkupAndResourceRequests` normally runs first.
+On a just-booted Simulator under a host load average near 94, the GPU and
+WebContent processes each took over 8 seconds to launch, and the networking
+process took another 1.9 seconds. The local attack document then missed its old
+10-second wait. On a quieter fresh Simulator the same navigation took 2.3
+seconds, while compiling `SVGResourceBlocker` rules took 0.11 seconds. The test
+now loads an inert SVG in the production configuration first, with a 60-second
+cold-start bound. It then times the attack document against the production
+15-second SVG deadline. After warm-up, that document finished in 0.6–0.7 seconds
+on three fresh-Simulator lane runs. The `finished` precondition and the
+script/resource assertions are unchanged. The test log prints
+`RENDERER DEFENSES TIMING`, which separates rule, WebKit-start and document time.
+
+<a id="why-the-first-workflow-took-nearly-an-hour"></a>
+## Historical baseline: the first workflow
 
 [The original main run](https://github.com/eyeb0l/RemoteFiles/actions/runs/39261247900)
 spent 57 minutes 54 seconds in its Mac job. It ran everything serially on every
@@ -134,23 +155,6 @@ independent work, gates expensive work behind quick checks and preserves build
 progress after failures. Cold builds still take longer than warm ones. Use each
 job's timestamps and retained summary to measure actual elapsed time rather than
 treating a compiler cache hit as proof that tests passed.
-
-## Local reproduction
-
-Run a single lane with fresh evidence outside the checkout:
-
-```sh
-python3 -B scripts/test-acceptance.py --lane macos-openssh \
-  --output /private/tmp/remotefiles-macos-NEW_RUN
-python3 -B scripts/test-acceptance.py --lane simulator-core \
-  --simulator SIMULATOR_UDID --output /private/tmp/remotefiles-core-NEW_RUN
-```
-
-Other choices are `simulator-ui`, `voiceover`, `release-device-compile`, and the
-combined `simulator` lane. Repeat `--lane` to select disjoint inventories; the
-combined Simulator lane cannot be mixed with its core/UI subsets. Omit `--lane`
-to retain the complete local acceptance run. Use `--allow-dirty` only when the
-report should identify a working-tree snapshot rather than an exact commit.
 
 ## Quick-run comparison baseline
 
@@ -190,3 +194,8 @@ installation and recent-entry state across app launches. Reusing their app conta
 with an already-installed mock public key or an already-removed seeded recent entry. A fresh
 output directory alone does not reset that simulator state. Diagnose these failures before
 rerunning the affected methods on a fresh device; retain both the original failure and rerun evidence.
+
+The VoiceOver launcher supports macOS’s stock Bash when optional package or
+compiler-cache settings are absent. Launcher regressions also check that argument
+paths with spaces survive and that collecting lifecycle logs cannot turn a failed
+Xcode run into success.

@@ -1,6 +1,11 @@
 # Renderer spike
 
-Inspected on 22 September 2026. The selected renderer is [Textual](https://github.com/gonzalezreal/textual/tree/01b51875a5406eefc95f52a058cb059e7bc94dc4), now locally vendored from commit `01b51875a5406eefc95f52a058cb059e7bc94dc4`. `DocumentContentView(text:markdown:source:)` is the app's only renderer integration boundary.
+This records the renderer decision and evidence from 22 September 2026; later
+features and performance changes are linked below. For the current reader
+behavior, start with [Reader](READER.md), [document links](DOCUMENT_LINKS.md),
+and [remote images](REMOTE_IMAGES.md).
+
+The selected renderer is [Textual](https://github.com/gonzalezreal/textual/tree/01b51875a5406eefc95f52a058cb059e7bc94dc4), now locally vendored from commit `01b51875a5406eefc95f52a058cb059e7bc94dc4`. `DocumentContentView(text:markdown:source:)` is the app's only renderer integration boundary.
 
 ## Source findings and choices
 
@@ -20,7 +25,7 @@ Textual's default attachment loader fetches URLs, so RemoteFiles does not use th
 1. The remote reader uses `DocumentPolicy.remoteMarkdownParts`: parsed image runs become native image rows, while attributed text segments retain Markdown styling and have no image URLs. The legacy `prepareMarkdown` default remains an image-free preparation API.
 2. Both Textual image and emoji loaders still perform no I/O. Only the injected remote-resource resolver fetches images through SFTP.
 3. Automatic resources are confined to the remote document directory tree, with lexical and server-canonical path checks. Relative paths and in-tree absolute remote paths are supported. HTTP/file/data images remain blocked. See [REMOTE_IMAGES.md](REMOTE_IMAGES.md) for cache, transfer, downsampling and cancellation policies.
-4. Unsafe and relative link attributes remain inactive; tapped absolute HTTP/HTTPS links can open externally. Local Markdown document navigation is future work. HTML remains inactive attributed text; no web view is used.
+4. At the time of the spike, relative link attributes were inactive and tapped absolute HTTP/HTTPS links could open externally. Relative document navigation was added later; see [document links](DOCUMENT_LINKS.md) for its current policy. The Markdown renderer does not use a web view for raw HTML.
 
 The plain-text/source branch uses `Text(verbatim:)`, monospaced Dynamic Type, native selection, and two-axis scrolling. It does not interpret code or HTML. UTF-8 validation rejects malformed byte sequences and non-whitespace C0 controls, and handles empty files and UTF-8 BOMs deliberately. Unsupported extensions and oversized input have separate policy results. The transport separately enforces the byte limit while receiving data.
 

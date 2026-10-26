@@ -2,7 +2,16 @@
 
 [Documentation](README.md) · [RemoteFiles](../README.md)
 
-Run commands from the repository root. Use Xcode 27.0 or newer and an available iOS 27 simulator; substitute your simulator name in the examples.
+This guide is for building and changing the app. Run commands from the repository
+root with Xcode 27.0 or newer and an available iOS 27 simulator; substitute your
+simulator name in the examples. For a first look at the app, run the Demo workspace
+in step 3 below. To validate a change, choose a test command based on the behavior
+you changed and use [automated acceptance](AUTOMATED_ACCEPTANCE.md) when you need
+the full integration evidence.
+
+`Sources/RemoteFilesCore` contains connection, persistence and document policies;
+`Sources/RemoteFilesUI` contains the views and presentation state. The runnable
+app is in `App`, and tests and their fixture apps are in `Tests`.
 
 ## Build and run
 
@@ -22,9 +31,14 @@ xcodebuild -project RemoteFiles.xcodeproj -scheme RemoteFiles \
 
 Simulator signing is ad hoc and requires no personal development team. The generic device command checks compilation; it does not produce an installable signed iPhone build.
 
-The local Swift package contains `RemoteFilesCore` and `RemoteFilesUI`. Xcode owns the runnable app, hosted iOS core-test target, and native UI-test target. The UI test uses the explicit demo workspace and exercises browsing, rendered/source reading, refresh, and back navigation without touching saved real connections. Tests use the separate minimal `RemoteFilesTestHost`. The hosted image lifecycle regressions also link `RemoteFilesUI` to check the production viewer and memory-warning handler. After adding test files, regenerate its small project with `python3 scripts/generate-project.py`; the script does not fetch packages or modify source files. Commit both `Package.resolved` and `RemoteFiles.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved` when dependency resolution changes.
+The local Swift package contains `RemoteFilesCore` and `RemoteFilesUI`. Xcode owns the runnable app, hosted iOS core-test target, and native UI-test target. The UI test uses the explicit demo workspace and exercises browsing, rendered/source reading, refresh, and back navigation without touching saved real connections. Tests use the separate minimal `RemoteFilesTestHost`. The hosted image lifecycle regressions also link `RemoteFilesUI` to check the production viewer and memory-warning handler. After adding test files, regenerate its small project with `python3 -B scripts/generate-project.py`; the script does not fetch packages or modify source files. Commit both `Package.resolved` and `RemoteFiles.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved` when dependency resolution changes.
 
 ## Reproducible verification
+
+The package tests are a useful starting point. Use the OpenSSH launcher when a
+change touches transport or its fixture, and the signed Simulator host for iOS
+and Keychain behavior. The commands below do not establish physical-device
+acceptance.
 
 ```sh
 swift test                         # unit tests; real-server cases explicitly skip without a fixture
@@ -34,7 +48,7 @@ scripts/test-openssh.sh xcodebuild -project RemoteFiles.xcodeproj \
   -derivedDataPath DerivedData -collect-test-diagnostics never \
   -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- test
 python3 -B scripts/test_runner_finalization.py -v  # runner failure/cleanup regressions
-python3 Fixtures/generate-fixtures.py /private/tmp/remotefiles-fixtures
+python3 -B Fixtures/generate-fixtures.py /private/tmp/remotefiles-fixtures
 # Optional actual iOS VoiceOver speech/focus checks (Xcode 27, local fixtures):
 scripts/test-voiceover.sh SIMULATOR_UDID /private/tmp/remotefiles-voiceover-run
 ```

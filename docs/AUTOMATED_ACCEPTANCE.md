@@ -3,6 +3,9 @@
 Use the acceptance runner after integration, from Xcode 27 on a Mac with an
 available iOS 27 simulator. It does not require an iPhone, a saved connection,
 existing SSH keys, or changes to the Mac's Remote Login/security settings.
+The default run combines host, Simulator, VoiceOver and device-compilation
+checks. It does not replace a physical-device or real-server journey; see
+[manual acceptance](MANUAL_ACCEPTANCE.md) for those checks.
 
 ```sh
 xcrun simctl list devices available
@@ -68,6 +71,65 @@ independently inventoried lanes to run quick macOS/hosted-core validation on
 ordinary code changes, and adds UI, VoiceOver and Release jobs for sensitive
 changes or explicit requests. See [CI policy and timing](CI.md). `--lane` reports
 its selected coverage explicitly; it does not count unrequested lanes as passed.
+
+## Required lanes and failure rules
+
+| Lane | What it establishes | Required outcome |
+|---|---|---|
+| macOS + loopback OpenSSH | All host core tests, key import/trust, read/stream caps, cancellation and generated server fixtures; actual large-image decode | Every inventoried method runs, no failures or skips; benchmark operations run once on loopback |
+| Signed iOS Simulator | Hosted Keychain/UI lifecycle tests, loopback SFTP, generated large-image decode and ordinary demo UI journeys | Every inventoried method runs; only real-server opt-in methods, the physical-device Data Protection assertion and the opt-in Face ID checks may skip |
+| Actual VoiceOver service | `XCUIVoiceOverService` speech/focus checks against production reader/image views in a disposable fixture app | Every VoiceOver method passes; original VoiceOver enabled state is restored |
+| Release generic iOS compile | Optimized device-target compilation | Build succeeds; this is not an installable/signed device run |
+
+The runner inventories XCTest methods in platform-specific source and compares
+that list with completed method results. An omitted new Xcode test file, crash,
+unexpected skip, unexpected retry, nonzero command exit, missing xcresult, or
+xcresult/log count mismatch fails acceptance. The inventory deliberately supports
+the repository's `os(iOS)`/`os(macOS)` conditionals; a new conditional form must be
+handled explicitly, otherwise acceptance fails closed.
+
+There are no automatic retries. An investigated rerun uses a fresh evidence
+directory; retain and disclose the first failure. Summary status stays `running`
+until all required lanes finish, or `failed` as soon as a lane fails.
+
+The demo reader VoiceOver journey enables the service before launching the app
+so the initial screen change establishes focus. PR #23's first VoiceOver run
+failed at its first Home speech query with `No speech available` after enabling
+the service on an already idle screen; seven other journeys passed. The startup
+ordering change retains every speech, navigation and state-restoration assertion
+and does not retry or skip service failures.
+
+`RealServerUITests` are explicitly skipped in the Simulator run. The single
+`IdentityTests/testTrustStoreWritesUseCompleteFileProtection` method may also skip
+because Simulator filesystems do not report Data Protection classes; its actual
+protection assertion still requires a physical device. The three opt-in Face ID
+methods in `IdentityTests` also skip unless given the setup described in
+[KEY_SUPPORT.md](KEY_SUPPORT.md). Keychain tests must run.
+The opt-in latency benchmark's operations run once against the generated
+loopback fixture on both platforms, with no latency proxy or performance
+threshold. These timings are smoke coverage, not network-latency evidence. The runner
+clears inherited real-server opt-in variables and never touches a real server.
+The current `testSeventyMegabyteImageUsesBoundedDisplayPixels` creates a valid
+PNG over 70 MB inside its temporary directory on both platforms, then checks
+decoded bounds; fixture generation retains a single row. Both platform runs
+must pass. This replaces the baseline's macOS-only method body and removes its
+manual fixture prerequisite. Simulator speech/focus does not prove touch
+gestures, rotor or Braille behavior.
+
+The VoiceOver script can also be run independently. Set
+`REMOTEFILES_SOURCE_PACKAGES_DIR` to reuse a locked package checkout directory;
+otherwise it uses normal Xcode package resolution:
+
+```sh
+REMOTEFILES_SOURCE_PACKAGES_DIR=/private/tmp/remotefiles-acceptance-SourcePackages \
+  scripts/test-voiceover.sh SIMULATOR_UDID /private/tmp/remotefiles-voiceover-NEW_RUN
+```
+
+## Feature-specific coverage
+
+These sections identify the regression tests and the limits of the evidence
+for changes that affect offline storage or search. They supplement the required
+lane and failure rules above.
 
 ### Offline copies
 
@@ -160,60 +222,8 @@ for cellular/Tailscale interruptions, background/foreground cancellation and
 post-recovery navigation during a recursive search. Neither a simulator run nor
 Release device compilation supplies that evidence.
 
-## Required lanes and failure rules
-
-| Lane | What it establishes | Required outcome |
-|---|---|---|
-| macOS + loopback OpenSSH | All host core tests, key import/trust, read/stream caps, cancellation and generated server fixtures; actual large-image decode | Every inventoried method runs, no failures or skips; benchmark operations run once on loopback |
-| Signed iOS Simulator | Hosted Keychain/UI lifecycle tests, loopback SFTP, generated large-image decode and ordinary demo UI journeys | Every inventoried method runs; only real-server opt-in methods, the physical-device Data Protection assertion and the opt-in Face ID checks may skip |
-| Actual VoiceOver service | `XCUIVoiceOverService` speech/focus checks against production reader/image views in a disposable fixture app | Every VoiceOver method passes; original VoiceOver enabled state is restored |
-| Release generic iOS compile | Optimized device-target compilation | Build succeeds; this is not an installable/signed device run |
-
-The runner inventories XCTest methods in platform-specific source and compares
-that list with completed method results. An omitted new Xcode test file, crash,
-unexpected skip, unexpected retry, nonzero command exit, missing xcresult, or
-xcresult/log count mismatch fails acceptance. The inventory deliberately supports
-the repository's `os(iOS)`/`os(macOS)` conditionals; a new conditional form must be
-handled explicitly, otherwise acceptance fails closed.
-
-There are no automatic retries. An investigated rerun uses a fresh evidence
-directory; retain and disclose the first failure. Summary status stays `running`
-until all required lanes finish, or `failed` as soon as a lane fails.
-
-The demo reader VoiceOver journey enables the service before launching the app
-so the initial screen change establishes focus. PR #23's first VoiceOver run
-failed at its first Home speech query with `No speech available` after enabling
-the service on an already idle screen; seven other journeys passed. The startup
-ordering change retains every speech, navigation and state-restoration assertion
-and does not retry or skip service failures.
-
-`RealServerUITests` are explicitly skipped in the Simulator run. The single
-`IdentityTests/testTrustStoreWritesUseCompleteFileProtection` method may also skip
-because Simulator filesystems do not report Data Protection classes; its actual
-protection assertion still requires a physical device. The three opt-in Face ID
-methods in `IdentityTests` also skip unless given the setup described in
-[KEY_SUPPORT.md](KEY_SUPPORT.md). Keychain tests must run.
-The opt-in latency benchmark's operations run once against the generated
-loopback fixture on both platforms, with no latency proxy or performance
-threshold. These timings are smoke coverage, not network-latency evidence. The runner
-clears inherited real-server opt-in variables and never touches a real server.
-The current `testSeventyMegabyteImageUsesBoundedDisplayPixels` creates a valid
-PNG over 70 MB inside its temporary directory on both platforms, then checks
-decoded bounds; fixture generation retains a single row. Both platform runs
-must pass. This replaces the baseline's macOS-only method body and removes its
-manual fixture prerequisite. Simulator speech/focus does not prove touch
-gestures, rotor or Braille behavior.
-
-The VoiceOver script can also be run independently. Set
-`REMOTEFILES_SOURCE_PACKAGES_DIR` to reuse a locked package checkout directory;
-otherwise it uses normal Xcode package resolution:
-
-```sh
-REMOTEFILES_SOURCE_PACKAGES_DIR=/private/tmp/remotefiles-acceptance-SourcePackages \
-  scripts/test-voiceover.sh SIMULATOR_UDID /private/tmp/remotefiles-voiceover-NEW_RUN
-```
-
-## October 3 baseline
+<a id="october-3-baseline"></a>
+## Historical baseline: October 3
 
 The initial source snapshot was copied from clean commit
 `5522b660651412d3d42fd8b05286e95f176e8d49` on
