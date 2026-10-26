@@ -2,15 +2,23 @@
 
 [Documentation](README.md) · [RemoteFiles](../README.md)
 
-Choose **Keep Offline** in a file’s **Document actions** menu, or long-press a regular file in its folder. The app saves its original bytes and filename on this device. The save shows byte progress and a Cancel action; only one offline file or folder save runs at a time.
+Save files or complete folder trees on this device when you want to read them without a connection. Copies do not update automatically, and removing a copy never deletes the server original.
 
-For a folder, choose **Folder actions → Keep Folder Offline**, or long-press its row. The setup sheet shows its path, explains the limits, and offers **Include Hidden Files**, initially matching the folder’s Show Hidden Files choice. **Save Folder Offline** saves all selected regular files, subfolders and empty directories. Symbolic links and special files are skipped and counted; links are never traversed. A resolved link chosen explicitly as the root uses its canonical target, which must remain within the connection’s starting folder.
+## Save and open copies
 
-Saved folders appear as folders in **Offline Files**. Open one to browse its saved hierarchy and preview or share individual originals entirely locally. Choose **Update Offline Folder** or **Remove Offline Folder** from its context menu, swipe actions, or **Saved folder actions**. Update repeats the original hidden-file choice and replaces the entire snapshot, including additions and deletions. A failed read, cancellation or limit never publishes a partial tree and leaves the previous snapshot readable. A folder update is a complete local commit, not a point-in-time snapshot of a server being edited concurrently.
+- **Save a file:** Choose **Keep Offline** in its **Document actions** menu, or long-press a regular file in its folder. The app saves its original bytes and filename on this device. The save shows byte progress and a Cancel action; only one offline file or folder save runs at a time.
+
+- **Save a folder:** Choose **Folder actions → Keep Folder Offline**, or long-press its row. The setup sheet shows its path, explains the limits, and offers **Include Hidden Files**, initially matching the folder’s Show Hidden Files choice. **Save Folder Offline** saves all selected regular files, subfolders and empty directories. Symbolic links and special files are skipped and counted; links are never traversed. A resolved link chosen explicitly as the root uses its canonical target, which must remain within the connection’s starting folder.
+
+Saved folders appear as folders in **Offline Files**. Open one to browse its saved hierarchy and preview or share individual originals entirely locally. Choose **Update Offline Folder** or **Remove Offline Folder** from its context menu, swipe actions, or **Saved folder actions**. Update repeats the original hidden-file choice and replaces the entire snapshot, including additions and deletions.
+
+> **If an update fails:** A failed read, cancellation or limit never publishes a partial tree; the previous snapshot remains readable. A folder update is a complete local commit, not a point-in-time snapshot of a server being edited concurrently.
 
 Individually pinned files and overlapping folder snapshots are independent copies. Removing a folder never removes an individually saved copy of the same file or another pinned folder. Members of a folder are updated/removed as a group. All copies count towards the shared storage/file limits; there is no automatic deduplication or synchronization.
 
 Open **Offline Files** from the library, even without a connection. Each copy shows the connection label, original path, byte count and saved date. The offline reader identifies the copy as offline; it never silently substitutes saved bytes for an online reader. Copies survive app relaunch, disconnects, connection edits and connection deletion. Demo has its own separate offline library. Saved-file counts and actions update across open windows when a copy is added, refreshed or removed.
+
+## Update or remove copies
 
 Long-press a saved file (or swipe its row) to **Update Offline Copy** or **Remove Offline Copy**. Updating explicitly uses the network. It requires the saved connection to retain the same host, port, account, SSH key, starting folder and jump-host configuration; changing its display name is fine. If that route changed or was deleted, the old copy stays readable: save a new copy from the current connection. Removing a copy never deletes anything on the server. There is no automatic synchronization or background SSH transfer.
 

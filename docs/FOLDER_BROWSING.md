@@ -4,10 +4,7 @@
 
 Folders list their contents with folders first. Use **Folder actions** to refresh, show hidden files, add a favourite, or choose how the folder is sorted. The search field filters this folder, searches names in its subfolders, or searches file contents.
 
-One directory response is bounded to 10,000 entries and 16 MiB of decoded name
-and attribute metadata. Crossing either limit closes the remote directory and
-shows an error; RemoteFiles never presents a silently truncated folder. Individual
-SFTP frames are capped at 1 MiB before the client buffers their declared body.
+A folder can contain up to 10,000 entries and 16 MiB of decoded name and attribute metadata. If it exceeds either limit, the app shows an error rather than a silently incomplete listing. Individual SFTP frames are capped at 1 MiB before their declared body is buffered.
 
 | Linked folder | File and broken links | Sorted by size |
 | --- | --- | --- |
@@ -17,7 +14,7 @@ SFTP frames are capped at 1 MiB before the client buffers their declared body.
 
 ## Symbolic links
 
-While a folder is listed, RemoteFiles also looks up where each symbolic link points. Each link sends `REALPATH` and `STAT` together, and links are resolved in parallel, so a folder of links costs about one more round trip.
+While listing a folder, RemoteFiles looks up where its symbolic links point. It resolves links in parallel, sending `REALPATH` and `STAT` together for each, so a folder of links costs about one more round trip.
 
 - **Link to a folder:** shown with a folder icon and **Link to folder**, sorted with the folders, and opened in one tap.
 - **Link to a file:** shown like its target, for example **Link to file · 1 KB · 22 Sep 2026**, and opened in one tap. Saving the original keeps the link's own name.
@@ -57,9 +54,10 @@ Subfolder and contents search automatically use a read-only helper on Linux serv
 - **What it skips:** links are matched by name but never followed, so the search stays inside the folder and can't loop. Hidden files and folders are skipped unless **Show Hidden Files** is on. A folder that can't be read, has gone, or times out is counted and skipped. In the SFTP fallback, a timeout closes the shared SFTP channel, so a folder whose listing fails with it is listed once more; if the connection has really ended, the search stops with an error.
 - **Limits:** a search lists at most 1,000 folders, goes at most 16 levels down, shows at most 500 matches, and starts no new listings after 30 seconds, including recovery retries. If an interrupted listing needs a retry after that deadline, the search stops with the time limit and keeps results already reported; it does not count the interrupted folder as unreadable. The line above the results says how many folders were searched, how many couldn't be read, and which limit stopped it. To go further, open a subfolder and search from there.
 
-### Server-assisted search
+<a id="server-assisted-search"></a>
+### How server-assisted search works
 
-Real Linux transport validation and its reproducible fixture are documented in [Linux search acceptance](../Tests/LinuxSearchAcceptance/README.md).
+The Linux helper is optional and runs over the existing authenticated SSH connection. When its safety checks or prerequisites are unavailable, the app falls back to SFTP. Real Linux transport validation and its reproducible fixture are documented in [Linux search acceptance](../Tests/LinuxSearchAcceptance/README.md).
 
 A dedicated SFTP channel holds the selected directory open while the helper verifies its kernel identity and walks that folder breadth first, and filters out definite non-matches before transferring candidates. It uses the existing authenticated SSH connection and host-key trust, including jump hosts. A separate exec channel owns the search; cancellation, a deadline or excess output closes that channel while browsing remains connected. Unsupported command access is remembered until the connection is recreated. Trust failures, connection loss and timeouts remain errors.
 

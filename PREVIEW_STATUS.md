@@ -1,5 +1,7 @@
 # RemoteFiles preview status
 
+This is a dated record of feature work and validation, not a live test dashboard. Each result applies to the build, environment and date described with it; an installation or Simulator pass does not establish later physical-device acceptance. For current behavior, start with the [documentation index](docs/README.md). For checks still to perform, see [manual acceptance](docs/MANUAL_ACCEPTANCE.md) and the [roadmap](ROADMAP.md).
+
 **25 October 2026: offline folders and document links.**
 
 Individual files and complete folder trees can be kept in a protected, device-local Offline library with explicit updates/removal and saved dates. Folder snapshots preserve subfolders and empty directories, offer a hidden-file choice, and skip symbolic links and special files. Failed or cancelled updates keep the previous complete snapshot. The library is bounded to 32 folders, 100 files, 128 MiB per original and 512 MiB of committed originals, and Demo is isolated.
@@ -17,6 +19,8 @@ Connections can use one SSH bastion with separate identities and host-key verifi
 RSA (2048–8192 bits) and ECDSA (P-256/P-384/P-521) now work with encrypted or unencrypted imports, passphrase unlock, optional biometric copies and explicit public-key installation. RSA authentication uses SHA-512/SHA-256. Independent OpenSSH tests passed on macOS and hosted iOS, including a SHA-256-only RSA server configuration on macOS. UI acceptance covers RSA and P-256 imports through the native paste control. See [key support](docs/KEY_SUPPORT.md) for the permitted and tested matrix. This update has not been installed or accepted on a physical device.
 
 ## Earlier validation snapshots
+
+The sections below preserve historical observations. Statements such as “now” and “current” refer to the dated work in each section; later features and results may supersede them. Paths under `/private/tmp` were local evidence at the time and may no longer exist.
 
 **17 October 2026: reader navigation, saved positions, scoped refresh and runner fixes.**
 

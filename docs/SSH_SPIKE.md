@@ -1,5 +1,9 @@
 # SSH/SFTP dependency spike — 22 September 2026
 
+This records the dependency decision and the tests that informed it. For current
+build and verification commands, see [Build and test](DEVELOPMENT.md); the
+vendored packages' `UPSTREAM.md` files are the source of truth for their patches.
+
 Citadel is retained behind `SFTPRemoteFileService`. Its exact upstream source revision is
 `ae8562f895de06ccb86fdb1cbb65fd99c8976e12`. The MIT-licensed source is vendored in
 `Vendor/Citadel` with two small connection-lifecycle patches recorded in `UPSTREAM.md`.

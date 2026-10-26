@@ -4,18 +4,46 @@
 
 Connect to an existing SSH/SFTP server, verify its identity, and understand how RemoteFiles handles credentials and local state.
 
-## Connect a Unix system
+## Before you connect
 
-Do these setup steps yourself on the server you intend to access. RemoteFiles connects over SSH/SFTP using an Ed25519, RSA or ECDSA identity. The app does not enable services or expose ports. Browsing is read only. The optional public-key installer writes only the selected account’s `~/.ssh/authorized_keys` after you confirm the account and public key; see [public-key installation](PUBLIC_KEY_INSTALLATION.md).
+You'll need:
 
-1. Enable SSH with an SFTP subsystem for the intended account using the system’s service configuration. On **macOS**, use **System Settings → General → Sharing → Remote Login**. On **Linux or another Unix system**, enable its OpenSSH server and SFTP subsystem according to that system’s documentation. Keep the server awake and reachable. The account must be able to read the chosen project directory.
-2. In RemoteFiles, choose **Add Connection → Generate or Import Key**. Prefer a dedicated generated Ed25519 identity; copy/share its **public** key. Append that public key to the intended account’s `~/.ssh/authorized_keys` on the server (directory permission 700; file permission 600). Never copy a private key into that file. If the server already supports SSH password authentication, **Settings → SSH Keys → select identity → Install Public Key on Server** can append the public key after host verification and explicit confirmation.
-3. If connecting away from home, install/sign in to Tailscale independently on both devices. Use the server’s MagicDNS hostname or Tailscale IP; ensure tailnet policy permits the configured SSH port (22 by default). This uses ordinary OpenSSH over Tailscale, **not the separate Tailscale SSH service**. Do not forward a router port. The connection editor’s **Show Tailscale Setup Tips** switch only shows this guidance; RemoteFiles does not route through Tailscale itself, so the connection uses whatever network path iOS provides to the hostname you enter.
-4. Enter the server account’s username, hostname, identity and optional absolute project directory. An empty starting directory uses the server’s default directory; literal `~` is not expanded locally.
-5. Verify the displayed server SHA-256 fingerprint using a trusted channel. On an OpenSSH server, the public host-key fingerprint can be inspected with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256` (choose the public file for the algorithm presented and the server’s configured host-key location). Accept trust only when it matches.
-6. Open a folder and choose **Folder actions → Add Favourite**. Open a `.md` report. Use **Rendered / Source**, **Copy Source**, and **Refresh** from its actions menu.
+- An SSH server with SFTP enabled and an account that can read the files you want.
+- A network route from the device to the server.
+- A supported SSH private key and a trusted way to check the server's host-key fingerprint.
 
-The first connection on a local network may require iOS Local Network permission. A timeout alone does not identify whether the server is asleep, the tunnel is unavailable, a permission was denied, or network policy blocked access. Check these possible causes individually. Denial and Settings recovery were verified on the physical iPhone; see [device permissions and lifecycle evidence](DEVICE_PERMISSIONS_LIFECYCLE.md).
+RemoteFiles cannot turn on SSH or make the server reachable for you.
+
+Browsing is read only. The optional [public-key installer](PUBLIC_KEY_INSTALLATION.md) is a separate operation that can add a key to the selected account's `~/.ssh/authorized_keys` after your confirmation.
+
+<a id="connect-a-unix-system"></a>
+## Set up a connection
+
+1. **Enable SSH and SFTP.** On macOS, use **System Settings → General → Sharing → Remote Login**. On Linux or another Unix system, enable OpenSSH and its SFTP subsystem using that system's documentation. Keep the server awake and reachable, and ensure the account can read the project directory.
+
+2. **Create or import an identity.** In RemoteFiles, choose **Add Connection → Generate or Import Key**. Prefer a dedicated generated Ed25519 identity and copy or share its **public** key. Append it to the account's `~/.ssh/authorized_keys` on the server (directory permission 700; file permission 600). Never copy a private key into that file.
+
+   If the server already supports SSH password authentication, **Settings → SSH Keys → select identity → Install Public Key on Server** can append the public key after host verification and explicit confirmation.
+
+3. **Check the network route.** For example, to use Tailscale away from home, install and sign in independently on both devices, then use the server's MagicDNS hostname or Tailscale IP. Tailnet policy must permit the SSH port (22 by default). This is ordinary OpenSSH over Tailscale, not the separate Tailscale SSH service; no router port forwarding is needed. The editor's **Show Tailscale Setup Tips** switch only shows guidance. RemoteFiles uses the network path iOS provides to the hostname you enter.
+
+4. **Enter connection details.** Supply the server account's username, hostname, identity and optional absolute project directory. An empty starting directory uses the server's default directory; literal `~` is not expanded locally.
+
+5. **Verify the host.** Compare the displayed server SHA-256 fingerprint through a trusted channel before accepting it. For example, on an OpenSSH server:
+
+   ```sh
+   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256
+   ```
+
+   Choose the public file for the algorithm presented and the server's configured host-key location. Accept trust only when the fingerprints match.
+
+6. **Open a file.** Open a folder and choose **Folder actions → Add Favourite**. Open a `.md` report and try **Rendered / Source**, **Copy Source** and **Refresh** from its actions menu.
+
+## If a connection fails
+
+The first connection on a local network may require iOS Local Network permission. A timeout alone does not tell you what failed. Check that the server is awake, SSH and SFTP are running, the hostname and port are correct, any VPN or tunnel is connected, network policy permits access, and the app has Local Network permission if needed. See [device permissions and lifecycle](DEVICE_PERMISSIONS_LIFECYCLE.md) for permission recovery.
+
+If a host key changes, stop and verify the new fingerprint through a trusted channel before resetting trust. A changed key can be legitimate, but can also mean you reached a different server.
 
 ## Keys and trust
 

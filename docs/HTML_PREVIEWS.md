@@ -31,6 +31,13 @@ and a table. Hosted WebKit tests check actual DOM/styles and visible pixels,
 blocked document scripts/resources, and script-only entries. The UI journey
 checks Rendered → Source → Copy Source → Rendered → Refresh.
 
+## Verification
+
+Hosted WebKit tests check static content and styling, script and resource blocking, and the explanation for script-only entries. A demo UI journey checks switching modes, copying source and refreshing. These are simulator checks; they do not establish physical-device HTML interaction.
+
+<details>
+<summary>Historical verification details (6 October 2026)</summary>
+
 ## Verification, 6 October 2026
 
 The final code passed 17 unique focused Simulator checks on iPhone 18 Pro /
@@ -57,3 +64,5 @@ The update was installed on the paired iPhone 17 Pro and launched normally.
 A separate process check confirmed PID 64188 running from the new installed
 app bundle. Installation/launch are verified separately from Simulator HTML
 interaction.
+
+</details>

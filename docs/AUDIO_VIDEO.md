@@ -44,6 +44,15 @@ failures and background cleanup. UI tests exercise both demo formats and their
 visible Play/Pause controls. Physical-device codec compatibility still needs device
 testing.
 
+## Verification
+
+Hosted tests exercise AVKit assets, seeking, cache unlinking, cancellation, damaged refreshes, runtime failures, fullscreen presentation and background cleanup. The Demo UI journey exercises audio and video controls. An isolated OpenSSH check exercises streamed download progress and the existing path and size limits.
+
+Simulator tests have decoded MP4/H.264, MOV/H.264, M4A/AAC, MP3, WAV/PCM, FLAC, AIFF/PCM and ADTS AAC. Other recognized extensions depend on the device, container and codec. Simulator playback is not proof of physical-device codec compatibility.
+
+<details>
+<summary>Historical verification details (6 October 2026)</summary>
+
 ## Verification, 6 October 2026
 
 On iPhone 18 Pro Simulator / iOS 27.0 with Xcode 27.0:
@@ -110,3 +119,5 @@ canonical-root and size-limit rejection retained. Evidence:
 build passed signature verification and was installed on the paired iPhone 17 Pro.
 Launch was verified separately: the installed app was running on the iPhone
 with PID 64005 and an executable path matching its new installation.
+
+</details>
