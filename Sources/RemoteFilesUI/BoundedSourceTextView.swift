@@ -127,6 +127,12 @@ struct BoundedSourceTextView: UIViewRepresentable {
         var applying = false
         var revealID: UUID?
         var wrapLines = true
+        func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+            // VoiceOver and other non-touch scrolling do not set dragging flags.
+            // captureReadingAnchor still excludes restoration and pending Find work.
+            guard !applying else { return }
+            (scrollView as? SourceTextView)?.captureReadingAnchor()
+        }
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
             guard !applying, scrollView.isDragging || scrollView.isDecelerating else { return }
             (scrollView as? SourceTextView)?.pendingOffset = nil
@@ -168,6 +174,15 @@ final class SourceTextView: UITextView {
     var revealDeadline: Date?
     private var revealScheduled = false
     var revealCompletion: ((CGPoint) -> Void)?
+    override func accessibilityScroll(_ direction: UIAccessibilityScrollDirection) -> Bool {
+        let handled = super.accessibilityScroll(direction)
+        if handled {
+            pendingOffset = nil; restoreAnchor = false
+            // Also capture immediate accessibility scrolls when no animation runs.
+            captureReadingAnchor()
+        }
+        return handled
+    }
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if window != nil { setNeedsLayout() }
@@ -199,7 +214,8 @@ final class SourceTextView: UITextView {
             self.layoutIfNeeded()
             let rect = self.caretRect(for: position)
             guard rect.height > 0, rect.minY.isFinite else { self.restoreAnchor = false; return }
-            let x = self.pendingOffset?.x ?? self.contentOffset.x
+            let x = min(max(0, self.pendingOffset?.x ?? self.contentOffset.x),
+                        max(0, self.contentSize.width - self.bounds.width))
             let y = min(max(0, rect.minY - anchor.viewportY), max(0, self.contentSize.height - self.bounds.height))
             let stable = abs(self.contentOffset.y - y) < 0.5
             self.setContentOffset(CGPoint(x: self.textContainer.widthTracksTextView ? 0 : x, y: y), animated: false)

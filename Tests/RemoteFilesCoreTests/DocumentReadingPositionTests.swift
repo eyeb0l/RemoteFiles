@@ -144,6 +144,59 @@ private struct ReadingPositionFixture: View {
         }, diagnostics: { self.describeScrollViews(nextWindow) })
     }
 
+    func testNonTouchSourceScrollIsSavedAndRestoredAcrossModeSwitch() async throws {
+        let state = ReadingFixtureState(); state.source = true
+        let window = try host(state)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await waitUntil { self.scrollView(window) is SourceTextView }
+        let view = try XCTUnwrap(scrollView(window) as? SourceTextView)
+        try await waitUntil { view.pendingOffset == nil && !view.restoreAnchor }
+        XCTAssertFalse(view.isDragging); XCTAssertFalse(view.isDecelerating)
+        // Accessibility page scrolling uses native scrolling without touch flags.
+        // Exercise its animated completion through the actual UIScrollView delegate.
+        view.setContentOffset(CGPoint(x: 0, y: 600), animated: true)
+        try await waitUntil { abs(state.position.source.y - 600) < 2 }
+        XCTAssertNotNil(state.position.sourceAnchor)
+        try await switchMode(state, toSource: false, in: window)
+        try await switchMode(state, toSource: true, in: window)
+        try await assertRestored(window, to: CGPoint(x: 0, y: 600))
+    }
+
+    func testUnwrappedSourceAnchorClampsHorizontalOffsetAfterLayoutShrinks() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("positions.json"), id = UUID()
+        let text = (0..<100).map { "row \($0) " + String(repeating: "abcdefghij", count: 8) }.joined(separator: "\n")
+        let first = ReadingFixtureState()
+        first.source = true; first.wrapLines = false; first.width = 240; first.typeSize = .xxxLarge; first.text = text
+        await first.position.prepare(text: text, store: ReadingPositionStore(fileURL: file), connectionID: id, path: "/guide.md")
+        let window = try host(first)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await waitUntil { self.scrollView(window) is SourceTextView }
+        let native = try XCTUnwrap(scrollView(window) as? SourceTextView)
+        let oldX = native.contentSize.width - native.bounds.width
+        XCTAssertGreaterThan(oldX, 500)
+        try await scroll(window, to: CGPoint(x: oldX, y: 600), saved: { first.position.source })
+        XCTAssertNotNil(first.position.sourceAnchor)
+        await first.position.flush()
+        window.isHidden = true; window.rootViewController = nil
+        let next = ReadingFixtureState()
+        next.source = true; next.wrapLines = false; next.width = 360; next.typeSize = .small; next.text = text
+        await next.position.prepare(text: text, store: ReadingPositionStore(fileURL: file), connectionID: id, path: "/guide.md")
+        let nextWindow = try host(next)
+        defer { nextWindow.isHidden = true; nextWindow.rootViewController = nil }
+        try await waitUntil {
+            guard let view = self.scrollView(nextWindow) as? SourceTextView else { return false }
+            return view.pendingOffset == nil && !view.restoreAnchor
+        }
+        let restored = try XCTUnwrap(scrollView(nextWindow) as? SourceTextView)
+        let maxX = max(0, restored.contentSize.width - restored.bounds.width)
+        XCTAssertLessThan(maxX, oldX - 100, "The saved offset must exceed the new horizontal range")
+        XCTAssertGreaterThanOrEqual(restored.contentOffset.x, 0)
+        XCTAssertLessThanOrEqual(restored.contentOffset.x, maxX + 1)
+        XCTAssertLessThanOrEqual(next.position.source.x, maxX + 1)
+    }
+
     func testMemoryWarningAndInactivityReleaseAttributedKeysButRetainAnchor() async throws {
         let state = ReadingFixtureState()
         state.text = String(repeating: "Paragraph before code.\n\n```swift\nlet value = 42\n```\n\n", count: 80)
