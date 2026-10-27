@@ -45,7 +45,7 @@ import XCTest
             // Stay in VoiceOver so switching modes keeps an established focus.
             try focus("Source Button", name: "svg source", limit: 20, backward: true)
             app.buttons["Source"].doubleTap()
-            XCTAssertTrue(app.staticTexts["Syntax highlighted source"].waitForExistence(timeout: 10))
+            XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 10))
             let source = try speech("SVG SOURCE", limit: 15)
             XCTAssertFalse(source.contains { $0.localizedCaseInsensitiveContains("double-tap to edit") })
             capture("VoiceOver SVG source", app)
@@ -149,7 +149,7 @@ import XCTest
             // focus back to the intended control before synthesizing activation.
             try focus("Source Button", name: "source", limit: 65, backward: true)
             app.buttons["Source"].doubleTap()
-            XCTAssertTrue(app.scrollViews["Markdown source"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 5))
             let source = try speech("SOURCE", limit: 12)
             XCTAssertFalse(source.contains { $0.localizedCaseInsensitiveContains("double-tap to edit") })
             try focus("Rendered", name: "rendered", limit: 20, backward: true)

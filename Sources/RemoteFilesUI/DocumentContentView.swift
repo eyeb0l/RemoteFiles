@@ -12,7 +12,7 @@ public struct DocumentContentView: View {
     public let readingPosition: DocumentReadingPosition?
     public let wrapLines: Bool
     private let navigation: ReaderNavigationState?
-    @State private var usesNativeSource = false
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var localReadingPosition = DocumentReadingPosition()
     @State private var prepared: [MarkdownPart]?
     public let location: RemoteDocumentLocation?
@@ -40,7 +40,7 @@ public struct DocumentContentView: View {
                 HTMLContentView(text: text, filename: filename, readingPosition: position)
             } else if !source, let filename, DocumentPolicy.kind(filename: filename) == .svg {
                 SVGContentView(text: text, filename: filename)
-            } else if (!markdown || source), SourceLayout.needsBoundedLayout(text) || usesNativeSource || navigation?.reveal?.inSource == true {
+            } else if !markdown || source {
                 SourceCodeView(text: text, language: markdown ? "markdown" : SourceLanguage.forFilename(filename),
                                bounded: true, readingPosition: position, reveal: navigation?.reveal,
                                wrapLines: SourceLayout.needsBoundedLayout(text) || wrapLines,
@@ -53,13 +53,18 @@ public struct DocumentContentView: View {
             ordinaryContent(position: position)
             #endif
         }
+        #if os(iOS)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+            position.overflowGeometry.clearLayoutCache()
+        }
+        #endif
         .task(id: markdown ? text : "") {
             await prepareMarkdownIfNeeded()
         }
-        .onChange(of: navigation?.reveal?.inSource, initial: true) { _, value in
-            // Keep the native source viewport after Find closes, avoiding a second
-            // renderer/layout swap at the newly selected reading position.
-            if value == true { usesNativeSource = true }
+        .onChange(of: dynamicTypeSize) { _, _ in
+            guard !source, navigation?.pendingRevealID == nil else { return }
+            let position = readingPosition ?? localReadingPosition
+            position.overflowGeometry.restoreReadingAnchor { position.rendered = $0 }
         }
     }
 

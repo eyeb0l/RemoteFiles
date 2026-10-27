@@ -1,9 +1,10 @@
 import SwiftUI
+import CryptoKit
 #if os(iOS)
 import UIKit
 #endif
 
-/// Reader-owned measured extents. This cache stores geometry, never rendered text or views.
+/// Reader-owned measured extents with bounded attributed-text keys; no views are retained.
 @MainActor public final class OverflowGeometryCache: NSObject {
   struct Key: Hashable {
     let revision: AttributedString
@@ -15,14 +16,35 @@ import UIKit
     let spacing: StructuredText.TableCell.Spacing
   }
   private var extents: [Key: Extent] = [:]
+  private var extentCost = 0
+  public var retainedExtentCount: Int { extents.count }
+  public var retainedExtentCost: Int { extentCost }
+  public func clearLayoutCache() { extents.removeAll(); extentCost = 0 }
+  /// No document text, attributes or layout environment is retained in a saved anchor.
+  public struct Snapshot: Codable, Equatable, Sendable {
+    public var kind: String
+    public var ordinal: Int
+    public var character: Int
+    public var fraction: Double
+    public var viewportY: Double
+    public init(kind: String, ordinal: Int, character: Int, fraction: Double, viewportY: Double) {
+      self.kind = kind; self.ordinal = ordinal; self.character = character
+      self.fraction = fraction; self.viewportY = viewportY
+    }
+  }
+  public var snapshot: Snapshot?
+
 
   public override init() { super.init() }
 
   func extent(for key: Key) -> Extent? { extents[key] }
   func record(_ extent: Extent, for key: Key) {
     guard extent.size.width > 0, extent.size.height > 0 else { return }
-    if extents.count >= 512, extents[key] == nil { extents.removeAll() }
-    extents[key] = extent
+    guard extents[key] == nil else { extents[key] = extent; return }
+    let cost = key.revision.characters.count * 8 + key.revision.runs.count * 256 + 512
+    guard cost <= 2 * 1024 * 1024 else { return }
+    if extents.count >= 64 || extentCost + cost > 2 * 1024 * 1024 { clearLayoutCache() }
+    extents[key] = extent; extentCost += cost
   }
 
   #if os(iOS) && TEXTUAL_ENABLE_TEXT_SELECTION
@@ -49,24 +71,25 @@ import UIKit
   private var until: CFTimeInterval = 0
   private var geometryDeadline: CFTimeInterval = 0
   private var link: CADisplayLink?
-  private var document: String?
-  private var tracksDeferredGeometry = false
+  private var document: SHA256.Digest?
   private var restoring = false
   private var restorationDeadline: CFTimeInterval = 0
   private var attachmentDeadline: CFTimeInterval = 0
   private var restorationCompletion: ((CGPoint) -> Void)?
 
   public var isRestoringReadingAnchor: Bool { restoring }
-  public var hasReadingAnchor: Bool { readingAnchor != nil }
+  public var hasReadingAnchor: Bool { readingAnchor != nil || snapshot != nil }
 
   public func documentDidChange(_ text: String) {
-    guard document != text else { return }
-    cancelAnchor(); readingAnchor = nil; tracksDeferredGeometry = false; document = text
+    let digest = SHA256.hash(data: Data(text.utf8))
+    guard document != digest else { return }
+    // The first attachment may already have a snapshot loaded from disk.
+    if document != nil { snapshot = nil }
+    cancelAnchor(); readingAnchor = nil; clearLayoutCache(); document = digest
   }
 
   func attach(_ view: UIView, deferring: Bool) {
     guard view.window != nil else { return }
-    tracksDeferredGeometry = tracksDeferredGeometry || deferring
     var ancestor = view.superview
     while let value = ancestor {
       if let value = value as? UIScrollView { reader = view; scroll = value; return }
@@ -74,10 +97,18 @@ import UIKit
     }
   }
 
+  public func releaseInactiveContent() {
+    cancelAnchor(); readingAnchor = nil; clearLayoutCache(); regions.removeAll()
+    reader = nil; scroll = nil
+  }
+
   func detach(_ view: UIView) {
     guard reader === view else { return }
     // Teardown may already have removed the visible regions; keep the last live snapshot.
-    cancelAnchor(); reader = nil; scroll = nil
+    // A replacement subtree may begin restoration before the old bridge detaches.
+    // Keep that bounded request alive until the replacement attaches.
+    if !restoring { cancelAnchor() }
+    readingAnchor = nil; clearLayoutCache(); reader = nil; scroll = nil
   }
 
   func register(_ view: ReadingAnchorRegionBridge.Probe) {
@@ -137,14 +168,15 @@ import UIKit
   }
 
   public func recordReadingAnchor() {
-    guard tracksDeferredGeometry, !restoring, let scroll, scroll.window != nil else { return }
+    guard !restoring, let scroll, scroll.window != nil else { return }
     // A gap or an unavailable block must invalidate an earlier prose anchor.
     // The caller can then use its saved native coordinate instead of stale content.
-    readingAnchor = scroll.contentOffset.y > 1 ? visibleAnchor() : nil
+    readingAnchor = scroll.contentOffset.y + scroll.adjustedContentInset.top > 1 ? visibleAnchor() : nil
+    snapshot = readingAnchor.flatMap { persistent($0, in: scroll) }
   }
 
   public func restoreReadingAnchor(completion: @escaping (CGPoint) -> Void) {
-    guard readingAnchor != nil else { return }
+    guard readingAnchor != nil || snapshot != nil else { return }
     cancelAnchor(); restoring = true; restorationCompletion = completion
     // SwiftUI can announce appearance before the replacement selection model
     // attaches. Do not spend its geometry-correction budget waiting for a view.
@@ -152,6 +184,37 @@ import UIKit
     restorationDeadline = 0
     until = 0
     startLink()
+  }
+
+  private func persistent(_ anchor: ReadingAnchor, in scroll: UIScrollView) -> Snapshot? {
+    switch anchor {
+    case .prose(let ordinal, let character, let y):
+      return Snapshot(kind: "prose", ordinal: ordinal, character: character, fraction: 0, viewportY: Double(y))
+    case .region(let id, let occurrence, let localY, let y):
+      let all = visibleRegions(in: scroll)
+      let matching = all.filter { $0.id == id }
+      guard matching.indices.contains(occurrence) else { return nil }
+      let view = matching[occurrence]
+      let kind = regionKind(view.id)
+      guard let ordinal = all.filter({ regionKind($0.id) == kind }).firstIndex(where: { $0 === view }) else { return nil }
+      return Snapshot(kind: kind, ordinal: ordinal, character: 0,
+                      fraction: Double(min(1, max(0, localY / max(1, view.bounds.height)))), viewportY: Double(y))
+    }
+  }
+  private func regionKind(_ id: RegionID) -> String {
+    switch id { case .image: return "image"; case .overflow: return "overflow" }
+  }
+  private func materialize(_ snapshot: Snapshot, in scroll: UIScrollView) -> ReadingAnchor? {
+    if snapshot.kind == "prose" {
+      return .prose(ordinal: snapshot.ordinal, character: snapshot.character, viewportY: CGFloat(snapshot.viewportY))
+    }
+    let candidates = visibleRegions(in: scroll).filter { regionKind($0.id) == snapshot.kind }
+    guard candidates.indices.contains(snapshot.ordinal) else { return nil }
+    let view = candidates[snapshot.ordinal]
+    let matching = candidates.filter { $0.id == view.id }
+    guard let occurrence = matching.firstIndex(where: { $0 === view }) else { return nil }
+    return .region(id: view.id, occurrence: occurrence, localY: view.bounds.height * snapshot.fraction,
+                   viewportY: snapshot.viewportY)
   }
 
   private func resolve(_ saved: ReadingAnchor, in scroll: UIScrollView) -> (y: CGFloat, ready: Bool)? {
@@ -210,7 +273,6 @@ import UIKit
   }
 
   private func restoreFrame() {
-    guard let saved = readingAnchor else { cancelAnchor(); return }
     let now = CACurrentMediaTime()
     let deadline = restorationDeadline > 0 ? restorationDeadline : attachmentDeadline
     guard let scroll, let window = scroll.window else {
@@ -220,7 +282,8 @@ import UIKit
     if scroll.isTracking || scroll.isDragging {
       finishRestoration(scroll); recordReadingAnchor(); return
     }
-    guard let point = resolve(saved, in: scroll) else {
+    let saved = snapshot.flatMap { materialize($0, in: scroll) } ?? readingAnchor
+    guard let saved, let point = resolve(saved, in: scroll) else {
       if now >= deadline { finishRestoration(scroll) }
       return
     }
@@ -254,6 +317,7 @@ import UIKit
   }
   func cancelGeometryAnchor() { if !restoring { cancelAnchor() } }
   #else
+  public func releaseInactiveContent() { clearLayoutCache() }
   func captureAnchor() {}
   func geometryDidChange() {}
   func cancelAnchor() {}

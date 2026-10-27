@@ -14,7 +14,7 @@ Complete physical acceptance of relative Markdown links, restoring reading posit
 ## Improvements under consideration
 
 - More verified private-key protection formats and hardware-backed security-key identities. OpenSSH RSA/ECDSA imports and optional biometric unlock are already available; see [key support](docs/KEY_SUPPORT.md).
-- Cached parsed-document eviction and layout-independent reading anchors. Rendered and Source positions are currently saved as pixel coordinates for unchanged text.
+- Extend layout-independent reading anchors beyond Markdown and Source. Text/block anchors and inactive reader-content eviction are implemented; physical-device layout and memory acceptance remain outstanding. See [reader behavior](docs/READER.md).
 - Upstream the Citadel cancellation hooks and remove vendoring when a verified release contains them.
 - Persistent search indexes, PDF/OCR search and additional search capabilities. [Folder search](docs/FOLDER_BROWSING.md) already supports bounded names and UTF-8 contents search, with optional server assistance and SFTP fallback.
 - Offline synchronization, File Provider, multiple jump hops, other protocols such as FTP/FTPS, optional terminal handoff, deeper Tailscale onboarding, and additional iPad keyboard and multiwindow workflows.

@@ -12,6 +12,8 @@ import RemoteFilesCore
     var wrapLines = true
     var version = 0
     var text = DemoRemoteFileService.navigationGuide
+    var typeSize = DynamicTypeSize.large
+    var width: CGFloat?
     var paragraphGap: CGFloat?
     let position = DocumentReadingPosition()
 }
@@ -35,6 +37,8 @@ private struct ReadingPositionFixture: View {
         NavigationStack(path: $state.path) {
             DocumentContentView(text: state.text, markdown: true,
                                 source: state.source, filename: "guide.md", readingPosition: state.position, wrapLines: state.wrapLines)
+                .environment(\.dynamicTypeSize, state.typeSize)
+                .frame(width: state.width)
                 .id(state.version)
                 .textual.paragraphStyle(ReadingFixtureParagraphStyle(gap: state.paragraphGap))
                 .navigationTitle("Reading fixture")
@@ -66,6 +70,106 @@ private struct ReadingPositionFixture: View {
         XCTAssertEqual(changed.rendered, .zero)
     }
 
+    func testPersistedRenderedAnchorRestoresPassageAtDifferentWidth() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("positions.json"), id = UUID()
+        let first = ReadingFixtureState(); first.width = 360
+        await first.position.prepare(text: first.text, store: ReadingPositionStore(fileURL: file), connectionID: id, path: "/guide.md")
+        let window = try host(first)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await scroll(window, to: CGPoint(x: 0, y: 980), saved: { first.position.rendered })
+        let anchor = try XCTUnwrap(first.position.overflowGeometry.snapshot)
+        XCTAssertEqual(anchor.kind, "prose")
+        await first.position.flush()
+        window.isHidden = true; window.rootViewController = nil
+        let next = ReadingFixtureState(); next.width = 240; next.typeSize = .xxxLarge
+        await next.position.prepare(text: next.text, store: ReadingPositionStore(fileURL: file), connectionID: id, path: "/guide.md")
+        let nextWindow = try host(next)
+        defer { nextWindow.isHidden = true; nextWindow.rootViewController = nil }
+        try await waitUntil({
+            guard let scroll = self.scrollView(nextWindow) else { return false }
+            let overlays = self.views(scroll).compactMap { $0 as? UITextInteractionView }
+            guard overlays.indices.contains(anchor.ordinal) else { return false }
+            let overlay = overlays[anchor.ordinal]
+            guard let position = overlay.model.position(from: overlay.model.startPosition, offset: anchor.character) else { return false }
+            let rect = overlay.convert(overlay.model.caretRect(for: position), to: nextWindow)
+            let viewport = scroll.convert(scroll.bounds, to: nextWindow)
+            return abs(rect.minY - viewport.minY - anchor.viewportY) < 4
+        }, diagnostics: { self.describeScrollViews(nextWindow) })
+        try await waitUntil { !next.position.overflowGeometry.isRestoringReadingAnchor }
+        XCTAssertNotEqual(next.position.rendered.y, 980, "The passage, rather than its old pixel coordinate, must be restored")
+        let liveAnchor = try XCTUnwrap(next.position.overflowGeometry.snapshot)
+        next.width = 320; next.typeSize = .large
+        try await waitUntil({
+            guard let scroll = self.scrollView(nextWindow) else { return false }
+            let overlays = self.views(scroll).compactMap { $0 as? UITextInteractionView }
+            guard overlays.indices.contains(liveAnchor.ordinal) else { return false }
+            let overlay = overlays[liveAnchor.ordinal]
+            guard let position = overlay.model.position(from: overlay.model.startPosition, offset: liveAnchor.character) else { return false }
+            let rect = overlay.convert(overlay.model.caretRect(for: position), to: nextWindow)
+            let viewport = scroll.convert(scroll.bounds, to: nextWindow)
+            return abs(scroll.bounds.width - 320) < 1 && abs(rect.minY - viewport.minY - liveAnchor.viewportY) < 4
+        }, diagnostics: { self.describeScrollViews(nextWindow) })
+    }
+
+    func testPersistedSourceAnchorRestoresCharacterAtDifferentWidth() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("positions.json"), id = UUID()
+        let first = ReadingFixtureState(); first.width = 360; first.source = true
+        await first.position.prepare(text: first.text, store: ReadingPositionStore(fileURL: file), connectionID: id, path: "/guide.md")
+        let window = try host(first)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await scroll(window, to: CGPoint(x: 0, y: 980), saved: { first.position.source })
+        let anchor = try XCTUnwrap(first.position.sourceAnchor)
+        await first.position.flush()
+        window.isHidden = true; window.rootViewController = nil
+        let next = ReadingFixtureState(); next.width = 240; next.source = true; next.typeSize = .xxxLarge
+        await next.position.prepare(text: next.text, store: ReadingPositionStore(fileURL: file), connectionID: id, path: "/guide.md")
+        let nextWindow = try host(next)
+        defer { nextWindow.isHidden = true; nextWindow.rootViewController = nil }
+        try await waitUntil({
+            guard let view = self.scrollView(nextWindow) as? SourceTextView, !view.restoreAnchor,
+                  let position = view.position(from: view.beginningOfDocument, offset: anchor.character) else { return false }
+            return abs(view.caretRect(for: position).minY - view.contentOffset.y - anchor.viewportY) < 4
+        }, diagnostics: { self.describeScrollViews(nextWindow) })
+        XCTAssertNotEqual(next.position.source.y, 980)
+        let liveAnchor = try XCTUnwrap(next.position.sourceAnchor)
+        next.width = 320; next.typeSize = .large
+        try await waitUntil({
+            guard let view = self.scrollView(nextWindow) as? SourceTextView, !view.restoreAnchor,
+                  let position = view.position(from: view.beginningOfDocument, offset: liveAnchor.character) else { return false }
+            return abs(view.bounds.width - 320) < 1 && abs(view.caretRect(for: position).minY - view.contentOffset.y - liveAnchor.viewportY) < 4
+        }, diagnostics: { self.describeScrollViews(nextWindow) })
+    }
+
+    func testMemoryWarningAndInactivityReleaseAttributedKeysButRetainAnchor() async throws {
+        let state = ReadingFixtureState()
+        state.text = String(repeating: "Paragraph before code.\n\n```swift\nlet value = 42\n```\n\n", count: 80)
+        let window = try host(state)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await waitUntil { state.position.overflowGeometry.retainedExtentCount > 0 }
+        let cache = state.position.overflowGeometry
+        XCTAssertLessThanOrEqual(cache.retainedExtentCount, 64)
+        XCTAssertLessThanOrEqual(cache.retainedExtentCost, 2 * 1024 * 1024)
+        cache.snapshot = .init(kind: "prose", ordinal: 0, character: 20, fraction: 0, viewportY: 40)
+        let anchor = cache.snapshot
+        NotificationCenter.default.post(name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
+        try await waitUntil { cache.retainedExtentCount == 0 }
+        XCTAssertEqual(cache.snapshot, anchor)
+        XCTAssertNotNil(scrollView(window), "Memory pressure must leave the active document readable")
+        cache.releaseInactiveContent()
+        XCTAssertEqual(cache.retainedExtentCount, 0)
+        XCTAssertEqual(cache.retainedExtentCost, 0)
+        XCTAssertEqual(cache.snapshot, anchor)
+        let navigation = ReaderNavigationState()
+        await navigation.prepare(text: state.text, markdown: true)
+        XCTAssertNotNil(navigation.index)
+        navigation.clear()
+        XCTAssertNil(navigation.index)
+    }
+
     func testDemoReadingDoesNotCreatePersistentHistory() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -83,7 +187,7 @@ private struct ReadingPositionFixture: View {
     private func scrollView(_ window: UIWindow) -> UIScrollView? {
         views(window).compactMap { $0 as? UIScrollView }.filter {
             // Select the active viewport, never a UITextView used for source selection.
-            $0.isScrollEnabled && !($0 is UITextView) && $0.window === window &&
+            $0.isScrollEnabled && $0.window === window &&
             !$0.isHidden && $0.alpha > 0.01 && $0.bounds.height > 200 &&
             $0.contentSize.height > $0.bounds.height * 2 &&
             $0.convert($0.bounds, to: window).intersection(window.bounds).height > 200
@@ -122,6 +226,7 @@ private struct ReadingPositionFixture: View {
         let native = try XCTUnwrap(scrollView(window))
         native.setContentOffset(.init(x: value.x - native.adjustedContentInset.left,
                                      y: value.y - native.adjustedContentInset.top), animated: false)
+        (native as? SourceTextView)?.captureReadingAnchor()
         try await waitUntil({ abs(saved().y - value.y) < 2 }, diagnostics: {
             "Expected saved=\(value), actual=\(saved())\n" + self.describeScrollViews(window)
         })

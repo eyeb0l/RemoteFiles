@@ -9,6 +9,7 @@ import UIKit
 /// Rendered and source coordinates remain independent when switching reading modes.
 @MainActor @Observable public final class DocumentReadingPosition {
     public var rendered: CGPoint = .zero { didSet { if rendered != oldValue { scheduleSave() } } }
+    public var sourceAnchor: SavedReadingPosition.Anchor? { didSet { if sourceAnchor != oldValue { scheduleSave() } } }
     public var source: CGPoint = .zero { didSet { if source != oldValue { scheduleSave() } } }
     @ObservationIgnored private var store: ReadingPositionStore?
     @ObservationIgnored private var connectionID: UUID?
@@ -37,6 +38,11 @@ import UIKit
         let restored = await store?.restore(connectionID: connectionID, path: path, revision: nextRevision)
         guard preparationID == token, !Task.isCancelled else { return }
         self.store = store; self.connectionID = connectionID; self.path = path; revision = nextRevision
+        overflowGeometry.documentDidChange(text)
+        overflowGeometry.snapshot = restored?.renderedAnchor.map {
+            .init(kind: $0.kind, ordinal: $0.ordinal, character: $0.character, fraction: $0.fraction, viewportY: $0.viewportY)
+        }
+        sourceAnchor = restored?.sourceAnchor
         rendered = restored.map { CGPoint(x: $0.rendered.x, y: $0.rendered.y) } ?? .zero
         source = restored.map { CGPoint(x: $0.source.x, y: $0.source.y) } ?? .zero
     }
@@ -47,7 +53,10 @@ import UIKit
         guard let store, let connectionID, let path, let revision else { return }
         let snapshot = SavedReadingPosition(revision: revision,
             rendered: .init(x: Double(rendered.x), y: Double(rendered.y)),
-            source: .init(x: Double(source.x), y: Double(source.y)))
+            source: .init(x: Double(source.x), y: Double(source.y)),
+            renderedAnchor: overflowGeometry.snapshot.map {
+                .init(kind: $0.kind, ordinal: $0.ordinal, character: $0.character, fraction: $0.fraction, viewportY: $0.viewportY)
+            }, sourceAnchor: sourceAnchor)
         do {
             try await store.save(snapshot, connectionID: connectionID, path: path)
             persistenceError = nil
@@ -97,7 +106,13 @@ struct DocumentScrollPreservation: ViewModifier {
             .onScrollGeometryChange(for: ScrollGeometry.self, of: { $0 }) { _, value in
                 // Offset tracking must not feed a new geometry state back into every
                 // scroll frame. Restoration only needs changes to the viewport's layout.
+                let resized = geometry.map { $0.containerSize.width != value.containerSize.width } ?? false
                 if geometry.map({ !sameLayout($0, value) }) ?? true { geometry = value }
+                if resized, appeared, ready, navigationID == nil, !userInteracting,
+                   overflowGeometry?.hasReadingAnchor == true {
+                    overflowGeometry?.restoreReadingAnchor { saved = $0 }
+                    return
+                }
                 guard appeared, ready else { return }
                 let offset = CGPoint(x: max(0, value.contentOffset.x + value.contentInsets.leading),
                                      y: max(0, value.contentOffset.y + value.contentInsets.top))
@@ -165,6 +180,7 @@ struct DocumentScrollPreservation: ViewModifier {
         command = nil
         restorationAttempts = 0
         lastRestorationGeometry = nil
+        guard ready else { phase = .awaitingContent; return }
         if !near(target, .zero), let overflowGeometry, overflowGeometry.hasReadingAnchor {
             phase = .tracking
             overflowGeometry.restoreReadingAnchor { saved = $0 }
