@@ -30,6 +30,26 @@ final class ReadingPositionStoreTests: XCTestCase {
         let uppercase = await store.restore(connectionID: id, path: "/CAFÉ.md", revision: position("same").revision)
         XCTAssertEqual(first?.rendered.y, 100); XCTAssertEqual(second?.rendered.y, 200); XCTAssertNil(uppercase)
     }
+    func testAnchorsRoundTripAndLegacyCoordinatesRemainReadable() async throws {
+        let url = location(); defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let id = UUID(), store = ReadingPositionStore(fileURL: url)
+        var value = position("report", y: 300)
+        value.renderedAnchor = .init(kind: "prose", ordinal: 2, character: 230, viewportY: 40)
+        value.sourceAnchor = .init(kind: "source", character: 420, viewportY: 30)
+        try await store.save(value, connectionID: id, path: "/a")
+        let restored = await ReadingPositionStore(fileURL: url).restore(connectionID: id, path: "/a", revision: value.revision)
+        XCTAssertEqual(restored, value)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as? [String: Any])
+        json.removeValue(forKey: "renderedAnchor"); json.removeValue(forKey: "sourceAnchor")
+        let legacy = try JSONDecoder().decode(SavedReadingPosition.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertNil(legacy.renderedAnchor); XCTAssertNil(legacy.sourceAnchor)
+        XCTAssertEqual(legacy.rendered, value.rendered)
+        value.sourceAnchor?.character = -1
+        try await store.save(value, connectionID: id, path: "/invalid")
+        let invalid = await store.restore(connectionID: id, path: "/invalid", revision: value.revision)
+        XCTAssertNil(invalid)
+    }
+
     func testCapacityEvictsOldestAndUpdatingExistingRecordRetainsIt() async throws {
         let url = location(); defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let store = ReadingPositionStore(fileURL: url, capacity: 2), id = UUID(), value = position("report")

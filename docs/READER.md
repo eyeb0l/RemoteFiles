@@ -31,15 +31,19 @@ Markdown images load as needed over SFTP, relative to the document directory. Th
 
 - **Headings and links:** **Headings** lists parsed Markdown headings. You can also follow same-document and relative-file heading links. Repeated headings have suffixes such as `details-1`. Native Back returns to the previous reader. Missing headings and unsupported query links show an explanation and leave the current document open.
 
-- **Reading position:** Text readers remember separate Rendered and Source positions across launches. History contains coordinates and a content fingerprint, not document contents, for up to 200 connection/path pairs. A changed document starts at the top; a different screen size or text setting can make a restored position approximate. Positions save after scrolling pauses and when leaving or backgrounding. Demo does not write reading history.
+- **Reading position:** Text readers remember separate Rendered and Source positions across launches. History contains text locations, block positions, fallback coordinates and a content fingerprint, not document contents, for up to 200 connection/path pairs. Markdown prose and Source restore the same text location after width or text-size changes; images and overflow blocks restore a proportional position within the block. A changed document starts at the top. Older coordinate-only history and positions without an available text/block anchor retain approximate coordinate restoration. Static HTML retains coordinate restoration. Positions save after scrolling pauses and when leaving or backgrounding. Demo does not write reading history.
 
 ## Read source
+
+<img src="screenshots/reader-source-anchors-iphone.png" width="240" alt="Native selectable Swift source with syntax colors and wrapped lines on an iPhone simulator">
+
+*Bundled demo source on the iPhone 18 Pro simulator, iOS 27.2.*
 
 Use **Source** where offered to see the original text. Supported languages are highlighted locally using the filename, including Swift, JavaScript/TypeScript, Python, JSON, YAML, shell, HTML/CSS and SQL. Selection and **Copy Source** retain the original text. For unfamiliar formats or large or complex sources, the reader displays plain text instead: highlighting is limited to 256 KiB and 16,000 tokens. The same limits apply to rendered Markdown code fences; they fall back to plain code without losing content. The text-preview limit remains 2 MiB.
 
 Lines wrap by default. Choose **Document actions → Wrap Lines** to turn wrapping off and scroll horizontally; the preference is remembered. Very long lines and large documents use a width-bounded read-only view to avoid an oversized layout surface. The actions menu explains when this limit applies. Malformed JSON remains readable as source.
 
-Highlighting is prepared off the main actor; plain text appears first. The local token cache holds at most two documents within an estimated 2 MiB, and clears on disconnect, backgrounding or memory warning. No remote scripts are loaded for highlighting.
+Source uses a selectable native text viewport for both short and long documents. Highlighting is prepared off the main actor; plain text appears first. The local token cache holds at most two documents within an estimated 2 MiB, and clears on disconnect, backgrounding or memory warning. No remote scripts are loaded for highlighting.
 
 ## Save the original
 
@@ -56,3 +60,9 @@ Rendered SVG supports a static subset (paths, shapes, groups, gradients, local r
 Scripts, event handlers, animation, embedded images, HTML and external resources are rejected. Only reserialized, allowlisted SVG enters a nonpersistent WebKit view with JavaScript disabled, a restrictive content security policy, resource blocking and external navigation denied. The rendering copy is separate from Source and Save Original.
 
 When the app becomes inactive or backgrounded, an opaque window-level privacy cover sits above readers and presented sheets for the app switcher snapshot. Returning removes the cover without changing navigation or reader position.
+
+## Reader memory
+
+Leaving a connected reader releases its decoded preview and parsed navigation index. Backgrounding unmounts the renderer and releases its parsed index, while retaining the selected reader’s bounded original text so a failed reconnect can still show the previous copy. Returning prepares them again from the bounded raw-byte cache when available and revalidates with the server. Offline readers release their local preview and verified lease when inactive. Reading anchors remain small and contain no document text.
+
+Markdown overflow geometry retains at most 64 entries within an estimated 2 MiB budget. It clears on reader detachment, inactivity and memory warnings. Oversized entries are not cached; their content still renders. This is an accounting budget for cached geometry keys, not a bound on the renderer's total resident memory. The active document still needs its parsed text and native layout. Physical-device memory and layout acceptance remain separate from simulator checks.

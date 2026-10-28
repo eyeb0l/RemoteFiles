@@ -1,4 +1,5 @@
 import SwiftUI
+import RemoteFilesCore
 
 enum SourceLayout {
     /// A two-axis SwiftUI Text creates one enormous layout surface for long lines.
@@ -21,6 +22,7 @@ import UIKit
 /// Width-constrained, selectable original source. Wrapping is visual only: no
 /// characters, escapes, indentation or newlines are inserted into the document.
 struct BoundedSourceTextView: UIViewRepresentable {
+    @ScaledMetric(relativeTo: .body) private var fontSize: CGFloat = 17
     let text: String
     let highlighted: AttributedString?
     let readingPosition: DocumentReadingPosition?
@@ -41,17 +43,24 @@ struct BoundedSourceTextView: UIViewRepresentable {
         view.accessibilityLabel = "Source text"
         view.delegate = context.coordinator
         view.pendingOffset = readingPosition?.source ?? .zero
+        view.anchor = readingPosition?.sourceAnchor
+        view.restoreAnchor = view.anchor != nil
         return view
     }
     func updateUIView(_ view: SourceTextView, context: Context) {
         let coordinator = context.coordinator
         coordinator.position = readingPosition
         coordinator.wrapLines = wrapLines
+        view.onPosition = { point, anchor in
+            readingPosition?.source = point
+            readingPosition?.sourceAnchor = anchor
+        }
         if view.textContainer.widthTracksTextView != wrapLines {
+            if view.anchor != nil { view.restoreAnchor = true }
             view.textContainer.widthTracksTextView = wrapLines
             if wrapLines { view.setContentOffset(CGPoint(x: 0, y: view.contentOffset.y), animated: false) }
         }
-        let font = UIFontMetrics(forTextStyle: .body).scaledFont(for: .monospacedSystemFont(ofSize: 17, weight: .regular))
+        let font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         let result = NSMutableAttributedString(string: text, attributes: [.font: font, .foregroundColor: UIColor.label])
         // UITextView clamps an effectively infinite container back to its viewport.
         // Short unwrapped source uses its finite natural width; large/long source
@@ -82,6 +91,7 @@ struct BoundedSourceTextView: UIViewRepresentable {
         }
         let selected = view.selectedRange, offset = view.contentOffset
         coordinator.applying = true
+        if view.anchor != nil { view.restoreAnchor = true }
         view.attributedText = result
         // UITextView replaces container geometry when assigning attributed text.
         // Reapply the finite width after that assignment, before resolving a match.
@@ -105,9 +115,11 @@ struct BoundedSourceTextView: UIViewRepresentable {
               NSMaxRange(reveal.target.range) <= view.attributedText.length else { return }
         coordinator.revealID = reveal.id
         view.pendingOffset = nil
+        view.restoreAnchor = false
+        view.anchor = nil
         view.pendingReveal = reveal.target.range
         view.revealDeadline = Date().addingTimeInterval(5)
-        view.revealCompletion = { point in readingPosition?.source = point; onReveal?(reveal.id) }
+        view.revealCompletion = { [weak view] point in view?.captureReadingAnchor(); readingPosition?.source = point; onReveal?(reveal.id) }
         view.setNeedsLayout()
     }
     final class Coordinator: NSObject, UITextViewDelegate {
@@ -115,15 +127,39 @@ struct BoundedSourceTextView: UIViewRepresentable {
         var applying = false
         var revealID: UUID?
         var wrapLines = true
+        func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+            // VoiceOver and other non-touch scrolling do not set dragging flags.
+            // captureReadingAnchor still excludes restoration and pending Find work.
+            guard !applying else { return }
+            (scrollView as? SourceTextView)?.captureReadingAnchor()
+        }
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            guard !applying, (scrollView as? SourceTextView)?.pendingOffset == nil,
-                  scrollView.isDragging || scrollView.isDecelerating else { return }
-            position?.source = CGPoint(x: wrapLines ? 0 : max(0, scrollView.contentOffset.x), y: max(0, scrollView.contentOffset.y))
+            guard !applying, scrollView.isDragging || scrollView.isDecelerating else { return }
+            (scrollView as? SourceTextView)?.pendingOffset = nil
+            (scrollView as? SourceTextView)?.restoreAnchor = false
+            (scrollView as? SourceTextView)?.captureReadingAnchor()
         }
     }
 }
 
 final class SourceTextView: UITextView {
+    var anchor: SavedReadingPosition.Anchor?
+    var restoreAnchor = false
+    var onPosition: ((CGPoint, SavedReadingPosition.Anchor?) -> Void)?
+    private var lastWidth: CGFloat = 0
+    private var anchorCorrectionScheduled = false
+    private var anchorAttempts = 0
+    func captureReadingAnchor() {
+        guard !restoreAnchor, pendingOffset == nil, pendingReveal == nil else { return }
+        let point = CGPoint(x: contentOffset.x + textContainerInset.left,
+                            y: contentOffset.y + adjustedContentInset.top + 40)
+        if contentOffset.y + adjustedContentInset.top <= 1 { anchor = nil }
+        else if let position = closestPosition(to: point) {
+            anchor = .init(kind: "source", character: offset(from: beginningOfDocument, to: position),
+                           viewportY: Double(caretRect(for: position).minY - contentOffset.y))
+        }
+        onPosition?(CGPoint(x: max(0, contentOffset.x), y: max(0, contentOffset.y)), anchor)
+    }
     var pendingOffset: CGPoint?
     var unwrappedWidth: CGFloat?
     override var contentSize: CGSize {
@@ -138,20 +174,59 @@ final class SourceTextView: UITextView {
     var revealDeadline: Date?
     private var revealScheduled = false
     var revealCompletion: ((CGPoint) -> Void)?
+    override func accessibilityScroll(_ direction: UIAccessibilityScrollDirection) -> Bool {
+        let handled = super.accessibilityScroll(direction)
+        if handled {
+            pendingOffset = nil; restoreAnchor = false
+            // Also capture immediate accessibility scrolls when no animation runs.
+            captureReadingAnchor()
+        }
+        return handled
+    }
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if window != nil { setNeedsLayout() }
     }
     override func layoutSubviews() {
+        if lastWidth > 0, lastWidth != bounds.width, anchor != nil { restoreAnchor = true }
+        lastWidth = bounds.width
         super.layoutSubviews()
         restoreUnwrappedContainer()
         guard window != nil, bounds.width > 0, bounds.height > 0, !attributedText.string.isEmpty else { return }
-        if let target = pendingOffset {
+        if restoreAnchor { scheduleAnchorRestoration() }
+        if !restoreAnchor, let target = pendingOffset {
             pendingOffset = nil
             setContentOffset(CGPoint(x: textContainer.widthTracksTextView ? 0 : min(max(0, target.x), max(0, contentSize.width - bounds.width)), y: min(max(0, target.y), max(0, contentSize.height - bounds.height))), animated: false)
         }
         scheduleReveal()
     }
+    private func scheduleAnchorRestoration() {
+        guard !anchorCorrectionScheduled else { return }
+        anchorCorrectionScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.016) { [weak self] in
+            guard let self else { return }
+            self.anchorCorrectionScheduled = false
+            guard self.restoreAnchor, let anchor = self.anchor, self.window != nil else { self.anchorAttempts = 0; return }
+            guard !self.isDragging, !self.isDecelerating,
+                  let position = self.position(from: self.beginningOfDocument, offset: anchor.character) else {
+                self.restoreAnchor = false; self.anchorAttempts = 0; return
+            }
+            self.layoutIfNeeded()
+            let rect = self.caretRect(for: position)
+            guard rect.height > 0, rect.minY.isFinite else { self.restoreAnchor = false; return }
+            let x = min(max(0, self.pendingOffset?.x ?? self.contentOffset.x),
+                        max(0, self.contentSize.width - self.bounds.width))
+            let y = min(max(0, rect.minY - anchor.viewportY), max(0, self.contentSize.height - self.bounds.height))
+            let stable = abs(self.contentOffset.y - y) < 0.5
+            self.setContentOffset(CGPoint(x: self.textContainer.widthTracksTextView ? 0 : x, y: y), animated: false)
+            self.anchorAttempts += 1
+            if (stable && self.anchorAttempts > 1) || self.anchorAttempts >= 60 {
+                self.restoreAnchor = false; self.pendingOffset = nil; self.anchorAttempts = 0
+                self.captureReadingAnchor()
+            } else { self.scheduleAnchorRestoration() }
+        }
+    }
+
     private func restoreUnwrappedContainer() {
         guard !textContainer.widthTracksTextView, let width = unwrappedWidth,
               abs(textContainer.size.width - width) > 0.5 else { return }

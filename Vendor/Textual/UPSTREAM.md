@@ -6,6 +6,12 @@ The MIT license is retained. The Markdown parser and visual rendering policies a
 
 Local changes:
 
+- `OverflowGeometryCache.swift`: exports content-free text/block reading snapshots
+  for app-owned persistence and restores them after layout changes. Geometry keys
+  have a 64-entry / estimated 2 MiB budget, clear on detachment, and expose explicit
+  memory-pressure/inactivity eviction. Document identity retains a SHA-256 digest
+  instead of the original text. Existing deferred-rendering correction remains.
+
 - `StructuredText.swift`: a direct `AttributedString` initializer renders an
   already prepared document without a parsing state transition. Attribute-only
   navigation updates and refreshed text retain the same rendering subtree,

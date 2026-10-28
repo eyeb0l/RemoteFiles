@@ -260,34 +260,32 @@ final class RemoteFilesUITests: XCTestCase {
             let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Example.swift,")).firstMatch
             XCTAssertTrue(row.waitForExistence(timeout: 10))
             revealFolderRow(row, in: app).tap()
-            XCTAssertTrue(app.staticTexts["Syntax highlighted source"].waitForExistence(timeout: 15))
+            XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 15))
         }
         let toggle = app.descendants(matching: .any).matching(identifier: "Wrap Lines").firstMatch
         openExample()
-        let source = app.staticTexts["Syntax highlighted source"]
-        // Normalize a preference from a previous run through the production menu.
-        let wasUnwrapped = source.frame.width > app.frame.width
+        let source = app.textViews["Bounded source text"]
         app.buttons["Document actions"].tap()
         XCTAssertTrue(toggle.waitForExistence(timeout: 5), app.debugDescription)
-        if wasUnwrapped {
-            toggle.tap(); app.buttons["Document actions"].tap()
-        }
-        dismissDocumentActions(in: app)
-        let original = source.label
-        let wrappedHeight = source.frame.height
-        XCTAssertLessThanOrEqual(source.frame.width, app.frame.width)
-        attachScreenshot("Source with wrapped lines")
-        app.buttons["Document actions"].tap(); toggle.tap()
-        XCTAssertLessThan(source.frame.height, wrappedHeight)
-        XCTAssertGreaterThan(source.frame.width, app.frame.width)
-        XCTAssertEqual(source.label, original)
-        attachScreenshot("Source with horizontal scrolling")
-        app.terminate(); app.launch(); openExample()
-        XCTAssertGreaterThan(source.frame.width, app.frame.width, "Preference must survive app relaunch")
+        // Native source keeps a fixed viewport; hosted tests verify the changing
+        // text-container dimensions and actual horizontal scrolling.
+        let initial = toggle.isSelected
+        toggle.tap()
+        XCTAssertTrue(source.waitForExistence(timeout: 5))
+        let original = source.value as? String
+        XCTAssertNotNil(original)
+        attachScreenshot("Source after toggling line wrapping")
         app.buttons["Document actions"].tap()
         XCTAssertTrue(toggle.waitForExistence(timeout: 5))
-        toggle.tap() // Leave subsequent demo tests with the default wrapping mode.
-        XCTAssertEqual(source.label, original)
+        let changed = toggle.isSelected
+        XCTAssertNotEqual(changed, initial)
+        dismissDocumentActions(in: app)
+        app.terminate(); app.launch(); openExample()
+        app.buttons["Document actions"].tap()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertEqual(toggle.isSelected, changed, "Preference must survive app relaunch")
+        toggle.tap()
+        XCTAssertEqual(source.value as? String, original)
     }
 
     func testHTMLRenderedSourceAndRefresh() throws {
@@ -302,11 +300,11 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(app.webViews.staticTexts["Sample table"].exists, app.debugDescription)
         attachScreenshot("HTML rendered page")
         app.buttons["Source"].tap()
-        let source = app.staticTexts["Syntax highlighted source"]
+        let source = app.textViews["Bounded source text"]
         XCTAssertTrue(source.waitForExistence(timeout: 15), app.debugDescription)
-        XCTAssertTrue(source.label.hasPrefix("<!doctype html>"))
-        XCTAssertTrue(source.label.contains("café 東京 🌍"))
-        XCTAssertTrue(source.label.hasSuffix("</body></html>"))
+        XCTAssertTrue((source.value as? String ?? "").hasPrefix("<!doctype html>"))
+        XCTAssertTrue((source.value as? String ?? "").contains("café 東京 🌍"))
+        XCTAssertTrue((source.value as? String ?? "").hasSuffix("</body></html>"))
         attachScreenshot("HTML original highlighted source")
         app.buttons["Document actions"].tap(); app.buttons["Copy Source"].tap()
         app.buttons["Document actions"].tap()
@@ -403,9 +401,9 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertGreaterThan(purple, 5_000, "Wait for visible SVG pixels, not just a WebKit accessibility element")
         attachScreenshot("SVG rendered image")
         app.buttons["Source"].tap()
-        let xml = app.staticTexts["Syntax highlighted source"]
+        let xml = app.textViews["Bounded source text"]
         XCTAssertTrue(xml.waitForExistence(timeout: 10))
-        XCTAssertTrue(xml.label.hasPrefix("<svg xmlns="))
+        XCTAssertTrue((xml.value as? String ?? "").hasPrefix("<svg xmlns="))
         attachScreenshot("SVG original source")
         app.buttons["Rendered"].tap()
         XCTAssertTrue(image.waitForExistence(timeout: 10))
@@ -529,10 +527,10 @@ final class RemoteFilesUITests: XCTestCase {
         let example = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Example.swift,")).firstMatch
         XCTAssertTrue(example.waitForExistence(timeout: 10))
         revealFolderRow(example, in: app).tap()
-        let highlighted = app.staticTexts["Syntax highlighted source"]
+        let highlighted = app.textViews["Bounded source text"]
         XCTAssertTrue(highlighted.waitForExistence(timeout: 15), app.debugDescription)
-        XCTAssertTrue(highlighted.label.contains("// Keep remote files within reach. 東京 ✨"))
-        XCTAssertTrue(highlighted.label.contains("let fileLimit = 2_097_152"))
+        XCTAssertTrue((highlighted.value as? String ?? "").contains("// Keep remote files within reach. 東京 ✨"))
+        XCTAssertTrue((highlighted.value as? String ?? "").contains("let fileLimit = 2_097_152"))
         attachScreenshot("Syntax highlighted Swift source")
         app.buttons["Document actions"].tap()
         app.buttons["Copy Source"].tap()
@@ -547,9 +545,15 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
         app.buttons["Source"].tap()
         XCTAssertTrue(highlighted.waitForExistence(timeout: 15), app.debugDescription)
-        XCTAssertTrue(highlighted.label.hasPrefix("# A little closer to home"))
+        XCTAssertTrue((highlighted.value as? String ?? "").hasPrefix("# A little closer to home"))
         app.swipeUp()
         attachScreenshot("Syntax highlighted Markdown source")
+        let originalSource = highlighted.value as? String
+        XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
+        app.activate()
+        XCTAssertTrue(highlighted.waitForExistence(timeout: 15))
+        XCTAssertEqual(highlighted.value as? String, originalSource, "Foreground re-prepares the original source after releasing inactive parsed content")
         app.buttons["Rendered"].tap()
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 5))
     }
@@ -632,7 +636,7 @@ final class RemoteFilesUITests: XCTestCase {
         attachScreenshot("Physical reader")
 
         app.buttons["Source"].tap()
-        XCTAssertTrue(app.scrollViews["Markdown source"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 5))
         app.buttons["Rendered"].tap()
         XCTAssertTrue(rendered.waitForExistence(timeout: 5))
         app.buttons["Document actions"].tap()
@@ -834,7 +838,7 @@ final class RemoteFilesUITests: XCTestCase {
                                    evaluatedWith: app.buttons["Save"])
             wait(for: [gone], timeout: 10)
             XCTAssertTrue(app.navigationBars["Example.swift"].waitForExistence(timeout: 5))
-            XCTAssertTrue(app.scrollViews["Plain text document"].exists)
+            XCTAssertTrue(app.textViews["Bounded source text"].exists)
             let ready = expectation(for: NSPredicate(format: "exists == true AND enabled == true"), evaluatedWith: export)
             wait(for: [ready], timeout: 5)
         }
@@ -862,7 +866,7 @@ final class RemoteFilesUITests: XCTestCase {
         let file = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", filename + ",")).firstMatch
         revealFolderRow(file, in: app).tap()
         XCTAssertTrue(app.navigationBars[filename].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.scrollViews[markdown ? "Rendered Markdown document" : "Plain text document"].waitForExistence(timeout: 15))
+        XCTAssertTrue((markdown ? app.scrollViews["Rendered Markdown document"] : app.textViews["Bounded source text"]).waitForExistence(timeout: 15))
         return app
     }
 
@@ -1014,7 +1018,7 @@ extension RealServerUITests {
         XCTAssertTrue(first.waitForExistence(timeout: 10), app.debugDescription)
         let capture = XCTAttachment(screenshot: app.screenshot()); capture.name = "Real server rendered report"; capture.lifetime = .keepAlways; add(capture)
         app.buttons["Source"].tap()
-        XCTAssertTrue(app.scrollViews["Markdown source"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 5))
         print("REMOTEFILES_READY_FOR_SERVER_UPDATE")
         let updated = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "updated on the real Mac")).firstMatch
         for _ in 0..<10 {
@@ -1088,7 +1092,7 @@ extension RealServerUITests {
         back()
 
         open("sample.csv")
-        XCTAssertTrue(app.scrollViews["Plain text document"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 20))
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "name,count")).firstMatch.exists)
     }
 }
@@ -1179,7 +1183,7 @@ extension RealServerUITests {
         XCTAssertTrue(heading.waitForExistence(timeout: 12), "Image-free README must render visible content, not merely an empty scroll view.\n" + app.debugDescription)
         let initial = XCTAttachment(screenshot: app.screenshot()); initial.name = "README rendered"; initial.lifetime = .keepAlways; add(initial)
         app.buttons["Source"].tap()
-        XCTAssertTrue(app.scrollViews["Markdown source"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 5))
         app.buttons["Rendered"].tap()
         XCTAssertTrue(heading.waitForExistence(timeout: 10))
         app.buttons["Document actions"].tap(); app.buttons["Refresh"].tap()

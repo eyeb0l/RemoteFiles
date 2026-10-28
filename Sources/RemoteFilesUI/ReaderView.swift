@@ -64,7 +64,7 @@ struct ReaderView: View {
                 if isMedia {
                     RemoteMediaView(model: model, profile: profile, entry: entry,
                                     kind: DocumentPolicy.kind(filename: entry.name), refreshID: refreshID)
-                } else if let preview {
+                } else if let preview, model.isForeground {
                     switch preview {
                     case .text(let text, let markdown): DocumentContentView(text: text, markdown: markdown, source: source, filename: entry.name, location: .init(profile: profile, path: entry.path), resolver: model.resources, readingPosition: readingPosition, openDocumentLink: openLink, wrapLines: wrapLines, navigation: navigation).id(ContentIdentity(revision: contentRevision, images: imageVersion))
                     case .empty: ContentUnavailableView("This file is empty", systemImage: "doc", description: Text("Refresh after it has been updated on the server."))
@@ -132,13 +132,25 @@ struct ReaderView: View {
             await navigation.search(inSource: showsSource)
         }
         .task(id: "\(model.isForeground)-\(model.sessionRevision)-\(refreshID)") { await reloadIfNeeded() }
-        .onDisappear { cancelLink(); Task { await readingPosition.flush() } }
+        .onDisappear {
+            releaseInactiveContent()
+            Task { await readingPosition.flush() }
+        }
         .onChange(of: model.isForeground) { _, active in
             cancelLink()
-            if !active { Task { await readingPosition.flush() } }
+            if !active { releaseInactiveContent(keepPreview: true); Task { await readingPosition.flush() } }
         }
         .onChange(of: model.sessionRevision) { _, _ in cancelLink() }
     }
+    private func releaseInactiveContent(keepPreview: Bool = false) {
+        cancelLink(); requestID = UUID()
+        // Keep only the selected reader's bounded original text across suspension,
+        // so a failed reconnect can still explain and display the previous copy.
+        if !keepPreview { preview = nil; displayedVersion = nil }
+        navigation.clear()
+        readingPosition.overflowGeometry.releaseInactiveContent()
+    }
+
     private var isMedia: Bool {
         let kind = DocumentPolicy.kind(filename: entry.name)
         return [.image, .pdf, .video, .audio].contains(kind)
@@ -228,6 +240,11 @@ struct ReaderView: View {
         let revision = model.sessionRevision
         lastSessionRevision = model.sessionRevision; lastRefreshID = refreshID
         loading = true; error = nil
+        if let preview, navigation.index == nil {
+            await prepareReading(preview)
+            guard !Task.isCancelled, token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
+            contentRevision = navigation.revision
+        }
         var knownVersion = preview == nil ? nil : displayedVersion
         if entry.navigationRoot == nil, preview == nil, let bytes = model.cachedDocument(profile.id, path: entry.path) {
             let version = model.cachedDocumentVersion(profile.id, path: entry.path)

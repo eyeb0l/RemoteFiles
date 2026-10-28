@@ -9,16 +9,36 @@ public struct SavedReadingPosition: Codable, Equatable, Sendable {
         public init(x: Double = 0, y: Double = 0) { self.x = x; self.y = y }
         fileprivate var isValid: Bool { x.isFinite && y.isFinite && x >= 0 && y >= 0 && x <= 100_000_000 && y <= 100_000_000 }
     }
+    /// Content-free UTF-16 location, or a proportional position within a rendered block.
+    public struct Anchor: Codable, Equatable, Sendable {
+        public var kind: String
+        public var ordinal: Int
+        public var character: Int
+        public var fraction: Double
+        public var viewportY: Double
+        public init(kind: String, ordinal: Int = 0, character: Int = 0, fraction: Double = 0, viewportY: Double = 0) {
+            self.kind = kind; self.ordinal = ordinal; self.character = character
+            self.fraction = fraction; self.viewportY = viewportY
+        }
+        fileprivate var isValid: Bool {
+            ["prose", "image", "overflow", "source"].contains(kind) && ordinal >= 0 && ordinal <= 2_097_152 &&
+            character >= 0 && character <= 2_097_152 && fraction.isFinite && (0...1).contains(fraction) &&
+            viewportY.isFinite && abs(viewportY) <= 100_000
+        }
+    }
+    public var renderedAnchor: Anchor?
+    public var sourceAnchor: Anchor?
     public var revision: String
     public var rendered: Point
     public var source: Point
-    public init(revision: String, rendered: Point = .init(), source: Point = .init()) {
+    public init(revision: String, rendered: Point = .init(), source: Point = .init(), renderedAnchor: Anchor? = nil, sourceAnchor: Anchor? = nil) {
         self.revision = revision; self.rendered = rendered; self.source = source
+        self.renderedAnchor = renderedAnchor; self.sourceAnchor = sourceAnchor
     }
     public static func revision(for text: String) -> String {
         SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
     }
-    fileprivate var isValid: Bool { revision.utf8.count == 64 && revision.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) } && rendered.isValid && source.isValid }
+    fileprivate var isValid: Bool { revision.utf8.count == 64 && revision.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) } && rendered.isValid && source.isValid && (renderedAnchor?.isValid ?? true) && (sourceAnchor?.isValid ?? true) }
 }
 
 /// Ancillary reading history is kept separate from the connection library so corrupt history

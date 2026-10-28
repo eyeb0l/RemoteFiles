@@ -237,6 +237,7 @@ struct OfflineReaderView: View {
     private func release() {
         cancelLink()
         navigation.clear()
+        readingPosition.overflowGeometry.releaseInactiveContent()
         requestID = UUID(); playback.stop(); image = nil; pdf = nil; lease = nil; preview = nil
     }
     private func cancelLink() {
