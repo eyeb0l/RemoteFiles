@@ -4,8 +4,10 @@ HTML and HTM files default to Rendered and have a Source switch, matching the
 Markdown/SVG reader. Rendered displays static document structure, inline CSS,
 headings, lists and tables using a nonpersistent WebKit view. Its default styling
 adapts to the device appearance and gives documents a mobile viewport. Authored
-inline styles are retained. Rendered scroll position is retained when switching
-modes. Source remains the original UTF-8 text with the existing HTML grammar,
+inline styles are retained. Rendered reading position uses text-node/UTF-16 or proportional block anchors
+when switching modes, resizing the viewport, changing text size or reopening the
+same revision. Source retains its own independent position. Older history and
+unavailable anchors fall back to bounded coordinates. Source remains the original UTF-8 text with the existing HTML grammar,
 selection, Copy Source and Save Original to Files actions.
 
 The text transport still enforces the 2 MiB preview cap and UTF-8/control-byte
@@ -21,6 +23,16 @@ navigation and form submission remain inactive. Internal fragment links can
 scroll within the current preview. The original HTML is never rewritten for
 copying or export; renderer-only metadata/styles wrap the displayed copy.
 
+App-owned anchor inspection runs in an isolated WebKit content world with
+document JavaScript still disabled. It visits at most 20,000 DOM nodes and
+128 ancestors per candidate, stores only numeric locations and keeps no DOM
+cache. Each inspection has a one-second deadline so a stalled WebKit process
+cannot indefinitely retain a departing reader. Hidden or fixed/sticky content is not used as a reading target. Tables,
+preformatted blocks and visual elements use a proportional block location.
+Font-size changes scale the rendered preview, including authored CSS. Offline
+HTML keeps an in-session position but still does not persist history across
+launches.
+
 An entry file containing an empty root element and a module script, such as the
 React entry in the supplied screenshot, has no static page to display. The view
 explains that it needs JavaScript and a running website rather than presenting a
@@ -32,6 +44,45 @@ blocked document scripts/resources, and script-only entries. The UI journey
 checks Rendered → Source → Copy Source → Rendered → Refresh.
 
 ## Verification
+
+The HTML anchor extension adds twelve hosted regressions for Unicode reflow,
+page zoom, visual blocks, persisted/live-width restoration, legacy coordinates,
+refresh, detach, non-touch interruption and hidden/over-budget DOM targets.
+On 29 October 2026 all twelve passed on iPhone 18 Pro / iOS 27.2 in
+`/private/tmp/remotefiles-html-anchor-runtime-8.xcresult` (103 seconds, no skips).
+The final production code also passed the three HTML rendering/security checks
+and seven reading-history tests in `remotefiles-html-anchor-runtime-7.xcresult`;
+that broader run still had intermittent initial-anchor and DOM-inspection
+timeouts before the final diagnostic run. The signed arm64/x86_64 test build, seven macOS persistence
+tests, 39 repository-runner tests and generated-project consistency also passed.
+
+Sol review added a thirteenth regression: when DOM inspection fails after a
+scroll, flushing must preserve the newer native coordinates and discard the
+stale semantic anchor. Native offsets are now recorded independently of DOM
+inspection. This regression and persisted/live-width restoration passed together
+in `/private/tmp/remotefiles-html-anchor-sol-s1c.xcresult` (2 tests, no failures).
+The preceding 23-test run had three failed methods: one test waited for native
+coordinates instead of completed DOM capture (corrected), plus the previously
+observed DOM-inspection/reflow timeouts. No full clean acceptance run is claimed.
+
+Earlier evidence is retained alongside those bundles. Attempt 1 was interrupted
+after 306 seconds with zero tests: simulator discovery recovered, but device
+support and test-host launch initially stalled. That exact infrastructure cause
+was not established. Subsequent execution exposed a wrong WebKit overload in
+the test helper (Void instead of JavaScript results), fixture cleanup masking
+errors, and restoration paths that could consume incomplete native geometry or
+ignore a new scroll coinciding with a content-size change. The helper and cleanup
+were corrected; restoration now waits for usable geometry, distinguishes native
+clamping from new scrolling, and permits at most two additional capture attempts
+while active. Initial WebKit readiness has a separate 30-second test deadline;
+position assertions remain bounded at 15 seconds. The final successful run does
+not erase the earlier intermittent timeouts.
+
+The wider attempt 2 also failed two existing Markdown overlay accessibility
+checks at `DocumentReadingPositionTests.swift` (`isAccessibilityElement` was
+true despite the hidden overlay policy). Those separate failures remain open;
+this evidence is not a full acceptance-lane pass. Physical-device acceptance
+remains outstanding.
 
 Hosted WebKit tests check static content and styling, script and resource blocking, and the explanation for script-only entries. A demo UI journey checks switching modes, copying source and refreshing. These are simulator checks; they do not establish physical-device HTML interaction.
 
