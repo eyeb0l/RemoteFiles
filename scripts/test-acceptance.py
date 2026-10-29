@@ -403,8 +403,11 @@ def execute_lanes(run, lanes, packages, scratch, derived, simulator=None, boot_s
         action = "test"
         if lane == "simulator-core":
             simulator_base[simulator_base.index("-scheme") + 1] = "RemoteFilesCoreCI"
-            build = run.command("simulator-core-build", simulator_base + ["-configuration", "Debug",
-                "-destination", "generic/platform=iOS Simulator", "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-", "build-for-testing"])
+        if lane in ("simulator-core", "simulator-ui"):
+            # Compilation must not consume the UI journeys' execution deadline.
+            # CI keeps the disposable device shut down until these products exist.
+            build = run.command(lane + "-build", simulator_base + ["-configuration", "Debug",
+                "-destination", "generic/platform=iOS Simulator", "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"] + selection + ["build-for-testing"])
             if build["status"] != "passed":
                 continue  # Never execute stale cached binaries after a failed build.
             if boot_simulator:
@@ -436,7 +439,7 @@ def main():
                         help="Run only this lane (repeatable); default is all four acceptance lanes")
     parser.add_argument("--output", required=True, type=Path, help="Fresh evidence directory outside the repository")
     parser.add_argument("--use-checkout", action="store_true", help="Validate a dedicated clean checkout directly (CI), with source hashes checked before/after")
-    parser.add_argument("--boot-simulator", action="store_true", help="Boot the selected disposable device after the core build; core-only CI lane")
+    parser.add_argument("--boot-simulator", action="store_true", help="Boot the selected disposable device after building; requires a single core or UI lane")
     parser.add_argument("--ci-compilation-cache", type=Path, help="Enable CI compiler caching at this external CAS directory, disable indexing, and record resource usage")
     parser.add_argument("--allow-dirty", action="store_true", help="Capture current files with exact manifest/patch hashes")
     parser.add_argument("--source-packages", type=Path, help="Optional reusable Xcode locked-dependency checkout directory")
@@ -449,8 +452,8 @@ def main():
         lanes = selected_lanes(args.lane)
     except ValueError as error:
         parser.error(str(error))
-    if args.boot_simulator and lanes != ("simulator-core",):
-        parser.error("--boot-simulator requires exactly --lane simulator-core")
+    if args.boot_simulator and lanes not in (("simulator-core",), ("simulator-ui",)):
+        parser.error("--boot-simulator requires exactly one of --lane simulator-core or --lane simulator-ui")
     needs_simulator = any(lane.startswith("simulator") or lane == "voiceover" for lane in lanes)
     if needs_simulator and not args.simulator:
         parser.error("--simulator is required for the selected lanes")
