@@ -127,6 +127,7 @@ try:
     shutil.copytree(ROOT/'RemoteFiles.xcodeproj',private_project)
     pbx=private_project/'project.pbxproj'
     code=pbx.read_text().replace('relativePath = .;', 'relativePath = '+json.dumps(str(ROOT))+';')
+    code=code.replace('INFOPLIST_FILE = App/Info.plist;', 'INFOPLIST_FILE = '+json.dumps(str(ROOT/'App/Info.plist'))+';')
     def replace_path(match):
         rel=match[1].strip('"')
         if rel.endswith('.swift'):

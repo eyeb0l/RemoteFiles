@@ -254,3 +254,9 @@ The VoiceOver launcher supports macOS’s stock Bash when optional package or
 compiler-cache settings are absent. Launcher regressions also check that argument
 paths with spaces survive and that collecting lifecycle logs cannot turn a failed
 Xcode run into success.
+
+Disposable fixture projects rebase the app's `App/Info.plist` input to the source
+checkout, along with their package and source references. The project-preparation
+regression executes all four fixture launchers' preparation code and verifies both
+app configurations still resolve the original plist, including checkout paths
+with spaces. Test hosts retain their generated plists.
