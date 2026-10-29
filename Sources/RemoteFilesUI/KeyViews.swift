@@ -58,6 +58,7 @@ private struct IdentityDetailsView: View {
     @State private var copied = false
     @State private var confirmDeletion = false
     @State private var showInstallation = false
+    @State private var showExport = false
     @State private var biometricUnlock = false
     @State private var biometricMessage: String?
     private var connections: [ConnectionProfile] { model.metadata.connections.filter { $0.identityIDs.contains(identity.id) } }
@@ -99,6 +100,12 @@ private struct IdentityDetailsView: View {
                 }
             }
             Section {
+                Button("Export Private Key", systemImage: "square.and.arrow.up") { showExport = true }
+                    .disabled(model.demo)
+            } footer: {
+                Text("Save a copy to Files for backup or use on another device. Anyone with an unencrypted private key can use this identity.")
+            }
+            Section {
                 Button("Delete Identity", role: .destructive) { confirmDeletion = true }.disabled(!connections.isEmpty)
             }
         }
@@ -106,6 +113,9 @@ private struct IdentityDetailsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showInstallation) {
             NavigationStack { PublicKeyInstallationView(model: model, identity: identity, connection: model.installationConnection(for: identity)) }
+        }
+        .sheet(isPresented: $showExport) {
+            NavigationStack { PrivateKeyExportView(identities: model.identities, identity: identity) }
         }
         .task { biometricUnlock = await model.identities.hasBiometricUnlock(identity) }
         .confirmationDialog("Delete this SSH identity from this device?", isPresented: $confirmDeletion, titleVisibility: .visible) {

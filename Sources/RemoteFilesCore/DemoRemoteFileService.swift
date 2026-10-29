@@ -8,6 +8,37 @@ public actor DemoRemoteFileService: RemoteFileService {
     public init(delayNanoseconds: UInt64 = 180_000_000, failure: String? = nil) {
         self.delayNanoseconds = delayNanoseconds; self.failure = failure
     }
+    public static let richMarkdown = #"""
+    # Rich Markdown
+
+    Diagrams, equations and static HTML render locally. Source keeps the original text.
+
+    ## Mermaid diagram
+
+    ```mermaid
+    flowchart LR
+        A[Choose a server] --> B[Verify host key]
+        B --> C[Browse files]
+        C --> D[Download a copy]
+    ```
+
+    ## Mathematical notation
+
+    Inline math: $E = mc^2$.
+
+    $$
+    \int_0^1 x^2\,dx = \frac{1}{3}
+    $$
+
+    ## Embedded HTML
+
+    <details><summary>Read the preview notes</summary><p>Local <strong>static HTML</strong> supports rich document structure.</p></details>
+
+    <table><thead><tr><th>Feature</th><th>Rendering</th></tr></thead><tbody><tr><td>Diagrams</td><td>Mermaid</td></tr><tr><td>Equations</td><td>KaTeX</td></tr></tbody></table>
+
+    [Open the navigation guide](Navigation%20guide.md) or [return to the diagram](#mermaid-diagram).
+    """#
+
     public func configure(delayNanoseconds: UInt64, failure: String?) {
         self.delayNanoseconds = delayNanoseconds; self.failure = failure
     }
@@ -49,6 +80,7 @@ public actor DemoRemoteFileService: RemoteFileService {
             .init(name: "Reports", path: path + "/Reports", kind: .directory),
             .init(name: "Empty", path: path + "/Empty", kind: .directory),
             .init(name: "Thousand files", path: path + "/Thousand files", kind: .directory),
+            .init(name: "Rich Markdown.md", path: path + "/Rich Markdown.md", kind: .file, size: UInt64(Self.richMarkdown.utf8.count)),
             .init(name: "Navigation guide.md", path: path + "/Navigation guide.md", kind: .file, size: UInt64(Self.navigationGuide.utf8.count)),
             .init(name: "Linked notes.md", path: path + "/Linked notes.md", kind: .file, size: UInt64(Self.linkedNotes.utf8.count)),
             .init(name: "Heading notes.md", path: path + "/Heading notes.md", kind: .file, size: UInt64(Self.headingNotes.utf8.count)),
@@ -88,7 +120,8 @@ public actor DemoRemoteFileService: RemoteFileService {
         if path.hasSuffix("Binary.txt") { return Data([0, 0xff, 0]) }
         if path.hasSuffix("Empty.txt") { return Data() }
         let text: String
-        if path.hasSuffix("Navigation guide.md") { text = Self.navigationGuide }
+        if path.hasSuffix("Rich Markdown.md") { text = Self.richMarkdown }
+        else if path.hasSuffix("Navigation guide.md") { text = Self.navigationGuide }
         else if path.hasSuffix("Linked notes.md") { text = Self.linkedNotes }
         else if path.hasSuffix("Heading notes.md") { text = Self.headingNotes }
         else if path.hasSuffix("Long lines.json") { text = Self.longLineJSON }
@@ -124,7 +157,7 @@ public actor DemoRemoteFileService: RemoteFileService {
         let root = profile.startingDirectory == "." ? "/Projects" : profile.startingDirectory
         let path = try RemoteDocumentLinkPath.resolve(reference, relativeTo: documentPath, connectionRoot: root)
         let name = RemotePath.name(of: path)
-        let knownFiles = ["Navigation guide.md", "Linked notes.md", "Heading notes.md", "Weekly review.md", "Example.swift", "Long lines.json", "Icon.svg", "Sample audio.m4a", "Sample video.mp4", "Notes — 東京.txt", ".config", "Empty.txt", "Binary.txt", "Too large.md"]
+        let knownFiles = ["Rich Markdown.md", "Navigation guide.md", "Linked notes.md", "Heading notes.md", "Weekly review.md", "Example.swift", "Long lines.json", "Icon.svg", "Sample audio.m4a", "Sample video.mp4", "Notes — 東京.txt", ".config", "Empty.txt", "Binary.txt", "Too large.md"]
         guard knownFiles.contains(name) || Self.mediaFile(name) != nil || Self.searchSampleFile(path) != nil else { throw RemoteFileError.unavailable("The linked file could not be found. Check the link or open its folder.") }
         try Task.checkCancellation()
         return RemoteEntry(name: name, path: path, kind: .file, navigationRoot: root)

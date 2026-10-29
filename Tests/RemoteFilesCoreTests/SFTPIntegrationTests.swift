@@ -436,6 +436,40 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertGreaterThan(completed.skippedDeepFolders, 0)
     }
 
+    func testManagedDownloadStreamsWithProgressAndPreservesRootAndByteBounds() async throws {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Managed transfer fixture")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        let managed: any ManagedRemoteFileDownloading = service
+        let target = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: target) }
+        let progress = ProgressRecorder()
+        let entry = try await managed.downloadManagedFile(profile: profile, path: fixture.files + "/oversized.txt",
+            allowedRoot: fixture.files, destination: target, limit: 3 * 1024 * 1024,
+            progress: { await progress.record($0) })
+        XCTAssertEqual(entry.kind, .file)
+        XCTAssertEqual(try Data(contentsOf: target).count, 3 * 1024 * 1024)
+        let updates = await progress.values
+        XCTAssertGreaterThan(updates.filter { $0.receivedBytes > 0 && !$0.isComplete }.count, 1)
+        XCTAssertEqual(updates.last?.receivedBytes, 3 * 1024 * 1024)
+        XCTAssertEqual(updates.last?.isComplete, true)
+        do {
+            _ = try await managed.downloadManagedFile(profile: profile, path: fixture.files + "/report.md",
+                allowedRoot: fixture.files + "/empty", destination: target, limit: 4096, progress: { _ in })
+            XCTFail("Managed transfers must retain canonical root containment")
+        } catch RemoteResourceError.outsideDocument { }
+        do {
+            _ = try await managed.downloadManagedFile(profile: profile, path: fixture.files + "/report.md",
+                allowedRoot: fixture.files, destination: target, limit: 3, progress: { _ in })
+            XCTFail("Managed transfers must retain byte limits")
+        } catch RemoteFileError.tooLarge { }
+    }
+
     func testResourceStreamUsesSessionAndRejectsSymlinkEscape() async throws {
         let fixture = try Fixture()
         let stores = try Stores(fixture: fixture)

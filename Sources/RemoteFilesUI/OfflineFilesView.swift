@@ -23,6 +23,8 @@ struct OfflinePinActions: View {
     var includeHidden = false
     var body: some View {
         if entry.kind == .file {
+            Button("Download", systemImage: "arrow.down.circle") { model.enqueueDownload(profile: profile, entry: entry) }
+                .disabled(!model.isForeground || model.downloads == nil)
             let pin = model.offlinePin(profile: profile, path: entry.path)
             Button(pin == nil ? "Keep Offline" : "Update Offline Copy", systemImage: "pin") {
                 model.pinOffline(profile: profile, entry: entry)

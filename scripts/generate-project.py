@@ -47,7 +47,7 @@ uitestbuild = obj('uitestbuild', f'isa = PBXBuildFile; fileRef = {uitestsource};
 uitestsources = obj('uitestsources', f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ({uitestbuild},); runOnlyForDeploymentPostprocessing = 0;')
 uc = configs('uitest', 'PRODUCT_BUNDLE_IDENTIFIER = dev.iris.RemoteFilesUITests; PRODUCT_NAME = "$(TARGET_NAME)"; GENERATE_INFOPLIST_FILE = YES; TEST_TARGET_NAME = RemoteFiles;')
 pc = configs('project','')
-ac = configs('app',appsettings)
+ac = configs('app',appsettings + ' INFOPLIST_FILE = App/Info.plist;')
 tc = configs('test',testsettings)
 hc = configs('host',appsettings.replace('dev.iris.RemoteFiles;', 'dev.iris.RemoteFilesTestHost;').replace('ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;', ''))
 ht = obj('hosttarget', f'isa = PBXNativeTarget; buildConfigurationList = {hc}; buildPhases = ({hostsources},); buildRules = (); dependencies = (); name = RemoteFilesTestHost; productName = RemoteFilesTestHost; productReference = {hostapp}; productType = "com.apple.product-type.application"; packageProductDependencies = ();')

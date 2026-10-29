@@ -11,8 +11,8 @@ unavailable anchors fall back to bounded coordinates. Source remains the origina
 selection, Copy Source and Save Original to Files actions.
 
 The text transport still enforces the 2 MiB preview cap and UTF-8/control-byte
-validation. HTML embedded inside Markdown remains inert text; only standalone
-HTML files enter this renderer.
+validation. HTML embedded inside Markdown uses the separately sanitized
+[rich Markdown renderer](MARKDOWN_RENDERING.md); standalone HTML retains this static renderer.
 
 This is the user-selected static document preview. Document JavaScript is
 disabled, a leading Content Security Policy disables executable/embedded content,

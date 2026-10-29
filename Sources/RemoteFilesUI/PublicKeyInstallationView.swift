@@ -5,6 +5,7 @@ import RemoteFilesCore
 @MainActor @Observable
 final class PublicKeyInstallationFlow {
     private let installer: any PublicKeyInstalling
+    private let onInstalled: (() -> Void)?
     private var operation: Task<Void, Never>?
     private var token = UUID()
     var review: PublicKeyInstallationRequest?
@@ -13,7 +14,9 @@ final class PublicKeyInstallationFlow {
     private(set) var result: PublicKeyInstallationResult?
     private(set) var unverifiedHost: (HostEndpoint, HostKeyDetails)?
 
-    init(installer: any PublicKeyInstalling) { self.installer = installer }
+    init(installer: any PublicKeyInstalling, onInstalled: (() -> Void)? = nil) {
+        self.installer = installer; self.onInstalled = onInstalled
+    }
     func prepare(host: String, port: Int, username: String, identity: IdentityMetadata) {
         guard !isWorking else { return }
         do {
@@ -35,6 +38,7 @@ final class PublicKeyInstallationFlow {
                 guard token == current else { return }
                 result = installed; review = nil
                 message = installed == .installed ? "Public key installed for \(request.account)." : "This public key is already listed for \(request.account). Existing options are unchanged."
+                onInstalled?()
             } catch {
                 guard token == current, !Task.isCancelled else { return }
                 review = nil
@@ -55,6 +59,7 @@ final class PublicKeyInstallationFlow {
 struct PublicKeyInstallationView: View {
     let model: AppModel
     let identity: IdentityMetadata
+    let onInstalled: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var host: String
@@ -65,19 +70,23 @@ struct PublicKeyInstallationView: View {
     @State private var trustError: String?
     @AccessibilityFocusState private var statusFocused: Bool
 
-    init(model: AppModel, identity: IdentityMetadata, connection: ConnectionProfile? = nil) {
+    init(model: AppModel, identity: IdentityMetadata, connection: ConnectionProfile? = nil,
+         onInstalled: (() -> Void)? = nil) {
         self.model = model; self.identity = identity
+        self.onInstalled = onInstalled
         _host = State(initialValue: connection?.host ?? "")
         _username = State(initialValue: connection?.username ?? "")
         _port = State(initialValue: String(connection?.port ?? 22))
-        _flow = State(initialValue: PublicKeyInstallationFlow(installer: model.publicKeyInstaller))
+        _flow = State(initialValue: PublicKeyInstallationFlow(installer: model.publicKeyInstaller, onInstalled: onInstalled))
     }
     var body: some View {
         Form {
             Section("Server account") {
-                TextField("Hostname or IP address", text: $host).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                TextField("Account username", text: $username).textInputAutocapitalization(.never).autocorrectionDisabled()
-                TextField("SSH port", text: $port).keyboardType(.numberPad)
+                Group {
+                    TextField("Hostname or IP address", text: $host).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                    TextField("Account username", text: $username).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    TextField("SSH port", text: $port).keyboardType(.numberPad)
+                }.disabled(onInstalled != nil)
                 SecureField("Account password", text: $password).textContentType(.password).privacySensitive()
             }.disabled(flow.isWorking)
             Section {
@@ -88,6 +97,7 @@ struct PublicKeyInstallationView: View {
             Section {
                 Text("Adds this public key to the account’s ~/.ssh/authorized_keys, enabling key login for this identity. Existing keys stay in place. Password login must already be enabled; the app does not change server settings.")
                 Text("The password is used only for this attempt and is not saved.")
+                if onInstalled != nil { Text("After installation is confirmed, the connection is saved automatically.") }
             }
             if let (endpoint, key) = flow.unverifiedHost {
                 Section("Verify this host") {

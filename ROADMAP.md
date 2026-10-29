@@ -20,9 +20,18 @@ does not block RemoteFiles; see [dependency maintenance](docs/CITADEL_UPSTREAM.m
 - Extend reading history to PDF and standalone image previews. Layout-independent text/block anchors cover Markdown, Source (including plain text) and static HTML; inactive reader-content eviction is implemented. Physical-device layout and memory acceptance remain outstanding. See [reader behavior](docs/READER.md).
 - Automatic or incremental search-index refresh and opening PDF search results at the matching page. [Folder search](docs/FOLDER_BROWSING.md) already supports explicit persistent local indexes, bounded PDF text and on-device OCR, plus case, whole-word and file-type filters. Saved indexes are snapshots and must be rebuilt to reflect remote changes.
 - Offline synchronization, File Provider, multiple jump hops, other protocols such as FTP/FTPS, optional terminal handoff, deeper Tailscale onboarding, and additional iPad keyboard and multiwindow workflows.
-- Private-key export, automatic key installation, Mermaid, mathematical notation, rendering raw HTML embedded in Markdown, generic download management and background SSH transfers. Standalone HTML already has a [static preview](docs/HTML_PREVIEWS.md).
+- Byte-offset resume for interrupted SSH downloads, expanded transfer quotas, and physical-device background-transfer acceptance. Managed downloads restart interrupted files from the beginning.
 
 <a id="separate-write-capable-iteration"></a>
+## Newly implemented
+
+- Private-key export through Files, with device authentication and a separate confirmation; imported encryption is preserved. See [key support](docs/KEY_SUPPORT.md).
+- Opt-in public-key installation while saving a direct connection, using the existing reviewed installer. See [public-key installation](docs/PUBLIC_KEY_INSTALLATION.md).
+- Locally rendered Mermaid, mathematical notation and static HTML inside Markdown. Standalone HTML keeps its [static preview](docs/HTML_PREVIEWS.md).
+- A persistent [download queue](docs/DOWNLOADS.md) with progress, cancellation, retry and Files export, plus system-managed continuation of active SSH transfers in the background.
+
+These features still need physical-device acceptance; see [the dated status record](PREVIEW_STATUS.md) for validation.
+
 ## Remote editing and uploads
 
 Editing and uploads would require a separate write-capable iteration with conflict detection and safe replacement. Remote browsing does not write files. The separately confirmed [public-key installation](docs/PUBLIC_KEY_INSTALLATION.md) feature can update `authorized_keys` on a compatible server.

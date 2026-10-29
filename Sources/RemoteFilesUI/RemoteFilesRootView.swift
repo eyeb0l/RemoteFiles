@@ -40,6 +40,7 @@ public struct RemoteFilesRootView: View {
                     await lifecycleTask?.value
                     guard scenePhase == .active else { return }
                     model?.isForeground = true
+                    model?.foregroundDownloads()
                     model?.sessionRevision += 1
                 }
             }
@@ -184,6 +185,7 @@ struct AppNavigation: View {
                         case .connection(let id): ConnectionEditor(model: model, existing: id.flatMap(model.profile))
                         case .keys: KeyManagerView(model: model)
                         case .offlineFiles: EmptyView()
+                        case .downloads: DownloadsView(model: model)
                         case .offlineFolder(let profile, let path, let hidden): OfflineFolderSetupView(model: model, profile: profile, path: path, includeHidden: hidden)
                         case .trust(let endpoint, let key): TrustView(model: model, endpoint: endpoint, key: key)
                         case .changed(let endpoint, let previous, let current): ChangedHostView(model: model, endpoint: endpoint, previous: previous, current: current)
@@ -354,6 +356,9 @@ struct HomeView: View {
                     LocationRow(name: "Offline Files", subtitle: "\(model.offlinePins.count) files · \(model.offlineFolders.count) folders saved", symbol: "pin.fill", color: .indigo)
                 }
                 .accessibilityIdentifier("offline-library")
+                Button { model.sheet = .downloads } label: {
+                    LocationRow(name: "Downloads", subtitle: "Original files and transfer progress", symbol: "arrow.down.circle", color: .indigo)
+                }.accessibilityIdentifier("download-manager")
             }
             if model.metadata.connections.isEmpty {
                 Section {

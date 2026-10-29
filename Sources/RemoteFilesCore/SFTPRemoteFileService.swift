@@ -9,7 +9,7 @@ import NIOSSH
 /// Read-only SFTP adapter. The SSH connection is reused, and listings, metadata and document
 /// reads share one SFTP channel per session. Streaming downloads own a child channel, so
 /// cancelling one also releases all of its remote file handles.
-public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching {
+public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching, RemoteFileSessionClosing, ManagedRemoteFileDownloading {
     private let identityStore: IdentityStore
     private let trustStore: HostTrustStore
     private let metadataStore: MetadataStore
@@ -343,11 +343,17 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching {
         try await download(profile: profile, path: path, allowedRoot: canonicalRoot, destination: destination,
                            limit: limit, progress: progress, canonicalPaths: true)
     }
+    public func downloadManagedFile(profile: ConnectionProfile, path: String, allowedRoot: String,
+                                    destination: URL, limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        try await download(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination,
+                           limit: limit, progress: progress, canonicalPaths: false, managed: true)
+    }
     private func download(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL,
-                          limit: Int, progress: @escaping DownloadProgressHandler, canonicalPaths: Bool) async throws -> RemoteEntry {
+                          limit: Int, progress: @escaping DownloadProgressHandler, canonicalPaths: Bool,
+                          managed: Bool = false) async throws -> RemoteEntry {
         guard limit > 0, limit < Int.max else { throw RemoteFileError.tooLarge(limit) }
         let session = try await session(for: profile)
-        let result = try await performOnDedicatedChannel(session: session, timeout: 180) { sftp in
+        let result = try await performOnDedicatedChannel(session: session, budget: managed ? .idle(.seconds(60)) : .total(180)) { sftp, activity in
             let root = try await sftp.getRealPath(atPath: Self.validated(allowedRoot))
             let canonical = try await sftp.getRealPath(atPath: Self.validated(path))
             if canonicalPaths {
@@ -377,7 +383,9 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching {
                 var count = 0
                 await progress(.init(totalBytes: attributes.size))
                 _ = try await BoundedPreviewReader.stream(initialSize: attributes.size, limit: limit, window: 16, readChunk: { offset, amount in
-                    try await file.read(from: offset, length: amount)
+                    let bytes = try await file.read(from: offset, length: amount)
+                    activity.receivedBytes(bytes.readableBytes)
+                    return bytes
                 }) { chunk in
                     try handle.write(contentsOf: Data(chunk.readableBytesView))
                     count += chunk.readableBytes
@@ -429,6 +437,15 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching {
     }
 
     public func disconnect() async {
+        closeTransport()
+        await identityStore.clearSession()
+    }
+
+    /// A completed foreground download releases its socket without locking keys used
+    /// by browsing or subsequent user-initiated downloads in the same app session.
+    public func closeSessionPreservingUnlockedIdentities() { closeTransport() }
+
+    private func closeTransport() {
         generation &+= 1
         pending?.cancel()
         pendingControl?.close()
@@ -438,7 +455,6 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching {
         let old = active
         active = nil
         old?.control.close()
-        await identityStore.clearSession()
     }
 
     private func session(for profile: ConnectionProfile) async throws -> LiveSession {
@@ -588,24 +604,40 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching {
     /// its handles without delaying browsing requests queued behind bulk reads.
     private func performOnDedicatedChannel<T: Sendable>(session: LiveSession, timeout: UInt64,
                                                         operation: @escaping @Sendable (SFTPClient) async throws -> T) async throws -> T {
+        try await performOnDedicatedChannel(session: session, budget: .total(timeout)) { sftp, _ in
+            try await operation(sftp)
+        }
+    }
+
+    private enum DedicatedChannelBudget { case total(UInt64), idle(Duration) }
+
+    private func performOnDedicatedChannel<T: Sendable>(session: LiveSession, budget: DedicatedChannelBudget,
+        operation: @escaping @Sendable (SFTPClient, TransferActivity) async throws -> T) async throws -> T {
         let channel = SFTPChannelControl()
         measurements.sftpChannels += 1
+        let close: @Sendable () -> Void = {
+            channel.close()
+            if !channel.hasClient { session.control.close() }
+        }
+        let work: @Sendable (TransferActivity) async throws -> T = { activity in
+            let sftp = try await session.client.openSFTP(logger: Self.sftpLogger())
+            channel.install(sftp)
+            do {
+                try Task.checkCancellation()
+                let value = try await operation(sftp, activity)
+                try await sftp.close()
+                return value
+            } catch {
+                try? await sftp.close()
+                throw error
+            }
+        }
         do {
-            return try await Self.deadline(seconds: timeout, close: {
-                channel.close()
-                if !channel.hasClient { session.control.close() }
-            }) {
-                let sftp = try await session.client.openSFTP(logger: Self.sftpLogger())
-                channel.install(sftp)
-                do {
-                    try Task.checkCancellation()
-                    let value = try await operation(sftp)
-                    try await sftp.close()
-                    return value
-                } catch {
-                    try? await sftp.close()
-                    throw error
-                }
+            switch budget {
+            case .total(let seconds):
+                return try await Self.deadline(seconds: seconds, close: close) { try await work(.ignored) }
+            case .idle(let interval):
+                return try await TransferIdleDeadline.run(idle: interval, clock: ContinuousClock(), close: close, operation: work)
             }
         } catch {
             throw Self.mapped(error)
