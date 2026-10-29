@@ -32,4 +32,5 @@ For a closer look at specific behavior, see [document links](DOCUMENT_LINKS.md),
 - [Project status](../PREVIEW_STATUS.md) records dated build and acceptance results; [roadmap](../ROADMAP.md) describes deferred work.
 - [SSH transport investigation](SSH_SPIKE.md) and [renderer investigation](RENDERER_SPIKE.md) document earlier dependency choices and their verification.
 - [Reader performance](READER_PERFORMANCE.md) and [Markdown viewport rendering](markdown-viewport-rendering.md) explain specific performance and layout work.
+- [Citadel local maintenance and optional release migration](CITADEL_UPSTREAM.md).
 - Vendored dependency provenance: [Citadel](../Vendor/Citadel/UPSTREAM.md) and [Textual](../Vendor/Textual/UPSTREAM.md).

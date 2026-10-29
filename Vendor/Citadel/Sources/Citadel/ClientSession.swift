@@ -92,11 +92,12 @@ final class ClientHandshakeHandler: ChannelInboundHandler, Sendable {
         self.promise.fail(error)
     }
 
-    func channelInactive(context: ChannelHandlerContext) {
-        // Finish an in-flight handshake immediately when the caller cancels/closes
-        // its socket; otherwise the hidden ten-second login timer is the only exit.
-        self.promise.fail(ChannelError.ioOnClosedChannel)
-        context.fireChannelInactive()
+    func handlerAdded(context: ChannelHandlerContext) {
+        // NIOSSHHandler consumes channelInactive rather than forwarding it. Observe
+        // closure directly so a retained handshake cannot wait for the login timeout.
+        context.channel.closeFuture.whenComplete { [promise] _ in
+            promise.fail(ChannelError.ioOnClosedChannel)
+        }
     }
     
     deinit {

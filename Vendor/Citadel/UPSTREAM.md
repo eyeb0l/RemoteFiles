@@ -3,11 +3,30 @@
 Vendored from https://github.com/orlandos-nl/Citadel at exact revision
 `ae8562f895de06ccb86fdb1cbb65fd99c8976e12` on 22 September 2026. Upstream MIT license is retained.
 
+## Upstream status
+
+Checked 29 October 2026: upstream `main` and the latest published release `0.12.1`
+still resolve to the original revision above and do not contain these cancellation
+hooks. Contribution: [Citadel #145](https://github.com/orlandos-nl/Citadel/pull/145). This includes direct/jump channel
+creation, prompt handshake failure on close, and bounded exec-channel ownership.
+Upstream monitoring has stopped; RemoteFiles maintains these patches independently.
+The contribution is not a released dependency. Consider removing vendoring only if
+an exact published release passes the [migration gate](../../docs/CITADEL_UPSTREAM.md),
+including every other local patch described below or a verified replacement.
+`SFTPIntegrationTests.testCitadelJumpChannelCloseFinishesHandshakeWithoutClosingParent`
+guards prompt completion for immediate/delayed child closure and continued parent SFTP use.
+
+## Local changes
+
 `Sources/Citadel/ClientSession.swift` has two narrow additive changes: `SSHClientSettings.onChannelCreated`
 is called by the existing NIO channel initializer. This lets RemoteFiles cancel or time out a connection by
 closing its actual socket before host-key verification or user authentication completes. The handshake
-handler also fails its pending promise on `channelInactive`, so cancellation does not have to wait for
-the dependency's hidden ten-second login timer.
+handler also observes `channel.closeFuture` and fails its pending promise, so cancellation does not
+have to wait for the dependency's hidden ten-second login timer. This replaces the original
+`channelInactive` override: upstream NIOSSH consumes that event, and a jump connection retains its
+handshake handler while awaiting authentication. Upstream regression tests exposed the resulting
+ten-second delay even after closing the forwarded child. The close-future observer captures only the
+promise and preserves an already completed authentication result.
 
 Reason: the upstream `SSHClient.connect(on:settings:)` alternative invokes NIO synchronous pipeline
 operations off the event loop. The unmodified source crashed the independent OpenSSH integration test

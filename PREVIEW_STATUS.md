@@ -54,7 +54,7 @@ Recorded **22 September 2026**, with folder-navigation results updated **27 Sept
 - Host: macOS **27.0 (26A428)**, arm64; Xcode **27.0 (27A266a)**; Apple Swift **6.4** compiler. The app/core package uses Swift 5 language mode; Textual has its own Swift 6 package requirements.
 - Simulator: **iPhone 18 Pro, iOS 27.0**, destination `E7C0844C-DA29-4328-96B7-C0ADB322D623`. The minimum deployment target remains **iOS 27.0** for app, test host, and tests.
 - Independent server: system OpenSSH **10.3p1 / LibreSSL 3.3.6**, temporary loopback-only server and generated keys/fixture directory. No existing SSH keys, Remote Login settings, firewall configuration, or Tailscale configuration were changed.
-- Citadel: vendored at **`ae8562f895de06ccb86fdb1cbb65fd99c8976e12`**, with two narrow connection-cancellation hooks and no cryptography/algorithm-default changes. See [source provenance](Vendor/Citadel/UPSTREAM.md) and [SSH spike](docs/SSH_SPIKE.md).
+- Citadel: vendored at **`ae8562f895de06ccb86fdb1cbb65fd99c8976e12`**, with connection/exec cancellation hooks, authentication and key-import changes, and bounded SFTP handling. See [source provenance](Vendor/Citadel/UPSTREAM.md), [SSH spike](docs/SSH_SPIKE.md), and the [upstream release gate](docs/CITADEL_UPSTREAM.md).
 - Textual: locally vendored from **`01b51875a5406eefc95f52a058cb059e7bc94dc4`**, behind `DocumentContentView`. See [renderer spike](docs/RENDERER_SPIKE.md) and [performance patch](docs/READER_PERFORMANCE.md).
 - [Package.resolved](Package.resolved) and the [Xcode resolution file](RemoteFiles.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved) contain matching pin arrays. Key resolved versions include NIO 2.103.0, NIOSSH fork 0.3.7, and Swift Crypto 3.15.1.
 

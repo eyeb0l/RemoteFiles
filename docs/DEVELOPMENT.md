@@ -70,7 +70,7 @@ scripts/benchmark-latency.sh 150 20    # cellular-like: 150 ms RTT, 20 Mbit/s
 
 The proxy models fixed delay only, with no loss, jitter or reordering, and it changes no system network settings. Use it to compare revisions on the same Mac, not to predict field timings.
 
-See [PREVIEW_STATUS.md](../PREVIEW_STATUS.md) for **actual** results and outstanding acceptance, [SSH_SPIKE.md](SSH_SPIKE.md) for the dependency decision, [RENDERER_SPIKE.md](RENDERER_SPIKE.md) for rendering evidence, and [ROADMAP.md](../ROADMAP.md) for deferred scope. Citadel is vendored from an exact upstream commit with a narrow cancellation patch and original license; see [its provenance](../Vendor/Citadel/UPSTREAM.md).
+See [PREVIEW_STATUS.md](../PREVIEW_STATUS.md) for **actual** results and outstanding acceptance, [SSH_SPIKE.md](SSH_SPIKE.md) for the dependency decision, [RENDERER_SPIKE.md](RENDERER_SPIKE.md) for rendering evidence, and [ROADMAP.md](../ROADMAP.md) for deferred scope. Citadel is vendored from an exact upstream commit with cancellation, authentication, SFTP and output-bound fixes; its original license is retained. See [its provenance](../Vendor/Citadel/UPSTREAM.md) and the [local maintenance and optional release migration](CITADEL_UPSTREAM.md) before replacing it with a published package.
 
 ## Full acceptance
 

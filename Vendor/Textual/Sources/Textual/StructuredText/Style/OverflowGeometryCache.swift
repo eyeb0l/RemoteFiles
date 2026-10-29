@@ -158,10 +158,14 @@ import UIKit
     for (ordinal, value) in prose(in: scroll).enumerated() {
       guard value.model.hasText, value.convert(value.bounds, to: window).contains(point),
             let position = value.model.closestPosition(to: value.convert(point, from: window)) else { continue }
-      let caret = value.convert(value.model.caretRect(for: position), to: window)
+      let character = value.model.offset(from: value.model.startPosition, to: position)
+      // A paragraph or wrapped-line boundary can have two visual carets for one
+      // character offset. Measure the same resolved caret restoration will use.
+      guard let resolved = value.model.position(from: value.model.startPosition, offset: character) else { continue }
+      let caret = value.convert(value.model.caretRect(for: resolved), to: window)
       guard abs(caret.minY - point.y) < 160 else { continue }
       return .prose(ordinal: ordinal,
-                    character: value.model.offset(from: value.model.startPosition, to: position),
+                    character: character,
                     viewportY: caret.minY - viewport.minY)
     }
     return nil

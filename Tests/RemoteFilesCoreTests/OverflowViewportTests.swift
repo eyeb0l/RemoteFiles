@@ -254,6 +254,39 @@ private struct OverflowFixtureView: View {
         }
     }
 
+    func testProseBoundaryAnchorRestoresTheSameViewport() async throws {
+        let text = (0..<40).map { "## Heading \($0)\n\nParagraph \($0) has enough words to wrap across multiple lines in the reader.\n\n" }.joined()
+        let (window, previous, state) = try host(text: text)
+        defer { cleanup(window, previous: previous) }
+        try await wait { self.prose(window).map { self.selectedText($0.model).string.contains("Heading 39") } == true }
+        let scroll = try XCTUnwrap(outer(window))
+        let interaction = try XCTUnwrap(prose(window))
+        // A paragraph start and the preceding paragraph end share one character
+        // offset, but have different caret rectangles. Put that boundary at the
+        // reader's anchor sampling point rather than relying on swipe momentum.
+        let textCopy = selectedText(interaction.model).string as NSString
+        let character = textCopy.range(of: "Heading 20").location
+        XCTAssertNotEqual(character, NSNotFound)
+        let canonical = try XCTUnwrap(interaction.model.position(from: interaction.model.startPosition, offset: character))
+        let boundary = TextPosition(indexPath: .init(layout: canonical.indexPath.layout + 1), affinity: .downstream)
+        XCTAssertEqual(interaction.model.offset(from: interaction.model.startPosition, to: boundary), character)
+        let caret = interaction.convert(interaction.model.caretRect(for: boundary), to: scroll)
+        scroll.setContentOffset(CGPoint(x: 0, y: caret.minY - 60), animated: false)
+        try await Task.sleep(for: .milliseconds(100))
+        let cache = state.position.overflowGeometry
+        cache.recordReadingAnchor()
+        let snapshot = try XCTUnwrap(cache.snapshot)
+        XCTAssertEqual(snapshot.kind, "prose")
+        XCTAssertEqual(snapshot.character, character, "Exercise the ambiguous paragraph boundary")
+        let before = scroll.contentOffset.y
+        var completed = false
+        cache.restoreReadingAnchor { _ in completed = true }
+        scroll.setContentOffset(.zero, animated: false)
+        try await wait { completed && !cache.isRestoringReadingAnchor }
+        XCTAssertEqual(scroll.contentOffset.y, before, accuracy: 2,
+                       "An unchanged layout must not jump to the preceding paragraph's caret")
+    }
+
     func testReadingAnchorRestorationWaitsForTheReplacementViewportToAttach() async throws {
         let (window, previous, state) = try host(text: fixture(72)); defer { cleanup(window, previous: previous) }
         try await wait { self.prose(window).map { self.selectedText($0.model).string.contains("Paragraph 71") } == true }
