@@ -150,6 +150,21 @@ import WebKit
             try await assertScript("document.querySelectorAll('.rf-math-display math').length", in: view, equals: 1)
             try await assertScript("Array.from(document.querySelectorAll('#rf-content > p')).map(e => e.textContent).join('|')", in: view, equals: "Before|After")
         }
+        let successiveExpressions = [
+            ("$$x+y$$ and text\n\n$$a+b$$", 2, "[math] and text"),
+            ("Before\n$$x+y$$ and text\n\n$$a+b$$\nAfter", 2, "Before [math] and text|After"),
+            ("$$x+y$$ and $$a+b$$\n\n$$c+d$$", 3, "[math] and [math]"),
+            ("\\[x+y\\] and text\n\n\\[a+b\\]", 1, "[x+y] and text"),
+            ("Before\n$$\nx+y\n$$\n\n$$a+b$$\nAfter", 2, "Before|After"),
+            ("Before\n\\[\nx+y\n\\]\n\n\\[a+b\\]\nAfter", 2, "Before|After")
+        ]
+        for (source, count, prose) in successiveExpressions {
+            _ = try await render(source, in: view)
+            try await assertScript("document.querySelectorAll('.rf-math-display math').length", in: view, equals: count)
+            try await assertScript("document.querySelectorAll('.rf-error').length", in: view, equals: 0)
+            try await assertScript(#"(() => { const copy = document.getElementById('rf-content').cloneNode(true); copy.querySelectorAll('.rf-math-display').forEach(e => e.replaceWith('[math]')); return Array.from(copy.querySelectorAll('p')).map(e => e.textContent.trim().replace(/\s+/g, ' ')).join('|'); })()"#,
+                in: view, equals: prose)
+        }
     }
     func testEmbeddedHTMLCannotExecuteOrLoadAndInvalidNotationStaysReadable() async throws {
         let view = try await renderer()

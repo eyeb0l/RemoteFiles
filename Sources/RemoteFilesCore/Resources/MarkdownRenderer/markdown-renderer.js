@@ -35,11 +35,12 @@
       {name:'displayMath',level:'block',start(src) {
          // Marked passes the paragraph after its first character. Interrupt it only
          // at a complete display block on a new line, never at an inline delimiter.
-         const match = /\n(?=(?:\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\])(?:\n|$))/.exec(src);
+         const match = /\n(?=(?:\$\$(?:(?!\$\$)[\s\S])+\$\$|\\\[(?:(?!\\\])[\s\S])+\\\])(?:\n|$))/.exec(src);
          return match ? match.index + 1 : undefined;
        },
        tokenizer(src) {
-         const match = /^(?:\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\])(?:\n|$)/.exec(src);
+         // Never backtrack past the first closer to absorb prose or a later equation.
+         const match = /^(?:\$\$((?:(?!\$\$)[\s\S])+)\$\$|\\\[((?:(?!\\\])[\s\S])+)\\\])(?:\n|$)/.exec(src);
          if (match) return {type:'displayMath',raw:match[0],text:match[1] ?? match[2]};
        }, renderer(token) { return placeholder('math',token.text,true); }},
       {name:'inlineMath',level:'inline',start(src) { return src.search(/\$|\\\(/); },
