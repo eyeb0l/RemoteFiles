@@ -127,6 +127,30 @@ import WebKit
         XCTAssertFalse(view.configuration.websiteDataStore.isPersistent)
         XCTAssertEqual(probe?.resources, 0)
     }
+    func testDisplayMathWithinParagraphPreservesSurroundingProse() async throws {
+        let view = try await renderer()
+        let paragraphs = [
+            ("Here $$x+y$$ and text", "Here [math] and text", 1),
+            ("Here $$x+y$$", "Here [math]", 1),
+            ("A$$x+y$$", "A[math]", 1),
+            ("$$x+y$$ and text", "[math] and text", 1),
+            ("Here $$x+y$$ then $$a+b$$ and text", "Here [math] then [math] and text", 2),
+            ("First line\nHere $$x+y$$ and text\nLast line", "First line Here [math] and text Last line", 1),
+            ("Literal `$$x+y$$`, math $$a+b$$ and text", "Literal $$x+y$$, math [math] and text", 1)
+        ]
+        for (source, expected, count) in paragraphs {
+            _ = try await render(source, in: view)
+            try await assertScript("document.querySelectorAll('.rf-math-display math').length", in: view, equals: count)
+            try await assertScript("document.querySelectorAll('#rf-content > p').length", in: view, equals: 1)
+            try await assertScript(#"(() => { const copy = document.getElementById('rf-content').cloneNode(true); copy.querySelectorAll('.rf-math-display').forEach(e => e.replaceWith('[math]')); return copy.textContent.trim().replace(/\s+/g, ' '); })()"#,
+                in: view, equals: expected)
+        }
+        for source in ["Before\n$$x+y$$\nAfter", "Before\n\\[x+y\\]\nAfter"] {
+            _ = try await render(source, in: view)
+            try await assertScript("document.querySelectorAll('.rf-math-display math').length", in: view, equals: 1)
+            try await assertScript("Array.from(document.querySelectorAll('#rf-content > p')).map(e => e.textContent).join('|')", in: view, equals: "Before|After")
+        }
+    }
     func testEmbeddedHTMLCannotExecuteOrLoadAndInvalidNotationStaysReadable() async throws {
         let view = try await renderer()
         let result = try await render(#"""

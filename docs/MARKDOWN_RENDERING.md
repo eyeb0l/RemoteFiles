@@ -12,7 +12,8 @@ Explore Demo → Rich Markdown.md contains examples.
   sequence diagrams and the other diagram types included in Mermaid are available.
 - **Mathematics:** `$…$` and `\(…\)` render inline; `$$…$$` and `\[…\]` render display
   equations. KaTeX converts notation to native MathML. Code spans and ordinary code
-  fences stay literal. Invalid or unsupported notation displays its original text
+  fences stay literal. Double-dollar expressions can also share a paragraph with
+  surrounding prose. Invalid or unsupported notation displays its original text
   with a preview-unavailable explanation.
 - **Embedded HTML:** semantic HTML such as headings, tables, lists, emphasis,
   details/summary, superscripts and subscripts renders within the document.

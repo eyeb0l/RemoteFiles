@@ -32,7 +32,12 @@
         return '<pre><code>' + escape(text) + '</code></pre>';
       }
     }, extensions: [
-      {name:'displayMath',level:'block',start(src) { return src.search(/\$\$|\\\[/); },
+      {name:'displayMath',level:'block',start(src) {
+         // Marked passes the paragraph after its first character. Interrupt it only
+         // at a complete display block on a new line, never at an inline delimiter.
+         const match = /\n(?=(?:\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\])(?:\n|$))/.exec(src);
+         return match ? match.index + 1 : undefined;
+       },
        tokenizer(src) {
          const match = /^(?:\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\])(?:\n|$)/.exec(src);
          if (match) return {type:'displayMath',raw:match[0],text:match[1] ?? match[2]};
