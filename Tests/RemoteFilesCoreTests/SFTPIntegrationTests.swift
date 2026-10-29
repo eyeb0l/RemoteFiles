@@ -242,6 +242,55 @@ final class SFTPIntegrationTests: XCTestCase {
         }
     }
 
+    func testCitadelJumpChannelCloseFinishesHandshakeWithoutClosingParent() async throws {
+        let fixture = try Fixture(), stores = try Stores(fixture: fixture)
+        let identity = try await stores.identity.generate(name: "Jump handshake lifecycle")
+        try fixture.authorize(identity.publicKey)
+        try await stores.trustFixtureHost()
+        let key = try await stores.identity.unlock(identity)
+        let client = try await SSHClient.connect(to: SSHClientSettings(host: "127.0.0.1", port: fixture.port,
+            authenticationMethod: { key.authentication(username: fixture.username) },
+            hostKeyValidator: .custom(TrustValidator(store: stores.trust, endpoint: fixture.endpoint))))
+        addTeardownBlock { try? await client.close() }
+        let sftp = try await client.openSFTP()
+        addTeardownBlock { try? await sftp.close() }
+
+        // Exercise Citadel directly: the application's detached deadline wrapper can
+        // return promptly even when Citadel still retains its unfinished handshake.
+        for closeImmediately in [true, false] {
+            let listener = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+                .childChannelInitializer { channel in
+                    channel.eventLoop.makeSucceededVoidFuture()
+                }.bind(host: "127.0.0.1", port: 0).get()
+            addTeardownBlock { try? await listener.close() }
+            let exposed = expectation(description: "Destination channel exposed")
+            exposed.assertForOverFulfill = true
+            var destination = SSHClientSettings(host: "127.0.0.1", port: try XCTUnwrap(listener.localAddress?.port),
+                authenticationMethod: { key.authentication(username: fixture.username) },
+                hostKeyValidator: .trustedKeys([]))
+            destination.onChannelCreated = { channel in
+                XCTAssertTrue(channel.eventLoop.inEventLoop)
+                if closeImmediately {
+                    channel.close(promise: nil)
+                } else {
+                    channel.eventLoop.scheduleTask(in: .milliseconds(50)) { channel.close(promise: nil) }
+                }
+                exposed.fulfill()
+            }
+            let started = ContinuousClock.now
+            do {
+                let nested = try await client.jump(to: destination)
+                try await nested.close()
+                XCTFail("A closed silent destination cannot authenticate")
+            } catch { }
+            XCTAssertLessThan(ContinuousClock.now - started, .seconds(2),
+                              "Closing a retained handshake must not wait for Citadel's ten-second login timer")
+            await fulfillment(of: [exposed], timeout: 1)
+            let path = try await sftp.getRealPath(atPath: fixture.files)
+            XCTAssertFalse(path.isEmpty, "The parent SSH connection must remain usable")
+        }
+    }
+
     func testJumpHostLockedIdentityReportsTheJumpKeyBeforeOpeningSockets() async throws {
         let (fixture, stores, original) = try await jumpFixture()
         let encrypted = try await stores.identity.importKey(name: "Locked bastion", openSSH: String(contentsOfFile: fixture.directory + "/encrypted", encoding: .utf8), passphrase: "fixture-passphrase")

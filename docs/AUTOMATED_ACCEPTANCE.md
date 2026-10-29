@@ -133,8 +133,19 @@ REMOTEFILES_SOURCE_PACKAGES_DIR=/private/tmp/remotefiles-acceptance-SourcePackag
 ## Feature-specific coverage
 
 These sections identify the regression tests and the limits of the evidence
-for changes that affect offline storage or search. They supplement the required
+for changes that affect transport, offline storage or search. They supplement the required
 lane and failure rules above.
+
+### Vendored SSH cancellation
+
+`SFTPIntegrationTests.testCitadelJumpChannelCloseFinishesHandshakeWithoutClosingParent`
+uses the isolated OpenSSH fixture and calls Citadel directly, bypassing RemoteFiles'
+detached deadline wrapper. Immediate and delayed child-channel closure must finish
+the retained authentication wait within two seconds; SFTP over the parent must
+remain usable. This guards the local close-future observer because NIOSSH consumes
+`channelInactive`. The existing direct/jump cancellation, deadline and bounded-exec
+methods cover the application wrapper. Run these tests with the fixture; an ordinary
+`swift test` skip is not evidence of working SSH cancellation.
 
 ### Offline copies
 

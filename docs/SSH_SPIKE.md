@@ -6,7 +6,10 @@ vendored packages' `UPSTREAM.md` files are the source of truth for their patches
 
 Citadel is retained behind `SFTPRemoteFileService`. Its exact upstream source revision is
 `ae8562f895de06ccb86fdb1cbb65fd99c8976e12`. The MIT-licensed source is vendored in
-`Vendor/Citadel` with two small connection-lifecycle patches recorded in `UPSTREAM.md`.
+`Vendor/Citadel`. The original two connection-lifecycle patches have since been joined by
+authentication, SFTP, key-import and bounded-exec changes recorded in
+[source provenance](../Vendor/Citadel/UPSTREAM.md). The [local maintenance and optional release
+migration guide](CITADEL_UPSTREAM.md) tracks when the vendored package can be removed.
 Transitive dependency versions are recorded in the checked-in package resolution files.
 
 The SSH protocol implementation is `NIOSSH` from `github.com/Wellz26/swift-nio-ssh`, a GitHub fork of
