@@ -27,17 +27,33 @@
     }
     const parser = new marked.Marked({gfm: true, breaks: false});
     parser.use({renderer: {
+      checkbox({checked}) { return checked ? '☑ ' : '☐ '; },
       code({text,lang}) {
         if ((lang || '').trim().toLowerCase() === 'mermaid') return placeholder('diagram',text,true);
         return '<pre><code>' + escape(text) + '</code></pre>';
       }
+    }, tokenizer: {
+      paragraph(src) {
+        // Work on the complete paragraph, including its first character (which
+        // Marked's block-start hints omit). Use Marked's own code-span tokenizer
+        // to hide literal notation before allowing math to interrupt a paragraph.
+        const paragraph = this.rules.block.paragraph.exec(src)?.[0];
+        if (!paragraph) return false;
+        const markers = /\\[\\`]|`+/g;
+        let marker, cursor = 0, visible = '';
+        while ((marker = markers.exec(paragraph))) {
+          if (marker[0][0] !== '`') continue;
+          const code = this.codespan(paragraph.slice(marker.index));
+          if (!code) continue;
+          visible += paragraph.slice(cursor, marker.index) + ' '.repeat(code.raw.length);
+          cursor = markers.lastIndex = marker.index + code.raw.length;
+        }
+        visible += paragraph.slice(cursor);
+        const match = /\n(?=(?:\$\$(?:(?!\$\$)[\s\S])+\$\$|\\\[(?:(?!\\\])[\s\S])+\\\])(?:\n|$))/.exec(visible);
+        return match ? marked.Tokenizer.prototype.paragraph.call(this, src.slice(0, match.index + 1)) : false;
+      }
     }, extensions: [
-      {name:'displayMath',level:'block',start(src) {
-         // Marked passes the paragraph after its first character. Interrupt it only
-         // at a complete display block on a new line, never at an inline delimiter.
-         const match = /\n(?=(?:\$\$(?:(?!\$\$)[\s\S])+\$\$|\\\[(?:(?!\\\])[\s\S])+\\\])(?:\n|$))/.exec(src);
-         return match ? match.index + 1 : undefined;
-       },
+      {name:'displayMath',level:'block',
        tokenizer(src) {
          // Never backtrack past the first closer to absorb prose or a later equation.
          const match = /^(?:\$\$((?:(?!\$\$)[\s\S])+)\$\$|\\\[((?:(?!\\\])[\s\S])+)\\\])(?:\n|$)/.exec(src);

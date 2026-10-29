@@ -166,6 +166,30 @@ import WebKit
                 in: view, equals: prose)
         }
     }
+    func testMultilineCodeSpansKeepDisplayNotationLiteral() async throws {
+        let view = try await renderer()
+        for notation in ["$$x+y$$", "\\[x+y\\]"] {
+            for (prefix, delimiter, firstLine) in [("A ", "`", "multiline"), ("", "`", "multiline"), ("A ", "``", "multi`line")] {
+                let literal = "\(firstLine)\n\(notation)\ncode"
+                _ = try await render("\(prefix)\(delimiter)\(literal)\(delimiter) and $z$\n\n$$a+b$$", in: view)
+                try await assertScript("document.querySelectorAll('code').length", in: view, equals: 1)
+                try await assertScript("document.querySelector('code')?.textContent ?? ''", in: view, equals: literal.replacingOccurrences(of: "\n", with: " "))
+                try await assertScript("document.querySelectorAll('math').length", in: view, equals: 2)
+                try await assertScript("document.querySelectorAll('#rf-content > p').length", in: view, equals: 1)
+                try await assertScript("document.querySelectorAll('.rf-error').length", in: view, equals: 0)
+            }
+        }
+    }
+    func testTaskListsRetainReadOnlyCompletionMarkers() async throws {
+        let view = try await renderer()
+        for list in ["- [x] Done\n- [ ] Pending", "- [x] Done\n\n- [ ] Pending", "- Parent\n  - [x] Done\n  - [ ] Pending"] {
+            _ = try await render(list + "\n\n$x$\n\n<input type=checkbox checked><form><input></form>", in: view)
+            try await assertScript("Array.from(document.querySelectorAll('li')).filter(e => !e.querySelector('li')).map(e => e.textContent.trim()).join('|')", in: view, equals: "☑ Done|☐ Pending")
+            try await assertScript("document.querySelectorAll('input,form').length", in: view, equals: 0)
+            try await assertScript("document.querySelectorAll('math').length", in: view, equals: 1)
+        }
+        XCTAssertEqual(probe?.resources, 0)
+    }
     func testEmbeddedHTMLCannotExecuteOrLoadAndInvalidNotationStaysReadable() async throws {
         let view = try await renderer()
         let result = try await render(#"""
