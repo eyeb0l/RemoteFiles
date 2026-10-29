@@ -209,6 +209,51 @@ import RemoteFilesCore
         XCTAssertEqual(position.rendered.y, 1300, accuracy: 2)
     }
 
+    func testReadinessWaitsForWebKitFirstCommitSoAnImmediateScrollIsKept() async throws {
+        let fixture = try await host()
+        addTeardownBlock { @MainActor in fixture.close() }
+        let position = DocumentReadingPosition()
+        var geometryAtReadiness: CGSize?
+        let coordinator = coordinate(fixture.view, position: position) {
+            XCTAssertFalse($0)
+            geometryAtReadiness = fixture.view.scrollView.contentSize
+        }
+        defer { coordinator.detach() }
+        try await waitUntil(timeout: .seconds(30)) { coordinator.finishedLoading }
+        XCTAssertGreaterThan(try XCTUnwrap(geometryAtReadiness).height, fixture.view.bounds.height)
+        // WebKit's first post-load layer-tree commit resets the native offset to the
+        // top. It must already have been applied, rather than undo and record this scroll.
+        fixture.view.scrollView.setContentOffset(CGPoint(x: 0, y: 700), animated: false)
+        try await waitUntil { abs(try await self.number("window.scrollY", in: fixture.view) - 700) < 2 }
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(fixture.view.scrollView.contentOffset.y, 700, accuracy: 2)
+        XCTAssertEqual(position.rendered.y, 700, accuracy: 2)
+    }
+
+    func testReflowLeavesScrollingToAppAnchorsInsteadOfWebKitScrollAnchoring() async throws {
+        let fixture = try await host()
+        addTeardownBlock { @MainActor in fixture.close() }
+        try await load(prose, in: fixture.view)
+        fixture.view.scrollView.setContentOffset(CGPoint(x: 0, y: 1700), animated: false)
+        try await waitUntil { abs(try await self.number("window.scrollY", in: fixture.view) - 1700) < 2 }
+        var webKitScrolls: [CGFloat] = []
+        let observation = fixture.view.scrollView.observe(\.contentOffset, options: [.old, .new]) { _, change in
+            guard let old = change.oldValue, let new = change.newValue, abs(old.y - new.y) >= 0.5 else { return }
+            MainActor.assumeIsolated { webKitScrolls.append(new.y) }
+        }
+        defer { observation.invalidate() }
+        let originalHeight = fixture.view.scrollView.contentSize.height
+        fixture.view.frame.size.width = 240
+        _ = try await evaluate("document.getElementById('passage').style.fontSize='27px'", in: fixture.view)
+        try await waitUntil {
+            let width = try await self.number("window.innerWidth", in: fixture.view)
+            return abs(width - 240) < 2 && fixture.view.scrollView.contentSize.height > originalHeight * 1.4
+        }
+        try await Task.sleep(for: .milliseconds(500))
+        // A WebKit-requested anchoring scroll can land after, and undo, a native restoration.
+        XCTAssertEqual(webKitScrolls, [], "Reflow must not request a native scroll")
+    }
+
     func testFailedInspectionFlushesNewCoordinatesInsteadOfStaleAnchor() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
@@ -366,9 +411,10 @@ import RemoteFilesCore
         return Fixture(view: view, window: window, previous: previous)
     }
 
-    private func coordinate(_ view: AnchoredHTMLWebView, position: DocumentReadingPosition) -> StaticHTMLWebView.Coordinator {
+    private func coordinate(_ view: AnchoredHTMLWebView, position: DocumentReadingPosition,
+                            onFinish: @escaping (Bool) -> Void = { XCTAssertFalse($0) }) -> StaticHTMLWebView.Coordinator {
         let coordinator = StaticHTMLWebView.Coordinator(readingPosition: position,
-            onFinish: { XCTAssertFalse($0) }, onFailure: { XCTFail($0) },
+            onFinish: onFinish, onFailure: { XCTFail($0) },
             openExternalLink: { _ in XCTFail("Loading must not open external links") })
         coordinator.attach(view)
         view.navigationDelegate = coordinator

@@ -59,7 +59,11 @@ Local changes:
 - Accessibility: headings carry the heading trait; decorative unordered-list
   markers are hidden from assistive technologies. The transparent UIKit text
   selection overlay is hidden from accessibility so VoiceOver reads the underlying
-  text and links without a duplicate editable-field hint. Table cells combine
+  text and links without a duplicate editable-field hint. `UITextInteractionView`
+  overrides its `isAccessibilityElement`/`accessibilityElementsHidden` getters:
+  once assistive technologies load, UIKit's accessibility bundle replaces UIView's
+  getter and reported the overlay as an element despite the stored `false`.
+  Table cells combine
   plain content with column-header and row/column context; linked cells retain
   their child link targets. Header cells carry the heading trait. These changes target the iOS reader; selection gestures remain
   on the existing overlay. Actual iOS VoiceOver regressions use the production

@@ -63,13 +63,15 @@ struct StaticHTMLWebView: UIViewRepresentable {
         config.userContentController.add(rules)
         return config
     }
+    /// WebKit's CSS scroll anchoring requests its own native scroll after reflow,
+    /// which can override or interrupt the app's text/block anchor restoration.
     static func html(_ source: String) -> String {
         """
         <!doctype html><html><head>
         <meta charset="utf-8">
         <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>:root{color-scheme:light dark}body{font:17px -apple-system,sans-serif;margin:20px;overflow-wrap:break-word}img,video,svg{max-width:100%;height:auto}</style>
+        <style>:root{color-scheme:light dark;overflow-anchor:none!important}body{font:17px -apple-system,sans-serif;margin:20px;overflow-wrap:break-word}img,video,svg{max-width:100%;height:auto}</style>
         </head><body>\(source)</body></html>
         """
     }
@@ -111,6 +113,7 @@ struct StaticHTMLWebView: UIViewRepresentable {
         private var sessionID = UUID()
         private var generation = UUID()
         private var captureTask: Task<Void, Never>?
+        private var geometryObservation: NSKeyValueObservation?
         private var restorationTask: Task<Void, Never>?
         private var restoring = false
         private var applyingRestoration = false
@@ -140,10 +143,11 @@ struct StaticHTMLWebView: UIViewRepresentable {
             readingPosition.htmlSessionID = sessionID
             readingPosition.captureHTMLPosition = { [weak self] in await self?.capturePosition() }
             self.text = text; initialNavigation = true; finishedLoading = false; restoring = false
+            geometryObservation = nil
         }
         func detach() {
             active = false
-            restorationTask?.cancel(); captureTask?.cancel()
+            restorationTask?.cancel(); captureTask?.cancel(); geometryObservation = nil
             view?.layoutChanged = nil; view?.userScrolled = nil
             // Keep only this final capture alive through representable teardown. Session
             // and generation checks prevent it writing into a replacement reader.
@@ -279,14 +283,35 @@ struct StaticHTMLWebView: UIViewRepresentable {
             document.body.innerText.trim().length === 0 &&
             !Array.from(document.querySelectorAll('img,svg,video')).some(e => e.getBoundingClientRect().height > 0)
             """, in: nil, in: .defaultClient) { [weak self, weak view] result in
-                guard let self, self.active, view != nil, self.generation == token else { return }
+                guard let self, self.active, let view, self.generation == token else { return }
                 switch result {
                 case .success(let value):
-                    self.finishedLoading = true
-                    self.restorePosition()
-                    self.onFinish(hasScripts && (value as? Bool ?? false))
+                    let needsScripts = hasScripts && (value as? Bool ?? false)
+                    self.afterNativeGeometry(of: view, token: token) { [weak self] in
+                        guard let self else { return }
+                        self.finishedLoading = true
+                        self.restorePosition()
+                        self.onFinish(needsScripts)
+                    }
                 case .failure(let error):
                     self.onFailure("The HTML preview could not finish loading: " + error.localizedDescription)
+                }
+            }
+        }
+        /// didFinish and DOM readiness can precede WebKit's first layer-tree commit,
+        /// which then resets the native offset to the top. Restoration, capture and
+        /// scroll tracking start only once that commit has supplied native geometry.
+        /// A reused viewport keeps its geometry; its changed revision starts at the top.
+        private func afterNativeGeometry(of view: WKWebView, token: UUID, _ ready: @escaping () -> Void) {
+            func committed(_ scroll: UIScrollView) -> Bool { scroll.contentSize.width > 0 && scroll.contentSize.height > 0 }
+            guard !committed(view.scrollView) else { ready(); return }
+            geometryObservation = view.scrollView.observe(\.contentSize) { [weak self] scroll, _ in
+                guard MainActor.assumeIsolated({ committed(scroll) }) else { return }
+                // Leave this callback and WebKit's commit, including its offset reset, first.
+                Task { @MainActor [weak self] in
+                    guard let self, self.active, self.generation == token, self.geometryObservation != nil else { return }
+                    self.geometryObservation = nil
+                    ready()
                 }
             }
         }
@@ -331,7 +356,7 @@ struct StaticHTMLWebView: UIViewRepresentable {
         func webViewWebContentProcessDidTerminate(_ view: WKWebView) { failed() }
         private func failed() {
             generation = UUID(); finishedLoading = false; restoring = false
-            restorationTask?.cancel(); captureTask?.cancel()
+            restorationTask?.cancel(); captureTask?.cancel(); geometryObservation = nil
             if active { onFailure("This HTML could not be rendered. Use Source or refresh to try again.") }
         }
     }

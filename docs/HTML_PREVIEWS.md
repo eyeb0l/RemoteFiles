@@ -29,7 +29,12 @@ document JavaScript still disabled. It visits at most 20,000 DOM nodes and
 cache. Each inspection has a one-second deadline so a stalled WebKit process
 cannot indefinitely retain a departing reader. Hidden or fixed/sticky content is not used as a reading target. Tables,
 preformatted blocks and visual elements use a proportional block location.
-Font-size changes scale the rendered preview, including authored CSS. Offline
+Font-size changes scale the rendered preview, including authored CSS. The
+wrapper disables CSS scroll anchoring (`overflow-anchor`) because WebKit's own
+post-reflow scroll request competes with app-owned anchor restoration. The
+reader starts restoring, capturing and tracking scrolls only after WebKit's
+first layer-tree commit supplies native geometry; DOM readiness can arrive
+seconds earlier, and that commit resets the native offset to the top. Offline
 HTML keeps an in-session position but still does not persist history across
 launches.
 
@@ -45,7 +50,7 @@ checks Rendered → Source → Copy Source → Rendered → Refresh.
 
 ## Verification
 
-The HTML anchor extension adds twelve hosted regressions for Unicode reflow,
+The HTML anchor extension originally added twelve hosted regressions for Unicode reflow,
 page zoom, visual blocks, persisted/live-width restoration, legacy coordinates,
 refresh, detach, non-touch interruption and hidden/over-budget DOM targets.
 On 29 October 2026 all twelve passed on iPhone 18 Pro / iOS 27.2 in
@@ -80,9 +85,28 @@ not erase the earlier intermittent timeouts.
 
 The wider attempt 2 also failed two existing Markdown overlay accessibility
 checks at `DocumentReadingPositionTests.swift` (`isAccessibilityElement` was
-true despite the hidden overlay policy). Those separate failures remain open;
-this evidence is not a full acceptance-lane pass. Physical-device acceptance
-remains outstanding.
+true despite the hidden overlay policy). The local simulator had
+`ApplicationAccessibilityEnabled`, so UIKit's accessibility bundle supplied
+UIView's `isAccessibilityElement` getter and ignored the overlay's stored
+`false`; CI simulators had not loaded that bundle. The vendored overlay now
+overrides both accessibility getters (see `Vendor/Textual/UPSTREAM.md`).
+
+Diagnostics then established the intermittent HTML causes. An offset set right
+after coordinator readiness was returned to zero by
+`-[WKWebView _didCommitLayerTree:]` in 3/3 runs: readiness preceded WebKit's
+first commit, whose offset reset was then recorded as reader movement. The first
+commit arrived 3.7–6.9 seconds after load in 4/5 runs and not within 7 seconds in
+another, beyond the restoration's geometry deadline. After a width/font reflow,
+WebKit's scroll anchoring requested 1700→1701 through
+`RemoteScrollingCoordinatorProxy::adjustMainFrameDelegatedScrollPosition` in
+3/3 runs and never with `overflow-anchor: none`; arriving after restoration it
+explains the earlier unchanged 1701 offset. Two regressions cover these causes.
+With the fixes, the 15 HTML anchor tests, 13 reader-position tests (including
+both overlay checks), 3 HTML rendering/security tests and 7 reading-history tests
+passed in `/private/tmp/remotefiles-html-anchor-fix-1.xcresult` (38 tests, no
+skips); two further HTML iterations passed in `remotefiles-html-anchor-fix-2.xcresult`
+(30 tests). This is focused simulator evidence, not a full acceptance-lane pass.
+Physical-device acceptance remains outstanding.
 
 Hosted WebKit tests check static content and styling, script and resource blocking, and the explanation for script-only entries. A demo UI journey checks switching modes, copying source and refreshing. These are simulator checks; they do not establish physical-device HTML interaction.
 
