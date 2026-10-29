@@ -1,5 +1,7 @@
 import XCTest
 import Foundation
+import CoreGraphics
+import CoreText
 @testable import RemoteFilesCore
 
 private actor ContentTreeService: RemoteFileService {
@@ -252,5 +254,148 @@ final class FileContentSearchTests: XCTestCase {
         let noQuery = try await search(empty, query: "")
         XCTAssertTrue(noQuery.final.isFinished)
         let listings = await empty.listed; XCTAssertTrue(listings.isEmpty)
+    }
+
+    func testIndexBuildCollectsAllSupportedDocumentsWithoutAQueryAndReusesThemForDifferentQueries() async throws {
+        let service = ContentTreeService(["/r": [file("/r/a.txt"), file("/r/empty.txt"), folder("/r/nested")],
+                                          "/r/nested": [file("/r/nested/b.md")]],
+            contents: ["/r/a.txt": bytes("alpha"), "/r/empty.txt": Data(), "/r/nested/b.md": bytes("bravo")])
+        let snapshot = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: service,
+                                                               includeHidden: false, limits: .init(maxMatches: 1))
+        XCTAssertEqual(snapshot.documents.map(\.entry.path), ["/r/a.txt", "/r/empty.txt", "/r/nested/b.md"])
+        XCTAssertFalse(snapshot.isPartial, "A query-independent build is not capped by matching documents")
+        let alpha = try RemoteFolderSearch.indexedContents(matching: "alpha", snapshot: snapshot, includeHidden: false)
+        let bravo = try RemoteFolderSearch.indexedContents(matching: "bravo", snapshot: snapshot, includeHidden: false)
+        XCTAssertEqual(alpha.contentMatches.map(\.entry.path), ["/r/a.txt"])
+        XCTAssertEqual(bravo.contentMatches.map(\.entry.path), ["/r/nested/b.md"])
+        XCTAssertTrue(alpha.isFinished && bravo.isFinished)
+        let reads = await service.reads
+        let listings = await service.listed
+        XCTAssertEqual(reads.count, 3, "Changing an indexed query must not fetch the remote files again")
+        XCTAssertEqual(listings, ["/r", "/r/nested"])
+        XCTAssertTrue(reads.allSatisfy { $0.root == "/r" })
+    }
+
+    func testRebuildingIndexReplacesDeletedAndChangedDocuments() async throws {
+        let original = ContentTreeService(["/r": [file("/r/deleted.txt"), file("/r/changed.txt")]],
+            contents: ["/r/deleted.txt": bytes("old phrase"), "/r/changed.txt": bytes("old phrase")])
+        let old = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: original, includeHidden: false)
+        let current = ContentTreeService(["/r": [file("/r/changed.txt"), file("/r/new.txt")]],
+            contents: ["/r/changed.txt": bytes("new phrase"), "/r/new.txt": bytes("new phrase")])
+        let rebuilt = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: current, includeHidden: false)
+        XCTAssertEqual(try RemoteFolderSearch.indexedContents(matching: "old phrase", snapshot: old, includeHidden: false).contentMatches.count, 2)
+        XCTAssertTrue(try RemoteFolderSearch.indexedContents(matching: "old phrase", snapshot: rebuilt, includeHidden: false).contentMatches.isEmpty)
+        XCTAssertEqual(try RemoteFolderSearch.indexedContents(matching: "new phrase", snapshot: rebuilt, includeHidden: false)
+            .contentMatches.map(\.entry.path), ["/r/changed.txt", "/r/new.txt"])
+    }
+
+    func testCancelledIndexBuildDoesNotReturnAPartialSnapshotOrStartAnotherRead() async throws {
+        let service = ContentTreeService(["/r": [file("/r/a.txt"), file("/r/b.txt"), file("/r/c.txt")]],
+            contents: ["/r/a.txt": bytes("alpha"), "/r/b.txt": bytes("bravo"), "/r/c.txt": bytes("charlie")],
+            delays: ["/r/b.txt": .seconds(5)], ignoresCancellation: true)
+        let task = Task {
+            try await RemoteFolderSearch.buildIndex(below: "/r", profile: self.profile, service: service, includeHidden: false)
+        }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while await service.reads.count < 2, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        let started = await service.reads.count
+        XCTAssertEqual(started, 2)
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("Cancellation must leave the previous saved index intact, not return a replaceable partial build")
+        } catch { XCTAssertTrue(error is CancellationError) }
+        let reads = await service.reads
+        XCTAssertEqual(reads.map(\.path), ["/r/a.txt", "/r/b.txt"])
+    }
+
+    func testLiveAndIndexedSearchApplyCaseWholeWordAndExtensionFilters() async throws {
+        let tree = ["/r": [file("/r/a.txt"), file("/r/b.txt"), file("/r/c.txt"), file("/r/d.md")]]
+        let data = ["/r/a.txt": bytes("Needle"), "/r/b.txt": bytes("needlework"),
+                    "/r/c.txt": bytes("a needle here"), "/r/d.md": bytes("needle")]
+        let options = SearchQueryOptions(caseSensitive: true, wholeWord: true, fileExtension: "txt")
+        let live = ContentTreeService(tree, contents: data)
+        var matches: [RemoteFolderSearch.ContentMatch] = []
+        for try await update in RemoteFolderSearch.contents(matching: "needle", below: "/r", profile: profile,
+                                                            service: live, includeHidden: false, options: options) {
+            matches += update.contentMatches
+        }
+        XCTAssertEqual(matches.map(\.entry.path), ["/r/c.txt"])
+        let reads = await live.reads
+        XCTAssertEqual(reads.map(\.path), ["/r/a.txt", "/r/b.txt", "/r/c.txt"], "Extension filtering happens before a remote read")
+        let snapshot = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile,
+            service: ContentTreeService(tree, contents: data), includeHidden: false)
+        let indexed = try RemoteFolderSearch.indexedContents(matching: "needle", snapshot: snapshot, includeHidden: false, options: options)
+        XCTAssertEqual(indexed.contentMatches.map(\.entry.path), matches.map(\.entry.path))
+        XCTAssertEqual(try RemoteFolderSearch.indexedContents(matching: "needle", snapshot: snapshot, includeHidden: false)
+            .contentMatches.count, 4, "The default retains case-insensitive substring matching")
+    }
+
+    func testIndexBuildMarksFileByteDepthAndExtractionLimitsAsPartial() async throws {
+        let tree = ["/r": [file("/r/a.txt"), file("/r/b.txt")]]
+        let data = ["/r/a.txt": bytes("alpha"), "/r/b.txt": bytes("bravo")]
+        let fileLimited = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile,
+            service: ContentTreeService(tree, contents: data), includeHidden: false, contentLimits: .init(maxFiles: 1))
+        XCTAssertTrue(fileLimited.isPartial)
+        XCTAssertEqual(fileLimited.documents.map(\.entry.path), ["/r/a.txt"])
+        let byteService = ContentTreeService(tree, contents: data)
+        let byteLimited = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: byteService,
+            includeHidden: false, contentLimits: .init(maxFileBytes: 10, maxTotalBytes: 8))
+        XCTAssertTrue(byteLimited.isPartial)
+        XCTAssertEqual(byteLimited.documents.map(\.entry.path), ["/r/a.txt"])
+        let reads = await byteService.reads
+        XCTAssertEqual(reads.map(\.limit), [7, 2])
+        let depthLimited = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile,
+            service: ContentTreeService(["/r": [folder("/r/deep")], "/r/deep": [file("/r/deep/a.txt")]]),
+            includeHidden: false, limits: .init(maxDepth: 0))
+        XCTAssertTrue(depthLimited.isPartial); XCTAssertTrue(depthLimited.documents.isEmpty)
+        let textLimited = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile,
+            service: ContentTreeService(tree, contents: data), includeHidden: false, extraction: .init(maxTextBytes: 3))
+        XCTAssertTrue(textLimited.isPartial)
+        XCTAssertEqual(textLimited.documents.flatMap(\.segments).map(\.text), ["alp", "bra"])
+    }
+
+    func testIndexedSearchHonorsHiddenPathsAndMatchLimitsWithoutDiscardingSavedDocuments() async throws {
+        let service = ContentTreeService(["/r": [file("/r/a.txt"), file("/r/b.txt"), folder("/r/.hidden")],
+                                          "/r/.hidden": [file("/r/.hidden/c.txt")]],
+            contents: ["/r/a.txt": bytes("needle"), "/r/b.txt": bytes("needle"), "/r/.hidden/c.txt": bytes("needle")])
+        let snapshot = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: service, includeHidden: true)
+        let visible = try RemoteFolderSearch.indexedContents(matching: "needle", snapshot: snapshot, includeHidden: false)
+        XCTAssertEqual(visible.contentMatches.map(\.entry.path), ["/r/a.txt", "/r/b.txt"])
+        let limited = try RemoteFolderSearch.indexedContents(matching: "needle", snapshot: snapshot, includeHidden: true, maxMatches: 1)
+        XCTAssertEqual(limited.stop, .matchLimit); XCTAssertEqual(limited.contentMatches.count, 1)
+        XCTAssertEqual(try RemoteFolderSearch.indexedContents(matching: "needle", snapshot: snapshot, includeHidden: true).contentMatches.count, 3)
+        XCTAssertEqual(snapshot.documents.count, 3)
+        let empty = try RemoteFolderSearch.indexedContents(matching: "", snapshot: snapshot, includeHidden: true)
+        XCTAssertTrue(empty.isFinished); XCTAssertTrue(empty.contentMatches.isEmpty)
+    }
+
+    func testPDFSearchAndIndexPreserveMatchingPageAndUseConfinedReads() async throws {
+        let pdf = NSMutableData()
+        let consumer = try XCTUnwrap(CGDataConsumer(data: pdf))
+        var bounds = CGRect(x: 0, y: 0, width: 400, height: 300)
+        let context = try XCTUnwrap(CGContext(consumer: consumer, mediaBox: &bounds, nil))
+        for text in ["An ordinary first page", "Needle appears on the second page"] {
+            context.beginPDFPage(nil)
+            context.textPosition = CGPoint(x: 30, y: 200)
+            let attributes = [NSAttributedString.Key(kCTFontAttributeName as String): CTFontCreateWithName("Helvetica" as CFString, 18, nil)]
+            CTLineDraw(CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes)), context)
+            context.endPDFPage()
+        }
+        context.closePDF()
+        let service = ContentTreeService(["/r": [file("/r/report.pdf")]], contents: ["/r/report.pdf": pdf as Data])
+        var matches: [RemoteFolderSearch.ContentMatch] = []
+        for try await update in RemoteFolderSearch.contents(matching: "needle", below: "/r", profile: profile,
+            service: service, includeHidden: false, extraction: .init(includePDF: true)) {
+            matches += update.contentMatches
+        }
+        XCTAssertEqual(matches.count, 1); XCTAssertEqual(matches.first?.page, 2)
+        XCTAssertTrue(matches.first?.snippet.contains("second page") == true)
+        let snapshot = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: service, includeHidden: false)
+        let indexed = try RemoteFolderSearch.indexedContents(matching: "needle", snapshot: snapshot, includeHidden: false)
+        XCTAssertEqual(indexed.contentMatches.first?.page, 2)
+        XCTAssertEqual(indexed.contentMatches.first?.snippet, matches.first?.snippet)
+        let reads = await service.reads
+        XCTAssertEqual(reads.count, 2); XCTAssertTrue(reads.allSatisfy { $0.root == "/r" })
     }
 }

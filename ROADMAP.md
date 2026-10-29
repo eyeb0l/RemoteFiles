@@ -18,7 +18,7 @@ does not block RemoteFiles; see [dependency maintenance](docs/CITADEL_UPSTREAM.m
 
 - More verified private-key protection formats and hardware-backed security-key identities. OpenSSH RSA/ECDSA imports and optional biometric unlock are already available; see [key support](docs/KEY_SUPPORT.md).
 - Extend reading history to PDF and standalone image previews. Layout-independent text/block anchors cover Markdown, Source (including plain text) and static HTML; inactive reader-content eviction is implemented. Physical-device layout and memory acceptance remain outstanding. See [reader behavior](docs/READER.md).
-- Persistent search indexes, PDF/OCR search and additional search capabilities. [Folder search](docs/FOLDER_BROWSING.md) already supports bounded names and UTF-8 contents search, with optional server assistance and SFTP fallback.
+- Automatic or incremental search-index refresh and opening PDF search results at the matching page. [Folder search](docs/FOLDER_BROWSING.md) already supports explicit persistent local indexes, bounded PDF text and on-device OCR, plus case, whole-word and file-type filters. Saved indexes are snapshots and must be rebuilt to reflect remote changes.
 - Offline synchronization, File Provider, multiple jump hops, other protocols such as FTP/FTPS, optional terminal handoff, deeper Tailscale onboarding, and additional iPad keyboard and multiwindow workflows.
 - Private-key export, automatic key installation, Mermaid, mathematical notation, rendering raw HTML embedded in Markdown, generic download management and background SSH transfers. Standalone HTML already has a [static preview](docs/HTML_PREVIEWS.md).
 

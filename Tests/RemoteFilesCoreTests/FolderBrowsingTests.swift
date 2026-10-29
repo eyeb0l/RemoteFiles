@@ -1,6 +1,8 @@
 #if os(iOS)
 import XCTest
 import Foundation
+import Crypto
+import NIOSSH
 import RemoteFilesCore
 @testable import RemoteFilesUI
 
@@ -68,6 +70,25 @@ final class FolderBrowsingTests: XCTestCase {
         XCTAssertFalse(names(listing.visible(query: "", showHidden: false, order: .size)).contains(".env"))
     }
 
+    func testThisFolderUsesCaseWholeWordAndFileTypeOptionsIncludingWithoutAQuery() {
+        let listing = FolderListing(DirectorySnapshot(path: "/p", entries: [
+            file("Note.txt", size: 1), file("notes.txt", size: 5), file("my note.txt", size: 10),
+            file("my note.md", size: 20), file(".note.txt", size: 30), folder("notebooks")
+        ]))
+        XCTAssertEqual(names(listing.visible(query: "note", showHidden: false, order: .name)).count, 5)
+        XCTAssertFalse(names(listing.visible(query: "note", showHidden: false, order: .name,
+            options: .init(caseSensitive: true))).contains("Note.txt"))
+        XCTAssertEqual(Set(names(listing.visible(query: "note", showHidden: false, order: .name,
+            options: .init(wholeWord: true)))), Set(["Note.txt", "my note.txt", "my note.md"]))
+        XCTAssertEqual(names(listing.visible(query: "note", showHidden: false, order: .size,
+            options: .init(caseSensitive: true, wholeWord: true, fileExtension: "txt"))), ["my note.txt"])
+        XCTAssertEqual(names(listing.visible(query: "", showHidden: false, order: .size,
+            options: .init(fileExtension: ".TXT"))), ["my note.txt", "notes.txt", "Note.txt"],
+            "The file-type filter applies even before a search term is entered")
+        XCTAssertEqual(names(listing.visible(query: "note", showHidden: true, order: .size,
+            options: .init(caseSensitive: true, wholeWord: true, fileExtension: "txt"))), [".note.txt", "my note.txt"])
+    }
+
     func testSearchResultsSayWhereEachNameWasFound() {
         XCTAssertEqual(FolderSearchRow(file("n.md"), root: "/p").subtitle, "In this folder · File")
         XCTAssertEqual(FolderSearchRow(RemoteEntry(name: "n.md", path: "/p/a/b/n.md", kind: .file, size: 2048), root: "/p").subtitle,
@@ -105,6 +126,46 @@ final class FolderBrowsingTests: XCTestCase {
         }
         state.error = "The SSH connection ended."
         XCTAssertFalse(state.isFinished(for: key), "A failed search is tried again")
+    }
+
+    func testChangingMatchingOrExtractionOptionsInvalidatesCompletedSearchAndRejectsOldUpdates() {
+        let original = FolderSearchState.Key(query: "note", root: "/p", includeHidden: false,
+            sessionRevision: 1, refresh: 0, scope: .contents)
+        var finished = FolderSearchState(key: original)
+        finished.progress.isFinished = true
+        var variants: [FolderSearchState.Key] = []
+        var key = original; key.options.caseSensitive = true; variants.append(key)
+        key = original; key.options.wholeWord = true; variants.append(key)
+        key = original; key.options.fileExtension = "pdf"; variants.append(key)
+        key = original; key.extraction.includePDF = true; variants.append(key)
+        key = original; key.extraction.includeOCR = true; variants.append(key)
+        for changed in variants {
+            XCTAssertFalse(finished.isFinished(for: changed))
+            var current = FolderSearchState(key: changed)
+            var late = RemoteFolderSearch.Update()
+            late.isFinished = true
+            late.contentMatches = [.init(entry: file("old.txt"), line: 1, snippet: "old note")]
+            current.apply(late, for: original)
+            XCTAssertTrue(current.rows.isEmpty, "Results from previous options must not leak into the new search")
+            XCTAssertFalse(current.progress.isFinished)
+        }
+    }
+
+    func testPDFResultsShowPagesTextResultsKeepLinesAndExtractionLimitsRemainVisible() {
+        let key = FolderSearchState.Key(query: "needle", root: "/p", includeHidden: false,
+            sessionRevision: 1, refresh: 0, scope: .contents, extraction: .init(includePDF: true))
+        var state = FolderSearchState(key: key)
+        var update = RemoteFolderSearch.Update()
+        update.contentMatches = [
+            .init(entry: file("report.pdf"), line: 2, snippet: "PDF needle", page: 3),
+            .init(entry: file("note.txt"), line: 7, snippet: "source needle")
+        ]
+        update.filesSearched = 2; update.truncatedFiles = 1; update.isFinished = true
+        state.apply(update, for: key)
+        XCTAssertEqual(state.rows.map(\.snippet), ["Page 3 · PDF needle", "Line 7 · source needle"])
+        XCTAssertTrue(state.summary.contains("Checked 2 files."))
+        XCTAssertTrue(state.summary.contains("extraction limits; matches may be missing."))
+        XCTAssertTrue(state.isFinished(for: key))
     }
 
     func testContentSearchProgressAndStaleUpdatesDoNotReplaceAnotherScope() async throws {
@@ -183,6 +244,67 @@ final class FolderBrowsingTests: XCTestCase {
         model.setFolderSortOrder(.size, id: profile.id, path: "/Projects")
         XCTAssertEqual(model.folderSortOrder(profile.id, path: "/Projects"), .name)
         XCTAssertNil(preferences.array(forKey: "folderSortOrders-v1"), "Demo never writes sort choices")
+    }
+
+    @MainActor func testEditingAndRemovingConnectionsDeleteTheirIndexesWithoutAffectingAnotherConnection() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try AppModel(directory: directory, fileService: DemoRemoteFileService(delayNanoseconds: 0))
+        let profile = ConnectionProfile(name: "Studio", host: "studio", username: "reader", identityID: UUID())
+        let other = ConnectionProfile(name: "Archive", host: "archive", username: "reader", identityID: UUID())
+        model.metadata.connections = [profile, other]
+        let snapshot = SearchIndexSnapshot(documents: [.init(entry: file("note.txt"), segments: [.init(text: "private note")])],
+            includeHidden: false, extraction: .init(), isPartial: false)
+        let store = await model.searchIndexStore()
+        try await store.save(snapshot, profile: profile, root: "/p")
+        try await store.save(snapshot, profile: other, root: "/p")
+        var edited = profile; edited.host = "new-studio"
+        await model.saveConnection(edited)
+        let oldIndex = try await store.load(profile: profile, root: "/p")
+        let retained = try await store.load(profile: other, root: "/p")
+        XCTAssertNil(oldIndex, "Changing a connection also deletes its previously indexed text")
+        XCTAssertEqual(retained?.documents.first?.segments.first?.text, "private note")
+        try await store.save(snapshot, profile: edited, root: "/p")
+        await model.removeConnection(edited)
+        let removed = try await store.load(profile: edited, root: "/p")
+        let stillRetained = try await store.load(profile: other, root: "/p")
+        XCTAssertNil(removed)
+        XCTAssertNotNil(stillRetained)
+        XCTAssertEqual(model.metadata.connections.map(\.id), [other.id])
+        XCTAssertNil(model.errorMessage)
+    }
+
+    @MainActor func testTrustResetStillForgetsDestinationAndJumpKeysWhenIndexCleanupFails() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try AppModel(directory: directory, fileService: DemoRemoteFileService(delayNanoseconds: 0))
+        let profile = ConnectionProfile(name: "Studio", host: "studio.invalid", username: "reader", identityID: UUID(),
+            jumpHost: JumpHost(host: "jump.invalid", port: 2222, username: "jump", identityID: UUID()))
+        let target = HostEndpoint(host: profile.host, port: profile.port)
+        let jump = HostEndpoint(host: "jump.invalid", port: 2222)
+        let key = NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey
+        let details = try HostKeyDetails(publicKey: key)
+        try await model.trust.trustUnknown(endpoint: target, key: details)
+        try await model.trust.trustUnknown(endpoint: jump, key: details)
+        // A regular file at the cache directory makes cleanup fail deterministically on iOS.
+        try Data("invalid index directory".utf8).write(to: model.searchIndexDirectory)
+
+        await model.resetTrust(for: profile)
+        do {
+            try await model.trust.validate(endpoint: target, publicKey: key)
+            XCTFail("An index cleanup error must not prevent forgetting the destination host key")
+        } catch HostTrustError.unknown { }
+        try await model.trust.validate(endpoint: jump, publicKey: key)
+        XCTAssertNotNil(model.errorMessage, "The independent index cleanup error remains visible")
+
+        await model.resetJumpHostTrust(for: profile)
+        let restored = try HostTrustStore(fileURL: directory.appendingPathComponent("known-hosts-v1.json"))
+        for endpoint in [target, jump] {
+            do {
+                try await restored.validate(endpoint: endpoint, publicKey: key)
+                XCTFail("Both explicit trust resets must persist even when index cleanup fails")
+            } catch HostTrustError.unknown { }
+        }
     }
 }
 #endif

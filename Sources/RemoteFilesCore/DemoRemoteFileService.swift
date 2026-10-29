@@ -22,6 +22,11 @@ public actor DemoRemoteFileService: RemoteFileService {
         try await pause()
         let path = path == "." ? "/Projects" : path
         if path == "/Projects/Empty" { return DirectorySnapshot(path: path, entries: []) }
+        if path == Self.searchSampleFolder {
+            return DirectorySnapshot(path: path, entries: Self.searchSampleNames.compactMap {
+                Self.searchSampleEntry(path + "/" + $0)
+            })
+        }
         // Reports and its subfolder are finite, so searching subfolders ends.
         if path.hasSuffix("/Reports") {
             return DirectorySnapshot(path: path, entries: [
@@ -40,7 +45,7 @@ public actor DemoRemoteFileService: RemoteFileService {
         if path == "/Projects/Thousand files" {
             return DirectorySnapshot(path: path, entries: (1...1000).map { RemoteEntry(name: "Report \($0).md", path: path + "/Report \($0).md", kind: .file, size: 8192) })
         }
-        let entries: [RemoteEntry] = [
+        var entries: [RemoteEntry] = [
             .init(name: "Reports", path: path + "/Reports", kind: .directory),
             .init(name: "Empty", path: path + "/Empty", kind: .directory),
             .init(name: "Thousand files", path: path + "/Thousand files", kind: .directory),
@@ -67,11 +72,14 @@ public actor DemoRemoteFileService: RemoteFileService {
             .init(name: "Binary.txt", path: path + "/Binary.txt", kind: .file, size: 3),
             .init(name: "Too large.md", path: path + "/Too large.md", kind: .file, size: 3_000_000)
         ]
+        if path == "/Projects" {
+            entries.append(.init(name: "Search samples", path: Self.searchSampleFolder, kind: .directory))
+        }
         return DirectorySnapshot(path: path, entries: entries)
     }
     public func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data {
         try await pause()
-        if let file = Self.mediaFile(RemotePath.name(of: path)) {
+        if let file = Self.searchSampleFile(path) ?? Self.mediaFile(RemotePath.name(of: path)) {
             let bytes = try Data(contentsOf: file)
             guard bytes.count <= limit else { throw RemoteFileError.tooLarge(limit) }
             return bytes
@@ -93,10 +101,11 @@ public actor DemoRemoteFileService: RemoteFileService {
     }
     public func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
         try await pause()
-        if path == "." || path == "/Projects" || path.hasSuffix("/Reports") || path.hasSuffix("/Reports/2026") || path.hasSuffix("/Empty") {
+        if path == "." || path == "/Projects" || path == Self.searchSampleFolder || path.hasSuffix("/Reports") || path.hasSuffix("/Reports/2026") || path.hasSuffix("/Empty") {
             let canonical = path == "." ? "/Projects" : path
             return RemoteEntry(name: RemotePath.name(of: canonical), path: canonical, kind: .directory)
         }
+        if let entry = Self.searchSampleEntry(path) { return entry }
         if path.hasSuffix("/Old notes") { throw RemoteFileError.notFound }
         if path.hasSuffix("/Current reports") { return RemoteEntry(name: "Reports", path: RemotePath.parent(of: path) + "/Reports", kind: .directory) }
         return RemoteEntry(name: "Weekly review.md", path: RemotePath.parent(of: path) + "/Weekly review.md", kind: .file)
@@ -116,7 +125,7 @@ public actor DemoRemoteFileService: RemoteFileService {
         let path = try RemoteDocumentLinkPath.resolve(reference, relativeTo: documentPath, connectionRoot: root)
         let name = RemotePath.name(of: path)
         let knownFiles = ["Navigation guide.md", "Linked notes.md", "Heading notes.md", "Weekly review.md", "Example.swift", "Long lines.json", "Icon.svg", "Sample audio.m4a", "Sample video.mp4", "Notes — 東京.txt", ".config", "Empty.txt", "Binary.txt", "Too large.md"]
-        guard knownFiles.contains(name) || Self.mediaFile(name) != nil else { throw RemoteFileError.unavailable("The linked file could not be found. Check the link or open its folder.") }
+        guard knownFiles.contains(name) || Self.mediaFile(name) != nil || Self.searchSampleFile(path) != nil else { throw RemoteFileError.unavailable("The linked file could not be found. Check the link or open its folder.") }
         try Task.checkCancellation()
         return RemoteEntry(name: name, path: path, kind: .file, navigationRoot: root)
     }
@@ -159,6 +168,26 @@ public actor DemoRemoteFileService: RemoteFileService {
         return RemoteEntry(name: RemotePath.name(of: canonical), path: canonical, kind: .file, size: UInt64(bytes.count))
     }
     public func disconnect() { generation += 1 }
+
+    private static let searchSampleFolder = "/Projects/Search samples"
+    private static let searchSampleNames = ["Text sample.pdf", "Scanned sample.pdf", "Image sample.png"]
+    private static func searchSampleFile(_ path: String) -> URL? {
+        let resource: String
+        switch path {
+        case searchSampleFolder + "/Text sample.pdf": resource = "search-sample.pdf"
+        case searchSampleFolder + "/Scanned sample.pdf": resource = "search-scan.pdf"
+        case searchSampleFolder + "/Image sample.png": resource = "search-image.png"
+        default: return nil
+        }
+        return Bundle.module.url(forResource: (resource as NSString).deletingPathExtension,
+                                 withExtension: (resource as NSString).pathExtension)
+    }
+    private static func searchSampleEntry(_ path: String) -> RemoteEntry? {
+        guard let url = searchSampleFile(path) else { return nil }
+        let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize
+        return RemoteEntry(name: RemotePath.name(of: path), path: path, kind: .file,
+                           size: size.map(UInt64.init))
+    }
 
     private static func mediaFile(_ name: String) -> URL? {
         let ext = (name as NSString).pathExtension

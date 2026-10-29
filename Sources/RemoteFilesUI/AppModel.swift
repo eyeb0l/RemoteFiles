@@ -35,6 +35,10 @@ final class AppModel {
     }
     let metadataStore: MetadataStore
     let readingPositions: ReadingPositionStore
+    let searchIndexDirectory: URL
+    func searchIndexStore() async -> SearchIndexStore {
+        await SearchIndexStore.shared(directory: demo ? searchIndexDirectory.appendingPathComponent("Demo") : searchIndexDirectory)
+    }
     let identities: IdentityStore
     let trust: HostTrustStore
     let publicKeyInstaller: any PublicKeyInstalling
@@ -95,6 +99,7 @@ final class AppModel {
     let preferences: UserDefaults
     init(directory: URL, fileService: (any RemoteFileService)? = nil, publicKeyInstaller: (any PublicKeyInstalling)? = nil,
          preferences: UserDefaults = .standard, identities: IdentityStore = IdentityStore()) throws {
+        searchIndexDirectory = directory.appendingPathComponent("SearchIndexes-v1", isDirectory: true)
         self.preferences = preferences
         self.identities = identities
         offlineDirectory = directory.appendingPathComponent("Offline-v1", isDirectory: true)
@@ -238,6 +243,8 @@ final class AppModel {
         // The iPad sidebar can edit the connection whose reader is still on screen.
         routes.removeAll { $0.connectionID == value.id }
         sessionRevision += 1
+        do { try await searchIndexStore().remove(connectionID: value.id) }
+        catch { errorMessage = error.localizedDescription }
         metadata.connections.removeAll { $0.id == value.id }
         metadata.connections.append(value)
         await persist()
@@ -246,6 +253,8 @@ final class AppModel {
         await disconnect()
         routes.removeAll { $0.connectionID == profile.id }
         sessionRevision += 1
+        do { try await searchIndexStore().remove(connectionID: profile.id) }
+        catch { errorMessage = error.localizedDescription }
         metadata.connections.removeAll { $0.id == profile.id }
         metadata.favourites.removeAll { $0.connectionID == profile.id }
         metadata.recents.removeAll { $0.connectionID == profile.id }
@@ -284,12 +293,17 @@ final class AppModel {
     /// Forgets the trusted key of the saved endpoint, never unsaved edits in the connection form.
     func resetTrust(for profile: ConnectionProfile) async {
         await disconnect()
+        do { try await searchIndexStore().remove(connectionID: profile.id) }
+        catch { errorMessage = error.localizedDescription }
+        // Forgetting trust must remain possible even when the local search cache is damaged.
         do { try await trust.reset(endpoint: HostEndpoint(host: profile.host, port: profile.port)) }
         catch { errorMessage = error.localizedDescription }
     }
     func resetJumpHostTrust(for profile: ConnectionProfile) async {
         guard let jump = profile.jumpHost else { return }
         await disconnect()
+        do { try await searchIndexStore().remove(connectionID: profile.id) }
+        catch { errorMessage = error.localizedDescription }
         do { try await trust.reset(endpoint: HostEndpoint(host: jump.host, port: jump.port)) }
         catch { errorMessage = error.localizedDescription }
     }
