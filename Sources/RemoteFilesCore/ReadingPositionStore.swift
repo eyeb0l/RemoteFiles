@@ -21,7 +21,7 @@ public struct SavedReadingPosition: Codable, Equatable, Sendable {
             self.fraction = fraction; self.viewportY = viewportY
         }
         fileprivate var isValid: Bool {
-            ["prose", "image", "overflow", "source"].contains(kind) && ordinal >= 0 && ordinal <= 2_097_152 &&
+            ["prose", "image", "overflow", "source", "html-text", "html-block"].contains(kind) && ordinal >= 0 && ordinal <= 2_097_152 &&
             character >= 0 && character <= 2_097_152 && fraction.isFinite && (0...1).contains(fraction) &&
             viewportY.isFinite && abs(viewportY) <= 100_000
         }

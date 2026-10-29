@@ -17,6 +17,20 @@
       true
     }
 
+    // Selection gestures belong to this transparent overlay. Assistive technologies
+    // read the underlying SwiftUI text and links, not a duplicate UITextInput.
+    // UIKit's accessibility bundle replaces UIView's stored getters once assistive
+    // technologies load, so the policy is fixed here rather than assigned in init.
+    override var isAccessibilityElement: Bool {
+      get { false }
+      set {}
+    }
+
+    override var accessibilityElementsHidden: Bool {
+      get { true }
+      set {}
+    }
+
     var model: TextSelectionModel
     var exclusionRects: [CGRect]
     var openURL: OpenURLAction
@@ -40,10 +54,6 @@
 
       super.init(frame: .zero)
       self.backgroundColor = .clear
-      // Selection gestures belong to this transparent overlay. Assistive technologies
-      // read the underlying SwiftUI text and links, not a duplicate UITextInput.
-      isAccessibilityElement = false
-      accessibilityElementsHidden = true
 
       setUp()
     }

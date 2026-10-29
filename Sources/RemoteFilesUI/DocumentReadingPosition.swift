@@ -10,6 +10,11 @@ import UIKit
 @MainActor @Observable public final class DocumentReadingPosition {
     public var rendered: CGPoint = .zero { didSet { if rendered != oldValue { scheduleSave() } } }
     public var sourceAnchor: SavedReadingPosition.Anchor? { didSet { if sourceAnchor != oldValue { scheduleSave() } } }
+    public var htmlAnchor: SavedReadingPosition.Anchor? { didSet { if htmlAnchor != oldValue { scheduleSave() } } }
+    // Weak renderer callbacks let a lifecycle flush await the final DOM capture without
+    // retaining the WebKit view or document in the route's reading history.
+    @ObservationIgnored var captureHTMLPosition: (() async -> Void)?
+    @ObservationIgnored var htmlSessionID: UUID?
     public var source: CGPoint = .zero { didSet { if source != oldValue { scheduleSave() } } }
     @ObservationIgnored private var store: ReadingPositionStore?
     @ObservationIgnored private var connectionID: UUID?
@@ -38,8 +43,10 @@ import UIKit
         let restored = await store?.restore(connectionID: connectionID, path: path, revision: nextRevision)
         guard preparationID == token, !Task.isCancelled else { return }
         self.store = store; self.connectionID = connectionID; self.path = path; revision = nextRevision
+        htmlSessionID = nil; captureHTMLPosition = nil
         overflowGeometry.documentDidChange(text)
-        overflowGeometry.snapshot = restored?.renderedAnchor.map {
+        htmlAnchor = restored?.renderedAnchor.flatMap { $0.kind.hasPrefix("html-") ? $0 : nil }
+        overflowGeometry.snapshot = restored?.renderedAnchor.flatMap { $0.kind.hasPrefix("html-") ? nil : $0 }.map {
             .init(kind: $0.kind, ordinal: $0.ordinal, character: $0.character, fraction: $0.fraction, viewportY: $0.viewportY)
         }
         sourceAnchor = restored?.sourceAnchor
@@ -50,11 +57,12 @@ import UIKit
     /// Flush on leaving the reader and before background suspension; ordinary scroll updates debounce.
     public func flush() async {
         pendingSave?.cancel(); pendingSave = nil
+        await captureHTMLPosition?()
         guard let store, let connectionID, let path, let revision else { return }
         let snapshot = SavedReadingPosition(revision: revision,
             rendered: .init(x: Double(rendered.x), y: Double(rendered.y)),
             source: .init(x: Double(source.x), y: Double(source.y)),
-            renderedAnchor: overflowGeometry.snapshot.map {
+            renderedAnchor: htmlAnchor ?? overflowGeometry.snapshot.map {
                 .init(kind: $0.kind, ordinal: $0.ordinal, character: $0.character, fraction: $0.fraction, viewportY: $0.viewportY)
             }, sourceAnchor: sourceAnchor)
         do {

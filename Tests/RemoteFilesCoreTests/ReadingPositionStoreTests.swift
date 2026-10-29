@@ -50,6 +50,31 @@ final class ReadingPositionStoreTests: XCTestCase {
         XCTAssertNil(invalid)
     }
 
+    func testHTMLAnchorsRoundTripWithoutDocumentContents() async throws {
+        let url = location(); defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let id = UUID(), store = ReadingPositionStore(fileURL: url)
+        for kind in ["html-text", "html-block"] {
+            var value = position("Private HTML document text", y: 900)
+            value.renderedAnchor = .init(kind: kind, ordinal: 12, character: 19, fraction: 0.4, viewportY: -3)
+            value.sourceAnchor = .init(kind: "source", character: 700, viewportY: 8)
+            try await store.save(value, connectionID: id, path: "/" + kind)
+            let restored = await ReadingPositionStore(fileURL: url).restore(connectionID: id, path: "/" + kind, revision: value.revision)
+            XCTAssertEqual(restored, value)
+            let history = try String(contentsOf: url, encoding: .utf8)
+            XCTAssertFalse(history.contains("Private HTML document text"))
+        }
+        for anchor in [SavedReadingPosition.Anchor(kind: "html-text", ordinal: -1),
+                       .init(kind: "html-block", fraction: 1.01),
+                       .init(kind: "html-text", character: 2_097_153),
+                       .init(kind: "html-block", viewportY: .infinity)] {
+            var value = position("Private HTML document text")
+            value.renderedAnchor = anchor
+            try await store.save(value, connectionID: id, path: "/invalid-html")
+            let restored = await store.restore(connectionID: id, path: "/invalid-html", revision: value.revision)
+            XCTAssertNil(restored)
+        }
+    }
+
     func testCapacityEvictsOldestAndUpdatingExistingRecordRetainsIt() async throws {
         let url = location(); defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let store = ReadingPositionStore(fileURL: url, capacity: 2), id = UUID(), value = position("report")
