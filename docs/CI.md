@@ -250,6 +250,11 @@ with an already-installed mock public key or an already-removed seeded recent en
 output directory alone does not reset that simulator state. Diagnose these failures before
 rerunning the affected methods on a fresh device; retain both the original failure and rerun evidence.
 
+The demo reader and image-viewer speech journeys launch their fixture with VoiceOver
+already enabled so the initial screen change establishes focus. Enabling it after the
+screen has settled can leave the first `currentSpeech()` call with `No speech available`.
+Retain the speech and traversal assertions when diagnosing this setup failure.
+
 The VoiceOver launcher supports macOS’s stock Bash when optional package or
 compiler-cache settings are absent. Launcher regressions also check that argument
 paths with spaces survive and that collecting lifecycle logs cannot turn a failed

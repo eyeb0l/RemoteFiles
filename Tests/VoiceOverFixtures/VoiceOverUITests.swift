@@ -171,9 +171,12 @@ import XCTest
     }
     func testImageViewerFailureRetryShareAndReturn() throws {
         continueAfterFailure = true
-        let app = XCUIApplication(); app.launchArguments = ["--voiceover-image-fixture"]; app.launch()
-        XCTAssertTrue(app.buttons["Open image diagram.png"].waitForExistence(timeout: 10))
+        let app = XCUIApplication(); app.launchArguments = ["--voiceover-image-fixture"]
         try withVoiceOver {
+            // Establish initial focus through the launch transition, rather than
+            // enabling VoiceOver on an idle fixture with no current utterance.
+            app.launch()
+            XCTAssertTrue(app.buttons["Open image diagram.png"].waitForExistence(timeout: 10))
             try focus("Open image diagram.png", name: "inline")
             app.buttons["Open image diagram.png"].doubleTap()
             XCTAssertTrue(app.buttons["Tap to retry"].waitForExistence(timeout: 10))
