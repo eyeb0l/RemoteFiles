@@ -11,6 +11,10 @@ Local changes:
   have a 64-entry / estimated 2 MiB budget, clear on detachment, and expose explicit
   memory-pressure/inactivity eviction. Document identity retains a SHA-256 digest
   instead of the original text. Existing deferred-rendering correction remains.
+  Prose anchors measure the caret reconstructed from their saved character offset,
+  matching restoration at paragraph and wrapped-line boundaries where two visual
+  carets share that offset. A hosted viewport regression reproduces a 47-point
+  jump without relying on swipe timing.
 
 - `StructuredText.swift`: a direct `AttributedString` initializer renders an
   already prepared document without a parsing state transition. Attribute-only

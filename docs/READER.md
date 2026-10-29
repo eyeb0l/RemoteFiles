@@ -33,6 +33,10 @@ Markdown images load as needed over SFTP, relative to the document directory. Th
 
 - **Reading position:** Text readers remember separate Rendered and Source positions across launches. History contains text locations, block positions, fallback coordinates and a content fingerprint, not document contents, for up to 200 connection/path pairs. Markdown prose and Source restore the same text location after width or text-size changes; images and overflow blocks restore a proportional position within the block. A changed document starts at the top. Older coordinate-only history and positions without an available text/block anchor retain approximate coordinate restoration. Static HTML retains coordinate restoration. Positions save after scrolling pauses and when leaving or backgrounding. Demo does not write reading history.
 
+Reading anchors use the same caret position when saving and restoring a text
+offset. This keeps Back navigation from shifting the page when the visible anchor
+falls at a paragraph boundary.
+
 ## Read source
 
 <img src="screenshots/reader-source-anchors-iphone.png" width="240" alt="Native selectable Swift source with syntax colors and wrapped lines on an iPhone simulator">
