@@ -4,9 +4,12 @@ import Crypto
 public struct RemoteDocumentLocation: Hashable, Sendable {
     public let profile: ConnectionProfile
     public let path: String
+    public let canonicalRoot: String?
     /// Automatic Markdown resources are confined to the document's directory tree.
     public var resourceRoot: String { RemotePath.parent(of: path) }
-    public init(profile: ConnectionProfile, path: String) { self.profile = profile; self.path = path }
+    public init(profile: ConnectionProfile, path: String, canonicalRoot: String? = nil) {
+        self.profile = profile; self.path = path; self.canonicalRoot = canonicalRoot
+    }
 }
 
 public enum RemoteResourcePath {
@@ -175,6 +178,7 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         let endpoint = HostEndpoint(host: profile.host, port: profile.port)
         var fields = [endpoint.host, String(endpoint.port), profile.username, profile.identityID.uuidString,
                       document.resourceRoot, path]
+        if let root = document.canonicalRoot { fields += ["canonical-search-root", root] }
         // A private hostname can identify different filesystems through different bastions.
         // Keep direct keys unchanged, but never reuse their bytes for a tunneled route.
         if let hop = profile.jumpHost {
@@ -251,7 +255,9 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         try prepareCacheDirectory()
         let target = directory.appendingPathComponent(key).appendingPathExtension("resource")
         let targetAttributes = try validateCachedFile(at: target)
-        if let attrs = targetAttributes,
+        // Saved results recheck their canonical boundary on every opening, even when an
+        // ordinary preview or a previous search opening has already cached these bytes.
+        if document.canonicalRoot == nil, let attrs = targetAttributes,
            let modified = attrs[.modificationDate] as? Date,
            Date().timeIntervalSince(modified) < freshness {
             try? fm.setAttributes([.creationDate: Date()], ofItemAtPath: target.path)
@@ -259,7 +265,7 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
             await report(.init(receivedBytes: size, totalBytes: size, isComplete: true), key: flightKey, id: id)
             try Task.checkCancellation()
             if generations[key] == generation, fm.fileExists(atPath: target.path) { return target }
-        } else if targetAttributes != nil, let cached = Self.storedVersion(at: target),
+        } else if document.canonicalRoot == nil, targetAttributes != nil, let cached = Self.storedVersion(at: target),
                   let current = try? await service.resolveEntry(profile: document.profile, path: path),
                   current.kind == .file, RemoteResourcePath.contains(current.path, in: document.resourceRoot),
                   RemoteFileVersion(size: current.size, modifiedAt: current.modifiedAt) == cached {
@@ -284,10 +290,17 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         try protectCacheFile(temp)
         let downloaded: RemoteEntry
         do {
-            downloaded = try await service.downloadFile(profile: document.profile, path: path, allowedRoot: document.resourceRoot,
+            if let root = document.canonicalRoot {
+                downloaded = try await service.downloadSnapshotFile(profile: document.profile, path: path, canonicalRoot: root,
+                    destination: temp, limit: fileLimit, progress: { update in
+                        await self.report(update, key: flightKey, id: id)
+                    })
+            } else {
+                downloaded = try await service.downloadFile(profile: document.profile, path: path, allowedRoot: document.resourceRoot,
                                                         destination: temp, limit: fileLimit, progress: { update in
                                                             await self.report(update, key: flightKey, id: id)
                                                         })
+            }
         } catch RemoteFileError.notFound {
             throw RemoteResourceError.missingFile(path)
         }

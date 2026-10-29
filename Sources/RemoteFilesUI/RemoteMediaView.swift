@@ -27,7 +27,7 @@ struct RemoteMediaView: View {
     @Environment(\.scenePhase) private var scenePhase
     @AccessibilityFocusState(for: .voiceOver) private var imageFocused: Bool
 
-    private var location: RemoteDocumentLocation { .init(profile: profile, path: entry.path) }
+    private var location: RemoteDocumentLocation { .init(profile: profile, path: entry.path, canonicalRoot: entry.canonicalRoot) }
     private var hasContent: Bool { image != nil || pdf != nil || playback.player != nil }
     private var previewFailure: String? { failure ?? playback.failure }
     private var symbol: String {

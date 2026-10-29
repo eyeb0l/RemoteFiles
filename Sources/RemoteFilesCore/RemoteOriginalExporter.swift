@@ -192,8 +192,14 @@ public actor RemoteOriginalExporter {
         try fm.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: temporaryDirectory.path)
         #endif
         let file = temporaryDirectory.appendingPathComponent(entry.exportFilename ?? entry.name, isDirectory: false)
-        let remote = try await service.downloadFile(profile: profile, path: entry.path, allowedRoot: allowedRoot,
-                                                    destination: file, limit: fileLimit, progress: progress)
+        let remote: RemoteEntry
+        if let root = entry.canonicalRoot {
+            remote = try await service.downloadSnapshotFile(profile: profile, path: entry.path, canonicalRoot: root,
+                destination: file, limit: fileLimit, progress: progress)
+        } else {
+            remote = try await service.downloadFile(profile: profile, path: entry.path, allowedRoot: allowedRoot,
+                destination: file, limit: fileLimit, progress: progress)
+        }
         try Task.checkCancellation()
         guard remote.kind == .file else { throw OriginalFileExportError.notRegularFile }
         if let size = remote.size, size > UInt64(fileLimit) { throw OriginalFileExportError.tooLarge(fileLimit) }

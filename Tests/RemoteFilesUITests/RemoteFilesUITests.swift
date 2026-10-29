@@ -595,6 +595,11 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(date.waitForExistence(timeout: 10))
         XCTAssertEqual(date.label, savedDate, "Relaunching loads the saved snapshot without rebuilding it")
         querySavedContents()
+        result.tap()
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+        let back = app.navigationBars.buttons["Reports"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5)); back.tap()
+        openIndex(); querySavedContents()
         reveal(delete, down: false); delete.tap()
         XCTAssertTrue(build.waitForExistence(timeout: 5))
         XCTAssertFalse(result.exists, "Deleting the index clears its extracted matches")
@@ -706,6 +711,15 @@ final class RemoteFilesUITests: XCTestCase {
             XCTAssertTrue(result.label.localizedCaseInsensitiveContains("SEARCHABLE INVOICE"), result.label)
         }
         attachScreenshot("Saved PDF and OCR search results")
+        let pdfResult = app.buttons["saved-search-result-/Projects/Search samples/Text sample.pdf"]
+        reveal(pdfResult); pdfResult.tap()
+        XCTAssertTrue(app.staticTexts["2 pages"].waitForExistence(timeout: 15), "A saved PDF result opens its current remote preview")
+        let back = app.navigationBars.buttons["Search samples"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5)); back.tap()
+        app.buttons["Folder actions"].tap()
+        XCTAssertTrue(saved.waitForExistence(timeout: 5)); saved.tap()
+        XCTAssertTrue(list.waitForExistence(timeout: 5))
+        XCTAssertTrue(search.waitForExistence(timeout: 5)); search.tap(); search.typeText("INVOICE\n")
         reveal(delete, down: false); delete.tap()
         XCTAssertTrue(build.waitForExistence(timeout: 5))
         for (filename, _) in expected {
