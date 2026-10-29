@@ -199,19 +199,33 @@ private struct ReadingPositionFixture: View {
 
     func testMemoryWarningAndInactivityReleaseAttributedKeysButRetainAnchor() async throws {
         let state = ReadingFixtureState()
-        state.text = String(repeating: "Paragraph before code.\n\n```swift\nlet value = 42\n```\n\n", count: 80)
+        state.text = String(repeating: "A readable paragraph without asynchronous code highlighting.\n\n", count: 80)
         let window = try host(state)
         defer { window.isHidden = true; window.rootViewController = nil }
-        try await waitUntil { state.position.overflowGeometry.retainedExtentCount > 0 }
+        try await waitUntil({ self.scrollView(window) != nil }, diagnostics: { self.describeScrollViews(window) })
         let cache = state.position.overflowGeometry
-        XCTAssertLessThanOrEqual(cache.retainedExtentCount, 64)
-        XCTAssertLessThanOrEqual(cache.retainedExtentCost, 2 * 1024 * 1024)
+        // This test exercises cleanup, not asynchronous overflow measurement.
+        // Distinct real keys also exercise the count bound; repeated code blocks
+        // can share one key and never reach that bound.
+        func populateCache() {
+            for index in 0..<80 {
+                cache.record(.init(size: CGSize(width: 320, height: 100), spacing: .init()),
+                             for: .init(revision: AttributedString("Cached block \(index)"),
+                                        environment: TextEnvironmentValues(), width: 320))
+                XCTAssertLessThanOrEqual(cache.retainedExtentCount, 64)
+                XCTAssertLessThanOrEqual(cache.retainedExtentCost, 2 * 1024 * 1024)
+            }
+            XCTAssertGreaterThan(cache.retainedExtentCount, 0)
+        }
+        populateCache()
         cache.snapshot = .init(kind: "prose", ordinal: 0, character: 20, fraction: 0, viewportY: 40)
         let anchor = cache.snapshot
         NotificationCenter.default.post(name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
-        try await waitUntil { cache.retainedExtentCount == 0 }
+        XCTAssertEqual(cache.retainedExtentCount, 0)
+        XCTAssertEqual(cache.retainedExtentCost, 0)
         XCTAssertEqual(cache.snapshot, anchor)
         XCTAssertNotNil(scrollView(window), "Memory pressure must leave the active document readable")
+        populateCache()
         cache.releaseInactiveContent()
         XCTAssertEqual(cache.retainedExtentCount, 0)
         XCTAssertEqual(cache.retainedExtentCost, 0)

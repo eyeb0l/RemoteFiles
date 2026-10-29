@@ -146,6 +146,15 @@ rendering limits and preview assertions remain unchanged. Require full hosted
 acceptance, including HTML/SVG journeys, on the fix and inspect the resulting
 main run rather than treating a successful rerun as a diagnosis.
 
+The first validation of this runner fix also exposed an unrelated setup race in
+`testMemoryWarningAndInactivityReleaseAttributedKeysButRetainAnchor`: it timed
+out waiting for asynchronous highlighting/layout to populate the cache, before
+posting any memory warning. The cleanup test now mounts readable prose and seeds
+distinct real cache entries directly before invoking the production notification
+handler. It refills the cache before checking inactivity cleanup too, so both
+paths must evict nonempty state while retaining the anchor. It does not require
+80 repeated code blocks to finish layout within an eight-second setup wait.
+
 ## WebKit cold-start regression
 
 The first WebKit navigation in the core test host pays WebKit's cold start.
