@@ -26,11 +26,13 @@ Code changes also run two jobs in parallel:
   UIKit host, without building the application or UI-test runner. The original
   `RemoteFiles` scheme remains responsible for app/UI/Release acceptance.
 
-The core lane records source identity and toolchain/device inventory while its
-fresh disposable Simulator is still shut down. It runs `build-for-testing` for
-`generic/platform=iOS Simulator`, boots only that device after the build succeeds,
-then runs the same products with `test-without-building`. A failed build cannot
-fall back to stale cached tests. The source/HEAD/status guard spans both actions;
+The core and UI lanes record source identity and toolchain/device inventory while
+their fresh disposable Simulator is still shut down. Each lane runs
+`build-for-testing` for `generic/platform=iOS Simulator`, boots only that device
+after the build succeeds,
+then runs the same products with `test-without-building`. Build and test execution
+each receive their own 30-minute command deadline, within the existing job ceiling.
+A failed build cannot fall back to stale cached tests. The source/HEAD/status guard spans both actions;
 method inventory, unexpected-skip, duplicate-result and xcresult-count checks are
 unchanged. The OpenSSH fixture still surrounds test execution.
 
@@ -111,6 +113,59 @@ combined `simulator` lane. Repeat `--lane` to select disjoint inventories; the
 combined Simulator lane cannot be mixed with its core/UI subsets. Omit `--lane`
 to retain the complete local acceptance run. Use `--allow-dirty` only when the
 report should identify a working-tree snapshot rather than an exact commit.
+
+## UI lane deadline regression
+
+[PR #36](https://github.com/eyeb0l/RemoteFiles/pull/36) passed only on its second
+UI attempt. Its tested source tree, toolchain and lane selection matched
+[main run 40606036577](https://github.com/eyeb0l/RemoteFiles/actions/runs/40606036577),
+which failed twice. This was not a merge-only source or scope change.
+
+The UI lane previously ran `xcodebuild test`, sharing one 30-minute command
+budget between compilation, test-host startup and all UI journeys. The passing
+PR attempt needed 281 seconds before the first XCTest and 1,274 seconds for its
+23 UI methods. Main took 761 and 637 seconds before the first XCTest; the runner
+interrupted both attempts with methods still missing. The second main attempt
+had passed every completed method before that interruption. A rerun could pass
+or fail depending on preparation time without fixing the underlying budget.
+
+The UI lane now follows the core lane's build-before-boot sequence and separates
+build and execution deadlines. It retains the complete UI inventory, nine explicit
+real-server skips, per-method deadlines, failure checks and 45-minute job ceiling.
+A failed build never boots the simulator or executes cached products. Separate
+`simulator-ui-build.log` and `simulator-ui.log` files and summary rows expose where
+time was spent. There are no automatic retries.
+
+Main's first attempt also hit the production HTML preview deadline. Its app log
+recorded GPU and WebContent launches taking 13.25 and 13.62 seconds, consuming
+most of the 15-second rendering allowance. The runners had three logical CPUs
+and 7 GiB RAM; preparation load averages were in the hundreds after simulator
+boot. Deferring boot removes overlap with compilation; this is a contention
+mitigation, not proof of which background process caused the load. Production
+rendering limits and preview assertions remain unchanged. Require full hosted
+acceptance, including HTML/SVG journeys, on the fix and inspect the resulting
+main run rather than treating a successful rerun as a diagnosis.
+
+The first validation of this runner fix also exposed an unrelated setup race in
+`testMemoryWarningAndInactivityReleaseAttributedKeysButRetainAnchor`: it timed
+out waiting for asynchronous highlighting/layout to populate the cache, before
+posting any memory warning. The cleanup test now mounts readable prose and seeds
+distinct real cache entries directly before invoking the production notification
+handler. It refills the cache before checking inactivity cleanup too, so both
+paths must evict nonempty state while retaining the anchor. It does not require
+80 repeated code blocks to finish layout within an eight-second setup wait.
+
+The next hosted run completed UI compilation in 153 seconds and executed the
+UI lane within its independent deadline; HTML, SVG, core, VoiceOver and Release
+checks passed. One offline-reader journey still exceeded its three-minute
+method allowance: app-wide link queries traversed the underlying library and
+hit an XCTest remote-query timeout. Document-link queries now stay within the
+reader scroll view, retaining the same visibility, navigation and position
+assertions. Background checks accept both running and suspended background
+states, while still rejecting a terminated or foreground app. No deadlines were
+extended. The runner prints structured xcresult failures as well as log assertions,
+so an interrupted test reports its primary timeout even if no completed-result
+line was emitted and a later assertion failed during cancellation.
 
 ## WebKit cold-start regression
 

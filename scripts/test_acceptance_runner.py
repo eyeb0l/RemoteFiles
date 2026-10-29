@@ -60,6 +60,25 @@ class AcceptanceRunnerTests(unittest.TestCase):
 
 
 class LogResultTests(unittest.TestCase):
+    def test_xcresult_timeout_is_reported_when_the_log_has_no_completed_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "test.log"
+            log.write_text("Test Case '-[ExampleTests testHung]' started.\n")
+            run = acceptance.Run(root, root, {"commit": "fixture", "mode": "test", "source_tree_sha256": "fixture"})
+            lane = {"name": "fixture", "status": "failed", "errors": [], "log": str(log)}
+            run.lanes.append(lane)
+            def export(command, stdout, **kwargs):
+                summary = {"passedTests": 0, "failedTests": 1, "skippedTests": 0, "expectedFailures": 0,
+                           "testFailures": [{"testIdentifierString": "ExampleTests/testHung()",
+                                             "failureText": "Test exceeded execution time allowance of 3 minutes"}]}
+                json.dump(summary if "summary" in command else {}, stdout)
+            with patch.object(acceptance.subprocess, "run", side_effect=export), contextlib.redirect_stdout(io.StringIO()) as console:
+                run.tests(lane, {"ExampleTests/testHung"}, xcresult=root / "fixture.xcresult")
+            self.assertEqual(lane["status"], "failed")
+            self.assertIn("Missing results: ExampleTests/testHung", console.getvalue())
+            self.assertIn("ExampleTests/testHung(): Test exceeded execution time allowance of 3 minutes", console.getvalue())
+
     def test_interleaved_system_diagnostics_do_not_hide_completed_results(self):
         for outcome in ("passed", "failed", "skipped"):
             with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:
@@ -228,7 +247,7 @@ class LaneSelectionTests(unittest.TestCase):
         self.assertIn("IdentityTests/testDeviceKeychainPersistenceAndAccessibility", expected)
         self.assertFalse(any(name.startswith(("RealServerUITests/", "RemoteFilesUITests/")) for name in expected))
 
-    def test_failed_core_build_never_boots_or_runs_cached_tests(self):
+    def check_failed_build_never_boots_or_runs_cached_tests(self, lane):
         class FailedBuild:
             root = Path(__file__).resolve().parents[1]
             output = Path("/tmp/unused-evidence")
@@ -240,11 +259,16 @@ class LaneSelectionTests(unittest.TestCase):
                 raise AssertionError("Failed builds cannot validate stale test products")
         run = FailedBuild(); run.commands = []
         with patch.object(acceptance, "boot_selected_simulator") as boot:
-            acceptance.execute_lanes(run, ["simulator-core"], Path("packages"), Path("scratch"), Path("derived"), "sim", True)
+            acceptance.execute_lanes(run, [lane], Path("packages"), Path("scratch"), Path("derived"), "sim", True)
             boot.assert_not_called()
-        self.assertEqual(run.commands, ["simulator-core-build"])
+        self.assertEqual(run.commands, [lane + "-build"])
 
-    def test_core_boot_follows_build_and_precedes_same_inventory_execution(self):
+    def test_failed_build_never_boots_or_runs_cached_tests(self):
+        for lane in ("simulator-core", "simulator-ui"):
+            with self.subTest(lane=lane):
+                self.check_failed_build_never_boots_or_runs_cached_tests(lane)
+
+    def check_boot_follows_build_and_precedes_same_inventory_execution(self, lane, directory):
         events = []
         class OrderedRun:
             root = Path(__file__).resolve().parents[1]
@@ -257,13 +281,29 @@ class LaneSelectionTests(unittest.TestCase):
                 self.expected = expected
         run = OrderedRun()
         with patch.object(acceptance, "boot_selected_simulator", side_effect=lambda *args: events.append("boot")):
-            acceptance.execute_lanes(run, ["simulator-core"], Path("packages"), Path("scratch"), Path("derived"), "sim", True)
-        self.assertEqual(events, ["simulator-core-build", "boot", "simulator-core"])
-        self.assertEqual(run.expected, acceptance.expected_tests(run.root, "iOS", ["Tests/RemoteFilesCoreTests"]))
+            acceptance.execute_lanes(run, [lane], Path("packages"), Path("scratch"), Path("derived"), "sim", True)
+        self.assertEqual(events, [lane + "-build", "boot", lane])
+        self.assertEqual(run.expected, acceptance.expected_tests(run.root, "iOS", [directory]))
+
+    def test_boot_follows_build_and_precedes_same_inventory_execution(self):
+        for lane, directory in (("simulator-core", "Tests/RemoteFilesCoreTests"),
+                                ("simulator-ui", "Tests/RemoteFilesUITests")):
+            with self.subTest(lane=lane):
+                self.check_boot_follows_build_and_precedes_same_inventory_execution(lane, directory)
 
     def test_ui_acceptance_does_not_repeat_the_core_tests(self):
         run = self.run_lane("simulator-ui")
-        self.assertIn("-only-testing:RemoteFilesUITests", run.commands[0][1])
+        self.assertEqual(len(run.commands), 2, "Build and test need independent command deadlines")
+        build, execution = run.commands[0][1], run.commands[1][1]
+        self.assertEqual(build[build.index("-scheme") + 1], "RemoteFiles")
+        self.assertIn("generic/platform=iOS Simulator", build)
+        self.assertEqual(build[-1], "build-for-testing")
+        self.assertEqual(execution[-1], "test-without-building")
+        self.assertIn("-only-testing:RemoteFilesUITests", build)
+        self.assertIn("-only-testing:RemoteFilesUITests", execution)
+        self.assertEqual(build[build.index("-derivedDataPath") + 1],
+                         execution[execution.index("-derivedDataPath") + 1])
+        self.assertEqual(execution[0], "scripts/test-openssh.sh")
         self.assertTrue(any(name.startswith("RealServerUITests/") for name in run.inventories[0]))
         self.assertFalse(any(name.startswith("IdentityTests/") for name in run.inventories[0]))
 

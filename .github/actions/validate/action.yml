@@ -42,7 +42,7 @@ runs:
           com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro \
           com.apple.CoreSimulator.SimRuntime.iOS-27-0)
         echo "udid=$simulator" >> "$GITHUB_OUTPUT"
-        if [[ "$LANE" != simulator-core ]]; then
+        if [[ "$LANE" != simulator-core && "$LANE" != simulator-ui ]]; then
           xcrun simctl boot "$simulator"
           xcrun simctl bootstatus "$simulator" -b
         fi
@@ -54,7 +54,7 @@ runs:
       run: |
         simulator_options=()
         if [[ -n "$SIMULATOR_UDID" ]]; then simulator_options=(--simulator "$SIMULATOR_UDID"); fi
-        if [[ "$LANE" == simulator-core ]]; then simulator_options+=(--boot-simulator); fi
+        if [[ "$LANE" == simulator-core || "$LANE" == simulator-ui ]]; then simulator_options+=(--boot-simulator); fi
         export REMOTEFILES_RUNNER_LAUNCHED_AT=$(date +%s)
         python3 -B scripts/test-acceptance.py --use-checkout --lane "$LANE" "${simulator_options[@]}" \
           --output "$EVIDENCE" --source-packages "$CI_CACHE/SourcePackages" \

@@ -38,7 +38,7 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Share Original"].exists)
         attachScreenshot("Saved folder nested Markdown reader")
         XCUIDevice.shared.press(.home)
-        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5)); app.activate()
+        waitForBackground(app); app.activate()
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
         app.terminate(); app.launch()
         XCTAssertTrue(library.waitForExistence(timeout: 15)); library.tap()
@@ -61,8 +61,8 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(details.waitForExistence(timeout: 10) && details.isHittable)
         attachScreenshot("Offline document link to a saved heading")
         app.navigationBars.buttons["Linked notes.md"].tap()
-        XCTAssertTrue(documentLink("Open heading details", in: app).waitForExistence(timeout: 10))
-        XCTAssertTrue(documentLink("Open heading details", in: app).isHittable, "Back restores the saved reader position")
+        XCTAssertTrue(documentLink("Open heading details", in: scroll).waitForExistence(timeout: 10))
+        XCTAssertTrue(documentLink("Open heading details", in: scroll).isHittable, "Back restores the saved reader position")
         for (label, explanation) in [("Missing note", "isn’t saved here"), ("Open parent guide", "leaves the saved folder")] {
             try revealDocumentLink(label, in: app, scroll: scroll).tap()
             let alert = app.alerts["Couldn’t open link"]
@@ -116,7 +116,7 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(missing.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "isn’t saved here")).firstMatch.exists)
         missing.buttons["OK"].tap()
         XCUIDevice.shared.press(.home)
-        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
+        waitForBackground(app)
         app.activate()
         XCTAssertTrue(app.staticTexts["offline-copy-date"].waitForExistence(timeout: 10), "Return to the same offline reader")
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15), "Reopen protected local bytes on activation")
@@ -550,7 +550,7 @@ final class RemoteFilesUITests: XCTestCase {
         attachScreenshot("Syntax highlighted Markdown source")
         let originalSource = highlighted.value as? String
         XCUIDevice.shared.press(.home)
-        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
+        waitForBackground(app)
         app.activate()
         XCTAssertTrue(highlighted.waitForExistence(timeout: 15))
         XCTAssertEqual(highlighted.value as? String, originalSource, "Foreground re-prepares the original source after releasing inactive parsed content")
@@ -766,7 +766,7 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
         XCTAssertTrue(app.navigationBars["Navigation guide.md"].waitForExistence(timeout: 5))
-        let restored = documentLink("Open nested note", in: app)
+        let restored = documentLink("Open nested note", in: rendered)
         XCTAssertTrue(restored.waitForExistence(timeout: 5) && restored.isHittable,
                       "Back should return to the selected link without scrolling from the top")
         XCTAssertEqual(restored.frame.minY, before.minY, accuracy: 4,
@@ -805,7 +805,7 @@ final class RemoteFilesUITests: XCTestCase {
                           "The link error should explain how to recover: \(label)")
             alert.buttons["OK"].tap()
             XCTAssertTrue(app.navigationBars["Navigation guide.md"].exists)
-            XCTAssertTrue(documentLink(label, in: app).isHittable,
+            XCTAssertTrue(documentLink(label, in: scroll).isHittable,
                           "Dismissing the error should retain the current document and reading position")
         }
         attachScreenshot("Relative document errors retain reader")
@@ -895,27 +895,38 @@ final class RemoteFilesUITests: XCTestCase {
         return row
     }
 
-    private func documentLink(_ label: String, in app: XCUIApplication) -> XCUIElement {
-        let link = app.links[label].firstMatch
+    private func documentLink(_ label: String, in reader: XCUIElement) -> XCUIElement {
+        // Offline readers are presented above the library. App-wide queries also
+        // traverse that underlying hierarchy and can exhaust XCTest's query timeout.
+        let link = reader.links[label].firstMatch
         if link.exists { return link }
         // Native attributed Text may expose a single-link paragraph as static text.
-        return app.staticTexts[label].firstMatch
+        return reader.staticTexts[label].firstMatch
     }
 
     private func revealDocumentLink(_ label: String, in app: XCUIApplication,
                                     scroll: XCUIElement) throws -> XCUIElement {
         XCTAssertTrue(scroll.waitForExistence(timeout: 10))
         for _ in 0..<24 {
-            let link = documentLink(label, in: app)
+            let link = documentLink(label, in: scroll)
             // XCTest can report links under the Home indicator as hittable.
             // Tap only after the whole link lies within the reading viewport.
             let safeViewport = scroll.frame.insetBy(dx: 0, dy: 44)
             if link.exists && link.isHittable && safeViewport.contains(link.frame) { return link }
             scroll.swipeUp(velocity: .fast)
         }
-        let link = documentLink(label, in: app)
+        let link = documentLink(label, in: scroll)
         XCTAssertTrue(link.exists && link.isHittable, "Could not reach the Demo link: \(label).\n" + app.debugDescription)
         return link
+    }
+
+    private func waitForBackground(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        let background = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let state = app.state
+            return state == .runningBackground || state == .runningBackgroundSuspended
+        }, object: app)
+        XCTAssertEqual(XCTWaiter.wait(for: [background], timeout: 5), .completed,
+                       "Expected a live background app, got \(app.state)", file: file, line: line)
     }
 
     private func waitUntilHittable(_ element: XCUIElement, _ message: String = "", timeout: TimeInterval = 15) {
