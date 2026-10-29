@@ -60,6 +60,25 @@ class AcceptanceRunnerTests(unittest.TestCase):
 
 
 class LogResultTests(unittest.TestCase):
+    def test_xcresult_timeout_is_reported_when_the_log_has_no_completed_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "test.log"
+            log.write_text("Test Case '-[ExampleTests testHung]' started.\n")
+            run = acceptance.Run(root, root, {"commit": "fixture", "mode": "test", "source_tree_sha256": "fixture"})
+            lane = {"name": "fixture", "status": "failed", "errors": [], "log": str(log)}
+            run.lanes.append(lane)
+            def export(command, stdout, **kwargs):
+                summary = {"passedTests": 0, "failedTests": 1, "skippedTests": 0, "expectedFailures": 0,
+                           "testFailures": [{"testIdentifierString": "ExampleTests/testHung()",
+                                             "failureText": "Test exceeded execution time allowance of 3 minutes"}]}
+                json.dump(summary if "summary" in command else {}, stdout)
+            with patch.object(acceptance.subprocess, "run", side_effect=export), contextlib.redirect_stdout(io.StringIO()) as console:
+                run.tests(lane, {"ExampleTests/testHung"}, xcresult=root / "fixture.xcresult")
+            self.assertEqual(lane["status"], "failed")
+            self.assertIn("Missing results: ExampleTests/testHung", console.getvalue())
+            self.assertIn("ExampleTests/testHung(): Test exceeded execution time allowance of 3 minutes", console.getvalue())
+
     def test_interleaved_system_diagnostics_do_not_hide_completed_results(self):
         for outcome in ("passed", "failed", "skipped"):
             with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:

@@ -155,6 +155,18 @@ handler. It refills the cache before checking inactivity cleanup too, so both
 paths must evict nonempty state while retaining the anchor. It does not require
 80 repeated code blocks to finish layout within an eight-second setup wait.
 
+The next hosted run completed UI compilation in 153 seconds and executed the
+UI lane within its independent deadline; HTML, SVG, core, VoiceOver and Release
+checks passed. One offline-reader journey still exceeded its three-minute
+method allowance: app-wide link queries traversed the underlying library and
+hit an XCTest remote-query timeout. Document-link queries now stay within the
+reader scroll view, retaining the same visibility, navigation and position
+assertions. Background checks accept both running and suspended background
+states, while still rejecting a terminated or foreground app. No deadlines were
+extended. The runner prints structured xcresult failures as well as log assertions,
+so an interrupted test reports its primary timeout even if no completed-result
+line was emitted and a later assertion failed during cancellation.
+
 ## WebKit cold-start regression
 
 The first WebKit navigation in the core test host pays WebKit's cold start.

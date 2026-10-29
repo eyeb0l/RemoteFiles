@@ -321,6 +321,11 @@ class Run:
                         subprocess.run(["xcrun", "xcresulttool", "get", "test-results", kind, "--path", str(xcresult)],
                                        stdout=handle, stderr=subprocess.PIPE, check=True)
                 summary = json.loads(summary_path.read_text())
+                # A test timeout can kill its host before a completed-result log
+                # line. Surface the primary xcresult failure, not just the missing
+                # method or a downstream assertion logged during cancellation.
+                for failure in summary.get("testFailures", []):
+                    lane["errors"].append("XCTest " + failure["testIdentifierString"] + ": " + failure["failureText"])
                 actual = (summary["passedTests"], summary["failedTests"], summary["skippedTests"])
                 counted = tuple(lane["counts"].get(key, 0) for key in ("passed", "failed", "skipped"))
                 if actual != counted or summary["expectedFailures"]:
