@@ -170,10 +170,30 @@ public enum SearchDocumentExtractor {
 
     private static func recognize(_ image: CGImage, textLimit: Int,
                                   deadline: ContinuousClock.Instant) async throws -> (value: String, truncated: Bool) {
+        try await withOCRFallback(deadline: deadline) { level in
+            try await recognize(image, textLimit: textLimit, deadline: deadline, level: level)
+        }
+    }
+
+    /// Some virtualized hosts cannot compile Vision's accurate model. The distinct fast
+    /// model gets one attempt inside the original budget, never after cancellation.
+    static func withOCRFallback<T>(deadline: ContinuousClock.Instant,
+                                   recognize: (VNRequestTextRecognitionLevel) async throws -> T) async throws -> T {
+        try check(deadline)
+        do { return try await recognize(.accurate) }
+        catch {
+            if error is CancellationError { throw error }
+            try check(deadline)
+            return try await recognize(.fast)
+        }
+    }
+
+    static func recognize(_ image: CGImage, textLimit: Int, deadline: ContinuousClock.Instant,
+                          level: VNRequestTextRecognitionLevel) async throws -> (value: String, truncated: Bool) {
         try check(deadline)
         guard textLimit > 0 else { return ("", true) }
         let recognition = Recognition()
-        recognition.request.recognitionLevel = .accurate
+        recognition.request.recognitionLevel = level
         recognition.request.usesLanguageCorrection = false
         // Automatic script detection may compile additional language models beyond the search
         // deadline. Recognize up to three supported device languages, with English as fallback.

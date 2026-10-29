@@ -86,7 +86,7 @@ Try **Explore Demo → Projects → Search samples** and search contents for `IN
 
 *Screenshots from a passing signed Release UI test on a physical iPhone 17 Pro running iOS 27.2, using only bundled synthetic samples.*
 
-Both options are off for an ordinary live search. OCR uses up to three supported device-preferred languages, falling back to English when none match. OCR can miss or misread text, especially handwriting, small text, unusual layouts and low-quality scans. Only the first frame of a multi-frame image is searched. Archives, audio and video remain unsupported, and encrypted or invalid PDFs cannot be searched. No document bytes or recognized text are sent to an OCR service.
+Both options are off for an ordinary live search. OCR uses up to three supported device-preferred languages, falling back to English when none match. If Vision's accurate model cannot run, its fast model gets one attempt within the original time budget; cancellation never starts that fallback. The fast model supports fewer languages and can be less accurate. OCR can miss or misread text, especially handwriting, small text, unusual layouts and low-quality scans. Only the first frame of a multi-frame image is searched. Archives, audio and video remain unsupported, and encrypted or invalid PDFs cannot be searched. No document bytes or recognized text are sent to an OCR service.
 
 | iPhone | iPad folder column |
 | --- | --- |

@@ -137,6 +137,47 @@ final class SearchDocumentExtractorTests: XCTestCase {
         catch SearchExtractionError.imageTooLarge { }
     }
 
+    func testFastOCRRecognizesTextWhenAccurateModelCannotRun() async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+        let image = try raster("SEARCHABLE INVOICE")
+        var calls = 0
+        let text = try await SearchDocumentExtractor.withOCRFallback(deadline: deadline) { level in
+            calls += 1
+            if level == .accurate { throw SearchExtractionError.invalidDocument }
+            return try await SearchDocumentExtractor.recognize(image, textLimit: 262_144, deadline: deadline, level: level)
+        }
+        XCTAssertEqual(calls, 2)
+        XCTAssertTrue(text.value.localizedCaseInsensitiveContains("INVOICE"))
+        XCTAssertFalse(text.truncated)
+    }
+
+    func testOCRFallbackKeepsSuccessCancellationAndTheOriginalDeadline() async throws {
+        var calls = 0
+        let success: String = try await SearchDocumentExtractor.withOCRFallback(deadline: .now.advanced(by: .seconds(30))) { _ in
+            calls += 1; return "recognized"
+        }
+        XCTAssertEqual(success, "recognized"); XCTAssertEqual(calls, 1)
+        calls = 0
+        do {
+            let _: String = try await SearchDocumentExtractor.withOCRFallback(deadline: .now.advanced(by: .seconds(30))) { _ in
+                calls += 1; throw CancellationError()
+            }
+            XCTFail("Cancellation must not start another model")
+        } catch is CancellationError { }
+        XCTAssertEqual(calls, 1)
+        calls = 0
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(250))
+        do {
+            let _: String = try await SearchDocumentExtractor.withOCRFallback(deadline: deadline) { _ in
+                calls += 1
+                try await Task.sleep(until: deadline, clock: .continuous)
+                throw SearchExtractionError.invalidDocument
+            }
+            XCTFail("A model failure must not extend the original deadline")
+        } catch SearchExtractionError.deadlineExceeded { }
+        XCTAssertEqual(calls, 1)
+    }
+
     func testExpiredDeadlineStopsPDFButRetainsAlreadyReadBoundedText() async throws {
         let expired = ContinuousClock.now - .seconds(1)
         do {
