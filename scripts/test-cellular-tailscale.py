@@ -149,6 +149,15 @@ def device_connection(udid):
     raise SystemExit(f'No paired device {udid}. List devices with: xcrun devicectl list devices')
 
 
+def tcp_table():
+    """`netstat` text including TCP rows, or SystemExit if macOS withholds them from this interpreter."""
+    text = run(['netstat', '-anl', '-p', 'tcp']).stdout
+    if not any(line.startswith('tcp') for line in text.splitlines()):
+        # macOS attributes netstat to the launching program; uv and Homebrew Pythons see no TCP rows.
+        raise SystemExit(f'netstat shows no TCP sockets to {sys.executable}. Run this script with /usr/bin/python3.')
+    return text
+
+
 def sampler(udid, cli, peer_key, peer_ips, mac_public_ips, mac_networks, port, interval, samples, errors, stop):
     try:
         sample_until_stopped(udid, cli, peer_key, peer_ips, mac_public_ips, mac_networks, port, interval, samples, stop)
@@ -162,7 +171,7 @@ def sample_until_stopped(udid, cli, peer_key, peer_ips, mac_public_ips, mac_netw
         while True:
             peer = tailscale_json(cli, 'status', '--json')['Peer'][peer_key]
             path, endpoint = classify_path(peer, mac_public_ips, mac_networks)
-            netstat = run(['netstat', '-anl', '-p', 'tcp']).stdout
+            netstat = tcp_table()
             sample = {'time': datetime.datetime.now().isoformat(timespec='milliseconds'), 'path': path,
                       'endpoint': endpoint, 'rx': peer.get('RxBytes', 0), 'tx': peer.get('TxBytes', 0),
                       'ssh_sockets': ssh_sockets(netstat, peer_ips, port),
@@ -222,6 +231,7 @@ def main():
         raise SystemExit(f"{peer['DNSName']} is offline in Tailscale. Open Tailscale on the iPhone.")
     netcheck = tailscale_json(cli, 'netcheck', '--format=json')
     mac_public_ips = {str(endpoint_host(netcheck[k])) for k in ('GlobalV4', 'GlobalV6') if netcheck.get(k)}
+    tcp_table()
     mac_networks = local_networks(run(['ifconfig']).stdout)
     peer_ips = peer['TailscaleIPs']
     ping = run([cli, 'ping', '--c', '10', peer_ips[0]])

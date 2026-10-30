@@ -76,12 +76,14 @@ Tailscale IP. Export the `TEST_RUNNER_REMOTEFILES_REAL_*` variables a test needs
 then run:
 
 ```sh
-python3 -B scripts/test-cellular-tailscale.py --device DEVICE_UDID \
+/usr/bin/python3 -B scripts/test-cellular-tailscale.py --device DEVICE_UDID \
   --output /private/tmp/remotefiles-cellular-NEW_RUN --build
-python3 -B scripts/test-cellular-tailscale.py --device DEVICE_UDID \
+/usr/bin/python3 -B scripts/test-cellular-tailscale.py --device DEVICE_UDID \
   --output /private/tmp/remotefiles-cellular-NEW_RUN --manual
 ```
 
+Use Apple's `/usr/bin/python3`: macOS hides the TCP socket table from netstat when
+uv or Homebrew Python launches it, and the script stops if it cannot see that table.
 The first form defaults to `testSavedConnectionReopensRealProject`; choose another
 method with `--test`, and omit `--build` to reuse `DerivedData-device`. `--manual`
 skips the device test and samples until you press Return, for checks such as
@@ -101,6 +103,24 @@ rather than skipped. A DERP relay route counts as cellular-consistent; it is wea
 evidence than a direct route to a carrier address. Passing establishes the
 cellular/Tailscale path for that run, not an off-site trip, movement between cells
 or a Wi-Fi/cellular handoff.
+
+On 30 October 2026 the physical iPhone 17 Pro (iOS 27.2) passed this check, with
+Wi-Fi off in Settings, 5G connected and the cable attached. The signed Release
+build of the commit adding this record ran `testSavedConnectionReopensRealProject`,
+which passed in 33.2 seconds. It opened **My MacBook** at `100.125.79.6`, browsed
+the real project's `docs` folder and rendered `READER_PERFORMANCE.md`. All 42
+samples showed the iPhone on USB and a Tailscale DERP relay route (`lhr`), never
+a local one. An SSH session from the phone's tailnet address `100.114.108.88` was
+established in 26 samples, and 43,648 WireGuard bytes were exchanged. Because the
+route was relayed, this does not show a direct path to a carrier address. Evidence:
+`/private/tmp/remotefiles-cellular-run3/` (`summary.md`, `samples.jsonl`,
+`sshd.log`, `tests.xcresult`).
+
+Two earlier runs that day didn't count as passes. In the first, the test waited for
+`READER_PERFORMANCE.md` before scrolling to it in the lazy folder list. It now
+scrolls until the row exists. In both runs, netstat started from a uv-installed
+Python showed no TCP sockets, so the phone's SSH session went undetected even
+though `sshd` logged it. The script now refuses to run without the TCP table.
 
 Local evidence:
 
