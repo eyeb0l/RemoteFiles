@@ -4,6 +4,10 @@ inputs:
   lane:
     description: Lane from scripts/test-acceptance.py
     required: true
+  ui-shard:
+    description: Optional simulator-ui shard (1 or 2)
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -12,6 +16,7 @@ runs:
       shell: bash
       env:
         LANE: ${{ inputs.lane }}
+        UI_SHARD: ${{ inputs.ui-shard }}
       run: |
         xcodebuild -version
         swift --version
@@ -21,12 +26,15 @@ runs:
         if [[ "$LANE" == macos-openssh ]]; then family=macos; fi
         echo "prefix=v2-xcode-$toolchain-${{ runner.arch }}-$family" >> "$GITHUB_OUTPUT"
         echo "legacy=xcode-$toolchain-${{ runner.arch }}-$family" >> "$GITHUB_OUTPUT"
+        evidence_name="$LANE"
+        if [[ -n "$UI_SHARD" ]]; then evidence_name+="-shard-$UI_SHARD"; fi
+        echo "evidence-name=$evidence_name" >> "$GITHUB_OUTPUT"
     - name: Restore dependency and build caches
       id: cache
       uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
       with:
         path: ${{ env.CI_CACHE }}
-        key: ${{ steps.build.outputs.prefix }}-${{ hashFiles('**/Package.resolved', '**/Package.swift') }}-${{ hashFiles('App/**', 'Sources/**', 'Tests/**', 'Vendor/**', 'RemoteFiles.xcodeproj/**') }}-${{ inputs.lane }}
+        key: ${{ steps.build.outputs.prefix }}-${{ hashFiles('**/Package.resolved', '**/Package.swift') }}-${{ hashFiles('App/**', 'Sources/**', 'Tests/**', 'Vendor/**', 'RemoteFiles.xcodeproj/**') }}-${{ steps.build.outputs.evidence-name }}
         restore-keys: |
           ${{ steps.build.outputs.prefix }}-${{ hashFiles('**/Package.resolved', '**/Package.swift') }}-${{ hashFiles('App/**', 'Sources/**', 'Tests/**', 'Vendor/**', 'RemoteFiles.xcodeproj/**') }}-
           ${{ steps.build.outputs.prefix }}-${{ hashFiles('**/Package.resolved', '**/Package.swift') }}-
@@ -51,10 +59,12 @@ runs:
       env:
         LANE: ${{ inputs.lane }}
         SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        UI_SHARD: ${{ inputs.ui-shard }}
       run: |
         simulator_options=()
         if [[ -n "$SIMULATOR_UDID" ]]; then simulator_options=(--simulator "$SIMULATOR_UDID"); fi
         if [[ "$LANE" == simulator-core || "$LANE" == simulator-ui ]]; then simulator_options+=(--boot-simulator); fi
+        if [[ -n "$UI_SHARD" ]]; then simulator_options+=(--ui-shard "$UI_SHARD"); fi
         export REMOTEFILES_RUNNER_LAUNCHED_AT=$(date +%s)
         python3 -B scripts/test-acceptance.py --use-checkout --lane "$LANE" "${simulator_options[@]}" \
           --output "$EVIDENCE" --source-packages "$CI_CACHE/SourcePackages" \
@@ -89,7 +99,7 @@ runs:
       if: always()
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
       with:
-        name: validation-${{ inputs.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+        name: validation-${{ steps.build.outputs.evidence-name }}-${{ github.run_id }}-${{ github.run_attempt }}
         retention-days: 7
         if-no-files-found: warn
         path: |
