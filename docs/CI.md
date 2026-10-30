@@ -341,3 +341,27 @@ value to become enabled before building. A focused iOS 27.2 run read its old
 value immediately after the tap; temporary before/after screenshots confirmed
 the switch updated when given time to settle. The enabled-state assertion is
 retained, and the diagnostic screenshots are not part of the final test.
+
+## Post-merge UI follow-up
+
+[Main run 41086051385](https://github.com/eyeb0l/RemoteFiles/actions/runs/41086051385)
+passed core, macOS, VoiceOver and Release validation after PR #43, but exposed two
+other UI checks. The single-file offline journey spent 132 seconds pinning and
+opening its document, then exhausted the method budget during accessibility
+queries before its link, foreground, relaunch and removal checks were complete.
+Link navigation and lifecycle/removal now run independently, each preparing its
+own saved copy. Reader queries use the first matching scroll view and keep
+heading lookups inside it; every original assertion remains covered.
+
+The SVG check counted zero purple pixels even though its retained screen recording
+showed the complete painted fixture during that interval. It now samples the same
+full-screen capture API used for test attachments, and keeps the bitmap buffer
+pinned while CoreGraphics draws into it. The existing 5,000-pixel threshold and
+ten-second paint bound remain unchanged. The rendered screenshot is attached
+before asserting, so any future mismatch retains the exact visible screen.
+
+Focused follow-up validation also caught the generic background predicate timing
+out while its failure message reported the accepted running-background state.
+Background checks now use XCTest's native state wait, then explicitly assert
+running-background or suspended-background. The five-second bound is unchanged;
+a foreground or terminated app still fails.
