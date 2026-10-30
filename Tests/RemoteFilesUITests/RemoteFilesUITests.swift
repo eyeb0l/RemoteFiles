@@ -1215,7 +1215,16 @@ final class RemoteFilesUITests: XCTestCase {
     }
 
     private func waitUntilHittable(_ element: XCUIElement, _ message: String = "", timeout: TimeInterval = 15) {
-        let hittable = expectation(for: NSPredicate(format: "exists == true AND hittable == true"), evaluatedWith: element)
+        // XCTest can expose launch-time elements before their window has geometry.
+        // Asking for hittability at an infinite/empty frame throws instead of waiting.
+        let hittable = expectation(for: NSPredicate { _, _ in
+            guard element.exists else { return false }
+            let frame = element.frame
+            guard frame.origin.x.isFinite, frame.origin.y.isFinite,
+                  frame.width.isFinite, frame.height.isFinite,
+                  frame.width > 0, frame.height > 0 else { return false }
+            return element.isHittable
+        }, evaluatedWith: element)
         hittable.expectationDescription = message.isEmpty ? element.description : message
         wait(for: [hittable], timeout: timeout)
     }

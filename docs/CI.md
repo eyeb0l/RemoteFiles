@@ -365,3 +365,9 @@ out while its failure message reported the accepted running-background state.
 Background checks now use XCTest's native state wait, then explicitly assert
 running-background or suspended-background. The five-second bound is unchanged;
 a foreground or terminated app still fails.
+
+The follow-up PR also caught content-search setup asking XCTest for hittability
+while its entire launch-time accessibility hierarchy still had infinite origins
+and zero sizes. The shared tappability wait now requires finite, positive element
+geometry before evaluating hittability. It still requires an actually hittable
+element within the same timeout; invalid geometry never counts as ready.
