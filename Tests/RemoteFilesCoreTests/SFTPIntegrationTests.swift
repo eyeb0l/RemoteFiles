@@ -554,6 +554,63 @@ final class SFTPIntegrationTests: XCTestCase {
     }
 
     #if os(macOS)
+    func testIndexedExportsKeepBothConnectionAndIndexBoundaries() async throws {
+        let fixture = try Fixture(), stores = try Stores(fixture: fixture)
+        let identity = try await stores.identity.generate(name: "Indexed export boundaries")
+        try fixture.authorize(identity.publicKey)
+        var profile = try await stores.profile(identity: identity)
+        try await stores.trustFixtureHost()
+        let service = CoalescingFileService(base: stores.service())
+        addTeardownBlock { await service.disconnect() }
+        let tree = fixture.files + "/export-index-" + UUID().uuidString, alias = tree + "-alias"
+        let local = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fm = FileManager.default
+        defer {
+            for path in [alias, tree] { try? fm.removeItem(atPath: path) }
+            try? fm.removeItem(at: local)
+        }
+        for folder in ["projects", "private"] {
+            try fm.createDirectory(atPath: tree + "/" + folder, withIntermediateDirectories: true)
+            try Data(folder.utf8).write(to: URL(fileURLWithPath: tree + "/" + folder + "/report.txt"))
+        }
+        try fm.createSymbolicLink(atPath: alias, withDestinationPath: tree + "/projects")
+        profile.startingDirectory = alias
+        let root = try await service.resolveEntry(profile: profile, path: tree).path
+        let outsideRoot = root + "/private"
+        let snapshot = try await RemoteFolderSearch.buildIndex(below: outsideRoot, profile: profile,
+            service: service, includeHidden: false)
+        let listed = try XCTUnwrap(snapshot.documents.first?.entry)
+        let saved = RemoteEntry(name: listed.name, path: listed.path, kind: .file, canonicalRoot: outsideRoot)
+        let exporter = RemoteOriginalExporter(service: service, directory: local.appendingPathComponent("exports"))
+        for entry in [listed, saved] {
+            do {
+                let result = try await exporter.prepare(profile: profile, entry: entry, allowedRoot: profile.startingDirectory)
+                XCTAssertEqual(try Data(contentsOf: result.url), Data("private".utf8))
+                await exporter.release(result.id)
+                XCTFail("Indexing an outside folder must not make its files exportable")
+            } catch OriginalFileExportError.outsideRoot { }
+        }
+        let offline = try OfflineFileStore(directory: local.appendingPathComponent("offline"))
+        do {
+            _ = try await offline.pin(profile: profile, entry: saved, allowedRoot: profile.startingDirectory, service: service)
+            XCTFail("Keep Offline must retain the same connection export boundary")
+        } catch OriginalFileExportError.outsideRoot { }
+        let pins = await offline.snapshot()
+        XCTAssertTrue(pins.isEmpty)
+
+        // An index may cover an ancestor: its in-connection results remain exportable,
+        // even when the configured starting folder itself is a symlink.
+        let ancestor = try await RemoteFolderSearch.buildIndex(below: root, profile: profile,
+            service: service, includeHidden: false)
+        let inside = try XCTUnwrap(ancestor.documents.first { $0.entry.path == root + "/projects/report.txt" }?.entry)
+        let selected = RemoteEntry(name: inside.name, path: inside.path, kind: .file, canonicalRoot: root)
+        let result = try await exporter.prepare(profile: profile, entry: selected, allowedRoot: profile.startingDirectory)
+        XCTAssertEqual(try Data(contentsOf: result.url), Data("projects".utf8))
+        await exporter.release(result.id)
+        let pin = try await offline.pin(profile: profile, entry: selected, allowedRoot: profile.startingDirectory, service: service)
+        XCTAssertEqual(pin.path, selected.path)
+    }
+
     func testSavedSearchResultsRejectRootRedirectsForTextMediaAndExports() async throws {
         let fixture = try Fixture(), stores = try Stores(fixture: fixture)
         let identity = try await stores.identity.generate(name: "Indexed result boundary")

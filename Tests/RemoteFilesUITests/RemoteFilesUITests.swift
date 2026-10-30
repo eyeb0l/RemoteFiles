@@ -597,6 +597,17 @@ final class RemoteFilesUITests: XCTestCase {
         querySavedContents()
         result.tap()
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+        let export = app.buttons["Save Original to Files"]
+        XCTAssertTrue(export.waitForExistence(timeout: 5) && export.isEnabled)
+        export.tap()
+        XCTAssertTrue(app.buttons["Save"].waitForExistence(timeout: 45),
+                      "An indexed result inside the connection boundary must still export.\n" + app.debugDescription)
+        attachScreenshot("Indexed original file native Save to Files picker")
+        cancelOriginalExport(in: app)
+        XCTAssertTrue(app.navigationBars["Quarterly review.md"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].exists)
+        let ready = expectation(for: NSPredicate(format: "exists == true AND enabled == true"), evaluatedWith: export)
+        wait(for: [ready], timeout: 5)
         let back = app.navigationBars.buttons["Reports"]
         XCTAssertTrue(back.waitForExistence(timeout: 5)); back.tap()
         openIndex(); querySavedContents()
@@ -1036,22 +1047,7 @@ final class RemoteFilesUITests: XCTestCase {
             XCTAssertTrue(app.buttons["Save"].waitForExistence(timeout: 45),
                           "The original should prepare and open the system Save to Files picker.\n" + app.debugDescription)
             attachScreenshot("Original file native Save to Files picker")
-            let cancel = app.descendants(matching: .any)
-                .matching(NSPredicate(format: "label == %@", "Cancel")).firstMatch
-            if cancel.exists && cancel.isHittable {
-                cancel.tap()
-            } else {
-                // This Files version retains a hidden Cancel accessibility element.
-                // Dismiss the real native page sheet through its header gesture.
-                let header = app.navigationBars["FullDocumentManagerViewControllerNavigationBar"]
-                XCTAssertTrue(header.waitForExistence(timeout: 5))
-                let start = header.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.25))
-                let end = app.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.8))
-                start.press(forDuration: 0.1, thenDragTo: end)
-            }
-            let gone = expectation(for: NSPredicate(format: "exists == false"),
-                                   evaluatedWith: app.buttons["Save"])
-            wait(for: [gone], timeout: 10)
+            cancelOriginalExport(in: app)
             XCTAssertTrue(app.navigationBars["Example.swift"].waitForExistence(timeout: 5))
             XCTAssertTrue(app.textViews["Bounded source text"].exists)
             let ready = expectation(for: NSPredicate(format: "exists == true AND enabled == true"), evaluatedWith: export)
@@ -1060,6 +1056,25 @@ final class RemoteFilesUITests: XCTestCase {
         app.buttons["Document actions"].tap()
         XCTAssertTrue(app.buttons["Copy Source"].waitForExistence(timeout: 5),
                       "Cancelling export should leave the reader's existing actions usable")
+    }
+
+    private func cancelOriginalExport(in app: XCUIApplication) {
+        let cancel = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Cancel")).firstMatch
+        if cancel.exists && cancel.isHittable {
+            cancel.tap()
+        } else {
+            // This Files version retains a hidden Cancel accessibility element.
+            // Dismiss the real native page sheet through its header gesture.
+            let header = app.navigationBars["FullDocumentManagerViewControllerNavigationBar"]
+            XCTAssertTrue(header.waitForExistence(timeout: 5))
+            let start = header.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.25))
+            let end = app.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.8))
+            start.press(forDuration: 0.1, thenDragTo: end)
+        }
+        let gone = expectation(for: NSPredicate(format: "exists == false"),
+                               evaluatedWith: app.buttons["Save"])
+        wait(for: [gone], timeout: 10)
     }
 
     private func dismissDocumentActions(in app: XCUIApplication) {
