@@ -16,6 +16,101 @@ final class DownloadManagerTests: XCTestCase {
         }
         XCTFail("Timed out waiting for downloads")
     }
+    func testIndexedDownloadsUseSnapshotContractInsteadOfOrdinaryFallback() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let service = IndexedDownloadFixture()
+        let manager = try DownloadManager(service: service, directory: directory)
+        let selected = RemoteEntry(name: "report.bin", path: "/safe/index/report.bin", kind: .file, canonicalRoot: "/safe/index")
+        let id = try manager.enqueue(profile: profile, entry: selected)
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.first?.state, .completed)
+        XCTAssertEqual(try Data(contentsOf: manager.completedURL(id)), Data("snapshot".utf8))
+        let ordinary = await service.ordinaryRequests, roots = await service.snapshotRoots
+        XCTAssertEqual(ordinary, 0, "Indexed entries must never use an ordinary redirect-following download")
+        XCTAssertEqual(roots, ["/safe/index"])
+    }
+
+    func testIndexedDownloadsRejectUnsupportedSnapshotAdapterWithoutOrdinaryFallback() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let service = IndexedDownloadFixture(supportsSnapshots: false)
+        let manager = try DownloadManager(service: service, directory: directory)
+        let id = try manager.enqueue(profile: profile, entry: .init(name: "report.bin", path: "/safe/index/report.bin", kind: .file, canonicalRoot: "/safe/index"))
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.first?.state, .failed)
+        XCTAssertThrowsError(try manager.completedURL(id))
+        let ordinary = await service.ordinaryRequests
+        XCTAssertEqual(ordinary, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(id.uuidString).path))
+    }
+
+    func testIndexedDownloadRootSurvivesQueuedRelaunchFailureAndRetry() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let selected = RemoteEntry(name: "report.bin", path: "/safe/index/report.bin", kind: .file, canonicalRoot: "/safe/index")
+        let manager = try DownloadManager(directory: directory)
+        manager.setForeground(false)
+        let id = try manager.enqueue(profile: profile, entry: selected, service: IndexedDownloadFixture())
+        XCTAssertEqual(manager.items.first?.canonicalRoot, selected.canonicalRoot)
+        let restored = try DownloadManager(directory: directory)
+        XCTAssertEqual(restored.items.first?.state, .interrupted)
+        XCTAssertEqual(restored.items.first?.canonicalRoot, selected.canonicalRoot)
+        let unsupported = IndexedDownloadFixture(supportsSnapshots: false)
+        try restored.retry(id, profile: profile, service: unsupported)
+        try await wait { restored.activeID == nil }
+        XCTAssertEqual(restored.items.first?.state, .failed)
+        XCTAssertEqual(restored.items.first?.canonicalRoot, selected.canonicalRoot)
+        let supported = IndexedDownloadFixture()
+        try restored.retry(id, profile: profile, service: supported)
+        try await wait { restored.activeID == nil }
+        XCTAssertEqual(try Data(contentsOf: restored.completedURL(id)), Data("snapshot".utf8))
+        let roots = await supported.snapshotRoots, ordinary = await supported.ordinaryRequests
+        XCTAssertEqual(roots, ["/safe/index"]); XCTAssertEqual(ordinary, 0)
+        let reopened = try DownloadManager(directory: directory)
+        XCTAssertEqual(reopened.items.first?.canonicalRoot, selected.canonicalRoot)
+        XCTAssertEqual(reopened.items.first?.state, .completed)
+    }
+
+    func testOlderDownloadManifestWithoutCanonicalRootRetainsOrdinaryBehavior() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let service = DownloadFixture(bytes: Data([1]))
+        let manager = try DownloadManager(service: service, directory: directory)
+        manager.setForeground(false)
+        let id = try manager.enqueue(profile: profile, entry: entry())
+        let manifest = directory.appendingPathComponent("downloads.json")
+        var records = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: manifest)) as? [[String: Any]])
+        records[0].removeValue(forKey: "canonicalRoot")
+        try JSONSerialization.data(withJSONObject: records).write(to: manifest)
+        let restored = try DownloadManager(service: service, directory: directory)
+        XCTAssertNil(restored.items.first?.canonicalRoot)
+        try restored.retry(id, profile: profile)
+        try await wait { restored.activeID == nil }
+        XCTAssertEqual(try Data(contentsOf: restored.completedURL(id)), Data([1]))
+    }
+
+    func testManagedAdapterWithoutCanonicalOptInFailsClosed() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let base = IndexedDownloadFixture()
+        let manager = try DownloadManager(service: OrdinaryManagedDownloadFixture(base: base), directory: directory)
+        let id = try manager.enqueue(profile: profile, entry: .init(name: "report.bin", path: "/safe/index/report.bin", kind: .file, canonicalRoot: "/safe/index"))
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.first?.state, .failed)
+        XCTAssertThrowsError(try manager.completedURL(id))
+        let ordinary = await base.ordinaryRequests, roots = await base.snapshotRoots
+        XCTAssertEqual(ordinary, 0)
+        XCTAssertTrue(roots.isEmpty, "An unsupported managed contract must not silently select a different transport contract")
+    }
+
+    func testIndexedDownloadsRetainConnectionBoundaryBeforeSnapshotFallback() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let service = IndexedDownloadFixture()
+        let manager = try DownloadManager(service: service, directory: directory)
+        let id = try manager.enqueue(profile: profile, entry: .init(name: "report.bin", path: "/outside/report.bin", kind: .file, canonicalRoot: "/"))
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.first?.state, .failed)
+        XCTAssertThrowsError(try manager.completedURL(id))
+        let ordinary = await service.ordinaryRequests, roots = await service.snapshotRoots
+        XCTAssertEqual(ordinary, 0); XCTAssertTrue(roots.isEmpty)
+    }
+
     func testProtectionLockRacePreservesBytesReservesQuotaAndFinalizesWithoutNetwork() async throws {
         let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
         let bytes = Data([0, 255, 13])
@@ -341,4 +436,47 @@ private final class DownloadSecrets: IdentitySecretStore, @unchecked Sendable {
     func delete(reference: String) throws {
         lock.lock(); defer { lock.unlock() }; storage.removeValue(forKey: reference)
     }
+}
+
+private actor IndexedDownloadFixture: RemoteFileService {
+    let supportsSnapshots: Bool
+    private(set) var ordinaryRequests = 0
+    private(set) var snapshotRoots: [String] = []
+    init(supportsSnapshots: Bool = true) { self.supportsSnapshots = supportsSnapshots }
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
+        ordinaryRequests += 1
+        try Data("ordinary".utf8).write(to: destination)
+        return .init(name: "report.bin", path: path, kind: .file)
+    }
+    func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL,
+                              limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        snapshotRoots.append(canonicalRoot)
+        guard supportsSnapshots else { throw RemoteFileError.unsupportedFile }
+        try Data("snapshot".utf8).write(to: destination)
+        return .init(name: "report.bin", path: path, kind: .file)
+    }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
+        .init(name: "safe", path: "/safe", kind: .directory)
+    }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
+    func disconnect() {}
+}
+
+/// Implements ordinary managed downloads and ordinary snapshots, but intentionally
+/// does not opt into the managed snapshot requirement's fail-closed default.
+private struct OrdinaryManagedDownloadFixture: RemoteFileService, ManagedRemoteFileDownloading {
+    let base: IndexedDownloadFixture
+    func downloadManagedFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL,
+                             limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        try await base.downloadFile(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination, limit: limit)
+    }
+    func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL,
+                              limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        try await base.downloadSnapshotFile(profile: profile, path: path, canonicalRoot: canonicalRoot, destination: destination, limit: limit, progress: progress)
+    }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { try await base.resolveEntry(profile: profile, path: path) }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
+    func disconnect() async { await base.disconnect() }
 }

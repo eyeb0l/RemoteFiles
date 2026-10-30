@@ -15,6 +15,9 @@ public struct ManagedDownload: Identifiable, Codable, Sendable {
     public let id: UUID
     public let profile: ConnectionProfile
     public let path: String
+    /// A saved index's original canonical boundary, retained across retries and relaunches.
+    /// Missing in older manifests means an ordinary folder-selected download.
+    public let canonicalRoot: String?
     public let filename: String
     public let expectedBytes: UInt64?
     public var state: ManagedDownloadState
@@ -135,7 +138,8 @@ public final class DownloadManager {
         if let bytes = entry.size, bytes > UInt64(fileLimit) { throw OriginalFileExportError.tooLarge(fileLimit) }
         guard let transport = service ?? self.service else { throw DownloadManagerError.unavailable }
         let id = UUID()
-        items.append(.init(id: id, profile: profile, path: entry.path, filename: filename, expectedBytes: entry.size,
+        items.append(.init(id: id, profile: profile, path: entry.path, canonicalRoot: entry.canonicalRoot,
+                           filename: filename, expectedBytes: entry.size,
                            state: .queued, receivedBytes: 0, message: nil))
         contexts[id] = .init(service: transport, onFailure: onFailure)
         stopped = false; publish(); startNext()
@@ -225,7 +229,23 @@ public final class DownloadManager {
                     await self?.updateProgress(progress, id: item.id)
                 }
                 let remote: RemoteEntry
-                if let managed = service as? any ManagedRemoteFileDownloading {
+                if let root = item.canonicalRoot {
+                    // An index can cover an ancestor or an unrelated folder. Its exact
+                    // canonical paths supplement the connection's download boundary.
+                    let connectionRoot = try await service.resolveEntry(profile: item.profile, path: item.profile.startingDirectory)
+                    try Task.checkCancellation()
+                    guard connectionRoot.kind == .directory,
+                          RemoteResourcePath.contains(item.path, in: connectionRoot.path) else {
+                        throw OriginalFileExportError.outsideRoot
+                    }
+                    if let managed = service as? any ManagedRemoteFileDownloading {
+                        remote = try await managed.downloadManagedSnapshotFile(profile: item.profile, path: item.path,
+                            canonicalRoot: root, destination: target, limit: limit, progress: progress)
+                    } else {
+                        remote = try await service.downloadSnapshotFile(profile: item.profile, path: item.path,
+                            canonicalRoot: root, destination: target, limit: limit, progress: progress)
+                    }
+                } else if let managed = service as? any ManagedRemoteFileDownloading {
                     remote = try await managed.downloadManagedFile(profile: item.profile, path: item.path,
                         allowedRoot: item.profile.startingDirectory, destination: target, limit: limit, progress: progress)
                 } else {

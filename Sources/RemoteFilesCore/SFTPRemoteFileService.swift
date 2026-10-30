@@ -348,6 +348,11 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching, Re
         try await download(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination,
                            limit: limit, progress: progress, canonicalPaths: false, managed: true)
     }
+    public func downloadManagedSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String,
+                                            destination: URL, limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        try await download(profile: profile, path: path, allowedRoot: canonicalRoot, destination: destination,
+                           limit: limit, progress: progress, canonicalPaths: true, managed: true)
+    }
     private func download(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL,
                           limit: Int, progress: @escaping DownloadProgressHandler, canonicalPaths: Bool,
                           managed: Bool = false) async throws -> RemoteEntry {

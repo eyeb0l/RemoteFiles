@@ -5,6 +5,17 @@ import Foundation
 public protocol ManagedRemoteFileDownloading: Sendable {
     func downloadManagedFile(profile: ConnectionProfile, path: String, allowedRoot: String,
                              destination: URL, limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry
+    /// Saved index roots and paths must remain exact canonical names. Adapters opt in
+    /// separately; supporting ordinary managed transfers does not satisfy this contract.
+    func downloadManagedSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String,
+                                     destination: URL, limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry
+}
+
+public extension ManagedRemoteFileDownloading {
+    func downloadManagedSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String,
+                                     destination: URL, limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        throw RemoteFileError.unsupportedFile
+    }
 }
 
 struct TransferActivity: Sendable {
