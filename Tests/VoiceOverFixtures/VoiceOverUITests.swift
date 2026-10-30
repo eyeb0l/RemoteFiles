@@ -173,12 +173,11 @@ import XCTest
         continueAfterFailure = true
         let app = XCUIApplication(); app.launchArguments = ["--voiceover-image-fixture"]
         try withVoiceOver {
-            // Establish initial focus through the launch transition, rather than
-            // enabling VoiceOver on an idle fixture with no current utterance.
+            // Keep VoiceOver enabled through launch, then explicitly focus the
+            // asynchronously loaded image before querying speech, as for JSON/SVG.
             app.launch()
             XCTAssertTrue(app.buttons["Open image diagram.png"].waitForExistence(timeout: 10))
-            try focus("Open image diagram.png", name: "inline")
-            app.buttons["Open image diagram.png"].doubleTap()
+            try open(app.buttons["Open image diagram.png"], app)
             XCTAssertTrue(app.buttons["Tap to retry"].waitForExistence(timeout: 10))
             XCTAssertFalse(app.buttons["Share"].isEnabled)
             let errors = try speech("IMAGE ERROR", limit: 15)
@@ -206,6 +205,7 @@ import XCTest
             capture("VoiceOver share sheet", app)
             try focus("Close", name: "close-share", limit: 20, backward: true)
             app.buttons["Close"].doubleTap()
+            XCTAssertTrue(app.buttons["Close"].waitForNonExistence(timeout: 10))
             try focus("Done Button", name: "done-image", limit: 20, backward: true)
             app.buttons["Done"].doubleTap()
             XCTAssertTrue(app.buttons["Open image diagram.png"].waitForExistence(timeout: 5))

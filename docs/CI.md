@@ -251,9 +251,13 @@ output directory alone does not reset that simulator state. Diagnose these failu
 rerunning the affected methods on a fresh device; retain both the original failure and rerun evidence.
 
 The demo reader and image-viewer speech journeys launch their fixture with VoiceOver
-already enabled so the initial screen change establishes focus. Enabling it after the
-screen has settled can leave the first `currentSpeech()` call with `No speech available`.
-Retain the speech and traversal assertions when diagnosing this setup failure.
+already enabled. Enabling it after the screen has settled can leave the first
+`currentSpeech()` call with `No speech available`. Launch alone also does not guarantee
+focus on an asynchronously loaded image: the image journey uses the same tap, speech
+verification and double-tap helper as JSON/SVG navigation. After closing the system
+share sheet it waits for Close to disappear before starting the existing backward
+traversal to Done. The final automatic focus return to the invoking image is still
+asserted. Retain the speech and traversal assertions when diagnosing these setup failures.
 
 The VoiceOver launcher supports macOS’s stock Bash when optional package or
 compiler-cache settings are absent. Launcher regressions also check that argument
