@@ -1300,7 +1300,9 @@ extension RealServerUITests {
         else { app.tap() }
         docs.tap()
         let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "READER_PERFORMANCE.md,")).firstMatch
-        XCTAssertTrue(report.waitForExistence(timeout: 10))
+        // The lazy folder list only creates rows near the screen; scroll until the report row exists.
+        for _ in 0..<10 where !report.waitForExistence(timeout: 2) { app.swipeUp() }
+        XCTAssertTrue(report.exists, app.debugDescription)
         if !report.isHittable { app.swipeUp() }
         report.tap()
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 10))
