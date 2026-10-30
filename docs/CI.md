@@ -298,3 +298,22 @@ checkout, along with their package and source references. The project-preparatio
 regression executes all four fixture launchers' preparation code and verifies both
 app configurations still resolve the original plist, including checkout paths
 with spaces. Test hosts retain their generated plists.
+
+## UI journey method deadlines
+
+[Main run 41046564410](https://github.com/eyeb0l/RemoteFiles/actions/runs/41046564410)
+failed UI shard 1 while all other lanes passed. Its second attempt reached the
+heading journey's final screenshot at 179 seconds, then exceeded the 180-second
+method allowance during teardown. The saved-index journey was still progressing
+through its final deletion/reopen assertions at that deadline; the native Files
+picker alone had taken about 30 seconds. Neither failure was an assertion about
+production behavior.
+
+Find plus same-document heading navigation and outline plus linked-document
+heading navigation now run as independent methods. Outline queries and swipes
+stay within its collection view. Saved-index persistence/deletion and exporting
+an original from a reopened index also run separately; each builds and reopens
+its own synthetic snapshot. All original assertions remain covered. The complete
+method inventory is still distributed across both UI shards, with unchanged
+180/240-second method, 30-minute command and 45-minute job limits. No skip or
+retry was added.
