@@ -91,6 +91,12 @@ interrupting the network during a refresh. Record the screen with QuickTime
 (New Movie Recording, iPhone as the camera) because iPhone Mirroring needs the
 phone's Wi-Fi. If several iOS devices are online in the tailnet, pass `--peer`.
 
+Add `--require-direct` to fail unless every sample taken during the phone's SSH
+session uses a direct route to a public address, not a DERP relay. If the route
+stays relayed, first run `tailscale ping` from the Mac to another peer and read
+the `tailscale status` health warnings. A relay to every peer means the Mac is the
+cause, not the carrier.
+
 The script stops before testing if Xcode reaches the phone over the local network
 or Tailscale routes to it through a private address, an address inside one of
 the Mac's interface networks (such as a shared global IPv6 prefix) or the Mac's
@@ -121,6 +127,16 @@ Two earlier runs that day didn't count as passes. In the first, the test waited 
 scrolls until the row exists. In both runs, netstat started from a uv-installed
 Python showed no TCP sockets, so the phone's SSH session went undetected even
 though `sshd` logged it. The script now refuses to run without the TCP table.
+
+Later that day `--require-direct` first failed because of the Mac. Its Tailscale
+reported "The MagicSock function ReceiveIPv4 is not running", and it reached every
+peer through DERP. After Tailscale restarted (updating to 1.105.140), that warning
+cleared. The same test then passed in 33.4 seconds with every check, including
+`direct_route`. All 40 samples used one direct WireGuard route to an O2 UK carrier
+address, different from the Mac's public address. The phone's SSH session appeared
+in 25 samples, and 42,320 WireGuard bytes were exchanged. `tailscale ping` round
+trips were about 80–150 ms direct and 75–170 ms relayed. Those are a few samples,
+not a latency benchmark. Evidence: `/private/tmp/remotefiles-cellular-direct1/`.
 
 Local evidence:
 

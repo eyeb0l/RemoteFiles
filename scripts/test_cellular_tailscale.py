@@ -13,7 +13,8 @@ PHONE = {'HostName': 'localhost', 'DNSName': 'iris-iphone.example.ts.net.', 'OS'
 
 
 def sample(path='direct-public', rx=0, tx=0, sockets=(), usb=True):
-    return {'path': path, 'rx': rx, 'tx': tx, 'ssh_sockets': list(sockets), 'usb': usb}
+    endpoint = '8.8.4.4:1086' if path == 'direct-public' else 'DERP lhr'
+    return {'path': path, 'endpoint': endpoint, 'rx': rx, 'tx': tx, 'ssh_sockets': list(sockets), 'usb': usb}
 
 
 class ClassifyPathTests(unittest.TestCase):
@@ -118,6 +119,14 @@ class EvaluateTests(unittest.TestCase):
         for name, (device, samples, outcome, *errors) in cases.items():
             checks = cellular.evaluate(device, samples, outcome, manual=False, sampler_errors=errors[0] if errors else ())
             self.assertEqual([n for n, (ok, _) in checks.items() if not ok], [name.strip()])
+
+    def test_require_direct_checks_only_samples_with_the_ssh_session(self):
+        direct = [sample('relay', rx=1), sample(rx=900, tx=400, sockets=['x'])]
+        checks = cellular.evaluate({'transportType': 'wired'}, direct, 'passed', manual=False, require_direct=True)
+        self.assertTrue(checks['direct_route'][0], checks)
+        relayed = cellular.evaluate({'transportType': 'wired'}, self.good, 'passed', manual=False, require_direct=True)
+        self.assertEqual([n for n, (ok, _) in relayed.items() if not ok], ['direct_route'])
+        self.assertNotIn('direct_route', cellular.evaluate({'transportType': 'wired'}, self.good, 'passed', manual=False))
 
     def test_manual_capture_has_no_device_test_and_no_samples_fail(self):
         self.assertNotIn('device_test_passed', cellular.evaluate({'transportType': 'wired'}, self.good, None, manual=True))

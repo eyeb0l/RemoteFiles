@@ -102,7 +102,7 @@ def test_outcomes(log_text):
     return {name: result for name, result in OUTCOME.findall(log_text)}
 
 
-def evaluate(device, samples, outcome, manual, sampler_errors=()):
+def evaluate(device, samples, outcome, manual, sampler_errors=(), require_direct=False):
     """Return named checks, each `(passed, detail)`."""
     classes = [s['path'] for s in samples]
     bad = sorted({c for c in classes if c in ('lan', 'same-network')})
@@ -122,6 +122,11 @@ def evaluate(device, samples, outcome, manual, sampler_errors=()):
                                       f'{len(socket_samples)} of {len(samples)} samples had SSH sockets from the phone'),
         'tunnel_traffic': (traffic > 0, f'{traffic} WireGuard bytes exchanged with the phone during the run'),
     }
+    if require_direct:
+        relayed = [s for s in socket_samples if s['path'] != 'direct-public']
+        endpoints = sorted({s['endpoint'] for s in socket_samples})
+        checks['direct_route'] = (bool(socket_samples) and not relayed,
+                                  f'{len(relayed)} of {len(socket_samples)} SSH samples not direct; endpoints {endpoints}')
     if not manual:
         checks['device_test_passed'] = (outcome == 'passed', f'device test outcome: {outcome or "no result"}')
     return checks
@@ -212,6 +217,8 @@ def main():
     parser.add_argument('--test', default='testSavedConnectionReopensRealProject', help='RealServerUITests method')
     parser.add_argument('--manual', action='store_true', help='capture while you drive the phone; stop with Return')
     parser.add_argument('--build', action='store_true', help='run build-for-testing first')
+    parser.add_argument('--require-direct', action='store_true',
+                        help='fail unless the SSH session uses a direct route to a public (carrier) address')
     parser.add_argument('--derived-data', type=Path, default=REPO / 'DerivedData-device')
     parser.add_argument('--port', type=int, default=22)
     parser.add_argument('--interval', type=float, default=1.0)
@@ -248,6 +255,9 @@ def main():
     if device.get('transportType') != 'wired' or path in ('lan', 'same-network'):
         raise SystemExit('The iPhone looks reachable on the local network. Turn Wi-Fi off in Settings '
                          '(not Control Center), turn off Personal Hotspot, connect the cable and retry.')
+    if args.require_direct and path != 'direct-public':
+        raise SystemExit('Tailscale has no direct route to the iPhone. Check `tailscale status` health '
+                         'warnings and `tailscale ping` to other peers before blaming the carrier.')
 
     env = dict(os.environ, TEST_RUNNER_REMOTEFILES_REAL_SERVER='1', NSUnbufferedIO='YES')
     if args.build and xcodebuild('build-for-testing', args, env, 'build.log'):
@@ -273,7 +283,7 @@ def main():
         stop.set(); thread.join()
         sshd.terminate(); sshd.wait()
 
-    checks = evaluate(device, samples, outcome, args.manual, sampler_errors)
+    checks = evaluate(device, samples, outcome, args.manual, sampler_errors, args.require_direct)
     passed = all(ok for ok, _ in checks.values())
     summary = {'result': 'pass' if passed else 'fail', 'test': None if args.manual else args.test,
                'checks': {name: {'passed': ok, 'detail': detail} for name, (ok, detail) in checks.items()},
