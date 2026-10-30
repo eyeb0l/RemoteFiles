@@ -12,8 +12,8 @@ PHONE = {'HostName': 'localhost', 'DNSName': 'iris-iphone.example.ts.net.', 'OS'
          'TailscaleIPs': ['100.114.108.88', 'fd7a:115c:a1e0::1938:6c58']}
 
 
-def sample(path='direct-public', rx=0, tx=0, sockets=()):
-    return {'path': path, 'rx': rx, 'tx': tx, 'ssh_sockets': list(sockets)}
+def sample(path='direct-public', rx=0, tx=0, sockets=(), usb=True):
+    return {'path': path, 'rx': rx, 'tx': tx, 'ssh_sockets': list(sockets), 'usb': usb}
 
 
 class ClassifyPathTests(unittest.TestCase):
@@ -86,6 +86,12 @@ class OutputParsingTests(unittest.TestCase):
             '100.114.108.88.51234 -> 100.125.79.6.22',
             'fd7a:115c:a1e0::1938:6c58.51235 -> fd7a:115c:a1e0::1.22'])
 
+    def test_usb_connection_matches_the_udid_serial_number(self):
+        ioreg = '    |   "USB Serial Number" = "00008150000434162182401C"\n    |   "USB Product Name" = "iPhone"'
+        self.assertTrue(cellular.usb_connected(ioreg, '00008150-000434162182401C'))
+        self.assertFalse(cellular.usb_connected(ioreg, '00008150-000434162182401D'))
+        self.assertFalse(cellular.usb_connected('"USB Product Name" = "00008150000434162182401C"', '00008150-000434162182401C'))
+
     def test_outcomes_report_skips_as_skips(self):
         log = ("Test Case '-[RemoteFilesUITests.RealServerUITests testA]' passed (12.0 seconds).\n"
                "Test Case '-[RemoteFilesUITests.RealServerUITests testB]' skipped (0.1 seconds).\n")
@@ -102,6 +108,7 @@ class EvaluateTests(unittest.TestCase):
     def test_each_failure_is_reported(self):
         cases = {
             'device_cabled': ({'transportType': 'localNetwork'}, self.good, 'passed'),
+            'device_cabled ': ({'transportType': 'wired'}, self.good + [sample(rx=999, usb=False)], 'passed'),
             'path_never_local': ({'transportType': 'wired'}, self.good + [sample('lan', 999, 999, ['x'])], 'passed'),
             'ssh_from_phone_tailnet_ip': ({'transportType': 'wired'}, [sample(rx=1), sample(rx=9)], 'passed'),
             'tunnel_traffic': ({'transportType': 'wired'}, [sample(sockets=['x'])] * 2, 'passed'),
@@ -110,7 +117,7 @@ class EvaluateTests(unittest.TestCase):
         }
         for name, (device, samples, outcome, *errors) in cases.items():
             checks = cellular.evaluate(device, samples, outcome, manual=False, sampler_errors=errors[0] if errors else ())
-            self.assertEqual([n for n, (ok, _) in checks.items() if not ok], [name])
+            self.assertEqual([n for n, (ok, _) in checks.items() if not ok], [name.strip()])
 
     def test_manual_capture_has_no_device_test_and_no_samples_fail(self):
         self.assertNotIn('device_test_passed', cellular.evaluate({'transportType': 'wired'}, self.good, None, manual=True))

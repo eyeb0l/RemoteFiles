@@ -92,6 +92,12 @@ def ssh_sockets(netstat_text, peer_ips, port):
     return found
 
 
+def usb_connected(ioreg_text, udid):
+    """Whether IOKit lists a USB device whose serial number is the iPhone's UDID."""
+    serial = udid.replace('-', '').upper()
+    return any(serial in line.upper() for line in ioreg_text.splitlines() if 'Serial Number' in line)
+
+
 def test_outcomes(log_text):
     return {name: result for name, result in OUTCOME.findall(log_text)}
 
@@ -101,13 +107,15 @@ def evaluate(device, samples, outcome, manual, sampler_errors=()):
     classes = [s['path'] for s in samples]
     bad = sorted({c for c in classes if c in ('lan', 'same-network')})
     socket_samples = [s for s in samples if s['ssh_sockets']]
+    unplugged = sum(1 for s in samples if not s['usb'])
     traffic = (samples[-1]['rx'] + samples[-1]['tx']) - (samples[0]['rx'] + samples[0]['tx']) if samples else 0
     checks = {
         'monitoring_complete': (not sampler_errors,
                                 f'sampling stopped early: {sampler_errors[0]}' if sampler_errors
                                 else 'sampled until the end of the session'),
-        'device_cabled': (device.get('transportType') == 'wired',
-                          f"Xcode reaches the iPhone via {device.get('transportType')!r}; 'wired' is required"),
+        'device_cabled': (device.get('transportType') == 'wired' and bool(samples) and not unplugged,
+                          f"Xcode reaches the iPhone via {device.get('transportType')!r}; "
+                          f'{unplugged} of {len(samples)} samples without the iPhone on USB'),
         'path_never_local': (bool(samples) and not bad,
                              f'route classes seen: {sorted(set(classes))}' + (f'; local route {bad} fails' if bad else '')),
         'ssh_from_phone_tailnet_ip': (bool(socket_samples),
@@ -141,15 +149,15 @@ def device_connection(udid):
     raise SystemExit(f'No paired device {udid}. List devices with: xcrun devicectl list devices')
 
 
-def sampler(cli, peer_key, peer_ips, mac_public_ips, mac_networks, port, interval, samples, errors, stop):
+def sampler(udid, cli, peer_key, peer_ips, mac_public_ips, mac_networks, port, interval, samples, errors, stop):
     try:
-        sample_until_stopped(cli, peer_key, peer_ips, mac_public_ips, mac_networks, port, interval, samples, stop)
+        sample_until_stopped(udid, cli, peer_key, peer_ips, mac_public_ips, mac_networks, port, interval, samples, stop)
     except (Exception, SystemExit) as error:
         # A thread's exception never reaches join(), so record it for evaluate().
         errors.append(f'{type(error).__name__}: {error}')
 
 
-def sample_until_stopped(cli, peer_key, peer_ips, mac_public_ips, mac_networks, port, interval, samples, stop):
+def sample_until_stopped(udid, cli, peer_key, peer_ips, mac_public_ips, mac_networks, port, interval, samples, stop):
     with (OUT / 'samples.jsonl').open('w') as log:
         while True:
             peer = tailscale_json(cli, 'status', '--json')['Peer'][peer_key]
@@ -157,7 +165,8 @@ def sample_until_stopped(cli, peer_key, peer_ips, mac_public_ips, mac_networks, 
             netstat = run(['netstat', '-anl', '-p', 'tcp']).stdout
             sample = {'time': datetime.datetime.now().isoformat(timespec='milliseconds'), 'path': path,
                       'endpoint': endpoint, 'rx': peer.get('RxBytes', 0), 'tx': peer.get('TxBytes', 0),
-                      'ssh_sockets': ssh_sockets(netstat, peer_ips, port)}
+                      'ssh_sockets': ssh_sockets(netstat, peer_ips, port),
+                      'usb': usb_connected(run(['ioreg', '-p', 'IOUSB', '-l', '-w0']).stdout, udid)}
             samples.append(sample)
             log.write(json.dumps(sample) + '\n'); log.flush()
             if stop.wait(interval):
@@ -237,7 +246,7 @@ def main():
                             stdout=(OUT / 'sshd.log').open('w'), stderr=subprocess.STDOUT)
     samples, sampler_errors, stop = [], [], threading.Event()
     thread = threading.Thread(target=sampler, daemon=True,
-                              args=(cli, peer['PublicKey'], set(peer_ips), mac_public_ips, mac_networks,
+                              args=(args.device, cli, peer['PublicKey'], set(peer_ips), mac_public_ips, mac_networks,
                                     args.port, args.interval, samples, sampler_errors, stop))
     thread.start()
     outcome = None
