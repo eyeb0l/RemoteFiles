@@ -1,0 +1,2 @@
+# Preserve the hash-verified upstream bundle, including whitespace inside its strings.
+Sources/RemoteFilesCore/Resources/MarkdownRenderer/mermaid.js whitespace=-blank-at-eol

@@ -19,6 +19,7 @@ public struct DocumentContentView: View {
     public let resolver: (any RemoteResourceResolving)?
     @State private var preparedSource: String?
     @State private var preparationFailed = false
+    @State private var enhancedRendering = false
     @State private var deferInitialOverflow = false
 
     public init(text: String, markdown: Bool, source: Bool, filename: String? = nil, location: RemoteDocumentLocation? = nil, resolver: (any RemoteResourceResolving)? = nil, readingPosition: DocumentReadingPosition? = nil, openDocumentLink: ((URL) -> Void)? = nil, wrapLines: Bool = true, navigation: ReaderNavigationState? = nil) {
@@ -40,6 +41,9 @@ public struct DocumentContentView: View {
                 HTMLContentView(text: text, filename: filename, readingPosition: position)
             } else if !source, let filename, DocumentPolicy.kind(filename: filename) == .svg {
                 SVGContentView(text: text, filename: filename)
+            } else if markdown, !source, enhancedRendering {
+                EnhancedMarkdownView(text: text, readingPosition: position, navigation: navigation,
+                                     location: location, resolver: resolver, openDocumentLink: openDocumentLink)
             } else if !markdown || source {
                 SourceCodeView(text: text, language: markdown ? "markdown" : SourceLanguage.forFilename(filename),
                                bounded: true, readingPosition: position, reveal: navigation?.reveal,
@@ -175,7 +179,9 @@ public struct DocumentContentView: View {
             let result: [MarkdownPart]
             if let index = navigation?.index, index.source.utf8.elementsEqual(input.utf8) { result = index.parts }
             else { result = try await MarkdownPreparation.shared.prepare(input) }
+            let requiresEnhanced = await MarkdownPreparation.shared.requiresEnhancedRendering(input)
             guard !Task.isCancelled else { return }
+            enhancedRendering = requiresEnhanced
             prepared = result
             preparedSource = input
             preparationFailed = false
@@ -188,6 +194,9 @@ public struct DocumentContentView: View {
 
 private actor MarkdownPreparation {
     static let shared = MarkdownPreparation()
+    func requiresEnhancedRendering(_ text: String) -> Bool {
+        EnhancedMarkdownPolicy.requiresEnhancedRendering(text)
+    }
     func prepare(_ text: String) throws -> [MarkdownPart] {
         try Task.checkCancellation()
         let result = try DocumentPolicy.remoteMarkdownParts(text)

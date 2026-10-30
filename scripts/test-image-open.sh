@@ -24,6 +24,7 @@ project = output / 'RemoteFiles.xcodeproj'
 shutil.copytree(root / 'RemoteFiles.xcodeproj', project)
 pbx = project / 'project.pbxproj'
 source = pbx.read_text().replace('relativePath = .;', 'relativePath = ' + json.dumps(str(root)) + ';')
+source = source.replace('INFOPLIST_FILE = App/Info.plist;', 'INFOPLIST_FILE = ' + json.dumps(str(root / 'App/Info.plist')) + ';')
 def replace(match):
     relative = match[1].strip('"')
     if not relative.endswith(('.swift', '.icon')):

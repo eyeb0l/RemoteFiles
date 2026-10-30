@@ -37,8 +37,10 @@ For command-line builds, signing and tests, see [build and test](docs/DEVELOPMEN
 ## Using RemoteFiles
 
 - **Find a file:** search names or file contents, with case, whole-word and file-type filters. Enable PDF text or on-device OCR in **Folder actions → Search Options**. Build a **Saved Search Index** to search a persistent local text snapshot without rereading remote files. [Folder browsing](docs/FOLDER_BROWSING.md) explains scopes, index freshness and limits.
-- **Read and preview:** open Markdown, text and source code, images, PDFs, audio, video, or static HTML/SVG. Markdown offers rendered and source views; text readers provide Find and reading-position history. Format support and size limits are in [reader and previews](docs/READER.md).
+- **Read and preview:** open Markdown, text and source code, images, PDFs, audio, video, or static HTML/SVG. Markdown supports Mermaid diagrams, mathematical notation and static embedded HTML, with rendered and source views; text readers provide Find and reading-position history. Format support and size limits are in [reader and previews](docs/READER.md).
 - **Save an original:** use **Save Original to Files** to export a copy without changing the server file. [Original-file export](docs/ORIGINAL_EXPORT.md) covers its limits and lifecycle.
+- **Manage downloads:** queue arbitrary files from a folder, track progress, cancel or retry, and save completed copies through Files. Active SSH downloads can continue using iOS background processing. See [downloads](docs/DOWNLOADS.md) for quotas and interruption behavior.
+- **Manage keys:** export a private key through Files after device authentication, or opt into public-key installation while saving a direct connection. See [SSH keys](docs/KEY_SUPPORT.md).
 - **Read offline:** choose **Keep Offline** for a file or **Keep Folder Offline** for a folder, then open the copy from **Offline Files** in the library. Saved copies are updated only when you request it; they are not automatically synchronized. Folder saves exclude symbolic links and special files, and a failed update retains the previous complete snapshot. See [offline files and folders](docs/OFFLINE_FILES.md) for storage limits and offline preview differences.
 
 ## Documentation

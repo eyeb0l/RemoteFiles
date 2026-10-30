@@ -10,7 +10,7 @@ Select a file in a folder to open its preview. The reader does not edit the serv
 
 | File | Preview and limits |
 | --- | --- |
-| Markdown | UTF-8 text up to 2 MiB, as a rendered document or original source. Tables and code blocks scroll within the document. |
+| Markdown | UTF-8 text up to 2 MiB, as a rendered document or original source, including Mermaid, math and static embedded HTML. Tables and code blocks scroll within the document. |
 | Text, configuration and source code | UTF-8 text up to 2 MiB. Empty, binary and unsupported files get an explanation. |
 | HTML / HTM | UTF-8 text up to 2 MiB, as a static rendered preview or source; scripts and linked resources do not load. See [HTML previews](HTML_PREVIEWS.md). |
 | SVG | A restricted static rendering or source. See [SVG previews](#svg-previews). |
@@ -24,6 +24,14 @@ Images are downsampled for display. Playback stops when you leave the preview or
 
 Markdown images load as needed over SFTP, relative to the document directory. They have bounded caches, retry, zoom and Share controls. Web, file and data image URLs never load; see [remote images](REMOTE_IMAGES.md). Tapping an HTTP or HTTPS document link may open it externally. Relative document links stay within the connection's canonical starting folder; unsafe URL schemes are blocked. See [document links](DOCUMENT_LINKS.md) for the boundary and offline behavior.
 
+## Diagrams, equations and embedded HTML
+
+Markdown containing Mermaid fences, mathematical notation or HTML uses an offline rich preview. Try **Explore Demo → Projects → Rich Markdown.md**. Ordinary Markdown continues to use the native renderer. See [rich Markdown rendering](MARKDOWN_RENDERING.md) for syntax and security details.
+
+Use fenced code with the language `mermaid` for diagrams. Use `$…$` or `\(…\)` for inline math, and `$$…$$` or `\[…\]` for displayed equations. Supported static HTML includes tables, details/summary and inline formatting. Scripts, forms, embedded pages, event handlers, styles and automatic web resources are removed or blocked. Original Source and exports keep every byte unchanged.
+
+Rich previews allow up to 32 diagrams (32 KiB and 250 edges each) and 128 equations (16 KiB each). Mermaid configuration directives and trusted TeX commands are disabled. Unsupported or oversized notation remains readable as literal text. Math uses native MathML; no remote fonts or renderer scripts are fetched. Rich-preview scroll restoration uses coordinates, and code fences remain plain code. Use Source to search literal notation that has become a diagram or equation.
+
 <a id="document-navigation-and-original-export"></a>
 ## Find your place
 
@@ -31,7 +39,7 @@ Markdown images load as needed over SFTP, relative to the document directory. Th
 
 - **Headings and links:** **Headings** lists parsed Markdown headings. You can also follow same-document and relative-file heading links. Repeated headings have suffixes such as `details-1`. Native Back returns to the previous reader. Missing headings and unsupported query links show an explanation and leave the current document open.
 
-- **Reading position:** Text readers remember separate Rendered and Source positions across launches. History contains text locations, block positions, fallback coordinates and a content fingerprint, not document contents, for up to 200 connection/path pairs. Markdown prose, Source and static HTML restore the same text location after width or text-size changes; Markdown images/overflow blocks and HTML visual blocks restore a proportional position within the block. A changed document starts at the top. Older coordinate-only history and positions without an available text/block anchor retain approximate coordinate restoration. HTML uses bounded DOM inspection in an isolated app content world; document scripts and automatic resources stay blocked. Unavailable/hidden locations and HTML beyond the inspection limit retain coordinate fallback. PDF, standalone image and media previews do not save reading history; rendered SVG fits its viewport. Positions save after scrolling pauses and when leaving or backgrounding. Demo does not write reading history.
+- **Reading position:** Text readers remember separate Rendered and Source positions across launches. History contains text locations, block positions, fallback coordinates and a content fingerprint, not document contents, for up to 200 connection/path pairs. Native Markdown prose, Source and static HTML restore the same text location after width or text-size changes; Markdown images/overflow blocks and HTML visual blocks restore a proportional position within the block. A changed document starts at the top. Older coordinate-only history and positions without an available text/block anchor retain approximate coordinate restoration. HTML uses bounded DOM inspection in an isolated app content world; document scripts and automatic resources stay blocked. Unavailable/hidden locations and HTML beyond the inspection limit retain coordinate fallback. Rich Markdown retains coordinate restoration. PDF, standalone image and media previews do not save reading history; rendered SVG fits its viewport. Positions save after scrolling pauses and when leaving or backgrounding. Demo does not write reading history.
 
 Reading anchors use the same caret position when saving and restoring a text
 offset. This keeps Back navigation from shifting the page when the visible anchor
@@ -52,6 +60,8 @@ Source uses a selectable native text viewport for both short and long documents.
 ## Save the original
 
 Choose **Save Original to Files** in the reader toolbar to save a copy through the native Files picker. Preparation streams the original file, up to 128 MiB, preserving its exact bytes and selected filename and extension. You can cancel preparation. Temporary exports expire after ten minutes and are removed on dismissal, navigation away, disconnect or backgrounding. See [original export](ORIGINAL_EXPORT.md) for confinement and lifecycle details.
+
+For a persistent queue of arbitrary originals, use **Download** in a file’s folder context menu and manage it in **Downloads**. See [managed downloads](DOWNLOADS.md).
 
 <a id="offline-copies"></a>
 For an on-device copy available without SFTP, choose **Document actions → Keep Offline**. To save a folder tree, choose **Folder actions → Keep Folder Offline**. Offline copies update only when requested. See [offline files and folders](OFFLINE_FILES.md) for limits, local links and preview differences.

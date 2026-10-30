@@ -21,6 +21,14 @@ struct ConnectionEditor: View {
     @State private var jumpUsername = ""
     @State private var jumpIdentityID: UUID?
     @State private var resetJumpTrust = false
+    @State private var installWhenSaving = false
+    @State private var installation: ConnectionKeySetup?
+
+    private struct ConnectionKeySetup: Identifiable {
+        let profile: ConnectionProfile
+        let identity: IdentityMetadata
+        var id: UUID { profile.id }
+    }
     private var connection: ConnectionProfile? {
         guard let identityID, let targetPort = Int(port) else { return nil }
         let hop: JumpHost?
@@ -55,6 +63,13 @@ struct ConnectionEditor: View {
                     }
                 }
                 NavigationLink("Generate or Import Key", destination: KeyManagerView(model: model))
+                if !useJumpHost {
+                    Toggle("Install Public Key When Saving", isOn: $installWhenSaving)
+                    if installWhenSaving {
+                        Text("Review and confirm installation using the server account’s password. The connection is saved automatically after the key is installed; cancelling leaves it unsaved.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
             }
             Section {
                 TextField("Starting directory (optional)", text: $directory).textInputAutocapitalization(.never).autocorrectionDisabled()
@@ -94,7 +109,9 @@ struct ConnectionEditor: View {
                 if tailscale {
                     Text("Enable Tailscale on both devices and use the server’s MagicDNS name or Tailscale IP. Your tailnet must permit the SSH connection. Tailscale SSH is not required.")
                 }
-                Text("To install a public key using password login, open the identity in SSH Keys and choose Install Public Key on Server. The app does not configure server services. Verify its fingerprint when connecting for the first time.")
+                Text(useJumpHost
+                     ? "Install keys on each server separately using SSH Keys → Install Public Key on Server. Automatic setup requires a directly reachable server."
+                     : "Choose Install Public Key When Saving to set up key login using the account’s password. The server must already allow password login. Verify its fingerprint when connecting for the first time.")
             }.font(.footnote).foregroundStyle(.secondary)
         }
         .navigationTitle(existing == nil ? "Add Connection" : "Edit Connection")
@@ -104,13 +121,21 @@ struct ConnectionEditor: View {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") {
                     guard let value = connection, valid else { return }
-                    saving = true
-                    Task {
-                        await model.saveConnection(value)
-                        saving = false
-                        if model.errorMessage == nil { dismiss() }
+                    if installWhenSaving && !useJumpHost,
+                       let identity = model.metadata.identities.first(where: { $0.id == value.identityID }) {
+                        installation = ConnectionKeySetup(profile: value, identity: identity)
+                    } else {
+                        save(value)
                     }
                 }.disabled(!valid || saving)
+            }
+        }
+        .sheet(item: $installation) { setup in
+            NavigationStack {
+                PublicKeyInstallationView(model: model, identity: setup.identity, connection: setup.profile) {
+                    installation = nil
+                    save(setup.profile)
+                }
             }
         }
         .onAppear {
@@ -145,6 +170,15 @@ struct ConnectionEditor: View {
             if let existing {
                 Text("The next connection to \(existing.host):\(String(existing.port)) will require you to verify the server fingerprint again.")
             }
+        }
+    }
+
+    private func save(_ value: ConnectionProfile) {
+        saving = true
+        Task {
+            await model.saveConnection(value)
+            saving = false
+            if model.errorMessage == nil { dismiss() }
         }
     }
 }

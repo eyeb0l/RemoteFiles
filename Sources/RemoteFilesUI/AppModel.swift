@@ -1,5 +1,6 @@
 #if os(iOS)
 import SwiftUI
+import UIKit
 import RemoteFilesCore
 
 /// Cancels a subscription when its window goes away, without requiring actor-isolated work
@@ -8,6 +9,31 @@ private final class OfflineLibraryObservation {
     let task: Task<Void, Never>
     init(_ task: Task<Void, Never>) { self.task = task }
     deinit { task.cancel() }
+}
+
+/// The registration tracks one window without retaining its model or credentials.
+private final class DownloadSceneRegistration {
+    let id = UUID()
+    let manager: DownloadManager
+    private let protectedDataObserver: NSObjectProtocol
+    init(manager: DownloadManager) {
+        self.manager = manager
+        protectedDataObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil, queue: .main
+        ) { [weak manager] _ in
+            Task { @MainActor in manager?.finalizePendingDownloads() }
+        }
+    }
+    deinit {
+        NotificationCenter.default.removeObserver(protectedDataObserver)
+        let manager = manager, id = id
+        Task { @MainActor in
+            manager.removeScene(id)
+            if !manager.isForeground, !BackgroundDownloadCoordinator.shared(for: manager).canContinue {
+                await manager.interrupt(reason: "The download window closed. Retry to start again.")
+            }
+        }
+    }
 }
 
 @MainActor @Observable
@@ -20,12 +46,13 @@ final class AppModel {
     }
     enum Sheet: Identifiable {
         case offlineFolder(ConnectionProfile, String, Bool)
-        case connection(UUID?), keys, offlineFiles, trust(HostEndpoint, HostKeyDetails), changed(HostEndpoint, HostKeyDetails, HostKeyDetails), unlock(IdentityMetadata)
+        case connection(UUID?), keys, offlineFiles, downloads, trust(HostEndpoint, HostKeyDetails), changed(HostEndpoint, HostKeyDetails, HostKeyDetails), unlock(IdentityMetadata)
         var id: String {
             switch self {
             case .connection: return "connection"
             case .keys: return "keys"
             case .offlineFiles: return "offlineFiles"
+            case .downloads: return "downloads"
             case .offlineFolder: return "offlineFolder"
             case .trust: return "trust"
             case .changed: return "changed"
@@ -49,6 +76,13 @@ final class AppModel {
     /// The real (or injected) transport, restored when leaving Demo.
     private let connectionService: any RemoteFileService
     let resourceDirectory: URL
+    let downloadDirectory: URL
+    private(set) var downloads: DownloadManager?
+    private(set) var downloadError: String?
+    private(set) var backgroundDownloads = BackgroundDownloadCoordinator()
+    private let downloadTransport: any RemoteFileService
+    private let demoDownloadTransport = DemoRemoteFileService()
+    private var downloadSceneRegistration: DownloadSceneRegistration?
     let offlineDirectory: URL
     private(set) var offlineStore: OfflineFileStore?
     private(set) var offlinePins: [OfflinePin] = []
@@ -102,6 +136,7 @@ final class AppModel {
         searchIndexDirectory = directory.appendingPathComponent("SearchIndexes-v1", isDirectory: true)
         self.preferences = preferences
         self.identities = identities
+        downloadDirectory = directory.appendingPathComponent("Downloads-v1", isDirectory: true)
         offlineDirectory = directory.appendingPathComponent("Offline-v1", isDirectory: true)
         resourceDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("RemoteImages-v1")
         metadataStore = try MetadataStore(fileURL: directory.appendingPathComponent("library-v1.json"))
@@ -110,11 +145,52 @@ final class AppModel {
         self.publicKeyInstaller = publicKeyInstaller ?? SSHPublicKeyInstaller(trust: trust)
         connectionService = fileService ?? CoalescingFileService(base: SFTPRemoteFileService(identityStore: identities, trustStore: trust, metadataStore: metadataStore))
         service = connectionService
+        downloadTransport = fileService ?? SFTPRemoteFileService(identityStore: identities, trustStore: trust, metadataStore: metadataStore)
     }
     func load() async {
         metadata = await metadataStore.snapshot()
         await loadOfflineLibrary()
+        loadDownloads()
     }
+    private func loadDownloads() {
+        do {
+            let manager = try DownloadManager.shared(directory: demo ? downloadDirectory.appendingPathComponent("Demo", isDirectory: true) : downloadDirectory)
+            manager.protectedDataAvailable = { UIApplication.shared.isProtectedDataAvailable }
+            let coordinator = BackgroundDownloadCoordinator.shared(for: manager)
+            backgroundDownloads = coordinator
+            manager.didChange = { [weak coordinator, weak manager] in
+                guard let coordinator, let manager else { return }
+                coordinator.update(manager)
+            }
+            if downloadSceneRegistration?.manager !== manager {
+                downloadSceneRegistration = DownloadSceneRegistration(manager: manager)
+            }
+            manager.setForeground(isForeground, sceneID: downloadSceneRegistration?.id)
+            downloads = manager; downloadError = nil
+        } catch { downloads = nil; downloadSceneRegistration = nil; downloadError = error.localizedDescription }
+    }
+    func enqueueDownload(profile: ConnectionProfile, entry: RemoteEntry) {
+        guard isForeground, !isDisconnecting, disconnectWork == nil, let downloads else { return }
+        do {
+            try downloads.enqueue(profile: profile, entry: entry, service: demo ? demoDownloadTransport : downloadTransport,
+                onFailure: { [weak self] error, profile in self?.handleDownloadFailure(error, profile: profile) })
+            sheet = .downloads
+        }
+        catch { errorMessage = error.localizedDescription }
+    }
+    func retryDownload(_ item: ManagedDownload) {
+        guard isForeground, !isDisconnecting, disconnectWork == nil, let profile = profile(item.profile.id) else { return }
+        do {
+            try downloads?.retry(item.id, profile: profile, service: demo ? demoDownloadTransport : downloadTransport,
+                onFailure: { [weak self] error, profile in self?.handleDownloadFailure(error, profile: profile) })
+        }
+        catch { errorMessage = error.localizedDescription }
+    }
+    private func handleDownloadFailure(_ error: Error, profile: ConnectionProfile) {
+        guard isForeground, isSecurityError(error) else { return }
+        handle(error, profile: profile)
+    }
+    func foregroundDownloads() { downloads?.setForeground(true, sceneID: downloadSceneRegistration?.id) }
     private func loadOfflineLibrary() async {
         offlineObservation = nil
         let token = UUID(); offlineLibraryToken = token
@@ -380,9 +456,15 @@ final class AppModel {
         if case RemoteResourceError.outsideDocument = error { return true }
         return false
     }
-    func disconnect() async {
+    func disconnect(preservingDownloads: Bool = false) async {
         if let disconnectWork { await disconnectWork.value; return }
-        let task = Task { await closeSession() }
+        let task = Task {
+            if !preservingDownloads {
+                await downloads?.interrupt(reason: "Transfer interrupted. Retry to download the file again.")
+                backgroundDownloads.finish(success: false)
+            }
+            await closeSession()
+        }
         disconnectWork = task
         await task.value
         disconnectWork = nil
@@ -416,8 +498,9 @@ final class AppModel {
     func background() async {
         // Offline navigation owns no connection or credentials. Keep its stack while the reader
         // releases protected local resources; transient trust/key/edit sheets still disappear.
-        if case .offlineFiles = sheet { } else { sheet = nil }
-        await disconnect()
+        if case .offlineFiles = sheet { } else if case .downloads = sheet { } else { sheet = nil }
+        downloads?.setForeground(false, sceneID: downloadSceneRegistration?.id)
+        await disconnect(preservingDownloads: downloads?.isForeground == true || backgroundDownloads.canContinue)
     }
     /// Breadcrumb navigation: pop back to a folder already in the stack instead of pushing a
     /// duplicate. A route may hold a non-canonical request such as ".", so its cached listing's
@@ -502,6 +585,7 @@ final class AppModel {
         }
         demo = enabled
         await loadOfflineLibrary()
+        loadDownloads()
     }
 }
 

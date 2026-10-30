@@ -25,6 +25,66 @@ private final class MemorySecrets: IdentitySecretStore, @unchecked Sendable {
 }
 
 final class IdentityTests: XCTestCase {
+    #if os(iOS)
+    func testPrivateKeyExportWrapperPreservesRegularFileTypeAndRestrictsPermissions() throws {
+        let bytes = Data("synthetic export fixture".utf8)
+        let wrapper = PrivateKeyDocument(bytes: bytes).makeFileWrapper()
+        XCTAssertTrue(wrapper.isRegularFile)
+        XCTAssertEqual(wrapper.regularFileContents, bytes)
+        XCTAssertEqual(wrapper.fileAttributes[FileAttributeKey.type.rawValue] as? String, FileAttributeType.typeRegular.rawValue)
+        XCTAssertEqual(wrapper.fileAttributes[FileAttributeKey.posixPermissions.rawValue] as? Int, 0o600)
+        XCTAssertEqual(wrapper.fileAttributes[FileAttributeKey.protectionKey.rawValue] as? String, FileProtectionType.complete.rawValue)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let destination = directory.appendingPathComponent("synthetic-key")
+        try wrapper.write(to: destination, options: .atomic, originalContentsURL: nil)
+        XCTAssertEqual(try Data(contentsOf: destination), bytes)
+        let attributes = try FileManager.default.attributesOfItem(atPath: destination.path)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+    }
+    #endif
+    func testGeneratedPrivateExportRoundTripsAndRejectsDifferentIdentity() async throws {
+        let store = IdentityStore(secretStore: MemorySecrets())
+        let identity = try await store.generate(name: "Export fixture")
+        let bytes = try await store.exportOpenSSH(identity)
+        let imported = try await store.importKey(name: "Round trip", openSSH: String(decoding: bytes, as: UTF8.self))
+        XCTAssertEqual(imported.publicKey, identity.publicKey)
+        XCTAssertFalse(imported.requiresPassphrase)
+        let other = try await store.generate(name: "Different fixture")
+        let mismatched = IdentityMetadata(name: identity.name, publicKey: other.publicKey,
+            fingerprint: other.fingerprint, requiresPassphrase: false, keychainReference: identity.keychainReference)
+        do { _ = try await store.exportOpenSSH(mismatched); XCTFail("Mismatched metadata must not export") }
+        catch { XCTAssertEqual(error as? IdentityError, .malformedKey) }
+        try await store.delete(identity, referencedBy: [])
+        do { _ = try await store.exportOpenSSH(identity); XCTFail("Deleted identity must not export") }
+        catch { XCTAssertEqual(error as? IdentityError, .missingSecret) }
+    }
+
+    func testPrivateExportHonoursCancellation() async throws {
+        let store = IdentityStore(secretStore: MemorySecrets())
+        let identity = try await store.generate(name: "Cancelled export")
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await store.exportOpenSSH(identity)
+        }
+        do { _ = try await task.value; XCTFail("Cancelled export must return no bytes") }
+        catch { XCTAssertTrue(error is CancellationError) }
+    }
+
+    func testPrivateExportRejectsCorruptStoredEnvelope() async throws {
+        let secrets = MemorySecrets(), store = IdentityStore(secretStore: MemorySecrets())
+        let identity = try await store.generate(name: "Envelope fixture")
+        let exportStore = IdentityStore(secretStore: secrets)
+        for secret in [Data("not a stored key".utf8),
+                       try JSONSerialization.data(withJSONObject: ["version": 1, "format": "importedOpenSSH",
+                                                                   "bytes": Data("not an OpenSSH key".utf8).base64EncodedString()])] {
+            try secrets.save(secret, reference: identity.keychainReference)
+            do { _ = try await exportStore.exportOpenSSH(identity); XCTFail("Corrupt export must fail") }
+            catch { XCTAssertEqual(error as? IdentityError, .malformedKey) }
+        }
+    }
+
     func testGeneratedKeyHasCanonicalPublicKeyAndSecretFreeMetadata() async throws {
         let secrets = MemorySecrets()
         let store = IdentityStore(secretStore: secrets)
@@ -243,6 +303,50 @@ final class IdentityTests: XCTestCase {
     #endif
 
     #if os(macOS)
+    func testGeneratedPrivateExportIsAcceptedBySystemOpenSSH() async throws {
+        let store = IdentityStore(secretStore: MemorySecrets())
+        let identity = try await store.generate(name: "OpenSSH interoperability")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("key")
+        let bytes = try await store.exportOpenSSH(identity)
+        try bytes.write(to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        let publicKey = try runSSHKeygen(["-y", "-f", file.path]).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(publicKey, identity.publicKey)
+    }
+
+    func testImportedPrivateExportsPreserveOriginalEncryptionForEveryAlgorithm() async throws {
+        for (type, options) in [("ed25519", [String]()), ("rsa", ["-b", "2048"]),
+                                ("ecdsa", ["-b", "256"]), ("ecdsa", ["-b", "384"]), ("ecdsa", ["-b", "521"])] {
+            for passphrase in ["", "export-fixture-password"] {
+                try await withGeneratedKey(passphrase: passphrase, type: type, options: options + ["-a", "4"]) { text, _, _ in
+                    let store = IdentityStore(secretStore: MemorySecrets())
+                    let identity = try await store.importKey(name: "Export fixture", openSSH: text, passphrase: passphrase)
+                    await store.clearSession()
+                    let exported = try await store.exportOpenSSH(identity)
+                    XCTAssertTrue(exported == Data(text.utf8), "Export must preserve original bytes, including encryption")
+                    let other = try await store.generate(name: "Different identity")
+                    let wrongIdentity = IdentityMetadata(name: identity.name, algorithm: identity.algorithm,
+                        publicKey: other.publicKey, fingerprint: other.fingerprint,
+                        requiresPassphrase: identity.requiresPassphrase, keychainReference: identity.keychainReference)
+                    do { _ = try await store.exportOpenSSH(wrongIdentity); XCTFail("The imported original must match the identity") }
+                    catch { XCTAssertEqual(error as? IdentityError, .malformedKey) }
+                    if !passphrase.isEmpty {
+                        do { _ = try await store.unlock(identity); XCTFail("Export must not unlock the encrypted identity") }
+                        catch { XCTAssertEqual(error as? IdentityError, .missingPassphrase) }
+                    }
+                    let mismatched = IdentityMetadata(name: identity.name, algorithm: identity.algorithm,
+                        publicKey: identity.publicKey, fingerprint: identity.fingerprint,
+                        requiresPassphrase: !identity.requiresPassphrase, keychainReference: identity.keychainReference)
+                    do { _ = try await store.exportOpenSSH(mismatched); XCTFail("Export protection must match metadata") }
+                    catch { XCTAssertEqual(error as? IdentityError, .malformedKey) }
+                }
+            }
+        }
+    }
+
     /// Independent system ssh-keygen produces every private fixture at runtime; none is checked in.
     func testSystemSSHKeygenImportMatrixAndSessionClearing() async throws {
         try await withGeneratedKey(passphrase: "") { text, publicKey, fingerprint in

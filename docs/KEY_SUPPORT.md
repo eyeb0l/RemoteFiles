@@ -33,9 +33,21 @@ Choose **Settings → SSH Keys → Import Key**, then choose a file or use the n
 
 ## Secret lifecycle
 
-Only non-secret identity metadata (ID, name, algorithm, canonical public key, fingerprint, encrypted flag, and an opaque Keychain account reference) appears in the metadata JSON. Private material is stored as a generic-password Keychain item under the app's service, with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` and `kSecAttrSynchronizable = false`. No key material is stored in UserDefaults or ordinary files. Keychain failure is an error, never a fallback to plaintext storage. This is device-local Keychain protection; it is not a claim of hardware-backed Ed25519.
+Only non-secret identity metadata (ID, name, algorithm, canonical public key, fingerprint, encrypted flag, and an opaque Keychain account reference) appears in the metadata JSON. Private material is stored as a generic-password Keychain item under the app's service, with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` and `kSecAttrSynchronizable = false`. Key material is never stored in UserDefaults. The explicit export flow below is the only way to save a private-key file outside Keychain. Keychain failure is an error, never a fallback to plaintext storage. This is device-local Keychain protection; it is not a claim of hardware-backed Ed25519.
 
 An encrypted import retains its original encrypted representation in Keychain. Its passphrase is used for validation/unlock but is never retained by `IdentityStore` or persisted. An unlocked cryptographic key may be cached during the active foreground connection session. Disconnect/background clears that cache and invalidates in-flight unlocks. Swift memory management cannot promise forensic zeroisation of every temporary string or framework copy. Import validation itself does not seed the session cache. The UI must clear its passphrase field after completion or dismissal, and the transport must close its authentication/session references on disconnect.
+
+## Export a private key
+
+Choose **Settings → SSH Keys → identity → Export Private Key**. Review the protection status, acknowledge the warning, then choose **Authenticate & Save to Files**. Device-owner authentication requires Face ID, Touch ID or the device passcode before Keychain is read. The native Files picker chooses the destination; private bytes are never placed on the clipboard or sent to a sharing service by the app.
+
+- **Imported identities:** export preserves the original OpenSSH file byte-for-byte, including its encryption and passphrase. It does not decrypt the original, export a biometric copy, change the passphrase, or unlock the connection session.
+- **Generated Ed25519 identities:** export creates a standard **unencrypted** OpenSSH private-key file. RemoteFiles currently does not add a passphrase during export. The acknowledgement explicitly identifies the unencrypted file.
+- **Lifecycle:** the prepared document exists in memory until the native exporter finishes or is cancelled. Backgrounding or dismissing the view cancels authentication and drops the app's document reference. The native exporter manages its own staging; the app requests owner-only permissions and complete file protection on its file wrapper. A chosen Files provider controls protection and synchronization of the destination copy.
+
+An exported copy can outlive the app and can sync through the selected Files provider. Deleting the identity from RemoteFiles does not revoke or delete that copy. Store it securely. Swift/framework copies are not guaranteed to be forensically erased.
+
+Regression coverage checks generated-key round trips, interoperability with system `ssh-keygen`, original-byte preservation for encrypted and unencrypted Ed25519/RSA/ECDSA imports, mismatched metadata rejection, deleted secrets, cancellation, and absence of an unlocked session after export. Physical-device authentication, Files-provider behavior and lock/background acceptance remain manual checks.
 
 ## Face ID unlock
 

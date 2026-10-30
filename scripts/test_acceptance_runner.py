@@ -217,7 +217,7 @@ class LaneSelectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             acceptance.selected_lanes(["simulator", "simulator-core"])
 
-    def run_lane(self, lane):
+    def run_lane(self, lane, ui_shard=None):
         class Recorder:
             root = Path(__file__).resolve().parents[1]
             output = Path("/tmp/unused-evidence")
@@ -230,8 +230,76 @@ class LaneSelectionTests(unittest.TestCase):
             def tests(self, lane, expected, allowed_skips=(), xcresult=None):
                 self.inventories.append(expected)
         run = Recorder(); run.commands = []; run.inventories = []
-        acceptance.execute_lanes(run, [lane], Path("packages"), Path("scratch"), Path("derived"), "simulator-id")
+        acceptance.execute_lanes(run, [lane], Path("packages"), Path("scratch"), Path("derived"), "simulator-id", ui_shard=ui_shard)
         return run
+
+    def test_ui_shards_cover_every_inventoried_method_exactly_once(self):
+        root = Path(__file__).resolve().parents[1]
+        expected = acceptance.expected_tests(root, "iOS", ["Tests/RemoteFilesUITests"])
+        for inventory in (expected, expected | {"RemoteFilesUITests/testFutureJourney"}):
+            first = acceptance.ui_shard_tests(inventory, 1)
+            second = acceptance.ui_shard_tests(inventory, 2)
+            self.assertEqual(first | second, inventory)
+            self.assertFalse(first & second)
+            self.assertLessEqual(abs(len(first) - len(second)), 1)
+            self.assertEqual(first, acceptance.ui_shard_tests(set(reversed(sorted(inventory))), 1))
+        with self.assertRaisesRegex(ValueError, "empty"):
+            acceptance.ui_shard_tests({"RemoteFilesUITests/testOnly"}, 2)
+
+    def test_ui_shard_execution_selects_exact_expected_methods_and_builds_full_target(self):
+        for shard in (1, 2):
+            with self.subTest(shard=shard):
+                run = self.run_lane("simulator-ui", shard)
+                build, execution = run.commands[0][1], run.commands[1][1]
+                self.assertEqual([arg for arg in build if str(arg).startswith("-only-testing:")],
+                                 ["-only-testing:RemoteFilesUITests"])
+                actual = {arg.removeprefix("-only-testing:RemoteFilesUITests/")
+                          for arg in execution if str(arg).startswith("-only-testing:")}
+                self.assertEqual(actual, run.inventories[0])
+                self.assertEqual(execution[-1], "test-without-building")
+                self.assertNotIn("-only-testing:RemoteFilesUITests", execution)
+                self.assertEqual(execution[execution.index("-default-test-execution-time-allowance") + 1], "180")
+                self.assertEqual(execution[execution.index("-maximum-test-execution-time-allowance") + 1], "240")
+
+    def test_ui_shard_cli_rejects_other_lanes_and_invalid_shards_before_creating_evidence(self):
+        script = Path(__file__).with_name("test-acceptance.py")
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "must-not-exist"
+            cases = (["--ui-shard", "1"], ["--lane", "simulator", "--ui-shard", "1"],
+                     ["--lane", "simulator-core", "--ui-shard", "1"],
+                     ["--lane", "simulator-ui", "--lane", "voiceover", "--ui-shard", "1"],
+                     ["--lane", "simulator-ui", "--ui-shard", "0"])
+            for args in cases:
+                with self.subTest(args=args):
+                    result = subprocess.run([sys.executable, "-B", str(script), *args,
+                                             "--output", str(output)], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("--ui-shard", result.stderr)
+                    self.assertNotIn("unrecognized arguments", result.stderr)
+                    self.assertFalse(output.exists())
+
+    def test_shard_validation_still_rejects_missing_extra_repeated_failed_and_unexpected_skipped_methods(self):
+        inventory = {"RemoteFilesUITests/testOne", "RemoteFilesUITests/testTwo", "RemoteFilesUITests/testThree"}
+        expected = acceptance.ui_shard_tests(inventory, 1)
+        selected = sorted(expected)
+        unselected = next(iter(inventory - expected))
+        cases = ([ (name, "passed") for name in selected[:-1] ],
+                 [ (name, "passed") for name in selected + [unselected] ],
+                 [ (name, "passed") for name in selected + [selected[0]] ],
+                 [(selected[0], "failed"), (selected[1], "passed")],
+                 [(selected[0], "skipped"), (selected[1], "passed")])
+        for records in cases:
+            with self.subTest(records=records), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                log = root / "shard.log"
+                log.write_text("".join(f"Test Case '-[{name.replace('/', ' ')}]' {outcome} (0.001 seconds).\n"
+                                       for name, outcome in records))
+                run = acceptance.Run(root, root, {"commit": "fixture", "mode": "test", "source_tree_sha256": "fixture"})
+                lane = {"name": "simulator-ui-shard-1", "status": "passed", "errors": [], "log": str(log)}
+                run.lanes.append(lane)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    run.tests(lane, expected)
+                self.assertEqual(lane["status"], "failed", lane)
 
     def test_quick_ios_runs_the_complete_hosted_core_inventory_without_ui_journeys(self):
         run = self.run_lane("simulator-core")
@@ -247,7 +315,7 @@ class LaneSelectionTests(unittest.TestCase):
         self.assertIn("IdentityTests/testDeviceKeychainPersistenceAndAccessibility", expected)
         self.assertFalse(any(name.startswith(("RealServerUITests/", "RemoteFilesUITests/")) for name in expected))
 
-    def check_failed_build_never_boots_or_runs_cached_tests(self, lane):
+    def check_failed_build_never_boots_or_runs_cached_tests(self, lane, ui_shard=None):
         class FailedBuild:
             root = Path(__file__).resolve().parents[1]
             output = Path("/tmp/unused-evidence")
@@ -259,14 +327,14 @@ class LaneSelectionTests(unittest.TestCase):
                 raise AssertionError("Failed builds cannot validate stale test products")
         run = FailedBuild(); run.commands = []
         with patch.object(acceptance, "boot_selected_simulator") as boot:
-            acceptance.execute_lanes(run, [lane], Path("packages"), Path("scratch"), Path("derived"), "sim", True)
+            acceptance.execute_lanes(run, [lane], Path("packages"), Path("scratch"), Path("derived"), "sim", True, ui_shard=ui_shard)
             boot.assert_not_called()
         self.assertEqual(run.commands, [lane + "-build"])
 
     def test_failed_build_never_boots_or_runs_cached_tests(self):
-        for lane in ("simulator-core", "simulator-ui"):
-            with self.subTest(lane=lane):
-                self.check_failed_build_never_boots_or_runs_cached_tests(lane)
+        for lane, shard in (("simulator-core", None), ("simulator-ui", None), ("simulator-ui", 1), ("simulator-ui", 2)):
+            with self.subTest(lane=lane, shard=shard):
+                self.check_failed_build_never_boots_or_runs_cached_tests(lane, shard)
 
     def check_boot_follows_build_and_precedes_same_inventory_execution(self, lane, directory):
         events = []
@@ -311,6 +379,25 @@ class LaneSelectionTests(unittest.TestCase):
         run = self.run_lane("macos-openssh")
         self.assertEqual(len(run.commands), 1)
         self.assertEqual(run.commands[0][1][:3], ["scripts/test-openssh.sh", "swift", "test"])
+
+
+class UIWorkflowGateTests(unittest.TestCase):
+    def test_existing_gate_requires_success_of_both_uncancelled_shards(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
+        shard_job = workflow.split("\n  simulator-ui:\n", 1)[1].split("\n  simulator-ui-check:\n", 1)[0]
+        self.assertIn("shard: [1, 2]", shard_job)
+        self.assertIn("fail-fast: false", shard_job)
+        self.assertNotIn("continue-on-error", shard_job)
+        self.assertIn("ui-shard: ${{ matrix.shard }}", shard_job)
+        gate = workflow.split("\n  simulator-ui-check:\n", 1)[1]
+        self.assertIn("name: Acceptance / simulator-ui\n", gate)
+        self.assertIn("needs: [repository-checks, simulator-ui]", gate)
+        self.assertIn("if: always() && needs.repository-checks.outputs.acceptance == 'true'", gate)
+        self.assertIn("UI_RESULT: ${{ needs.simulator-ui.result }}", gate)
+        command = next(line.strip().removeprefix("run: ") for line in gate.splitlines() if line.strip().startswith("run: "))
+        for result in ("success", "failure", "cancelled", "skipped", ""):
+            completed = subprocess.run(["bash", "-c", command], env=dict(os.environ, UI_RESULT=result))
+            self.assertEqual(completed.returncode == 0, result == "success", result)
 
 
 class DedicatedCheckoutTests(unittest.TestCase):

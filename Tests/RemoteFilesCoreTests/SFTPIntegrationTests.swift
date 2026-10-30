@@ -436,6 +436,40 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertGreaterThan(completed.skippedDeepFolders, 0)
     }
 
+    func testManagedDownloadStreamsWithProgressAndPreservesRootAndByteBounds() async throws {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Managed transfer fixture")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        let managed: any ManagedRemoteFileDownloading = service
+        let target = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: target) }
+        let progress = ProgressRecorder()
+        let entry = try await managed.downloadManagedFile(profile: profile, path: fixture.files + "/oversized.txt",
+            allowedRoot: fixture.files, destination: target, limit: 3 * 1024 * 1024,
+            progress: { await progress.record($0) })
+        XCTAssertEqual(entry.kind, .file)
+        XCTAssertEqual(try Data(contentsOf: target).count, 3 * 1024 * 1024)
+        let updates = await progress.values
+        XCTAssertGreaterThan(updates.filter { $0.receivedBytes > 0 && !$0.isComplete }.count, 1)
+        XCTAssertEqual(updates.last?.receivedBytes, 3 * 1024 * 1024)
+        XCTAssertEqual(updates.last?.isComplete, true)
+        do {
+            _ = try await managed.downloadManagedFile(profile: profile, path: fixture.files + "/report.md",
+                allowedRoot: fixture.files + "/empty", destination: target, limit: 4096, progress: { _ in })
+            XCTFail("Managed transfers must retain canonical root containment")
+        } catch RemoteResourceError.outsideDocument { }
+        do {
+            _ = try await managed.downloadManagedFile(profile: profile, path: fixture.files + "/report.md",
+                allowedRoot: fixture.files, destination: target, limit: 3, progress: { _ in })
+            XCTFail("Managed transfers must retain byte limits")
+        } catch RemoteFileError.tooLarge { }
+    }
+
     func testResourceStreamUsesSessionAndRejectsSymlinkEscape() async throws {
         let fixture = try Fixture()
         let stores = try Stores(fixture: fixture)
@@ -554,6 +588,118 @@ final class SFTPIntegrationTests: XCTestCase {
     }
 
     #if os(macOS)
+    @MainActor
+    func testIndexedManagedDownloadsRejectFileAndRootRedirectsWithinConnection() async throws {
+        let fixture = try Fixture(), stores = try Stores(fixture: fixture)
+        let identity = try await stores.identity.generate(name: "Indexed managed redirects")
+        try fixture.authorize(identity.publicKey)
+        let profile = try await stores.profile(identity: identity)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        let tree = fixture.files + "/managed-index-" + UUID().uuidString
+        let local = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fm = FileManager.default
+        defer { try? fm.removeItem(atPath: tree); try? fm.removeItem(at: local) }
+        for folder in ["index", "replacement"] {
+            try fm.createDirectory(atPath: tree + "/" + folder, withIntermediateDirectories: true)
+            try Data(folder.utf8).write(to: URL(fileURLWithPath: tree + "/" + folder + "/report.bin"))
+        }
+        try Data("other".utf8).write(to: URL(fileURLWithPath: tree + "/index/other.bin"))
+        let root = try await service.resolveEntry(profile: profile, path: tree + "/index").path
+        let selected = RemoteEntry(name: "report.bin", path: root + "/report.bin", kind: .file, canonicalRoot: root)
+        let manager = try DownloadManager(service: service, directory: local.appendingPathComponent("downloads"))
+        var boundaryFailures = 0
+        func fetch() async throws -> ManagedDownload {
+            let id = try manager.enqueue(profile: profile, entry: selected, onFailure: { error, _ in
+                XCTAssertEqual(error as? RemoteDocumentLinkError, .outsideConnection)
+                boundaryFailures += 1
+            })
+            let deadline = ContinuousClock.now + .seconds(10)
+            while manager.activeID != nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertNil(manager.activeID, "Download must finish or fail without leaving a worker")
+            return try XCTUnwrap(manager.items.first { $0.id == id })
+        }
+        let original = try await fetch()
+        XCTAssertEqual(try Data(contentsOf: manager.completedURL(original.id)), Data("index".utf8))
+
+        // The replacement file is still inside the exact index root and broader
+        // connection root; only preserving the saved canonical path rejects it.
+        try fm.removeItem(atPath: tree + "/index/report.bin")
+        try fm.createSymbolicLink(atPath: tree + "/index/report.bin", withDestinationPath: tree + "/index/other.bin")
+        let fileRedirect = try await fetch()
+        XCTAssertEqual(fileRedirect.state, .failed)
+        XCTAssertThrowsError(try manager.completedURL(fileRedirect.id))
+        XCTAssertFalse(fm.fileExists(atPath: local.appendingPathComponent("downloads/" + fileRedirect.id.uuidString).path))
+
+        // The whole index can also be redirected elsewhere inside the connection.
+        try fm.moveItem(atPath: tree + "/index", toPath: tree + "/original-index")
+        try fm.createSymbolicLink(atPath: tree + "/index", withDestinationPath: tree + "/replacement")
+        let rootRedirect = try await fetch()
+        XCTAssertEqual(rootRedirect.state, .failed)
+        XCTAssertThrowsError(try manager.completedURL(rootRedirect.id))
+        XCTAssertFalse(fm.fileExists(atPath: local.appendingPathComponent("downloads/" + rootRedirect.id.uuidString).path))
+        XCTAssertEqual(boundaryFailures, 2)
+
+        // Ordinary folder selections may follow this in-connection alias. This
+        // control demonstrates why a saved index must use the stronger contract.
+        let ordinary = local.appendingPathComponent("ordinary-control.bin")
+        _ = try await service.downloadManagedFile(profile: profile, path: selected.path,
+            allowedRoot: profile.startingDirectory, destination: ordinary, limit: 1024, progress: { _ in })
+        XCTAssertEqual(try Data(contentsOf: ordinary), Data("replacement".utf8))
+    }
+
+    @MainActor
+    func testIndexedManagedDownloadsKeepBothConnectionAndIndexBoundaries() async throws {
+        let fixture = try Fixture(), stores = try Stores(fixture: fixture)
+        let identity = try await stores.identity.generate(name: "Indexed managed boundaries")
+        try fixture.authorize(identity.publicKey)
+        var profile = try await stores.profile(identity: identity)
+        try await stores.trustFixtureHost()
+        let managed = stores.service(), fallback = CoalescingFileService(base: stores.service())
+        addTeardownBlock { await managed.disconnect(); await fallback.disconnect() }
+        let tree = fixture.files + "/managed-boundaries-" + UUID().uuidString, alias = tree + "-alias"
+        let local = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fm = FileManager.default
+        defer {
+            for path in [alias, tree] { try? fm.removeItem(atPath: path) }
+            try? fm.removeItem(at: local)
+        }
+        for folder in ["projects", "private"] {
+            try fm.createDirectory(atPath: tree + "/" + folder, withIntermediateDirectories: true)
+            try Data(folder.utf8).write(to: URL(fileURLWithPath: tree + "/" + folder + "/report.bin"))
+        }
+        try fm.createSymbolicLink(atPath: alias, withDestinationPath: tree + "/projects")
+        profile.startingDirectory = alias
+        let root = try await managed.resolveEntry(profile: profile, path: tree).path
+        let services: [any RemoteFileService] = [managed, fallback]
+        for (offset, service) in services.enumerated() {
+            let manager = try DownloadManager(service: service, directory: local.appendingPathComponent(String(offset)))
+            var rejected = 0
+            for canonicalRoot in [root, root + "/private"] {
+                let outside = RemoteEntry(name: "report.bin", path: root + "/private/report.bin", kind: .file, canonicalRoot: canonicalRoot)
+                let id = try manager.enqueue(profile: profile, entry: outside, onFailure: { error, _ in
+                    guard case OriginalFileExportError.outsideRoot = error else { return XCTFail("Expected connection-root rejection, got \(error)") }
+                    rejected += 1
+                })
+                let deadline = ContinuousClock.now + .seconds(10)
+                while manager.activeID != nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+                XCTAssertNil(manager.activeID)
+                XCTAssertEqual(manager.items.first { $0.id == id }?.state, .failed)
+                XCTAssertThrowsError(try manager.completedURL(id))
+            }
+            XCTAssertEqual(rejected, 2)
+            // A canonical ancestor index must not reject results that remain inside
+            // the configured connection folder, including its symlink spelling.
+            let inside = RemoteEntry(name: "report.bin", path: root + "/projects/report.bin", kind: .file, canonicalRoot: root)
+            let id = try manager.enqueue(profile: profile, entry: inside)
+            let deadline = ContinuousClock.now + .seconds(10)
+            while manager.activeID != nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertNil(manager.activeID)
+            XCTAssertEqual(try Data(contentsOf: manager.completedURL(id)), Data("projects".utf8))
+        }
+    }
+
     func testIndexedExportsKeepBothConnectionAndIndexBoundaries() async throws {
         let fixture = try Fixture(), stores = try Stores(fixture: fixture)
         let identity = try await stores.identity.generate(name: "Indexed export boundaries")

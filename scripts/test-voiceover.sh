@@ -19,6 +19,7 @@ project = fixture / 'RemoteFiles.xcodeproj'
 shutil.copytree(repo / 'RemoteFiles.xcodeproj', project)
 pbx = project / 'project.pbxproj'
 s = pbx.read_text().replace('relativePath = .;', 'relativePath = ' + json.dumps(str(repo)) + ';')
+s = s.replace('INFOPLIST_FILE = App/Info.plist;', 'INFOPLIST_FILE = ' + json.dumps(str(repo / 'App/Info.plist')) + ';')
 replacements = {
     'App/RemoteFilesApp.swift': 'Tests/VoiceOverFixtures/RemoteFilesAccessibilityApp.swift',
     'Tests/RemoteFilesUITests/RemoteFilesUITests.swift': 'Tests/VoiceOverFixtures/VoiceOverUITests.swift',

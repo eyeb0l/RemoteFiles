@@ -266,6 +266,34 @@ public actor IdentityStore {
         unlocked.removeValue(forKey: metadata.id)
     }
 
+    /// Explicit export only. Callers must obtain user confirmation and device authentication.
+    /// Encrypted imports leave Keychain in their original encrypted form, never the cached signing
+    /// key or biometric copy. Generated keys use the interoperable, unencrypted OpenSSH format.
+    public func exportOpenSSH(_ metadata: IdentityMetadata) throws -> Data {
+        try Task.checkCancellation()
+        let data = try secretStore.load(reference: metadata.keychainReference)
+        guard let secret = try? JSONDecoder().decode(StoredSecret.self, from: data), secret.version == 1 else {
+            throw IdentityError.malformedKey
+        }
+        let exported: Data
+        switch secret.format {
+        case .generatedEd25519:
+            let key = try Curve25519.Signing.PrivateKey(rawRepresentation: secret.bytes)
+            guard !metadata.requiresPassphrase, metadata.algorithm == "ssh-ed25519",
+                  String(openSSHPublicKey: NIOSSHPrivateKey(ed25519Key: key).publicKey) == metadata.publicKey else {
+                throw IdentityError.malformedKey
+            }
+            exported = Data(key.makeSSHRepresentation().utf8)
+        case .importedOpenSSH:
+            try OpenSSHIdentityParser.validateExport(secret.bytes, metadata: metadata)
+            exported = secret.bytes
+        case .biometricSigningKey:
+            throw IdentityError.malformedKey
+        }
+        try Task.checkCancellation()
+        return exported
+    }
+
     /// Whether this identity can be unlocked with Face ID or Touch ID. Never prompts.
     public func hasBiometricUnlock(_ metadata: IdentityMetadata) -> Bool {
         biometricStore?.contains(reference: metadata.keychainReference) ?? false
@@ -325,6 +353,31 @@ public actor IdentityStore {
 /// supported matrix. Citadel performs all private-key parsing, KDF work, and decryption.
 enum OpenSSHIdentityParser {
     struct Parsed { let key: IdentityPrivateKey; let encrypted: Bool }
+
+    /// Checks the public envelope without decrypting an imported original for export.
+    static func validateExport(_ bytes: Data, metadata: IdentityMetadata) throws {
+        guard bytes.count <= 256 * 1024, let input = String(data: bytes, encoding: .utf8) else {
+            throw IdentityError.malformedKey
+        }
+        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let begin = "-----BEGIN OPENSSH PRIVATE KEY-----", end = "-----END OPENSSH PRIVATE KEY-----"
+        guard text.hasPrefix(begin), text.hasSuffix(end),
+              let data = Data(base64Encoded: String(text.dropFirst(begin.count).dropLast(end.count).filter { !$0.isWhitespace })) else {
+            throw IdentityError.malformedKey
+        }
+        var reader = SSHContainerReader(data: data)
+        guard try reader.take(15) == Data("openssh-key-v1\0".utf8) else { throw IdentityError.malformedKey }
+        let cipher = try reader.string(), kdf = try reader.string(), options = try reader.field()
+        guard ["none", "aes128-ctr", "aes256-ctr"].contains(cipher),
+              (cipher != "none") == metadata.requiresPassphrase,
+              cipher == "none" ? (kdf == "none" && options.isEmpty) : kdf == "bcrypt",
+              try reader.integer() == 1 else { throw IdentityError.malformedKey }
+        let publicBytes = try reader.field()
+        let fields = metadata.publicKey.split(separator: " ")
+        guard fields.count == 2, fields[0] == Substring(metadata.algorithm),
+              Data(base64Encoded: String(fields[1])) == publicBytes,
+              !(try reader.field()).isEmpty, reader.remaining == 0 else { throw IdentityError.malformedKey }
+    }
 
     static func parse(_ input: String, passphrase: String?) throws -> Parsed {
         guard input.utf8.count <= 256 * 1024 else { throw IdentityError.malformedKey }

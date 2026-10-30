@@ -79,6 +79,15 @@ def selected_lanes(requested):
     return lanes
 
 
+def ui_shard_tests(expected, shard):
+    if shard not in (1, 2):
+        raise ValueError("UI shard must be 1 or 2")
+    selected = set(sorted(expected)[shard - 1::2])
+    if not selected:
+        raise ValueError("UI shard inventory is empty")
+    return selected
+
+
 def capture(command, cwd=None):
     return subprocess.check_output(command, cwd=cwd, text=True).strip()
 
@@ -362,6 +371,8 @@ class Run:
                  "Source: `" + self.metadata["commit"] + "` (" + self.metadata["mode"] + ")",
                  "Source manifest SHA-256: `" + self.metadata["source_tree_sha256"] + "`", "",
                  "| Lane | Result | Passed | Failed | Skipped |", "|---|---|---:|---:|---:|"]
+        if self.metadata.get("ui_shard"):
+            lines[3:3] = ["", "UI shard: " + str(self.metadata["ui_shard"]) + " of 2 (partial UI inventory)"]
         for lane in self.lanes:
             counts = lane.get("counts", {})
             lines.append("| " + lane["name"] + " | " + lane["status"] + " | " + " | ".join(str(counts.get(k, "—")) for k in ("passed", "failed", "skipped")) + " |")
@@ -381,7 +392,9 @@ class Run:
         (self.output / "SUMMARY.md").write_text("\n".join(lines) + "\n")
 
 
-def execute_lanes(run, lanes, packages, scratch, derived, simulator=None, boot_simulator=False, compilation_cache=None):
+def execute_lanes(run, lanes, packages, scratch, derived, simulator=None, boot_simulator=False, compilation_cache=None, ui_shard=None):
+    if ui_shard is not None and tuple(lanes) != ("simulator-ui",):
+        raise ValueError("--ui-shard requires exactly --lane simulator-ui")
     root, output = run.root, run.output
     base = ["xcodebuild", "-jobs", "2", "-project", "RemoteFiles.xcodeproj", "-scheme", "RemoteFiles",
             "-clonedSourcePackagesDirPath", packages, "-onlyUsePackageVersionsFromResolvedFile", "-derivedDataPath", derived] + ci_build_settings(compilation_cache)
@@ -402,8 +415,14 @@ def execute_lanes(run, lanes, packages, scratch, derived, simulator=None, boot_s
         elif lane == "simulator-ui":
             selection = ["-only-testing:RemoteFilesUITests"]
         expected = expected_tests(root, "iOS", directories)
+        execution_selection = selection
+        execution_name = lane
+        if ui_shard is not None:
+            expected = ui_shard_tests(expected, ui_shard)
+            execution_selection = ["-only-testing:RemoteFilesUITests/" + identifier for identifier in sorted(expected)]
+            execution_name += "-shard-" + str(ui_shard)
         ordinary_skips = SIMULATOR_ALLOWED_SKIPS | {name for name in expected if name.startswith("RealServerUITests/")}
-        sim_result = output / (lane + ".xcresult")
+        sim_result = output / (execution_name + ".xcresult")
         simulator_base = list(base)
         action = "test"
         if lane == "simulator-core":
@@ -418,10 +437,13 @@ def execute_lanes(run, lanes, packages, scratch, derived, simulator=None, boot_s
             if boot_simulator:
                 boot_selected_simulator(run, simulator)
             action = "test-without-building"
-        sim = run.command(lane, ["scripts/test-openssh.sh"] + simulator_base + ["-configuration", "Debug", "-destination", "platform=iOS Simulator,id=" + simulator,
+        sim = run.command(execution_name, ["scripts/test-openssh.sh"] + simulator_base + ["-configuration", "Debug", "-destination", "platform=iOS Simulator,id=" + simulator,
             "-resultBundlePath", sim_result, "-parallel-testing-enabled", "NO", "-collect-test-diagnostics", "never",
             "-test-timeouts-enabled", "YES", "-default-test-execution-time-allowance", "180", "-maximum-test-execution-time-allowance", "240",
-            "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"] + selection + [action])
+            "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"] + execution_selection + [action])
+        if ui_shard is not None:
+            sim["ui_shard"] = ui_shard
+            sim["selected_tests"] = sorted(expected)
         run.tests(sim, expected, ordinary_skips, sim_result)
     if "voiceover" in lanes:
         # The disposable fixture substitutes only app entry point and UI checks.
@@ -442,6 +464,8 @@ def main():
     parser.add_argument("--simulator", help="Available iOS 27 simulator UDID; required for Simulator/VoiceOver lanes")
     parser.add_argument("--lane", choices=AVAILABLE_LANES, action="append",
                         help="Run only this lane (repeatable); default is all four acceptance lanes")
+    parser.add_argument("--ui-shard", type=int, choices=(1, 2),
+                        help="Run one of two disjoint UI inventories; requires exactly --lane simulator-ui")
     parser.add_argument("--output", required=True, type=Path, help="Fresh evidence directory outside the repository")
     parser.add_argument("--use-checkout", action="store_true", help="Validate a dedicated clean checkout directly (CI), with source hashes checked before/after")
     parser.add_argument("--boot-simulator", action="store_true", help="Boot the selected disposable device after building; requires a single core or UI lane")
@@ -457,6 +481,8 @@ def main():
         lanes = selected_lanes(args.lane)
     except ValueError as error:
         parser.error(str(error))
+    if args.ui_shard is not None and lanes != ("simulator-ui",):
+        parser.error("--ui-shard requires exactly --lane simulator-ui")
     if args.boot_simulator and lanes not in (("simulator-core",), ("simulator-ui",)):
         parser.error("--boot-simulator requires exactly one of --lane simulator-core or --lane simulator-ui")
     needs_simulator = any(lane.startswith("simulator") or lane == "voiceover" for lane in lanes)
@@ -485,6 +511,9 @@ def main():
         metadata["xcode"] = timed(phases, "xcode-version", lambda: capture(["xcodebuild", "-version"]))
         metadata["swift"] = timed(phases, "swift-version", lambda: capture(["swift", "--version"]))
         metadata["requested_lanes"] = list(lanes)
+        if args.ui_shard is not None:
+            metadata["ui_shard"] = args.ui_shard
+            metadata["ui_shard_count"] = 2
         metadata["full_acceptance"] = set(DEFAULT_LANES).issubset(lanes)
         if needs_simulator:
             inventory = timed(phases, "simulator-inventory", lambda: json.loads(capture(["xcrun", "simctl", "list", "devices", "available", "-j"])))
@@ -506,7 +535,7 @@ def main():
         packages = (args.source_packages or output / "SourcePackages").expanduser().resolve()
         scratch = (args.swift_scratch or output / "SwiftBuild").expanduser().resolve()
         derived = (args.derived_data or output / "DerivedData").expanduser().resolve()
-        execute_lanes(run, lanes, packages, scratch, derived, args.simulator, args.boot_simulator, compilation_cache)
+        execute_lanes(run, lanes, packages, scratch, derived, args.simulator, args.boot_simulator, compilation_cache, args.ui_shard)
         verified_at = time.monotonic()
         frozen_manifest = json.loads((output / "source-manifest.json").read_text())
         verified_files = source_files(root) if args.use_checkout else [entry["path"] for entry in frozen_manifest]

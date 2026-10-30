@@ -44,11 +44,21 @@ failures, unexpected skips and xcresult/log count mismatches fail validation.
 
 After quick validation passes, acceptance runs these jobs in parallel:
 
-- **Acceptance / simulator-ui**: ordinary demo journeys and navigation; explicit
-  real-server opt-in methods remain skipped.
+- **Acceptance / simulator-ui-shard-1** and **simulator-ui-shard-2**: disjoint halves
+  of the complete UI inventory, on separate runners and disposable simulators.
+  Sorted method identifiers alternate between the two shards, so newly inventoried
+  methods are included automatically. Explicit real-server opt-in methods remain skipped.
 - **Acceptance / voiceover**: actual VoiceOver speech, focus and custom-action discovery
   against disposable fixture entry points using production views.
 - **Acceptance / release-device-compile**: unsigned optimized iOS compilation.
+
+The existing **Acceptance / simulator-ui** check is an aggregate gate on Linux.
+It succeeds only when both UI shards succeed; failed, cancelled or skipped shards
+cannot satisfy it. It does not wait for VoiceOver or Release compilation. Each
+shard builds the full UI target, then executes only its exact selected methods and
+checks those results against its selected inventory. Together they cover each UI
+method exactly once, retaining missing/extra/duplicate-result, skip and xcresult
+validation. A shard report is explicitly partial UI evidence.
 
 The classifier in [scripts/ci_scope.py](../scripts/ci_scope.py) escalates reader,
 preview/security boundaries, navigation entry points, dependency pins, vendored
@@ -62,7 +72,7 @@ The workflow also responds to label changes. Manual dispatch defaults to full
 acceptance; turn off **full_acceptance** to request just the quick checks. A
 failure in quick validation prevents expensive acceptance jobs from starting.
 
-Across these five jobs, the inventories cover the original full acceptance
+Across these six Mac jobs, the inventories cover the original full acceptance
 suite. Each job reports only its selected lane; a partial report never claims
 full acceptance. Physical iPhone and real-server participation remain separate.
 No signing secrets, saved connections or personal SSH keys are required.
@@ -74,7 +84,9 @@ builds leave source/lockfiles unchanged. CI uses its dedicated checkout directly
 instead of copying thousands of files; dirty direct-checkout runs are rejected.
 Local acceptance retains immutable source copies by default. Build caches live outside the fresh evidence folder.
 Keys include the actual Xcode build, architecture, dependency/vendor and source
-hashes (including generated schemes), and lane. The v2 cache format enables
+hashes (including generated schemes), lane and optional UI shard. Artifact names
+also include the shard, so concurrent UI jobs cannot overwrite each other's evidence.
+The v2 cache format enables
 Xcode's native compilation cache, stores its CAS inside the saved cache root,
 and disables IDE indexing for CI Xcode builds. Compiler cache diagnostics are
 retained in each build log. Migration can restore an older dependency/build
@@ -106,6 +118,8 @@ python3 -B scripts/test-acceptance.py --lane macos-openssh \
   --output /private/tmp/remotefiles-macos-NEW_RUN
 python3 -B scripts/test-acceptance.py --lane simulator-core \
   --simulator SIMULATOR_UDID --output /private/tmp/remotefiles-core-NEW_RUN
+python3 -B scripts/test-acceptance.py --lane simulator-ui --ui-shard 1 \
+  --simulator SIMULATOR_UDID --output /private/tmp/remotefiles-ui-1-NEW_RUN
 ```
 
 Other choices are `simulator-ui`, `voiceover`, `release-device-compile`, and the
@@ -113,6 +127,9 @@ combined `simulator` lane. Repeat `--lane` to select disjoint inventories; the
 combined Simulator lane cannot be mixed with its core/UI subsets. Omit `--lane`
 to retain the complete local acceptance run. Use `--allow-dirty` only when the
 report should identify a working-tree snapshot rather than an exact commit.
+`--ui-shard 1` or `--ui-shard 2` requires exactly `--lane simulator-ui`;
+omit it to run the whole UI lane locally. Run both shards for full UI evidence,
+using separate fresh output directories and never running two jobs on one device.
 
 ## UI lane deadline regression
 
@@ -166,6 +183,18 @@ states, while still rejecting a terminated or foreground app. No deadlines were
 extended. The runner prints structured xcresult failures as well as log assertions,
 so an interrupted test reports its primary timeout even if no completed-result
 line was emitted and a later assertion failed during cancellation.
+
+PR #39's [run 40996701531](https://github.com/eyeb0l/RemoteFiles/actions/runs/40996701531)
+then exhausted the execution-only 1,800-second budget twice on the same source.
+Attempt 1 completed 24 UI methods and nine expected skips before interrupting
+the final wrap-lines journey while it was progressing. Attempt 2 completed 21
+UI methods and nine expected skips before interrupting the saved-index journey,
+also without an assertion or per-method timeout. The newly completed PDF/OCR
+journey passed in both attempts. The unchanged wrap-lines test passed locally.
+The expanded UI suite therefore now runs in the two independent shards above.
+The 30-minute command, 180/240-second per-method and 45-minute Mac job limits
+remain unchanged; no method, assertion or skip policy was removed and there are
+no automatic retries.
 
 ## WebKit cold-start regression
 
@@ -250,7 +279,22 @@ with an already-installed mock public key or an already-removed seeded recent en
 output directory alone does not reset that simulator state. Diagnose these failures before
 rerunning the affected methods on a fresh device; retain both the original failure and rerun evidence.
 
+The demo reader and image-viewer speech journeys launch their fixture with VoiceOver
+already enabled. Enabling it after the screen has settled can leave the first
+`currentSpeech()` call with `No speech available`. Launch alone also does not guarantee
+focus on an asynchronously loaded image: the image journey uses the same tap, speech
+verification and double-tap helper as JSON/SVG navigation. After closing the system
+share sheet it waits for Close to disappear before starting the existing backward
+traversal to Done. The final automatic focus return to the invoking image is still
+asserted. Retain the speech and traversal assertions when diagnosing these setup failures.
+
 The VoiceOver launcher supports macOS’s stock Bash when optional package or
 compiler-cache settings are absent. Launcher regressions also check that argument
 paths with spaces survive and that collecting lifecycle logs cannot turn a failed
 Xcode run into success.
+
+Disposable fixture projects rebase the app's `App/Info.plist` input to the source
+checkout, along with their package and source references. The project-preparation
+regression executes all four fixture launchers' preparation code and verifies both
+app configurations still resolve the original plist, including checkout paths
+with spaces. Test hosts retain their generated plists.

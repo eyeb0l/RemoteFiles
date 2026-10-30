@@ -68,6 +68,69 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
 }
 
 @MainActor final class AppModelLifecycleTests: XCTestCase {
+    func testDownloadRetryUsesRequestingWindowsTransportAndUnlockSheet() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let firstService = BackgroundExportService(), secondService = BackgroundExportService()
+        await firstService.failDownloads(IdentityError.missingPassphrase)
+        await secondService.failDownloads(IdentityError.missingPassphrase)
+        let first = try AppModel(directory: directory, fileService: firstService)
+        let second = try AppModel(directory: directory, fileService: secondService)
+        await first.load(); await second.load()
+        let identity = IdentityMetadata(name: "Encrypted", publicKey: "fixture", fingerprint: "fixture", requiresPassphrase: true, keychainReference: "fixture")
+        let profile = ConnectionProfile(name: "Fixture", host: "fixture.invalid", username: "reader", identityID: identity.id)
+        first.metadata.identities = [identity]; first.metadata.connections = [profile]
+        second.metadata.identities = [identity]; second.metadata.connections = [profile]
+        first.enqueueDownload(profile: profile, entry: .init(name: "file.bin", path: "/file.bin", kind: .file))
+        let manager = try XCTUnwrap(first.downloads)
+        let deadline = ContinuousClock.now + .seconds(3)
+        while manager.activeID != nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(first.sheet?.id, "unlock"); XCTAssertNil(second.sheet)
+        let item = try XCTUnwrap(manager.items.first)
+        first.sheet = nil
+        second.retryDownload(item)
+        while manager.activeID != nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(second.sheet?.id, "unlock"); XCTAssertNil(first.sheet)
+        let firstRequests = await firstService.downloads, secondRequests = await secondService.downloads
+        XCTAssertEqual(firstRequests, 1); XCTAssertEqual(secondRequests, 1)
+    }
+
+    func testBackgroundWindowKeepsOtherWindowsDownloadRunning() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let firstService = BackgroundExportService(), secondService = BackgroundExportService()
+        let first = try AppModel(directory: directory, fileService: firstService)
+        let second = try AppModel(directory: directory, fileService: secondService)
+        await first.load(); await second.load()
+        let profile = ConnectionProfile(name: "Fixture", host: "fixture.invalid", username: "reader", identityID: UUID())
+        first.enqueueDownload(profile: profile, entry: .init(name: "file.bin", path: "/file.bin", kind: .file))
+        let manager = try XCTUnwrap(first.downloads)
+        let deadline = ContinuousClock.now + .seconds(3)
+        while !(await firstService.waiting()), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        second.isForeground = false
+        await second.background()
+        XCTAssertTrue(manager.isForeground)
+        XCTAssertEqual(manager.items.first?.state, .downloading)
+        let disconnects = await firstService.disconnects
+        XCTAssertEqual(disconnects, 0)
+        await first.disconnect()
+    }
+
+    func testDownloadUnknownHostPresentsTrustSheet() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = BackgroundExportService()
+        let key = try HostKeyDetails(publicKey: NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey)
+        await service.failDownloads(HostTrustError.unknown(endpoint: .init(host: "fixture.invalid"), key: key))
+        let model = try AppModel(directory: directory, fileService: service)
+        await model.load()
+        let profile = ConnectionProfile(name: "Fixture", host: "fixture.invalid", username: "reader", identityID: UUID())
+        model.enqueueDownload(profile: profile, entry: .init(name: "file.bin", path: "/file.bin", kind: .file))
+        let deadline = ContinuousClock.now + .seconds(3)
+        while model.downloads?.activeID != nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.sheet?.id, "trust")
+    }
+
     func testOfflineStoreIsSharedWhenAnotherWindowOpensAfterLibraryCreation() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

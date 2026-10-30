@@ -13,10 +13,11 @@ Choose a guide by what you want to do.
 - [Manage SSH keys](KEY_SUPPORT.md) or [install a public key](PUBLIC_KEY_INSTALLATION.md) on a compatible server. Installation is a separately confirmed server change; browsing is read only.
 - [Browse and search folders](FOLDER_BROWSING.md): sorting, hidden files, symbolic links and search limits.
 - [Read and preview files](READER.md): supported formats, navigation, source, sharing and size limits.
+- [Manage downloads](DOWNLOADS.md): queues, progress, retry, Files export and background SSH transfers.
 - [Save files and folders for offline use](OFFLINE_FILES.md): snapshots, updates, storage limits and offline links.
 - [Use the iPad workspace](IPAD.md): navigate the library, folder and reader in different window sizes.
 
-For a closer look at specific behavior, see [document links](DOCUMENT_LINKS.md), [saving original files](ORIGINAL_EXPORT.md), [remote Markdown images](REMOTE_IMAGES.md), [audio and video](AUDIO_VIDEO.md) and [static HTML](HTML_PREVIEWS.md).
+For a closer look at specific behavior, see [rich Markdown](MARKDOWN_RENDERING.md), [document links](DOCUMENT_LINKS.md), [saving original files](ORIGINAL_EXPORT.md), [remote Markdown images](REMOTE_IMAGES.md), [audio and video](AUDIO_VIDEO.md) and [static HTML](HTML_PREVIEWS.md).
 
 ## Build, change and verify the app
 

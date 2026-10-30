@@ -643,7 +643,8 @@ final class RemoteFilesUITests: XCTestCase {
             search.typeText("\n")
         }
         func closeLiveSearch() {
-            let close = app.buttons["close"]
+            // Navigation-bar search exposes "Close"; the index sheet uses "close".
+            let close = app.navigationBars["Search samples"].buttons["Close"]
             XCTAssertTrue(close.waitForExistence(timeout: 5)); close.tap()
             XCTAssertTrue(app.navigationBars["Search samples"].waitForExistence(timeout: 5))
         }
@@ -887,9 +888,16 @@ final class RemoteFilesUITests: XCTestCase {
         add.tap()
         XCTAssertTrue(app.textFields["Hostname or IP address"].waitForExistence(timeout: 5))
         let jump = app.switches["Use Jump Host"]
-        for _ in 0..<5 { if jump.exists && jump.isHittable { break }; app.swipeUp() }
-        XCTAssertTrue(jump.exists && jump.isHittable)
+        // XCTest can report this row as hittable while its switch is below the
+        // screen. Reveal the whole row before tapping its trailing switch control.
+        let safeViewport = app.frame.insetBy(dx: 0, dy: 44)
+        for _ in 0..<5 {
+            if jump.exists && jump.isHittable && safeViewport.contains(jump.frame) { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(jump.exists && jump.isHittable && safeViewport.contains(jump.frame))
         jump.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        XCTAssertEqual(jump.value as? String, "1", "Enable routing before checking its fields")
         let hopHost = app.textFields["Jump hostname or IP address"]
         for _ in 0..<4 { if hopHost.exists && hopHost.isHittable { break }; app.swipeUp() }
         XCTAssertTrue(hopHost.exists && hopHost.isHittable)

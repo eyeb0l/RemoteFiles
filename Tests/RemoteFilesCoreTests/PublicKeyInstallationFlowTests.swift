@@ -24,6 +24,33 @@ private actor ControlledKeyInstaller: PublicKeyInstalling {
 }
 
 @MainActor final class PublicKeyInstallationFlowTests: XCTestCase {
+    func testAutomaticSetupContinuesOnlyAfterConfirmedCurrentInstallation() async throws {
+        let installer = ControlledKeyInstaller()
+        var savedConnections = 0
+        let flow = PublicKeyInstallationFlow(installer: installer) { savedConnections += 1 }
+        let identity = try identity()
+        flow.prepare(host: "fixture.invalid", port: 22, username: "fixture", identity: identity)
+        XCTAssertEqual(savedConnections, 0, "Review cannot save or install")
+        flow.confirm(password: "fixture password")
+        try await wait { await installer.waiting(1) }
+        flow.cancel()
+        await installer.finish(1, result: .success(.installed))
+        await Task.yield()
+        XCTAssertEqual(savedConnections, 0, "Cancelled installation cannot save a connection")
+        flow.prepare(host: "fixture.invalid", port: 22, username: "fixture", identity: identity)
+        flow.confirm(password: "fixture password")
+        try await wait { await installer.waiting(2) }
+        await installer.finish(2, result: .failure(PublicKeyInstallationError.uncertainOutcome))
+        try await wait { !flow.isWorking }
+        XCTAssertEqual(savedConnections, 0, "An unconfirmed server outcome cannot complete setup")
+        flow.prepare(host: "fixture.invalid", port: 22, username: "fixture", identity: identity)
+        flow.confirm(password: "fixture password")
+        try await wait { await installer.waiting(3) }
+        await installer.finish(3, result: .success(.alreadyInstalled))
+        try await wait { !flow.isWorking }
+        XCTAssertEqual(savedConnections, 1)
+    }
+
     private func identity() throws -> IdentityMetadata {
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(repeating: 7, count: 32))
         return .init(name: "Fixture public identity", publicKey: String(openSSHPublicKey: NIOSSHPrivateKey(ed25519Key: key).publicKey),
