@@ -222,7 +222,7 @@ final class RemoteFilesUITests: XCTestCase {
         }
     }
 
-    func testFindHeadingsAndHeadingLinksInReader() throws {
+    func testFindAndSameDocumentHeadingLinkInReader() throws {
         continueAfterFailure = false
         let app = launchDemoReader(filename: "Navigation guide.md")
         let localHeading = try revealDocumentLink("Jump to marker 20", in: app, scroll: app.scrollViews["Rendered Markdown document"])
@@ -240,9 +240,16 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Reading marker 20"].isHittable, app.debugDescription)
         attachScreenshot("Find matching rendered heading")
         app.buttons["Done"].tap()
+    }
+
+    func testHeadingOutlineAndLinkedDocumentHeadingInReader() throws {
+        continueAfterFailure = false
+        let app = launchDemoReader(filename: "Navigation guide.md")
         app.buttons["Document actions"].tap(); app.buttons["Headings"].tap()
-        let last = app.buttons["Navigation return marker, heading level 2"]
-        for _ in 0..<10 { if last.exists && last.isHittable { break }; app.swipeUp() }
+        let outline = app.collectionViews.firstMatch
+        XCTAssertTrue(outline.waitForExistence(timeout: 5))
+        let last = outline.buttons["Navigation return marker, heading level 2"]
+        for _ in 0..<10 { if last.exists && last.isHittable { break }; outline.swipeUp() }
         XCTAssertTrue(last.waitForExistence(timeout: 5) && last.isHittable, app.debugDescription); last.tap()
         let link = try revealDocumentLink("Heading link", in: app, scroll: app.scrollViews["Rendered Markdown document"])
         link.tap()
@@ -521,6 +528,16 @@ final class RemoteFilesUITests: XCTestCase {
     }
 
     func testSavedSearchIndexBuildsReopensWithTheSameSnapshotAndDeletes() throws {
+        exerciseSavedSearchIndex(exportOriginal: false)
+    }
+
+    func testSavedSearchIndexReopenedResultExportsOriginal() throws {
+        exerciseSavedSearchIndex(exportOriginal: true)
+    }
+
+    // Each journey creates and reopens its own snapshot. Keep the native Files picker
+    // independent of deletion so both fit the unchanged per-method CI deadline.
+    private func exerciseSavedSearchIndex(exportOriginal: Bool) {
         continueAfterFailure = false
         let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
@@ -597,17 +614,20 @@ final class RemoteFilesUITests: XCTestCase {
         querySavedContents()
         result.tap()
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
-        let export = app.buttons["Save Original to Files"]
-        XCTAssertTrue(export.waitForExistence(timeout: 5) && export.isEnabled)
-        export.tap()
-        XCTAssertTrue(app.buttons["Save"].waitForExistence(timeout: 45),
-                      "An indexed result inside the connection boundary must still export.\n" + app.debugDescription)
-        attachScreenshot("Indexed original file native Save to Files picker")
-        cancelOriginalExport(in: app)
-        XCTAssertTrue(app.navigationBars["Quarterly review.md"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].exists)
-        let ready = expectation(for: NSPredicate(format: "exists == true AND enabled == true"), evaluatedWith: export)
-        wait(for: [ready], timeout: 5)
+        if exportOriginal {
+            let export = app.buttons["Save Original to Files"]
+            XCTAssertTrue(export.waitForExistence(timeout: 5) && export.isEnabled)
+            export.tap()
+            XCTAssertTrue(app.buttons["Save"].waitForExistence(timeout: 45),
+                          "An indexed result inside the connection boundary must still export.\n" + app.debugDescription)
+            attachScreenshot("Indexed original file native Save to Files picker")
+            cancelOriginalExport(in: app)
+            XCTAssertTrue(app.navigationBars["Quarterly review.md"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.scrollViews["Rendered Markdown document"].exists)
+            let ready = expectation(for: NSPredicate(format: "exists == true AND enabled == true"), evaluatedWith: export)
+            wait(for: [ready], timeout: 5)
+            return
+        }
         let back = app.navigationBars.buttons["Reports"]
         XCTAssertTrue(back.waitForExistence(timeout: 5)); back.tap()
         openIndex(); querySavedContents()
@@ -623,14 +643,9 @@ final class RemoteFilesUITests: XCTestCase {
         closeIndex()
     }
 
-    func testPDFAndOCRSearchFindsPagesAndPersistsRecognizedContents() throws {
+    func testLivePDFAndOCRSearchFindsPagesWithExplicitOptions() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
-        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
-        waitUntilHittable(projects); projects.tap()
-        let samples = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Search samples, Folder")).firstMatch
-        revealFolderRow(samples, in: app).tap()
-        XCTAssertTrue(app.navigationBars["Search samples"].waitForExistence(timeout: 10))
+        let app = launchDemoSearchSamples()
 
         func liveResult(_ filename: String) -> XCUIElement {
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", filename + ",")).firstMatch
@@ -678,7 +693,12 @@ final class RemoteFilesUITests: XCTestCase {
         }
         attachScreenshot("PDF and OCR live search on device")
         closeLiveSearch()
+    }
 
+    func testSavedPDFAndOCRIndexPersistsRecognizedContents() throws {
+        continueAfterFailure = false
+        let app = launchDemoSearchSamples()
+        let expected = [("Text sample.pdf", "Page 2"), ("Scanned sample.pdf", "Page 1"), ("Image sample.png", "Line 1")]
         app.buttons["Folder actions"].tap()
         let saved = app.buttons["Saved Search Index"]
         XCTAssertTrue(saved.waitForExistence(timeout: 5)); saved.tap()
@@ -710,6 +730,9 @@ final class RemoteFilesUITests: XCTestCase {
         reveal(ocr)
         // SwiftUI exposes the entire labelled row as the switch; tap its actual thumb.
         ocr.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        // SwiftUI's labelled row can publish the new value after the tap returns.
+        let ocrEnabled = expectation(for: NSPredicate(format: "value == %@", "1"), evaluatedWith: ocr)
+        wait(for: [ocrEnabled], timeout: 5)
         XCTAssertEqual(ocr.value as? String, "1")
         reveal(build); build.tap()
         XCTAssertTrue(app.buttons["Rebuild Index"].waitForExistence(timeout: 45), "The OCR index must finish within its bounded search")
@@ -1091,6 +1114,16 @@ final class RemoteFilesUITests: XCTestCase {
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).tap()
         XCTAssertFalse(app.buttons["Source Copied"].exists, "The native actions menu must be dismissed before navigating or changing reading mode")
         XCTAssertFalse(app.buttons["Copy Source"].exists)
+    }
+
+    private func launchDemoSearchSamples() -> XCUIApplication {
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        waitUntilHittable(projects); projects.tap()
+        let samples = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Search samples, Folder")).firstMatch
+        revealFolderRow(samples, in: app).tap()
+        XCTAssertTrue(app.navigationBars["Search samples"].waitForExistence(timeout: 10))
+        return app
     }
 
     private func launchDemoReader(filename: String, markdown: Bool = true) -> XCUIApplication {

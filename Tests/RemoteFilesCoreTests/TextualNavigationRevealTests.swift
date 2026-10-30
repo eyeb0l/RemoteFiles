@@ -200,11 +200,15 @@ private struct PreparedRevealFixture: View {
         try await Task.sleep(for: .milliseconds(300))
         XCTAssertEqual(scroll.contentOffset.y + scroll.adjustedContentInset.top, 0, accuracy: 2)
         state.version += 1
-        try await wait {
-            self.views(window).compactMap { $0 as? UIScrollView }.contains { $0.contentSize.height > 5_000 }
-        }
-        try await Task.sleep(for: .milliseconds(300))
+        // SwiftUI replaces the subtree on a later update. The old tall scroll view
+        // still satisfies the initial-mount predicate until that update begins.
+        try await wait({
+            guard let candidate = self.documentScroll(window) else { return false }
+            return candidate !== scroll
+        }, diagnostics: { self.diagnostics(needle, window: window) })
         let recreated = try XCTUnwrap(documentScroll(window))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(views(window).contains { $0 === recreated }, "The recreated scroll must remain mounted")
         XCTAssertEqual(recreated.contentOffset.y + recreated.adjustedContentInset.top, 0, accuracy: 2,
                        "A fulfilled Find request must stay fulfilled after the content subtree remounts")
     }

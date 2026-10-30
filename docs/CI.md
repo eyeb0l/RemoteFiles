@@ -298,3 +298,46 @@ checkout, along with their package and source references. The project-preparatio
 regression executes all four fixture launchers' preparation code and verifies both
 app configurations still resolve the original plist, including checkout paths
 with spaces. Test hosts retain their generated plists.
+
+## UI journey method deadlines
+
+[Main run 41046564410](https://github.com/eyeb0l/RemoteFiles/actions/runs/41046564410)
+failed UI shard 1 while all other lanes passed. Its second attempt reached the
+heading journey's final screenshot at 179 seconds, then exceeded the 180-second
+method allowance during teardown. The saved-index journey was still progressing
+through its final deletion/reopen assertions at that deadline; the native Files
+picker alone had taken about 30 seconds. Neither failure was an assertion about
+production behavior.
+
+Find plus same-document heading navigation and outline plus linked-document
+heading navigation now run as independent methods. Outline queries and swipes
+stay within its collection view. Saved-index persistence/deletion and exporting
+an original from a reopened index also run separately; each builds and reopens
+its own synthetic snapshot. All original assertions remain covered. The complete
+method inventory is still distributed across both UI shards, with unchanged
+180/240-second method, 30-minute command and 45-minute job limits. No skip or
+retry was added.
+
+The first hosted validation of this split also exposed a core-test setup race in
+`TextualNavigationRevealTests`: after changing the fixture's `.id`, its wait could
+accept the old tall scroll view before SwiftUI replaced the subtree. A fixed
+300-millisecond sleep did not establish that the replacement document scroll
+had usable geometry, and its unwrap failed. The test now waits for a different document
+scroll view using the original 12-second bound, then retains the settling delay
+and verifies that the new view remains mounted at the top. Exact target-range,
+horizontal visibility and fulfilled-request assertions are unchanged.
+
+The next validation passed the heading journeys in 84 and 55 seconds, reopened
+index export in 151 seconds, and index persistence/deletion in 156 seconds.
+It also exposed the combined live PDF/OCR and saved-index journey: after 130
+seconds of successful assertions, XCTest spent another 60 seconds awaiting an
+animation-idle notification on the return from PDF preview. Live extraction
+options/results and saved extraction/build/preview/deletion now run independently,
+each opening its own synthetic sample folder. The saved-index form already
+defaults PDF extraction on and explicitly enables OCR, so it does not depend on
+live-search options. All original assertions and deadlines remain in place.
+The saved form also waits up to five seconds for the OCR switch's accessible
+value to become enabled before building. A focused iOS 27.2 run read its old
+value immediately after the tap; temporary before/after screenshots confirmed
+the switch updated when given time to settle. The enabled-state assertion is
+retained, and the diagnostic screenshots are not part of the final test.
