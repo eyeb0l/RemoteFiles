@@ -33,6 +33,8 @@ public enum RemoteFolderSearch {
         public var bytesRead = 0
         /// Upper bound charged for reads, including unsuccessful reads and an EOF sentinel.
         public var chargedBytes = 0
+        public var extractedBytes = 0
+        public var truncatedFiles = 0
         public var foldersSearched = 0
         /// Folders that could not be listed, for example for lack of permission. The search goes on.
         public var unreadableFolders = 0
@@ -51,12 +53,12 @@ public enum RemoteFolderSearch {
     /// are neither matched nor searched unless `includeHidden`. Ending the consumer cancels the walk.
     public static func names(matching query: String, below root: String, profile: ConnectionProfile,
                              service: any RemoteFileService, includeHidden: Bool,
-                             limits: Limits = Limits()) -> AsyncThrowingStream<Update, Error> {
+                             limits: Limits = Limits(), options: SearchQueryOptions = .init()) -> AsyncThrowingStream<Update, Error> {
         AsyncThrowingStream { continuation in
             let walk = Task {
                 do {
                     try await search(query: query, root: root, profile: profile, service: service,
-                                     includeHidden: includeHidden, limits: limits, content: nil) { continuation.yield($0) }
+                                     includeHidden: includeHidden, limits: limits, content: nil, options: options) { continuation.yield($0) }
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -75,9 +77,12 @@ public enum RemoteFolderSearch {
     }
 
     static func search(query: String, root: String, profile: ConnectionProfile, service: any RemoteFileService,
-                               includeHidden: Bool, limits: Limits, content: ContentLimits?, report: (Update) -> Void) async throws {
+                               includeHidden: Bool, limits: Limits, content: ContentLimits?,
+                               options: SearchQueryOptions = .init(), extraction: SearchExtractionOptions = .init(),
+                               collect: ((SearchIndexDocument) -> Void)? = nil, report: (Update) -> Void) async throws {
         try Task.checkCancellation()
-        if let server = service as? any ServerFolderSearching,
+        if options == SearchQueryOptions(), extraction == SearchExtractionOptions(), collect == nil,
+           let server = service as? any ServerFolderSearching,
            let update = try await server.searchFolders(query: query, root: root, profile: profile,
                                                        includeHidden: includeHidden, limits: limits, content: content) {
             try Task.checkCancellation()
@@ -148,10 +153,10 @@ public enum RemoteFolderSearch {
                         if let content {
                             try await scan(visible, query: query, root: root, profile: profile,
                                 service: service, limits: content, matchLimit: limits.maxMatches, deadline: deadline,
-                                matched: &matched, progress: &progress, report: report)
+                                matched: &matched, progress: &progress, options: options, extraction: extraction, collect: collect, report: report)
                             if matched >= limits.maxMatches, reported < queue.count { progress.stop = .matchLimit }
                         } else {
-                            let found = visible.filter { $0.name.localizedCaseInsensitiveContains(query) }
+                            let found = visible.filter { options.accepts($0) && options.range(in: $0.name, query: query) != nil }
                             let kept = found.prefix(max(0, limits.maxMatches - matched))
                             matched += kept.count
                             update.matches = Array(kept)

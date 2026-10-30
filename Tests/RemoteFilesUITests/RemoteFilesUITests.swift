@@ -460,13 +460,16 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(nested.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(nested.label.contains("In Reports/2026"), nested.label)
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@ AND label CONTAINS %@", "Weekly review.md,", "In Reports")).firstMatch.exists)
-        let summary = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Searched 5 folders")).firstMatch
-        XCTAssertTrue(summary.waitForExistence(timeout: 10), "Projects, its three folders and Reports/2026; the link to Reports is not followed")
+        let summary = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Searched 6 folders")).firstMatch
+        XCTAssertTrue(summary.waitForExistence(timeout: 10), "Projects, its four folders and Reports/2026; the link to Reports is not followed")
         XCTAssertTrue(summary.isHittable, "The summary stays visible above the keyboard")
         search.typeText("\n")
         let capture = XCTAttachment(screenshot: app.screenshot()); capture.name = "Subfolder search results"; capture.lifetime = .keepAlways; add(capture)
 
-        nested.tap()
+        // Tap the title itself: the combined accessibility row's center falls between its
+        // two text lines on the physical iPhone and does not activate the link.
+        let title = nested.staticTexts["Quarterly review.md"].firstMatch
+        waitUntilHittable(title); title.tap()
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
         XCTAssertTrue(app.navigationBars.buttons["Projects"].waitForExistence(timeout: 5)); app.navigationBars.buttons["Projects"].tap()
         // Searching again would show its status for at least the pause before listing.
@@ -516,6 +519,229 @@ final class RemoteFilesUITests: XCTestCase {
         app.buttons["This Folder"].tap()
         XCTAssertTrue(app.staticTexts["No matching names"].waitForExistence(timeout: 5), "Contents are not file names")
     }
+
+    func testSavedSearchIndexBuildsReopensWithTheSameSnapshotAndDeletes() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        let reports = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports, Folder")).firstMatch
+        func openReports() {
+            waitUntilHittable(projects); projects.tap()
+            revealFolderRow(reports, in: app).tap()
+        }
+        openReports()
+
+        let indexList = app.collectionViews["saved-search-index-list"]
+        let date = app.staticTexts["saved-search-index-date"]
+        let build = app.buttons["Build Index"]
+        let rebuild = app.buttons["Rebuild Index"]
+        let delete = app.buttons["Delete Index"]
+        let search = app.searchFields.matching(NSPredicate(format: "placeholderValue == %@", "Search saved contents")).firstMatch
+        let result = app.buttons["saved-search-result-/Projects/Reports/2026/Quarterly review.md"]
+
+        func openIndex() {
+            let actions = app.buttons["Folder actions"]
+            waitUntilHittable(actions); actions.tap()
+            let saved = app.buttons["Saved Search Index"]
+            XCTAssertTrue(saved.waitForExistence(timeout: 5)); saved.tap()
+            XCTAssertTrue(app.navigationBars["Saved Search Index"].waitForExistence(timeout: 10))
+            XCTAssertTrue(indexList.waitForExistence(timeout: 5), app.debugDescription)
+        }
+        func reveal(_ element: XCUIElement, down: Bool = true) {
+            for _ in 0..<16 {
+                let bottom = search.exists && search.frame.minY > indexList.frame.midY
+                    ? min(indexList.frame.maxY, search.frame.minY - 12) : indexList.frame.maxY
+                if element.exists, element.isHittable,
+                   element.frame.minY >= indexList.frame.minY, element.frame.maxY <= bottom { return }
+                let start = indexList.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: down ? 0.7 : 0.3))
+                let end = indexList.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: down ? 0.3 : 0.7))
+                start.press(forDuration: 0.05, thenDragTo: end)
+            }
+            XCTFail("Could not reveal saved-index control or result.\n" + app.debugDescription)
+        }
+        func closeIndex() {
+            // iOS hides the sheet navigation bar while its search presentation is active.
+            let closeSearch = app.buttons["close"]
+            if closeSearch.exists { closeSearch.tap() }
+            let done = app.navigationBars["Saved Search Index"].buttons["Done"]
+            XCTAssertTrue(done.waitForExistence(timeout: 5)); done.tap()
+        }
+        func querySavedContents() {
+            XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
+            search.tap(); search.typeText("distance disappear\n")
+            reveal(result)
+            XCTAssertTrue(result.label.contains("Line 13"), result.label)
+            XCTAssertTrue(result.label.contains("Good tools make the distance disappear."), result.label)
+        }
+
+        openIndex()
+        // Demo storage is persistent too; remove only this synthetic folder's previous run.
+        if date.waitForExistence(timeout: 3) {
+            reveal(delete); delete.tap()
+            XCTAssertTrue(build.waitForExistence(timeout: 5))
+        }
+        reveal(build); build.tap()
+        XCTAssertTrue(rebuild.waitForExistence(timeout: 45), "A completed build must expose rebuild and deletion.\n" + app.debugDescription)
+        reveal(date, down: false)
+        let savedDate = date.label
+        XCTAssertTrue(savedDate.hasSuffix("5 files"), savedDate)
+        querySavedContents()
+        attachScreenshot("Persistent search index with saved source matches")
+        closeIndex()
+
+        app.terminate(); app.launch()
+        openReports()
+        openIndex()
+        XCTAssertTrue(date.waitForExistence(timeout: 10))
+        XCTAssertEqual(date.label, savedDate, "Relaunching loads the saved snapshot without rebuilding it")
+        querySavedContents()
+        result.tap()
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+        let export = app.buttons["Save Original to Files"]
+        XCTAssertTrue(export.waitForExistence(timeout: 5) && export.isEnabled)
+        export.tap()
+        XCTAssertTrue(app.buttons["Save"].waitForExistence(timeout: 45),
+                      "An indexed result inside the connection boundary must still export.\n" + app.debugDescription)
+        attachScreenshot("Indexed original file native Save to Files picker")
+        cancelOriginalExport(in: app)
+        XCTAssertTrue(app.navigationBars["Quarterly review.md"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].exists)
+        let ready = expectation(for: NSPredicate(format: "exists == true AND enabled == true"), evaluatedWith: export)
+        wait(for: [ready], timeout: 5)
+        let back = app.navigationBars.buttons["Reports"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5)); back.tap()
+        openIndex(); querySavedContents()
+        reveal(delete, down: false); delete.tap()
+        XCTAssertTrue(build.waitForExistence(timeout: 5))
+        XCTAssertFalse(result.exists, "Deleting the index clears its extracted matches")
+        closeIndex()
+        openIndex()
+        reveal(build)
+        XCTAssertFalse(date.exists, "Deletion persists after reopening the sheet")
+        XCTAssertFalse(rebuild.exists)
+        XCTAssertFalse(delete.exists)
+        closeIndex()
+    }
+
+    func testPDFAndOCRSearchFindsPagesAndPersistsRecognizedContents() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        waitUntilHittable(projects); projects.tap()
+        let samples = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Search samples, Folder")).firstMatch
+        revealFolderRow(samples, in: app).tap()
+        XCTAssertTrue(app.navigationBars["Search samples"].waitForExistence(timeout: 10))
+
+        func liveResult(_ filename: String) -> XCUIElement {
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", filename + ",")).firstMatch
+        }
+        func searchContents() {
+            let search = app.searchFields.firstMatch
+            XCTAssertTrue(search.waitForExistence(timeout: 10)); search.tap(); search.typeText("INVOICE")
+            let contents = app.buttons["Contents"]
+            XCTAssertTrue(contents.waitForExistence(timeout: 5)); contents.tap()
+            search.typeText("\n")
+        }
+        func closeLiveSearch() {
+            let close = app.buttons["close"]
+            XCTAssertTrue(close.waitForExistence(timeout: 5)); close.tap()
+            XCTAssertTrue(app.navigationBars["Search samples"].waitForExistence(timeout: 5))
+        }
+        func enableLiveOption(_ title: String) {
+            let actions = app.buttons["Folder actions"]
+            waitUntilHittable(actions); actions.tap()
+            let options = app.buttons["Search Options"]
+            XCTAssertTrue(options.waitForExistence(timeout: 5)); options.tap()
+            // Native menu toggles use button semantics; a switch is used in form presentations.
+            let button = app.buttons[title]
+            let option = button.waitForExistence(timeout: 2) ? button : app.switches[title]
+            XCTAssertTrue(option.waitForExistence(timeout: 5)); option.tap()
+        }
+
+        searchContents()
+        XCTAssertTrue(app.staticTexts["No matching contents"].waitForExistence(timeout: 15),
+                      "PDFs and images are excluded until their extraction options are enabled")
+        XCTAssertFalse(liveResult("Text sample.pdf").exists)
+        XCTAssertFalse(liveResult("Scanned sample.pdf").exists)
+        XCTAssertFalse(liveResult("Image sample.png").exists)
+        closeLiveSearch()
+        enableLiveOption("Include PDF Text")
+        enableLiveOption("Recognize Text in Images and Scans")
+        searchContents()
+        let expected = [("Text sample.pdf", "Page 2"), ("Scanned sample.pdf", "Page 1"), ("Image sample.png", "Line 1")]
+        for (filename, location) in expected {
+            let result = liveResult(filename)
+            XCTAssertTrue(result.waitForExistence(timeout: 45), "Missing live PDF/OCR result: \(filename).\n" + app.debugDescription)
+            XCTAssertTrue(result.label.contains(location), result.label)
+            XCTAssertTrue(result.label.localizedCaseInsensitiveContains("SEARCHABLE INVOICE"), result.label)
+        }
+        attachScreenshot("PDF and OCR live search on device")
+        closeLiveSearch()
+
+        app.buttons["Folder actions"].tap()
+        let saved = app.buttons["Saved Search Index"]
+        XCTAssertTrue(saved.waitForExistence(timeout: 5)); saved.tap()
+        XCTAssertTrue(app.navigationBars["Saved Search Index"].waitForExistence(timeout: 10))
+        let list = app.collectionViews["saved-search-index-list"]
+        XCTAssertTrue(list.waitForExistence(timeout: 5))
+        let search = app.searchFields.matching(NSPredicate(format: "placeholderValue == %@", "Search saved contents")).firstMatch
+        func reveal(_ element: XCUIElement, down: Bool = true) {
+            for _ in 0..<16 {
+                let bottom = search.exists && search.frame.minY > list.frame.midY
+                    ? min(list.frame.maxY, search.frame.minY - 12) : list.frame.maxY
+                if element.exists, element.isHittable,
+                   element.frame.minY >= list.frame.minY, element.frame.maxY <= bottom { return }
+                let start = list.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: down ? 0.7 : 0.3))
+                let end = list.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: down ? 0.3 : 0.7))
+                start.press(forDuration: 0.05, thenDragTo: end)
+            }
+            XCTFail("Could not reveal PDF/OCR index control or result.\n" + app.debugDescription)
+        }
+        let date = app.staticTexts["saved-search-index-date"]
+        let delete = app.buttons["Delete Index"]
+        let build = app.buttons["Build Index"]
+        if date.waitForExistence(timeout: 3) {
+            // Only this synthetic folder's saved index is replaced or removed.
+            reveal(delete); delete.tap()
+            XCTAssertTrue(build.waitForExistence(timeout: 5))
+        }
+        let ocr = app.switches["Recognize Text in Images and Scans"]
+        reveal(ocr)
+        // SwiftUI exposes the entire labelled row as the switch; tap its actual thumb.
+        ocr.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        XCTAssertEqual(ocr.value as? String, "1")
+        reveal(build); build.tap()
+        XCTAssertTrue(app.buttons["Rebuild Index"].waitForExistence(timeout: 45), "The OCR index must finish within its bounded search")
+        reveal(date, down: false)
+        XCTAssertTrue(date.label.hasSuffix("3 files"), date.label)
+        XCTAssertTrue(search.waitForExistence(timeout: 5)); search.tap(); search.typeText("INVOICE\n")
+        for (filename, location) in expected.reversed() {
+            let result = app.buttons["saved-search-result-/Projects/Search samples/" + filename]
+            reveal(result)
+            XCTAssertTrue(result.label.contains(location), result.label)
+            XCTAssertTrue(result.label.localizedCaseInsensitiveContains("SEARCHABLE INVOICE"), result.label)
+        }
+        attachScreenshot("Saved PDF and OCR search results")
+        let pdfResult = app.buttons["saved-search-result-/Projects/Search samples/Text sample.pdf"]
+        reveal(pdfResult); pdfResult.tap()
+        XCTAssertTrue(app.staticTexts["2 pages"].waitForExistence(timeout: 15), "A saved PDF result opens its current remote preview")
+        let back = app.navigationBars.buttons["Search samples"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5)); back.tap()
+        app.buttons["Folder actions"].tap()
+        XCTAssertTrue(saved.waitForExistence(timeout: 5)); saved.tap()
+        XCTAssertTrue(list.waitForExistence(timeout: 5))
+        XCTAssertTrue(search.waitForExistence(timeout: 5)); search.tap(); search.typeText("INVOICE\n")
+        reveal(delete, down: false); delete.tap()
+        XCTAssertTrue(build.waitForExistence(timeout: 5))
+        for (filename, _) in expected {
+            XCTAssertFalse(app.buttons["saved-search-result-/Projects/Search samples/" + filename].exists)
+        }
+        let close = app.buttons["close"]
+        if close.exists { close.tap() }
+        let done = app.navigationBars["Saved Search Index"].buttons["Done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5)); done.tap()
+    }
+
     func testSourceSyntaxHighlightingAndMarkdownSource() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -821,22 +1047,7 @@ final class RemoteFilesUITests: XCTestCase {
             XCTAssertTrue(app.buttons["Save"].waitForExistence(timeout: 45),
                           "The original should prepare and open the system Save to Files picker.\n" + app.debugDescription)
             attachScreenshot("Original file native Save to Files picker")
-            let cancel = app.descendants(matching: .any)
-                .matching(NSPredicate(format: "label == %@", "Cancel")).firstMatch
-            if cancel.exists && cancel.isHittable {
-                cancel.tap()
-            } else {
-                // This Files version retains a hidden Cancel accessibility element.
-                // Dismiss the real native page sheet through its header gesture.
-                let header = app.navigationBars["FullDocumentManagerViewControllerNavigationBar"]
-                XCTAssertTrue(header.waitForExistence(timeout: 5))
-                let start = header.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.25))
-                let end = app.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.8))
-                start.press(forDuration: 0.1, thenDragTo: end)
-            }
-            let gone = expectation(for: NSPredicate(format: "exists == false"),
-                                   evaluatedWith: app.buttons["Save"])
-            wait(for: [gone], timeout: 10)
+            cancelOriginalExport(in: app)
             XCTAssertTrue(app.navigationBars["Example.swift"].waitForExistence(timeout: 5))
             XCTAssertTrue(app.textViews["Bounded source text"].exists)
             let ready = expectation(for: NSPredicate(format: "exists == true AND enabled == true"), evaluatedWith: export)
@@ -845,6 +1056,25 @@ final class RemoteFilesUITests: XCTestCase {
         app.buttons["Document actions"].tap()
         XCTAssertTrue(app.buttons["Copy Source"].waitForExistence(timeout: 5),
                       "Cancelling export should leave the reader's existing actions usable")
+    }
+
+    private func cancelOriginalExport(in app: XCUIApplication) {
+        let cancel = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Cancel")).firstMatch
+        if cancel.exists && cancel.isHittable {
+            cancel.tap()
+        } else {
+            // This Files version retains a hidden Cancel accessibility element.
+            // Dismiss the real native page sheet through its header gesture.
+            let header = app.navigationBars["FullDocumentManagerViewControllerNavigationBar"]
+            XCTAssertTrue(header.waitForExistence(timeout: 5))
+            let start = header.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.25))
+            let end = app.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.8))
+            start.press(forDuration: 0.1, thenDragTo: end)
+        }
+        let gone = expectation(for: NSPredicate(format: "exists == false"),
+                               evaluatedWith: app.buttons["Save"])
+        wait(for: [gone], timeout: 10)
     }
 
     private func dismissDocumentActions(in app: XCUIApplication) {

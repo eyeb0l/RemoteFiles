@@ -17,13 +17,18 @@ public extension RemoteFolderSearch {
         public let entry: RemoteEntry
         public let line: Int
         public let snippet: String
+        public let page: Int?
+        public init(entry: RemoteEntry, line: Int, snippet: String, page: Int? = nil) {
+            self.entry = entry; self.line = line; self.snippet = snippet; self.page = page
+        }
     }
 
     /// Uses server assistance when available, otherwise reads candidate UTF-8 files one at a time.
-    /// No persistent index or on-disk content cache is used. Canonical reads stay within root.
+    /// Rich-document extraction and custom matching use bounded SFTP reads. Canonical reads stay within root.
     static func contents(matching query: String, below root: String, profile: ConnectionProfile,
                          service: any RemoteFileService, includeHidden: Bool,
-                         limits: Limits = Limits(), contentLimits: ContentLimits = ContentLimits()) -> AsyncThrowingStream<Update, Error> {
+                         limits: Limits = Limits(), contentLimits: ContentLimits = ContentLimits(),
+                         options: SearchQueryOptions = .init(), extraction: SearchExtractionOptions = .init()) -> AsyncThrowingStream<Update, Error> {
         AsyncThrowingStream { continuation in
             let walk = Task {
                 do {
@@ -31,7 +36,7 @@ public extension RemoteFolderSearch {
                         var final = Update(); final.isFinished = true; continuation.yield(final)
                     } else {
                         try await search(query: query, root: root, profile: profile, service: service,
-                            includeHidden: includeHidden, limits: limits, content: contentLimits) { continuation.yield($0) }
+                            includeHidden: includeHidden, limits: limits, content: contentLimits, options: options, extraction: extraction) { continuation.yield($0) }
                     }
                     continuation.finish()
                 } catch { continuation.finish(throwing: error) }
@@ -44,11 +49,13 @@ public extension RemoteFolderSearch {
 extension RemoteFolderSearch {
     static func scan(_ entries: [RemoteEntry], query: String, root: String, profile: ConnectionProfile,
                      service: any RemoteFileService, limits: ContentLimits, matchLimit: Int,
-                     deadline: ContinuousClock.Instant, matched: inout Int, progress: inout Update, report: (Update) -> Void) async throws {
+                     deadline: ContinuousClock.Instant, matched: inout Int, progress: inout Update, options: SearchQueryOptions, extraction: SearchExtractionOptions,
+                     collect: ((SearchIndexDocument) -> Void)?, report: (Update) -> Void) async throws {
         for entry in entries {
             try Task.checkCancellation()
-            if entry.kind == .directory { continue }
-            guard entry.kind == .file, isText(entry.name), entry.size.map({ $0 <= UInt64(limits.maxFileBytes) }) ?? true else {
+            if entry.kind == .directory || !options.accepts(entry) { continue }
+            guard entry.kind == .file, RemoteResourcePath.contains(entry.path, in: root),
+                  SearchDocumentExtractor.supports(filename: entry.name, options: extraction), entry.size.map({ $0 <= UInt64(limits.maxFileBytes) }) ?? true else {
                 progress.skippedFiles += 1; continue
             }
             guard matched < matchLimit else { progress.stop = .matchLimit; break }
@@ -88,13 +95,26 @@ extension RemoteFolderSearch {
                 progress.chargedBytes -= reservation - data.count
                 progress.bytesRead += data.count
                 var update = progress
-                switch DocumentPolicy.decode(data, filename: entry.name, maxBytes: readLimit) {
-                case .text(let text, _):
-                    if let match = firstMatch(in: text, query: query, entry: entry) {
-                        matched += 1; update.contentMatches = [match]
+                do {
+                    var boundedExtraction = extraction
+                    let remainingText = 16 * 1_024 * 1_024 - progress.extractedBytes
+                    guard remainingText > 0 else { progress.stop = .byteLimit; return }
+                    boundedExtraction.maxTextBytes = min(extraction.maxTextBytes, remainingText)
+                    let extracted = try await SearchDocumentExtractor.extract(data, filename: entry.name,
+                        options: boundedExtraction, deadline: deadline)
+                    try Task.checkCancellation()
+                    progress.extractedBytes += extracted.segments.reduce(0) { $0 + $1.text.utf8.count }
+                    if extracted.isTruncated { progress.truncatedFiles += 1 }
+                    collect?(SearchIndexDocument(entry: entry, segments: extracted.segments))
+                    for segment in extracted.segments {
+                        if let match = firstMatch(in: segment.text, query: query, entry: entry, options: options, page: segment.page) {
+                            matched += 1; update.contentMatches = [match]; break
+                        }
                     }
-                case .empty: break
-                default: progress.skippedFiles += 1
+                } catch {
+                    try Task.checkCancellation()
+                    if ContinuousClock.now >= deadline { progress.stop = .timeLimit; return }
+                    progress.skippedFiles += 1
                 }
                 update.copyContentProgress(from: progress)
                 report(update)
@@ -103,15 +123,9 @@ extension RemoteFolderSearch {
         }
     }
 
-    private static func isText(_ name: String) -> Bool {
-        switch DocumentPolicy.kind(filename: name) {
-        case .plainText, .markdown, .html, .svg: return true
-        default: return false
-        }
-    }
-
-    static func firstMatch(in text: String, query: String, entry: RemoteEntry) -> ContentMatch? {
-        guard let range = text.range(of: query, options: [.caseInsensitive]) else { return nil }
+    static func firstMatch(in text: String, query: String, entry: RemoteEntry,
+                           options: SearchQueryOptions = .init(), page: Int? = nil) -> ContentMatch? {
+        guard let range = options.range(in: text, query: query) else { return nil }
         let before = text[..<range.lowerBound]
         let line = before.reduce(1) { $1.isNewline ? $0 + 1 : $0 }
         let lineStart = before.lastIndex(where: \.isNewline).map { text.index(after: $0) } ?? text.startIndex
@@ -122,12 +136,13 @@ extension RemoteFolderSearch {
         let context = String(text[start..<end]).replacingOccurrences(of: "\r\n", with: " ")
             .replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
             .replacingOccurrences(of: "\t", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-        return ContentMatch(entry: entry, line: line, snippet: (start > lineStart ? "…" : "") + context + (end < lineEnd ? "…" : ""))
+        return ContentMatch(entry: entry, line: line, snippet: (start > lineStart ? "…" : "") + context + (end < lineEnd ? "…" : ""), page: page)
     }
 }
 
 extension RemoteFolderSearch.Update {
     mutating func copyContentProgress(from other: Self) {
+        extractedBytes = other.extractedBytes; truncatedFiles = other.truncatedFiles
         filesSearched = other.filesSearched; skippedFiles = other.skippedFiles
         unreadableFiles = other.unreadableFiles; bytesRead = other.bytesRead; chargedBytes = other.chargedBytes
     }

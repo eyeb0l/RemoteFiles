@@ -65,6 +65,8 @@ public struct RemoteEntry: Identifiable, Hashable, Sendable {
     public let modifiedAt: Date?
     /// Present only for a user-tapped document link; rechecked by every reader fetch.
     public let navigationRoot: String?
+    /// For saved search results, retain the exact canonical folder used to build the index.
+    public let canonicalRoot: String?
     /// The tapped alias name, retained for exporting the original after canonical resolution.
     public let exportFilename: String?
     /// A user-tapped heading link; never part of the remote filesystem path.
@@ -72,9 +74,10 @@ public struct RemoteEntry: Identifiable, Hashable, Sendable {
     /// For a symbolic link resolved while listing; nil when it was not resolved.
     public let link: LinkResolution?
     public init(name: String, path: String, kind: Kind, size: UInt64? = nil, modifiedAt: Date? = nil, navigationRoot: String? = nil,
-                exportFilename: String? = nil, link: LinkResolution? = nil) {
+                exportFilename: String? = nil, link: LinkResolution? = nil, canonicalRoot: String? = nil) {
         self.name = name; self.path = path; self.kind = kind; self.size = size; self.modifiedAt = modifiedAt
         self.navigationRoot = navigationRoot; self.exportFilename = exportFilename
+        self.canonicalRoot = canonicalRoot
         self.headingFragment = nil; self.link = link
     }
     public func openingHeading(_ fragment: String) -> RemoteEntry {
@@ -83,6 +86,7 @@ public struct RemoteEntry: Identifiable, Hashable, Sendable {
     private init(copying entry: RemoteEntry, headingFragment: String) {
         name = entry.name; path = entry.path; kind = entry.kind; size = entry.size; modifiedAt = entry.modifiedAt
         navigationRoot = entry.navigationRoot; exportFilename = entry.exportFilename; link = entry.link
+        canonicalRoot = entry.canonicalRoot
         self.headingFragment = headingFragment
     }
     /// The resolved target of a symbolic link, if any.
@@ -163,6 +167,16 @@ public protocol RemoteFileService: Sendable {
 }
 
 public extension RemoteFileService {
+    /// Indexed results must recheck the original canonical boundary, including on refresh.
+    /// Ordinary navigation keeps its existing conditional-read and document-link behavior.
+    func readFileIfChanged(profile: ConnectionProfile, entry: RemoteEntry, limit: Int,
+                           since: RemoteFileVersion?) async throws -> RemoteFileRead {
+        if let root = entry.canonicalRoot {
+            return .contents(try await readSearchFile(profile: profile, path: entry.path, canonicalRoot: root, limit: limit), nil)
+        }
+        return try await readFileIfChanged(profile: profile, path: entry.path, allowedRoot: entry.navigationRoot,
+                                          limit: limit, since: since)
+    }
     func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL,
                               limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
         throw RemoteFileError.unsupportedFile

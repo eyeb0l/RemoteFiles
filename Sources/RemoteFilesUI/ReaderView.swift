@@ -66,7 +66,7 @@ struct ReaderView: View {
                                     kind: DocumentPolicy.kind(filename: entry.name), refreshID: refreshID)
                 } else if let preview, model.isForeground {
                     switch preview {
-                    case .text(let text, let markdown): DocumentContentView(text: text, markdown: markdown, source: source, filename: entry.name, location: .init(profile: profile, path: entry.path), resolver: model.resources, readingPosition: readingPosition, openDocumentLink: openLink, wrapLines: wrapLines, navigation: navigation).id(ContentIdentity(revision: contentRevision, images: imageVersion))
+                    case .text(let text, let markdown): DocumentContentView(text: text, markdown: markdown, source: source, filename: entry.name, location: .init(profile: profile, path: entry.path, canonicalRoot: entry.canonicalRoot), resolver: model.resources, readingPosition: readingPosition, openDocumentLink: openLink, wrapLines: wrapLines, navigation: navigation).id(ContentIdentity(revision: contentRevision, images: imageVersion))
                     case .empty: ContentUnavailableView("This file is empty", systemImage: "doc", description: Text("Refresh after it has been updated on the server."))
                     case .unsupportedFileType: infoView("Preview not available", detail: "This file type is not supported for preview.")
                     case .unsupportedEncodingOrBinary: infoView("Can’t display this file", detail: "This file contains binary data or text that is not UTF-8.")
@@ -246,7 +246,7 @@ struct ReaderView: View {
             contentRevision = navigation.revision
         }
         var knownVersion = preview == nil ? nil : displayedVersion
-        if entry.navigationRoot == nil, preview == nil, let bytes = model.cachedDocument(profile.id, path: entry.path) {
+        if entry.navigationRoot == nil, entry.canonicalRoot == nil, preview == nil, let bytes = model.cachedDocument(profile.id, path: entry.path) {
             let version = model.cachedDocumentVersion(profile.id, path: entry.path)
             let cached = await Task.detached(priority: .userInitiated) { DocumentPolicy.decode(bytes, filename: entry.name) }.value
             await prepareReading(cached)
@@ -255,7 +255,7 @@ struct ReaderView: View {
             knownVersion = version
         }
         do {
-            let read = try await model.service.readFileIfChanged(profile: profile, path: entry.path, allowedRoot: entry.navigationRoot,
+            let read = try await model.service.readFileIfChanged(profile: profile, entry: entry,
                                                                  limit: DocumentPolicy.previewByteLimit,
                                                                  since: explicitRefresh ? nil : knownVersion)
             guard case .contents(let bytes, let version) = read else {
@@ -283,7 +283,7 @@ struct ReaderView: View {
             let published = try await ReaderReloadPublication.perform(
                 clearImages: refreshImages,
                 isCurrent: { token == requestID && !model.isDisconnecting && model.sessionRevision == revision },
-                clearResources: { invalidatedFiles = await model.resources.invalidateResources(references, in: .init(profile: profile, path: entry.path)) },
+                clearResources: { invalidatedFiles = await model.resources.invalidateResources(references, in: .init(profile: profile, path: entry.path, canonicalRoot: entry.canonicalRoot)) },
                 clearDecoded: { await RemoteImageDecoder.shared.invalidate(files: invalidatedFiles) },
                 publish: {
                     if refreshImages { lastImageRefresh = refreshID; imageVersion += 1 }

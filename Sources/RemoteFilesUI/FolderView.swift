@@ -86,6 +86,8 @@ struct FolderSearchState {
     struct Key: Equatable {
         let query: String, root: String, includeHidden: Bool, sessionRevision: Int, refresh: Int
         var scope: FolderSearchScope = .subfolders
+        var options = SearchQueryOptions()
+        var extraction = SearchExtractionOptions()
     }
     var key: Key?
     var rows: [FolderSearchRow] = []
@@ -102,7 +104,8 @@ struct FolderSearchState {
         var parts = ["Searched \(searched.formatted()) \(searched == 1 ? "folder" : "folders")."]
         if key?.scope == .contents {
             parts.append("Checked \(progress.filesSearched.formatted()) files.")
-            if progress.skippedFiles > 0 { parts.append("Skipped \(progress.skippedFiles.formatted()) non-text, oversized or linked files.") }
+            if progress.skippedFiles > 0 { parts.append("Skipped \(progress.skippedFiles.formatted()) unsupported, oversized or linked files.") }
+            if progress.truncatedFiles > 0 { parts.append("\(progress.truncatedFiles) files had extraction limits; matches may be missing.") }
             if progress.unreadableFiles > 0 { parts.append("\(progress.unreadableFiles.formatted()) files couldn’t be read.") }
         }
         if progress.unreadableFolders > 0 {
@@ -123,7 +126,7 @@ struct FolderSearchState {
     mutating func apply(_ update: RemoteFolderSearch.Update, for key: Key) {
         guard self.key == key else { return }
         rows += update.matches.map { FolderSearchRow($0, root: key.root) }
-        rows += update.contentMatches.map { FolderSearchRow($0.entry, root: key.root, snippet: "Line \($0.line) · \($0.snippet)") }
+        rows += update.contentMatches.map { FolderSearchRow($0.entry, root: key.root, snippet: ($0.page.map { "Page \($0)" } ?? "Line \($0.line)") + " · " + $0.snippet) }
         progress = update
     }
 }
@@ -138,10 +141,10 @@ struct FolderListing: Sendable {
         rows = snapshot.entries.sorted { Self.precedes($0, $1, by: .name) }.map(FolderRow.init)
         defaultRows = rows.filter { !$0.entry.name.hasPrefix(".") }
     }
-    func visible(query: String, showHidden: Bool, order: FolderSortOrder) -> [FolderRow] {
-        if query.isEmpty && order == .name { return showHidden ? rows : defaultRows }
+    func visible(query: String, showHidden: Bool, order: FolderSortOrder, options: SearchQueryOptions = .init()) -> [FolderRow] {
+        if query.isEmpty && order == .name && options == SearchQueryOptions() { return showHidden ? rows : defaultRows }
         let result = (showHidden ? rows : defaultRows).filter {
-            query.isEmpty || $0.entry.name.localizedCaseInsensitiveContains(query)
+            options.accepts($0.entry) && (query.isEmpty || options.range(in: $0.entry.name, query: query) != nil)
         }
         guard order != .name else { return result }
         return result.sorted { Self.precedes($0.entry, $1.entry, by: order) }
@@ -184,6 +187,7 @@ struct FolderView: View {
     @State private var userChoseSort = false
     @State private var appliedFilter = ""
     @State private var appliedShowHidden = false
+    @State private var appliedSearchOptions = SearchQueryOptions()
     @State private var appliedSortOrder: FolderSortOrder
     @State private var refreshID = 0
     @State private var requestID = UUID()
@@ -194,6 +198,9 @@ struct FolderView: View {
     @State private var resolveTask: Task<Void, Never>?
     @State private var searchScope = FolderSearchScope.folder
     @State private var search = FolderSearchState()
+    @State private var searchOptions = SearchQueryOptions()
+    @State private var extraction = SearchExtractionOptions()
+    @State private var showingSearchIndex = false
     init(model: AppModel, profile: ConnectionProfile, requestedPath: String) {
         self.model = model
         self.profile = profile
@@ -211,7 +218,9 @@ struct FolderView: View {
         VStack(spacing: 0) {
             pathBar
             if searchScope == .contents {
-                Text("Search text in this folder and subfolders. Up to 256 KB per file and 16 MB per search.")
+                Text(extraction.includePDF || extraction.includeOCR
+                     ? "Search text, selected PDFs and images locally. Up to 2 MB per file, 20 PDF pages and 16 MB per search."
+                     : "Search text in this folder and subfolders. Up to 256 KB per file and 16 MB per search.")
                     .font(.caption).foregroundStyle(.secondary).padding(.horizontal).padding(.vertical, 6)
             }
             if let error { StatusBanner(message: listing == nil ? error : "Previously loaded folder · \(error)", error: true) }
@@ -251,6 +260,13 @@ struct FolderView: View {
                     Button(model.isFavourite(profile.id, path: path) ? "Remove Favourite" : "Add Favourite", systemImage: model.isFavourite(profile.id, path: path) ? "star.slash" : "star") { Task { await model.favourite(profile: profile, path: path) } }.disabled(listing == nil)
                     Button("Refresh", systemImage: "arrow.clockwise") { refreshID += 1 }
                     Toggle("Show Hidden Files", isOn: $showHidden)
+                    Menu("Search Options", systemImage: "line.3.horizontal.decrease") {
+                        SearchOptionsControls(options: $searchOptions)
+                        Toggle("Include PDF Text", isOn: $extraction.includePDF)
+                        Toggle("Recognize Text in Images and Scans", isOn: $extraction.includeOCR)
+                    }
+                    Button("Saved Search Index", systemImage: "doc.text.magnifyingglass") { showingSearchIndex = true }
+                        .disabled(listing == nil)
                     if let listing {
                         OfflineFolderPinActions(model: model, profile: profile, path: listing.path, includeHidden: showHidden)
                     }
@@ -263,8 +279,11 @@ struct FolderView: View {
         }
         .task(id: "\(model.isForeground)-\(model.sessionRevision)-\(refreshID)") { await reloadIfNeeded() }
         .onDisappear { resolveTask?.cancel(); resolveTask = nil }
-        .task(id: "\(filter)-\(showHidden)-\(sortOrder)") { await updateVisible() }
-        .task(id: "\(searchScope)-\(filter)-\(showHidden)-\(listing?.path ?? "")-\(model.isForeground)-\(model.sessionRevision)-\(lastRefreshID)") {
+        .task(id: "\(filter)-\(showHidden)-\(sortOrder)-\(searchOptions)") { await updateVisible() }
+        .sheet(isPresented: $showingSearchIndex) {
+            SearchIndexView(model: model, profile: profile, root: path, includeHidden: showHidden)
+        }
+        .task(id: "\(searchOptions)-\(extraction)-\(searchScope)-\(filter)-\(showHidden)-\(listing?.path ?? "")-\(model.isForeground)-\(model.sessionRevision)-\(lastRefreshID)") {
             await searchSubfolders()
         }
         .task {
@@ -390,18 +409,18 @@ struct FolderView: View {
             let value = try await model.service.listDirectory(profile: profile, path: requestedPath)
             let prepared = await Task.detached(priority: .userInitiated) { FolderListing(value) }.value
             if !userChoseSort { sortOrder = model.folderSortOrder(profile.id, path: prepared.path) }
-            let query = filter, hidden = showHidden, order = sortOrder
+            let query = filter, hidden = showHidden, order = sortOrder, options = searchOptions
             let rows = await Task.detached(priority: .userInitiated) {
-                prepared.visible(query: query, showHidden: hidden, order: order)
+                prepared.visible(query: query, showHidden: hidden, order: order, options: options)
             }.value
             try Task.checkCancellation()
             guard token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
             sortID = UUID() // Supersede a filter task based on the previous listing.
             listing = prepared; visible = rows
-            appliedFilter = query; appliedShowHidden = hidden; appliedSortOrder = order
+            appliedFilter = query; appliedShowHidden = hidden; appliedSortOrder = order; appliedSearchOptions = options
             model.cache(prepared, id: profile.id, requestedPath: requestedPath)
             model.connectionStates[profile.id] = "Connected"
-            if query != filter || hidden != showHidden || order != sortOrder { await updateVisible() }
+            if query != filter || hidden != showHidden || order != sortOrder || options != searchOptions { await updateVisible() }
         } catch {
             guard token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
             if !Task.isCancelled && !(error is CancellationError) {
@@ -420,14 +439,16 @@ struct FolderView: View {
               model.isForeground, !model.isDisconnecting else { search = FolderSearchState(); return }
         let revision = model.sessionRevision
         let key = FolderSearchState.Key(query: query, root: root, includeHidden: showHidden,
-                                        sessionRevision: revision, refresh: lastRefreshID, scope: searchScope)
+                                        sessionRevision: revision, refresh: lastRefreshID, scope: searchScope, options: searchOptions, extraction: extraction)
         guard !search.isFinished(for: key) else { return }
         search = FolderSearchState(key: key)
         do { try await Task.sleep(for: .milliseconds(350)) } catch { return }
         do {
             let updates = searchScope == .contents
-                ? RemoteFolderSearch.contents(matching: query, below: root, profile: profile, service: model.searchService, includeHidden: showHidden)
-                : RemoteFolderSearch.names(matching: query, below: root, profile: profile, service: model.searchService, includeHidden: showHidden)
+                ? RemoteFolderSearch.contents(matching: query, below: root, profile: profile, service: model.searchService, includeHidden: showHidden,
+                    contentLimits: .init(maxFileBytes: extraction.includePDF || extraction.includeOCR ? DocumentPolicy.previewByteLimit : 256 * 1_024),
+                    options: searchOptions, extraction: extraction)
+                : RemoteFolderSearch.names(matching: query, below: root, profile: profile, service: model.searchService, includeHidden: showHidden, options: searchOptions)
             for try await update in updates {
                 guard !Task.isCancelled, model.sessionRevision == revision else { return }
                 search.apply(update, for: key)
@@ -441,15 +462,16 @@ struct FolderView: View {
     }
     private func updateVisible() async {
         guard let listing else { return }
-        guard filter != appliedFilter || showHidden != appliedShowHidden || sortOrder != appliedSortOrder else { return }
+        guard filter != appliedFilter || showHidden != appliedShowHidden || sortOrder != appliedSortOrder || searchOptions != appliedSearchOptions else { return }
         let token = UUID()
         sortID = token
-        let query = filter, hidden = showHidden, order = sortOrder
+        let query = filter, hidden = showHidden, order = sortOrder, options = searchOptions
         let results = await Task.detached(priority: .userInitiated) {
-            listing.visible(query: query, showHidden: hidden, order: order)
+            listing.visible(query: query, showHidden: hidden, order: order, options: options)
         }.value
-        guard !Task.isCancelled, token == sortID, query == filter, hidden == showHidden, order == sortOrder else { return }
+        guard !Task.isCancelled, token == sortID, query == filter, hidden == showHidden, order == sortOrder, options == searchOptions else { return }
         visible = results
+        appliedSearchOptions = options
         appliedFilter = query; appliedShowHidden = hidden; appliedSortOrder = order
     }
 }

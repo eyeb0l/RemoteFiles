@@ -8,6 +8,8 @@ including a selected symlink alias after its preview resolves to a canonical fil
 Unsupported preview types and empty files can still be exported.
 
 Only regular files within the connection’s canonical starting folder can export.
+Saved search results must also remain inside their original canonical index root;
+indexing another folder does not expand Save Original or Keep Offline permissions.
 The SFTP transport checks REALPATH for the configured root and target, rejects
 escaping symlinks, rechecks stable root/target paths after opening, reads metadata
 from the open handle, and enforces the 128 MiB limit on every received chunk. The
