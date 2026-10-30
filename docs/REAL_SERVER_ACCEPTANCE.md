@@ -63,6 +63,43 @@ The connection and identity are intentionally retained. The refresh check requir
 resetting the dedicated fixture to revision 1, then changing it to revision 2 after
 `REMOTEFILES_READY_FOR_SERVER_UPDATE` appears in the test log.
 
+## Cellular and Tailscale evidence
+
+`scripts/test-cellular-tailscale.py` runs one `RealServerUITests` method on a
+cabled iPhone and records, on the Mac, which path its SSH traffic took. The cable
+carries only the Xcode test session; the app's traffic uses the phone's own network.
+
+Before running, turn the iPhone's Wi-Fi off in Settings (Control Center only
+disconnects it for a while), turn off Personal Hotspot, connect the cable and open
+Tailscale on the phone. The saved connection must use the Mac's MagicDNS name or
+Tailscale IP. Export the `TEST_RUNNER_REMOTEFILES_REAL_*` variables a test needs,
+then run:
+
+```sh
+python3 -B scripts/test-cellular-tailscale.py --device DEVICE_UDID \
+  --output /private/tmp/remotefiles-cellular-NEW_RUN --build
+python3 -B scripts/test-cellular-tailscale.py --device DEVICE_UDID \
+  --output /private/tmp/remotefiles-cellular-NEW_RUN --manual
+```
+
+The first form defaults to `testSavedConnectionReopensRealProject`; choose another
+method with `--test`, and omit `--build` to reuse `DerivedData-device`. `--manual`
+skips the device test and samples until you press Return, for checks such as
+interrupting the network during a refresh. Record the screen with QuickTime
+(New Movie Recording, iPhone as the camera) because iPhone Mirroring needs the
+phone's Wi-Fi. If several iOS devices are online in the tailnet, pass `--peer`.
+
+The script stops before testing if Xcode reaches the phone over the local network
+or Tailscale routes to it through a private address or the Mac's own public
+address. While it runs, it samples `tailscale status`, established `netstat`
+sockets on the SSH port and the `sshd` log. `summary.md` passes only when the
+phone stayed cabled, the route was never local, an SSH session arrived from the
+phone's tailnet address, WireGuard traffic flowed and the device test passed
+rather than skipped. A DERP relay route counts as cellular-consistent; it is weaker
+evidence than a direct route to a carrier address. Passing establishes the
+cellular/Tailscale path for that run, not an off-site trip, movement between cells
+or a Wi-Fi/cellular handoff.
+
 Local evidence:
 
 - `/private/tmp/remotefiles-real-identity2.xcresult`: successful on-phone key generation.
