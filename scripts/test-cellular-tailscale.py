@@ -2,8 +2,9 @@
 """Record Mac-side evidence that a cabled iPhone reaches this Mac's SSH server over cellular and Tailscale.
 
 The cable only carries Xcode's test session. The checks fail closed if the Mac can
-see the iPhone on the local network, the Tailscale route uses a LAN endpoint or the
-Mac's own public address, no SSH session arrives from the phone's tailnet address,
+see the iPhone on the local network, the Tailscale route uses a non-global address,
+one inside a network on the Mac's interfaces or the Mac's own public address,
+sampling stops early, no SSH session arrives from the phone's tailnet address,
 or the device test does not pass. A pass shows the network path; it does not show
 an off-site trip, movement between cells or a Wi-Fi/cellular handoff.
 """
@@ -34,13 +35,26 @@ def endpoint_host(address):
     return ipaddress.ip_address(host.strip('[]'))
 
 
-def classify_path(peer, mac_public_ips):
+def local_networks(ifconfig_text):
+    """Networks on this Mac's interfaces, including globally routable IPv6 prefixes shared with the LAN."""
+    networks = set()
+    for line in ifconfig_text.splitlines():
+        v4 = re.match(r'\s+inet (\S+) netmask (0x[0-9a-f]+)', line)
+        v6 = re.match(r'\s+inet6 ([^\s%]+)\S* prefixlen (\d+)', line)
+        if v4:
+            networks.add(ipaddress.ip_interface(f'{v4[1]}/{ipaddress.IPv4Address(int(v4[2], 16))}').network)
+        elif v6:
+            networks.add(ipaddress.ip_interface(f'{v6[1]}/{v6[2]}').network)
+    return {n for n in networks if n.prefixlen and not n.is_loopback}
+
+
+def classify_path(peer, mac_public_ips, mac_networks=()):
     """Classify the peer's current WireGuard route as seen by this Mac."""
     address = peer.get('CurAddr') or ''
     if not address:
         return ('relay', 'DERP ' + peer['Relay']) if peer.get('Relay') else ('unknown', 'no route yet')
     host = endpoint_host(address)
-    if not host.is_global:
+    if not host.is_global or any(host in n for n in mac_networks):
         return 'lan', address
     if str(host) in mac_public_ips:
         return 'same-network', address
@@ -82,13 +96,16 @@ def test_outcomes(log_text):
     return {name: result for name, result in OUTCOME.findall(log_text)}
 
 
-def evaluate(device, samples, outcome, manual):
+def evaluate(device, samples, outcome, manual, sampler_errors=()):
     """Return named checks, each `(passed, detail)`."""
     classes = [s['path'] for s in samples]
     bad = sorted({c for c in classes if c in ('lan', 'same-network')})
     socket_samples = [s for s in samples if s['ssh_sockets']]
     traffic = (samples[-1]['rx'] + samples[-1]['tx']) - (samples[0]['rx'] + samples[0]['tx']) if samples else 0
     checks = {
+        'monitoring_complete': (not sampler_errors,
+                                f'sampling stopped early: {sampler_errors[0]}' if sampler_errors
+                                else 'sampled until the end of the session'),
         'device_cabled': (device.get('transportType') == 'wired',
                           f"Xcode reaches the iPhone via {device.get('transportType')!r}; 'wired' is required"),
         'path_never_local': (bool(samples) and not bad,
@@ -124,11 +141,19 @@ def device_connection(udid):
     raise SystemExit(f'No paired device {udid}. List devices with: xcrun devicectl list devices')
 
 
-def sampler(cli, peer_key, peer_ips, mac_public_ips, port, interval, samples, stop):
+def sampler(cli, peer_key, peer_ips, mac_public_ips, mac_networks, port, interval, samples, errors, stop):
+    try:
+        sample_until_stopped(cli, peer_key, peer_ips, mac_public_ips, mac_networks, port, interval, samples, stop)
+    except (Exception, SystemExit) as error:
+        # A thread's exception never reaches join(), so record it for evaluate().
+        errors.append(f'{type(error).__name__}: {error}')
+
+
+def sample_until_stopped(cli, peer_key, peer_ips, mac_public_ips, mac_networks, port, interval, samples, stop):
     with (OUT / 'samples.jsonl').open('w') as log:
         while True:
             peer = tailscale_json(cli, 'status', '--json')['Peer'][peer_key]
-            path, endpoint = classify_path(peer, mac_public_ips)
+            path, endpoint = classify_path(peer, mac_public_ips, mac_networks)
             netstat = run(['netstat', '-anl', '-p', 'tcp']).stdout
             sample = {'time': datetime.datetime.now().isoformat(timespec='milliseconds'), 'path': path,
                       'endpoint': endpoint, 'rx': peer.get('RxBytes', 0), 'tx': peer.get('TxBytes', 0),
@@ -188,6 +213,7 @@ def main():
         raise SystemExit(f"{peer['DNSName']} is offline in Tailscale. Open Tailscale on the iPhone.")
     netcheck = tailscale_json(cli, 'netcheck', '--format=json')
     mac_public_ips = {str(endpoint_host(netcheck[k])) for k in ('GlobalV4', 'GlobalV6') if netcheck.get(k)}
+    mac_networks = local_networks(run(['ifconfig']).stdout)
     peer_ips = peer['TailscaleIPs']
     ping = run([cli, 'ping', '--c', '10', peer_ips[0]])
     (OUT / 'preflight.json').write_text(json.dumps({
@@ -198,7 +224,7 @@ def main():
         'mac': {'tailscale_ips': status['Self']['TailscaleIPs'], 'public_ips': sorted(mac_public_ips)},
         'tailscale_ping': ping.stdout.splitlines()}, indent=2) + '\n')
     print('\n'.join(ping.stdout.splitlines()[-2:]))
-    path, endpoint = classify_path(tailscale_json(cli, 'status', '--json')['Peer'][peer['PublicKey']], mac_public_ips)
+    path, endpoint = classify_path(tailscale_json(cli, 'status', '--json')['Peer'][peer['PublicKey']], mac_public_ips, mac_networks)
     print(f"iPhone {peer['DNSName']} via Xcode transport {device.get('transportType')!r}; Tailscale route {path} ({endpoint})")
     if device.get('transportType') != 'wired' or path in ('lan', 'same-network'):
         raise SystemExit('The iPhone looks reachable on the local network. Turn Wi-Fi off in Settings '
@@ -209,9 +235,10 @@ def main():
         raise SystemExit(f'build-for-testing failed; see {OUT / "build.log"}')
     sshd = subprocess.Popen(['log', 'stream', '--style', 'compact', '--predicate', 'process BEGINSWITH "sshd"'],
                             stdout=(OUT / 'sshd.log').open('w'), stderr=subprocess.STDOUT)
-    samples, stop = [], threading.Event()
+    samples, sampler_errors, stop = [], [], threading.Event()
     thread = threading.Thread(target=sampler, daemon=True,
-                              args=(cli, peer['PublicKey'], set(peer_ips), mac_public_ips, args.port, args.interval, samples, stop))
+                              args=(cli, peer['PublicKey'], set(peer_ips), mac_public_ips, mac_networks,
+                                    args.port, args.interval, samples, sampler_errors, stop))
     thread.start()
     outcome = None
     try:
@@ -227,7 +254,7 @@ def main():
         stop.set(); thread.join()
         sshd.terminate(); sshd.wait()
 
-    checks = evaluate(device, samples, outcome, args.manual)
+    checks = evaluate(device, samples, outcome, args.manual, sampler_errors)
     passed = all(ok for ok, _ in checks.values())
     summary = {'result': 'pass' if passed else 'fail', 'test': None if args.manual else args.test,
                'checks': {name: {'passed': ok, 'detail': detail} for name, (ok, detail) in checks.items()},

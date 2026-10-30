@@ -90,10 +90,11 @@ interrupting the network during a refresh. Record the screen with QuickTime
 phone's Wi-Fi. If several iOS devices are online in the tailnet, pass `--peer`.
 
 The script stops before testing if Xcode reaches the phone over the local network
-or Tailscale routes to it through a private address or the Mac's own public
-address. While it runs, it samples `tailscale status`, established `netstat`
-sockets on the SSH port and the `sshd` log. `summary.md` passes only when the
-phone stayed cabled, the route was never local, an SSH session arrived from the
+or Tailscale routes to it through a private address, an address inside one of
+the Mac's interface networks (such as a shared global IPv6 prefix) or the Mac's
+own public address. While it runs, it samples `tailscale status`, established `netstat`
+sockets on the SSH port and the `sshd` log. `summary.md` passes only when
+sampling continued to the end, the phone stayed cabled, the route was never local, an SSH session arrived from the
 phone's tailnet address, WireGuard traffic flowed and the device test passed
 rather than skipped. A DERP relay route counts as cellular-consistent; it is weaker
 evidence than a direct route to a carrier address. Passing establishes the

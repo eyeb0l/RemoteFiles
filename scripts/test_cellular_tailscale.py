@@ -1,5 +1,6 @@
 """Exercise the cellular/Tailscale evidence checks without a device, Tailscale or Xcode."""
 import importlib.util
+import ipaddress
 from pathlib import Path
 import unittest
 
@@ -25,6 +26,26 @@ class ClassifyPathTests(unittest.TestCase):
         self.assertEqual(cellular.classify_path(peer, {'8.8.4.4'})[0], 'same-network')
         self.assertEqual(cellular.classify_path(peer, {'9.9.9.9'})[0], 'direct-public')
         self.assertEqual(cellular.classify_path({'CurAddr': '[2606:4700::1111]:41641'}, set())[0], 'direct-public')
+
+    def test_shared_global_ipv6_prefix_is_local(self):
+        ifconfig = '\n'.join([
+            'lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384',
+            '\tinet 127.0.0.1 netmask 0xff000000',
+            '\tinet6 fe80::1%lo0 prefixlen 64 scopeid 0x1',
+            'en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500',
+            '\tinet6 2a02:c7c:1234:5600:1c2a:3b4c:5d6e:7f80 prefixlen 64 autoconf secured',
+            '\tinet 192.168.4.28 netmask 0xffffff00 broadcast 192.168.4.255',
+            'utun4: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1280',
+            '\tinet 100.125.79.6 --> 100.125.79.6 netmask 0xffffffff',
+        ])
+        networks = cellular.local_networks(ifconfig)
+        self.assertIn(ipaddress.ip_network('192.168.4.0/24'), networks)
+        self.assertIn(ipaddress.ip_network('2a02:c7c:1234:5600::/64'), networks)
+        self.assertNotIn(ipaddress.ip_network('127.0.0.0/8'), networks)
+        same_lan = {'CurAddr': '[2a02:c7c:1234:5600:aaaa:bbbb:cccc:dddd]:41641'}
+        self.assertEqual(cellular.classify_path(same_lan, set(), networks)[0], 'lan')
+        carrier = {'CurAddr': '[2a01:4b00:1:2::3]:41641'}
+        self.assertEqual(cellular.classify_path(carrier, set(), networks)[0], 'direct-public')
 
     def test_relay_and_unknown_routes(self):
         self.assertEqual(cellular.classify_path({'CurAddr': '', 'Relay': 'lhr'}, set()), ('relay', 'DERP lhr'))
@@ -85,9 +106,10 @@ class EvaluateTests(unittest.TestCase):
             'ssh_from_phone_tailnet_ip': ({'transportType': 'wired'}, [sample(rx=1), sample(rx=9)], 'passed'),
             'tunnel_traffic': ({'transportType': 'wired'}, [sample(sockets=['x'])] * 2, 'passed'),
             'device_test_passed': ({'transportType': 'wired'}, self.good, 'skipped'),
+            'monitoring_complete': ({'transportType': 'wired'}, self.good, 'passed', ['SystemExit: tailscale status failed']),
         }
-        for name, (device, samples, outcome) in cases.items():
-            checks = cellular.evaluate(device, samples, outcome, manual=False)
+        for name, (device, samples, outcome, *errors) in cases.items():
+            checks = cellular.evaluate(device, samples, outcome, manual=False, sampler_errors=errors[0] if errors else ())
             self.assertEqual([n for n, (ok, _) in checks.items() if not ok], [name])
 
     def test_manual_capture_has_no_device_test_and_no_samples_fail(self):
