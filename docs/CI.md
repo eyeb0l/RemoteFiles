@@ -326,3 +326,18 @@ had usable geometry, and its unwrap failed. The test now waits for a different d
 scroll view using the original 12-second bound, then retains the settling delay
 and verifies that the new view remains mounted at the top. Exact target-range,
 horizontal visibility and fulfilled-request assertions are unchanged.
+
+The next validation passed the heading journeys in 84 and 55 seconds, reopened
+index export in 151 seconds, and index persistence/deletion in 156 seconds.
+It also exposed the combined live PDF/OCR and saved-index journey: after 130
+seconds of successful assertions, XCTest spent another 60 seconds awaiting an
+animation-idle notification on the return from PDF preview. Live extraction
+options/results and saved extraction/build/preview/deletion now run independently,
+each opening its own synthetic sample folder. The saved-index form already
+defaults PDF extraction on and explicitly enables OCR, so it does not depend on
+live-search options. All original assertions and deadlines remain in place.
+The saved form also waits up to five seconds for the OCR switch's accessible
+value to become enabled before building. A focused iOS 27.2 run read its old
+value immediately after the tap; temporary before/after screenshots confirmed
+the switch updated when given time to settle. The enabled-state assertion is
+retained, and the diagnostic screenshots are not part of the final test.

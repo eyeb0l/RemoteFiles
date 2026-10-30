@@ -643,14 +643,9 @@ final class RemoteFilesUITests: XCTestCase {
         closeIndex()
     }
 
-    func testPDFAndOCRSearchFindsPagesAndPersistsRecognizedContents() throws {
+    func testLivePDFAndOCRSearchFindsPagesWithExplicitOptions() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
-        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
-        waitUntilHittable(projects); projects.tap()
-        let samples = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Search samples, Folder")).firstMatch
-        revealFolderRow(samples, in: app).tap()
-        XCTAssertTrue(app.navigationBars["Search samples"].waitForExistence(timeout: 10))
+        let app = launchDemoSearchSamples()
 
         func liveResult(_ filename: String) -> XCUIElement {
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", filename + ",")).firstMatch
@@ -698,7 +693,12 @@ final class RemoteFilesUITests: XCTestCase {
         }
         attachScreenshot("PDF and OCR live search on device")
         closeLiveSearch()
+    }
 
+    func testSavedPDFAndOCRIndexPersistsRecognizedContents() throws {
+        continueAfterFailure = false
+        let app = launchDemoSearchSamples()
+        let expected = [("Text sample.pdf", "Page 2"), ("Scanned sample.pdf", "Page 1"), ("Image sample.png", "Line 1")]
         app.buttons["Folder actions"].tap()
         let saved = app.buttons["Saved Search Index"]
         XCTAssertTrue(saved.waitForExistence(timeout: 5)); saved.tap()
@@ -730,6 +730,9 @@ final class RemoteFilesUITests: XCTestCase {
         reveal(ocr)
         // SwiftUI exposes the entire labelled row as the switch; tap its actual thumb.
         ocr.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        // SwiftUI's labelled row can publish the new value after the tap returns.
+        let ocrEnabled = expectation(for: NSPredicate(format: "value == %@", "1"), evaluatedWith: ocr)
+        wait(for: [ocrEnabled], timeout: 5)
         XCTAssertEqual(ocr.value as? String, "1")
         reveal(build); build.tap()
         XCTAssertTrue(app.buttons["Rebuild Index"].waitForExistence(timeout: 45), "The OCR index must finish within its bounded search")
@@ -1111,6 +1114,16 @@ final class RemoteFilesUITests: XCTestCase {
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).tap()
         XCTAssertFalse(app.buttons["Source Copied"].exists, "The native actions menu must be dismissed before navigating or changing reading mode")
         XCTAssertFalse(app.buttons["Copy Source"].exists)
+    }
+
+    private func launchDemoSearchSamples() -> XCUIApplication {
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        waitUntilHittable(projects); projects.tap()
+        let samples = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Search samples, Folder")).firstMatch
+        revealFolderRow(samples, in: app).tap()
+        XCTAssertTrue(app.navigationBars["Search samples"].waitForExistence(timeout: 10))
+        return app
     }
 
     private func launchDemoReader(filename: String, markdown: Bool = true) -> XCUIApplication {
