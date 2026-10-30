@@ -38,7 +38,7 @@ The choice is remembered per connection and folder. Choosing **Name** removes th
 
 ## Searching subfolders
 
-Type in the search field, then choose a scope:
+Type in the search field below the navigation title, then choose a scope:
 
 - **This Folder:** filters the names already listed, instantly.
 - **Subfolders:** searches names in this folder and every folder below it.
@@ -46,7 +46,9 @@ Type in the search field, then choose a scope:
 
 Matching is literal and ignores case by default. In **Folder actions → Search Options**, enable **Match Case** or **Whole Words**, or choose a **File Type** extension filter. Whole-word matching treats Unicode letters, numbers, combining marks and underscores as word characters: `report` does not match `report_2026`. These controls apply to all three scopes; a file-type filter excludes folder and link rows from matches while subfolder traversal continues. The picker offers `.md`, `.txt`, `.pdf`, `.png` and `.jpg`; each choice matches that extension, ignoring its case. There is no regular-expression syntax.
 
-<img src="screenshots/folder-browsing/subfolder-search.jpg" width="240" alt="Searching Projects for review: matches in this folder, in Reports, and in Reports/2026, after searching five folders">
+Search stays in the navigation bar so result rows remain tappable after the keyboard closes.
+
+<img src="screenshots/folder-browsing/subfolder-search-navigation-bar.png" width="240" alt="Navigation-bar search in Projects for review: matches in this folder, in Reports, and in Reports/2026, after searching five folders">
 
 *Screenshot from the demo workspace.*
 

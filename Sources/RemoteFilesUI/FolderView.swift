@@ -248,7 +248,9 @@ struct FolderView: View {
         }
         .navigationTitle(RemotePath.name(of: path))
         .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $filter, prompt: searchPrompt)
+        // iOS 27.2's floating search bar can intercept visible result rows after
+        // keyboard dismissal. Keep search in the navigation bar.
+        .searchable(text: $filter, placement: .navigationBarDrawer(displayMode: .always), prompt: searchPrompt)
         .searchScopes($searchScope) {
             Text("This Folder").tag(FolderSearchScope.folder)
             Text("Subfolders").tag(FolderSearchScope.subfolders)
