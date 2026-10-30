@@ -81,7 +81,7 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Saved folder unavailable"].waitForExistence(timeout: 5))
     }
 
-    func testOfflineCopyOpensAfterDisconnectAndRelaunchAndCanBeRemoved() throws {
+    private func openDemoOfflineNavigationGuide() -> XCUIApplication {
         continueAfterFailure = false
         let app = launchDemoReader(filename: "Navigation guide.md")
         app.buttons["Document actions"].tap()
@@ -104,28 +104,40 @@ final class RemoteFilesUITests: XCTestCase {
         attachScreenshot("Offline library with saved file")
         file.tap()
         XCTAssertTrue(app.staticTexts["offline-copy-date"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].firstMatch.waitForExistence(timeout: 15))
         XCTAssertTrue(app.buttons["Share Original"].exists)
         attachScreenshot("Offline Markdown copy after disconnect")
-        try revealDocumentLink("Jump to marker 20", in: app, scroll: app.scrollViews["Rendered Markdown document"]).tap()
-        XCTAssertTrue(app.staticTexts["Reading marker 20"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Reading marker 20"].isHittable)
-        try revealDocumentLink("Open nested note", in: app, scroll: app.scrollViews["Rendered Markdown document"]).tap()
+        return app
+    }
+
+    func testOfflineCopyHeadingAndMissingDocumentLinks() throws {
+        let app = openDemoOfflineNavigationGuide()
+        let reader = app.scrollViews["Rendered Markdown document"].firstMatch
+        try revealDocumentLink("Jump to marker 20", in: app, scroll: reader).tap()
+        XCTAssertTrue(reader.staticTexts["Reading marker 20"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(reader.staticTexts["Reading marker 20"].firstMatch.isHittable)
+        try revealDocumentLink("Open nested note", in: app, scroll: reader).tap()
         let missing = app.alerts["Couldn’t open link"]
         XCTAssertTrue(missing.waitForExistence(timeout: 5))
         XCTAssertTrue(missing.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "isn’t saved here")).firstMatch.exists)
         missing.buttons["OK"].tap()
+    }
+
+    func testOfflineCopyOpensAfterDisconnectAndRelaunchAndCanBeRemoved() throws {
+        let app = openDemoOfflineNavigationGuide()
+        let library = app.buttons["offline-library"]
+        let file = app.buttons["offline-file-Navigation guide.md"]
         XCUIDevice.shared.press(.home)
         waitForBackground(app)
         app.activate()
         XCTAssertTrue(app.staticTexts["offline-copy-date"].waitForExistence(timeout: 10), "Return to the same offline reader")
-        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15), "Reopen protected local bytes on activation")
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].firstMatch.waitForExistence(timeout: 15), "Reopen protected local bytes on activation")
         XCTAssertTrue(app.buttons["Share Original"].exists)
 
         app.terminate(); app.launch()
         XCTAssertTrue(library.waitForExistence(timeout: 15)); library.tap()
         XCTAssertTrue(file.waitForExistence(timeout: 10)); file.tap()
-        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].firstMatch.waitForExistence(timeout: 15))
         app.navigationBars.buttons["Offline Files"].tap()
         XCTAssertTrue(file.waitForExistence(timeout: 5)); file.press(forDuration: 1)
         app.buttons["Remove Offline Copy"].tap()
@@ -136,7 +148,7 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(projects.waitForExistence(timeout: 10)); projects.tap()
         let original = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Navigation guide.md,")).firstMatch
         revealFolderRow(original, in: app).tap()
-        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].firstMatch.waitForExistence(timeout: 15))
     }
 
     func testOfflineAudioPinnedFromFolderKeepsLocalPlaybackControls() throws {
@@ -389,12 +401,14 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(image.exists && image.isHittable, app.debugDescription)
         // WebKit can expose the element before its first paint, so sample until the SVG is visible.
         func purplePixels() throws -> Int {
-            let pixels = try XCTUnwrap(app.screenshot().image.cgImage)
+            let pixels = try XCTUnwrap(XCUIScreen.main.screenshot().image.cgImage)
             let width = pixels.width, height = pixels.height
             var bytes = [UInt8](repeating: 0, count: width * height * 4)
-            let context = try XCTUnwrap(CGContext(data: &bytes, width: width, height: height, bitsPerComponent: 8,
-                bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue))
-            context.draw(pixels, in: CGRect(x: 0, y: 0, width: width, height: height))
+            try bytes.withUnsafeMutableBytes { buffer in
+                let context = try XCTUnwrap(CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                    bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue))
+                context.draw(pixels, in: CGRect(x: 0, y: 0, width: width, height: height))
+            }
             return stride(from: width * (height / 4) * 4, to: width * (height * 3 / 4) * 4, by: 4).filter {
                 bytes[$0+2] > 180 && bytes[$0] > 60 && bytes[$0] < 180 && bytes[$0+1] < 120
             }.count
@@ -405,8 +419,8 @@ final class RemoteFilesUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.25)
             purple = try purplePixels()
         }
-        XCTAssertGreaterThan(purple, 5_000, "Wait for visible SVG pixels, not just a WebKit accessibility element")
         attachScreenshot("SVG rendered image")
+        XCTAssertGreaterThan(purple, 5_000, "Wait for visible SVG pixels, not just a WebKit accessibility element")
         app.buttons["Source"].tap()
         let xml = app.textViews["Bounded source text"]
         XCTAssertTrue(xml.waitForExistence(timeout: 10))
@@ -1192,16 +1206,25 @@ final class RemoteFilesUITests: XCTestCase {
     }
 
     private func waitForBackground(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
-        let background = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            let state = app.state
-            return state == .runningBackground || state == .runningBackgroundSuspended
-        }, object: app)
-        XCTAssertEqual(XCTWaiter.wait(for: [background], timeout: 5), .completed,
-                       "Expected a live background app, got \(app.state)", file: file, line: line)
+        // Use native application-state observation, then validate the final state.
+        // A fast suspension can skip the transient running-background state.
+        _ = app.wait(for: .runningBackground, timeout: 5)
+        let state = app.state
+        XCTAssertTrue(state == .runningBackground || state == .runningBackgroundSuspended,
+                      "Expected a live background app, got \(state)", file: file, line: line)
     }
 
     private func waitUntilHittable(_ element: XCUIElement, _ message: String = "", timeout: TimeInterval = 15) {
-        let hittable = expectation(for: NSPredicate(format: "exists == true AND hittable == true"), evaluatedWith: element)
+        // XCTest can expose launch-time elements before their window has geometry.
+        // Asking for hittability at an infinite/empty frame throws instead of waiting.
+        let hittable = expectation(for: NSPredicate { _, _ in
+            guard element.exists else { return false }
+            let frame = element.frame
+            guard frame.origin.x.isFinite, frame.origin.y.isFinite,
+                  frame.width.isFinite, frame.height.isFinite,
+                  frame.width > 0, frame.height > 0 else { return false }
+            return element.isHittable
+        }, evaluatedWith: element)
         hittable.expectationDescription = message.isEmpty ? element.description : message
         wait(for: [hittable], timeout: timeout)
     }
