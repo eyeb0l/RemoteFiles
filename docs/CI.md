@@ -317,3 +317,12 @@ its own synthetic snapshot. All original assertions remain covered. The complete
 method inventory is still distributed across both UI shards, with unchanged
 180/240-second method, 30-minute command and 45-minute job limits. No skip or
 retry was added.
+
+The first hosted validation of this split also exposed a core-test setup race in
+`TextualNavigationRevealTests`: after changing the fixture's `.id`, its wait could
+accept the old tall scroll view before SwiftUI replaced the subtree. A fixed
+300-millisecond sleep did not establish that the replacement document scroll
+had usable geometry, and its unwrap failed. The test now waits for a different document
+scroll view using the original 12-second bound, then retains the settling delay
+and verifies that the new view remains mounted at the top. Exact target-range,
+horizontal visibility and fulfilled-request assertions are unchanged.
