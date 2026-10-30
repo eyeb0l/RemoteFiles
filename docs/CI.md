@@ -371,3 +371,16 @@ while its entire launch-time accessibility hierarchy still had infinite origins
 and zero sizes. The shared tappability wait now requires finite, positive element
 geometry before evaluating hittability. It still requires an actually hittable
 element within the same timeout; invalid geometry never counts as ready.
+
+## HTML anchor fixture presentation
+
+[Main run 41116836414](https://github.com/eyeb0l/RemoteFiles/actions/runs/41116836414)
+loaded the visual-block HTML fixture, but its initial native scroll was reset to
+zero before anchor capture. The retained DOM was complete and 3,000 pixels high;
+native and DOM offsets were both zero. Local baseline traversal-budget checks
+also reproduced this initial-scroll failure.
+
+The bare HTML fixture now waits for an after-screen-updates WebKit snapshot
+before returning to its caller. This synchronizes its initial presentation before
+the test establishes a nonzero reading position. Initial-offset, traversal-limit,
+anchor and post-resize assertions remain unchanged, as do all existing deadlines.
