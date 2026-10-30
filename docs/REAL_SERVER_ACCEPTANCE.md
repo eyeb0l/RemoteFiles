@@ -138,6 +138,36 @@ in 25 samples, and 42,320 WireGuard bytes were exchanged. `tailscale ping` round
 trips were about 80–150 ms direct and 75–170 ms relayed. Those are a few samples,
 not a latency benchmark. Evidence: `/private/tmp/remotefiles-cellular-direct1/`.
 
+### Still outstanding over cellular
+
+These runs establish the network path for one journey: saved-connection reopen,
+folder listing and a rendered report, over both a relayed and a direct route. The
+following remain unverified over cellular:
+
+- **Changed-file refresh.** `testRealServerBrowseAndRefresh` needs the Mac fixture
+  changed after `REMOTEFILES_READY_FOR_SERVER_UPDATE`. The script doesn't drive that
+  update, and this journey hasn't run over a recorded cellular path.
+- **Network interruption.** Turn on Airplane Mode or turn off cellular during a
+  refresh, a recursive search and a managed download. The previous copy must stay
+  clearly labelled as stale, no partial content may be shown as current, and
+  navigation must recover afterwards. Record these with `--manual` and a QuickTime
+  capture; the script records the path, not the app's state.
+- **Wi-Fi/cellular handoff.** Switch networks with a session or reader open, in both
+  directions. Tailscale may change route mid-session, so `--require-direct` doesn't
+  apply.
+- **Off-site use.** Repeat away from home, ideally with the Mac behind a different
+  network, and while moving between cells or in weak signal. A cabled run at home
+  shows the same packet path but not radio conditions.
+- **Background and lock over cellular.** Background teardown and foreground refetch
+  passed over Tailscale ([lifecycle evidence](DEVICE_PERMISSIONS_LIFECYCLE.md)) but
+  without a recorded cellular path. Background transfers, locking and relaunch
+  remain unchecked over cellular.
+- **Performance.** No timing compares relayed and direct cellular with Wi-Fi.
+  Instruments profiling of the 1,000-entry folder and large report on cellular
+  remains outstanding; `tailscale ping` samples aren't a benchmark.
+- **Other carriers and networks.** Only O2 UK 5G has been recorded. Carriers that
+  block UDP or use harder NAT may only ever relay.
+
 Local evidence:
 
 - `/private/tmp/remotefiles-real-identity2.xcresult`: successful on-phone key generation.
