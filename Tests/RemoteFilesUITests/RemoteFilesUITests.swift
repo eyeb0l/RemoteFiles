@@ -643,7 +643,8 @@ final class RemoteFilesUITests: XCTestCase {
             search.typeText("\n")
         }
         func closeLiveSearch() {
-            let close = app.buttons["close"]
+            // Navigation-bar search exposes "Close"; the index sheet uses "close".
+            let close = app.navigationBars["Search samples"].buttons["Close"]
             XCTAssertTrue(close.waitForExistence(timeout: 5)); close.tap()
             XCTAssertTrue(app.navigationBars["Search samples"].waitForExistence(timeout: 5))
         }
