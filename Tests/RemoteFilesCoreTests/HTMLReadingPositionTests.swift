@@ -432,6 +432,11 @@ import RemoteFilesCore
         if let error = probe.failure { throw error }
         view.navigationDelegate = nil
         try await waitUntil(timeout: .seconds(30)) { view.scrollView.contentSize.height > view.bounds.height }
+        // Navigation and content size can arrive before WebKit presents its initial
+        // scroll state. Finish that presentation before a test sets its starting offset.
+        let presentation = WKSnapshotConfiguration()
+        presentation.afterScreenUpdates = true
+        _ = try await view.takeSnapshot(configuration: presentation)
     }
 
     private func characterY(_ character: Int, in view: WKWebView) async throws -> Double {
