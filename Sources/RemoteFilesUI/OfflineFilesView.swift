@@ -11,7 +11,9 @@ import RemoteFilesCore
     private(set) var lease: OfflineFileLease?
     init(lease: OfflineFileLease) { self.lease = lease }
 
-    func makeController() -> UIActivityViewController {
+    func finish() { lease = nil }
+
+    func makeActivity() -> (controller: UIActivityViewController, provider: NSItemProvider) {
         let provider = NSItemProvider()
         provider.suggestedName = lease?.url.lastPathComponent
         provider.registerFileRepresentation(forTypeIdentifier: UTType.data.identifier, fileOptions: [], visibility: .all) { [self] completion in
@@ -28,14 +30,71 @@ import RemoteFilesCore
         controller.completionWithItemsHandler = { [self] _, _, _, _ in
             Task { @MainActor in lease = nil }
         }
-        return controller
+        return (controller, provider)
     }
 }
 
-private struct OfflineShareSheet: UIViewControllerRepresentable {
-    let item: OfflineShareItem
-    func makeUIViewController(context: Context) -> UIActivityViewController { item.makeController() }
-    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+/// Present natively from the toolbar anchor. UIKit requires an explicit popover source
+/// on iPad; using an unanchored activity controller as SwiftUI sheet content loses it.
+private struct OfflineSharePresenter: UIViewControllerRepresentable {
+    let item: OfflineShareItem?
+    let onDismiss: (UUID) -> Void
+    func makeUIViewController(context: Context) -> AnchorController { AnchorController() }
+    func updateUIViewController(_ anchor: AnchorController, context: Context) {
+        anchor.item = item
+        anchor.onDismiss = onDismiss
+        anchor.schedulePresentation()
+    }
+
+    final class AnchorController: UIViewController, UIPopoverPresentationControllerDelegate {
+        var item: OfflineShareItem?
+        var onDismiss: ((UUID) -> Void)?
+        private var presentedID: UUID?
+        private var completedID: UUID?
+        override func loadView() {
+            view = UIView()
+            view.isUserInteractionEnabled = false
+        }
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            schedulePresentation()
+        }
+        func schedulePresentation() {
+            // SwiftUI updates must not synchronously mutate presentation state.
+            DispatchQueue.main.async { [weak self] in self?.presentShare() }
+        }
+        private func presentShare() {
+            guard let item, item.id != completedID, presentedID == nil, parent != nil, view.window != nil,
+                  presentedViewController == nil else { return }
+            presentedID = item.id
+            let controller = item.makeActivity().controller
+            let completion = controller.completionWithItemsHandler
+            let onDismiss = self.onDismiss
+            controller.completionWithItemsHandler = { [weak self] activity, completed, values, error in
+                completion?(activity, completed, values, error)
+                if let self { self.finish(item.id) }
+                else { onDismiss?(item.id) }
+            }
+            if let popover = controller.popoverPresentationController {
+                popover.sourceView = view
+                popover.sourceRect = view.bounds
+                popover.delegate = self
+            }
+            present(controller, animated: true)
+            controller.presentationController?.delegate = self
+        }
+        func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+            guard let item else { return }
+            item.finish()
+            finish(item.id)
+        }
+        private func finish(_ id: UUID) {
+            guard presentedID == id else { return }
+            completedID = id
+            presentedID = nil
+            onDismiss?(id)
+        }
+    }
 }
 
 /// SwiftUI may cache copies of a covered view and its callbacks. They share this owner,
@@ -254,10 +313,17 @@ struct OfflineReaderView: View {
         }
         .navigationTitle(savedCopy.filename).navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if lease != nil {
+            if lease != nil || share != nil {
                 ToolbarItem(placement: .primaryAction) {
                     Button("Share Original", systemImage: "square.and.arrow.up") {
                         if let lease { share = OfflineShareItem(lease: lease) }
+                    }
+                    .disabled(lease == nil)
+                    .accessibilityHint("Shares the saved file’s original bytes")
+                    .background {
+                        OfflineSharePresenter(item: share) { id in
+                            if share?.id == id { share = nil }
+                        }
                     }
                 }
             }
@@ -265,7 +331,6 @@ struct OfflineReaderView: View {
                 ToolbarItem(placement: .primaryAction) { Toggle("Source", isOn: $source) }
             }
         }
-        .sheet(item: $share) { OfflineShareSheet(item: $0) }
         .task(id: canRead) {
             if canRead, lease == nil { await load() }
         }

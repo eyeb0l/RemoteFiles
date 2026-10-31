@@ -110,6 +110,19 @@ final class RemoteFilesUITests: XCTestCase {
         return app
     }
 
+    func testOfflineShareOriginalPresentsAndCancels() {
+        let app = openDemoOfflineNavigationGuide()
+        for _ in 0..<2 {
+            app.buttons["Share Original"].tap()
+            let close = app.buttons["Close"].firstMatch
+            XCTAssertTrue(close.waitForExistence(timeout: 15), app.debugDescription)
+            attachScreenshot("Offline original native share sheet")
+            close.tap()
+            XCTAssertTrue(close.waitForNonExistence(timeout: 5))
+            XCTAssertTrue(app.scrollViews["Rendered Markdown document"].firstMatch.waitForExistence(timeout: 15))
+        }
+    }
+
     func testOfflineCopyHeadingAndMissingDocumentLinks() throws {
         let app = openDemoOfflineNavigationGuide()
         let reader = app.scrollViews["Rendered Markdown document"].firstMatch

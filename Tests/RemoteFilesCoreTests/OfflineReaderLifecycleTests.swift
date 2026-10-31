@@ -2,7 +2,7 @@
 import XCTest
 import SwiftUI
 import WebKit
-import RemoteFilesCore
+@testable import RemoteFilesCore
 @testable import RemoteFilesUI
 
 private actor OfflineReaderTransport: RemoteFileService {
@@ -20,8 +20,8 @@ private actor OfflineReaderTransport: RemoteFileService {
     func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL,
                       limit: Int) async throws -> RemoteEntry {
         let target = path.hasSuffix("README.md") ? "notes.md" : "README.md"
-        // Math selects the WebKit Markdown renderer, letting this hosted test activate the
-        // real relative-link callback without accessibility traversal or synthetic taps.
+        // Math selects the WebKit Markdown renderer so the test can inspect real
+        // rendered scroll restoration without driving asynchronous JavaScript navigation.
         let text = "# \(RemotePath.name(of: path))\n\n[Next](\(target))\n\n$x$\n\n" +
             (0..<80).map { "Paragraph \($0) of the saved document.\n\n" }.joined()
         try Data(text.utf8).write(to: destination)
@@ -78,10 +78,17 @@ private struct OfflineReaderFixture: View {
         let originalURL = try XCTUnwrap(leaseURLs(directory).first)
         for hop in 1...12 {
             let previousWeb = web
-            _ = try await web.evaluateJavaScript("document.querySelector('a').click()")
-            try await waitUntil { state.path.count == hop + 1 }
+            let source = try XCTUnwrap(state.path.last?.pin)
+            let target = try await store.resolveDocumentLink(from: source,
+                reference: hop.isMultiple(of: 2) ? "README.md" : "notes.md")
+            // Use the same route appended by openDocument, outside evaluateJavaScript:
+            // a successful link removes that web view before its JS completion returns.
+            state.path.append(.init(pin: target))
             try await waitUntil { previousWeb.window == nil }
             web = try await reader(in: window, named: hop.isMultiple(of: 2) ? "README.md" : "notes.md")
+            try await waitUntil { self.leaseURLs(directory).count == 1 }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: originalURL.path),
+                           "Covered reader must release its lease at hop \(hop)")
             print("Offline link hop \(hop): \(self.leaseURLs(directory).count) live lease directories")
         }
         try await waitUntil { self.leaseURLs(directory).count == 1 }
@@ -104,15 +111,37 @@ private struct OfflineReaderFixture: View {
         try await waitUntil { abs(web.scrollView.contentOffset.y - 500) < 5 }
         XCTAssertNotEqual(leaseURLs(directory).first, originalURL, "Back must acquire a new verified lease")
 
+        // A new directory alone does not prove verification. Cover this route again,
+        // corrupt its committed bytes without changing their length, then go Back.
+        let target = try await store.resolveDocumentLink(from: first, reference: "notes.md")
+        state.path.append(.init(pin: target))
+        let coveredWeb = try await reader(in: window, named: "notes.md")
+        try await waitUntil { self.leaseURLs(directory).count == 1 }
+        let original = directory.appendingPathComponent(first.blobID.uuidString).appendingPathComponent("original")
+        var damaged = try Data(contentsOf: original)
+        damaged[0] ^= 1
+        try damaged.write(to: original, options: .atomic)
+        state.path.removeLast()
+        try await waitUntil { coveredWeb.window == nil }
+        // Observe the protected resources, not SwiftUI's private accessibility tree.
+        // A cached preview/lease must not survive a failed verification on Back.
+        try await waitUntil { self.leaseURLs(directory).isEmpty }
+        XCTAssertTrue(webViews(in: window).isEmpty, "Back must not render unverified bytes")
+        do {
+            _ = try await store.lease(first.id)
+            XCTFail("Same-length corruption must fail digest verification")
+        } catch OfflineFileError.damaged { }
+
         state.path.removeAll()
         try await waitUntil { self.leaseURLs(directory).isEmpty }
     }
 
     private func leaseURLs(_ directory: URL) -> [URL] {
         let base = directory.appendingPathComponent(".leases")
-        return ((try? FileManager.default.contentsOfDirectory(at: base, includingPropertiesForKeys: nil)) ?? []).flatMap {
-            (try? FileManager.default.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil)) ?? []
-        }
+        return (try? FileManager.default.contentsOfDirectory(at: base,
+            includingPropertiesForKeys: [.isDirectoryKey]))?.filter {
+                (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            } ?? []
     }
     private func webViews(in view: UIView) -> [WKWebView] {
         if let web = view as? WKWebView { return [web] }
