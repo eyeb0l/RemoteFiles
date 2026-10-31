@@ -31,6 +31,14 @@ Choose **Settings → SSH Keys → Import Key**, then choose a file or use the n
 
 *Simulator screenshots from the passing import UI test, using disposable keys generated in memory.*
 
+The disposable RSA/ECDSA UI fixtures share their generator with `IdentitySecKeyFixtureTests`.
+The Core regression generates 32 fresh SecKey RSA keys, checks their OpenSSH component
+invariants, and imports both algorithms. A hosted iOS regression imports the exact UTF-8
+item-provider text used by the UI test. The UI journey validates each fixture before
+launching the app, uses a local-only pasteboard item, and checks clipboard equality
+without logging private text. See [the physical-device investigation](RSA_IMPORT_DEVICE_TEST.md)
+for the evidence boundary and Release rerun command.
+
 ## Secret lifecycle
 
 Only non-secret identity metadata (ID, name, algorithm, canonical public key, fingerprint, encrypted flag, and an opaque Keychain account reference) appears in the metadata JSON. Private material is stored as a generic-password Keychain item under the app's service, with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` and `kSecAttrSynchronizable = false`. Key material is never stored in UserDefaults. The explicit export flow below is the only way to save a private-key file outside Keychain. Keychain failure is an error, never a fallback to plaintext storage. This is device-local Keychain protection; it is not a claim of hardware-backed Ed25519.
