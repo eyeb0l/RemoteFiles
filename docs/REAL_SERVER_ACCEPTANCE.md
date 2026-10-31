@@ -138,6 +138,98 @@ in 25 samples, and 42,320 WireGuard bytes were exchanged. `tailscale ping` round
 trips were about 80–150 ms direct and 75–170 ms relayed. Those are a few samples,
 not a latency benchmark. Evidence: `/private/tmp/remotefiles-cellular-direct1/`.
 
+## 31 October 2026 iPhone session
+
+A hands-on session on the physical iPhone 17 Pro (iOS 27.2) against **My MacBook**
+over Tailscale. Builds were signed Release with `ENABLE_TESTABILITY=YES` from
+[PR #46](https://github.com/eyeb0l/RemoteFiles/pull/46): `aa1daa9` for the
+automated run and the first PDF check, then `844dced`, which fixed the rotation
+drift that check found, for everything else. Until the network recordings, the
+phone used Wi-Fi and the route was not recorded. All fixtures were synthetic files
+added to `Fixtures/` for the session and removed afterwards; the phone's own key
+was not exported.
+
+### Automated
+
+The demo `RemoteFilesUITests` class passed 28 of 29 methods in about 20 minutes,
+including both PDF search journeys. `testImportRSAAndECDSAKeysShowsTheirAlgorithmsAndPublicKeys`
+failed twice: the app rejected the RSA key the test generates and pastes as
+malformed, so the ECDSA case never ran. Importing a real encrypted RSA file through
+the UI worked, so the failure is specific to the test's generated key or paste path.
+Evidence on the Mac mini: `/private/tmp/remotefiles-pdfnav-device-ui1.xcresult` and
+`/private/tmp/remotefiles-pdfnav-device-key2.xcresult`.
+
+### Passed by hand
+
+- **PDF navigation** ([step 13](MANUAL_ACCEPTANCE.md)): a 12-page PDF with a phrase
+  only on page 9. Live and saved-index results opened at page 9. A mid-page position
+  returned after Back, relaunch and rotation, the last after the `844dced` fix. After
+  the file was replaced on the server, Refresh opened revision 2 at the top, and a
+  stale saved-index result still opened the current file at page 9.
+- **Managed downloads:** three 120 MiB random files. Transfers continued in the
+  background; a queued item did not start while backgrounded or locked, and started
+  after unlocking. System cancellation, lock, force quit and Disconnect each exposed
+  Retry, and retries started from zero. A completed download saved to iCloud Drive
+  matched the server's SHA-256. Resource expiration could not be forced.
+- **Save Original:** the PDF saved from the reader matched the server's SHA-256, and
+  cancelling the picker kept the reader usable.
+- **Offline file** (step 9): opened in Airplane Mode after Disconnect and relaunch;
+  Share Original matched revision 1 byte-for-byte; Update Offline Copy fetched
+  revision 2; an update interrupted by Airplane Mode kept the old copy and saved
+  time; removing the copy left the server file unchanged. The offline reader has no
+  Find or Headings controls.
+- **Offline folder** (step 10): nested and empty folders saved with hidden files
+  excluded and two symbolic links counted; browsing, sharing and relaunch worked in
+  Airplane Mode. An update picked up an added, a deleted and an edited file. With a
+  member made unreadable, the update failed and the previous snapshot stayed complete.
+  An 18-level folder failed at the 16-level limit with nothing published.
+- **Offline links** (step 11): sibling, nested, parent and heading links, and Back
+  position, worked in Airplane Mode. Missing, hidden, symbolic-link, unsupported,
+  query and outside-folder links each explained the failure and kept the reader.
+- **Keys** (step 4, in part): encrypted RSA 3072 and Ed25519 files imported with the
+  expected fingerprints, and exports matched the originals byte-for-byte. Cancelling
+  authentication and the Files picker saved nothing. Both identities survived locking.
+  A connection using the encrypted key prompted for the passphrase, a swipe-dismiss
+  connected nothing, and after relaunch it prompted again. These keys were disposable
+  and never authorized; the server rejected them as expected.
+- **Appearance and accessibility** (step 6): selection and copy in Rendered and
+  Source, horizontally panned code blocks and tables, light/dark, the largest
+  accessibility text size, Reduce Motion, Reduce Transparency, VoiceOver continuous
+  reading, the Headings rotor, focus returning to the opened row, and the PDF's page
+  announcement.
+
+### Network recordings
+
+Both used `scripts/test-cellular-tailscale.py --manual` on the MacBook, with the
+phone cabled to it and Wi-Fi off in Settings. Evidence on the MacBook:
+`/private/tmp/remotefiles-net-run1/` and `/private/tmp/remotefiles-net-run2/`.
+
+- **Interruption, 19:14–19:28, PASS.** 744 samples, all wired, with a direct route to
+  an O2 UK carrier address (briefly relayed), never local, and 146 MB of WireGuard
+  traffic. A refresh interrupted by Airplane Mode showed an error banner within
+  seconds and kept the previous copy; the next refresh worked. Two transfers did not
+  fail promptly, as described below.
+- **Handoff, 19:28–19:35.** 333 samples, all wired. The route moved from the carrier
+  to the home LAN when Wi-Fi joined at 19:29:51, and back through a London relay to
+  the carrier at 19:31:37–38. A managed download in progress across each switch
+  stalled for a few seconds and then completed; browsing worked after each. The
+  summary's `path_never_local` failure is the intended Wi-Fi leg. Tailscale keeps the
+  tunnel address, so this does not show a non-Tailscale handoff.
+
+### Found
+
+- **A dead network isn't noticed during transfers.** In Airplane Mode a managed
+  download stopped moving at 19:16:54, and the Mac dropped its socket at 19:17:34,
+  but the app showed no failure until the network returned at 19:19, despite the
+  documented 60-second inactivity limit. An offline-copy update in the same state
+  showed nothing, and its Cancel took effect only after about 3 minutes (the
+  180-second limit), again without an explanation.
+- **Linked offline readers exhaust preview leases.** Following links back and forth
+  in a saved folder eventually showed "Close another offline preview before opening
+  this file." Returning to Offline Files cleared it. Each stacked reader keeps one of
+  the four leases.
+- **RSA paste in the device UI test**, as above.
+
 ### Still outstanding over cellular
 
 These runs establish the network path for one journey: saved-connection reopen,
@@ -147,14 +239,12 @@ following remain unverified over cellular:
 - **Changed-file refresh.** `testRealServerBrowseAndRefresh` needs the Mac fixture
   changed after `REMOTEFILES_READY_FOR_SERVER_UPDATE`. The script doesn't drive that
   update, and this journey hasn't run over a recorded cellular path.
-- **Network interruption.** Turn on Airplane Mode or turn off cellular during a
-  refresh, a recursive search and a managed download. The previous copy must stay
-  clearly labelled as stale, no partial content may be shown as current, and
-  navigation must recover afterwards. Record these with `--manual` and a QuickTime
-  capture; the script records the path, not the app's state.
-- **Wi-Fi/cellular handoff.** Switch networks with a session or reader open, in both
-  directions. Tailscale may change route mid-session, so `--require-direct` doesn't
-  apply.
+- **Network interruption.** A refresh and a managed download were interrupted on
+  [31 October](#31-october-2026-iphone-session); the refresh passed, but transfers
+  don't notice the dead network promptly. A recursive search remains unchecked.
+- **Wi-Fi/cellular handoff.** Passed in both directions over Tailscale with a
+  download in progress on [31 October](#31-october-2026-iphone-session). A reader
+  left open across the switch, and handoff without Tailscale, remain unchecked.
 - **Off-site use.** Repeat away from home, ideally with the Mac behind a different
   network, and while moving between cells or in weak signal. A cabled run at home
   shows the same packet path but not radio conditions.
@@ -179,7 +269,8 @@ Denied Local Network access, permission recovery, and actual-network background
 teardown/foreground refetch now pass on the physical iPhone; see
 [device lifecycle evidence](DEVICE_PERMISSIONS_LIFECYCLE.md).
 
-Still outstanding: forced network interruption/stale rendering, locked/encrypted-key lifecycle, preserved scroll position
-for a long folder, full accessibility/selection matrix, and representative large
-report/directory performance. Read-only enforcement here is an OpenSSH command
+Still outstanding: preserved scroll position for a long folder, a recursive search
+during network loss, and representative large report/directory performance. Stale
+rendering after an interrupted refresh, the encrypted-key lifecycle and the
+accessibility/selection matrix passed on [31 October](#31-october-2026-iphone-session). Read-only enforcement here is an OpenSSH command
 restriction; this UI test deliberately did not attempt remote writes.
