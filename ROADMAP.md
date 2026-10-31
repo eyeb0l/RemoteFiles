@@ -5,9 +5,9 @@ RemoteFiles is a read-only SFTP browser. This page separates work that remains t
 <a id="after-the-first-real-usage-session"></a>
 ## Acceptance still needed
 
-Automated and Simulator results do not establish behavior on every physical device or server. Remaining checks include physical iPhone network interruption, Wi-Fi/cellular handoff and off-site use over cellular/Tailscale (the [network path itself has passed](docs/REAL_SERVER_ACCEPTANCE.md#cellular-and-tailscale-evidence) relayed and direct), accessibility and Instruments profiling; physical iPad windowing; a production bastion; and offline use on a locked device and a real server. The [manual acceptance guide](docs/MANUAL_ACCEPTANCE.md) and [dated status record](PREVIEW_STATUS.md) provide context and distinguish completed checks from outstanding ones.
+Automated and Simulator results do not establish behavior on every physical device or server. Remaining checks include off-site cellular use, Instruments profiling, file protection while locked, physical iPad windowing, a production bastion, and a changed server key. Network interruption, Wi-Fi/cellular handoff, accessibility, downloads, keys and offline use otherwise [passed on the iPhone](docs/REAL_SERVER_ACCEPTANCE.md#31-october-2026-iphone-session) on 31 October 2026, which also found transfers that don't notice a dead network and an offline link limit. The [manual acceptance guide](docs/MANUAL_ACCEPTANCE.md) and [dated status record](PREVIEW_STATUS.md) provide context and distinguish completed checks from outstanding ones.
 
-Complete physical acceptance of relative Markdown links, restoring reading position and Save Original to Files. [Document links](docs/DOCUMENT_LINKS.md) and [original export](docs/ORIGINAL_EXPORT.md) describe the implementation and recorded checks. Image Share exports display pixels; Save Original to Files preserves the original bytes.
+Complete iPad acceptance of relative Markdown links and restoring reading position; on the iPhone these and Save Original to Files passed. [Document links](docs/DOCUMENT_LINKS.md) and [original export](docs/ORIGINAL_EXPORT.md) describe the implementation and recorded checks. Image Share exports display pixels; Save Original to Files preserves the original bytes.
 
 <a id="implemented-navigation-and-routing"></a>
 <a id="later-possibilities"></a>
