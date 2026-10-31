@@ -995,6 +995,16 @@ final class RemoteFilesUITests: XCTestCase {
             XCTAssertTrue(name.waitForExistence(timeout: 5))
             name.tap(); name.typeText("UI test " + fixture.name)
             fixture.copyPrivateText(to: .general)
+            // On a physical device the background UI-test runner can't write the general
+            // pasteboard (PBErrorDomain 10/11), so the app would paste stale text and rightly
+            // reject it. IdentitySecKeyFixtureTests covers these keys on the device instead.
+            // Simulators allow the write and must still run the paste. (A runtime check:
+            // the acceptance inventory parser rejects compile-time conditionals here.)
+            let physicalDevice = ProcessInfo.processInfo.environment["SIMULATOR_DEVICE_NAME"] == nil
+            if physicalDevice, UIPasteboard.general.string != fixture.privateText {
+                app.terminate()
+                throw XCTSkip("The UI-test runner can't write the clipboard on a physical device; key parsing is covered by IdentitySecKeyFixtureTests")
+            }
             // XCTAssertEqual would disclose private text on failure.
             XCTAssertTrue(UIPasteboard.general.string == fixture.privateText, "Clipboard changed before native paste")
             defer { UIPasteboard.general.string = "" }

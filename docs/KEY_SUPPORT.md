@@ -31,13 +31,16 @@ Choose **Settings → SSH Keys → Import Key**, then choose a file or use the n
 
 *Simulator screenshots from the passing import UI test, using disposable keys generated in memory.*
 
-The disposable RSA/ECDSA UI fixtures share their generator with `IdentitySecKeyFixtureTests`.
-The Core regression generates 32 fresh SecKey RSA keys, checks their OpenSSH component
-invariants, and imports both algorithms. A hosted iOS regression imports the exact UTF-8
-item-provider text used by the UI test. The UI journey validates each fixture before
-launching the app, uses a local-only pasteboard item, and checks clipboard equality
-without logging private text. See [the physical-device investigation](RSA_IMPORT_DEVICE_TEST.md)
-for the evidence boundary and Release rerun command.
+The disposable RSA/ECDSA UI fixtures share their generator with `IdentitySecKeyFixtureTests`,
+which generates 32 fresh SecKey RSA keys, checks their OpenSSH component invariants, imports
+both algorithms, and imports the exact UTF-8 text the UI test pastes. The UI journey validates
+each fixture before launching the app, uses a local-only pasteboard item, and checks the
+clipboard without logging private text. On a physical device the background UI-test runner
+can't write the general pasteboard (`PBErrorDomain` 10/11), so the app would paste stale text
+and rightly reject it as malformed; the journey's paste step is skipped there, and
+`IdentitySecKeyFixtureTests` covers the same keys on the device. On 31 October 2026 those passed
+on an iPhone 17 Pro (iOS 27.2, Release), and importing real encrypted RSA and Ed25519 files
+through the Files picker worked by hand.
 
 ## Secret lifecycle
 
