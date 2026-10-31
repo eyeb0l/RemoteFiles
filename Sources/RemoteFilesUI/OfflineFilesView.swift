@@ -265,6 +265,9 @@ struct OfflineReaderView: View {
     @State private var source = false
     @State private var failure: String?
     @State private var loading = true
+    /// Set only when a load completes. A retained lease alone doesn't mean the preview is
+    /// ready: an interrupted load can still hold one and release it when it finally ends.
+    @State private var loaded = false
     @State private var requestID = UUID()
     @State private var navigation = ReaderNavigationState()
     @State private var readingPosition = DocumentReadingPosition()
@@ -340,7 +343,7 @@ struct OfflineReaderView: View {
             .frame(width: 1, height: 1)
         }
         .task(id: canRead) {
-            if canRead, lease == nil { await load() }
+            if canRead, !loaded { await load() }
         }
         .onAppear { visible = true }
         .onDisappear { visible = false; release() }
@@ -356,7 +359,7 @@ struct OfflineReaderView: View {
         cancelLink()
         navigation.clear()
         readingPosition.overflowGeometry.releaseInactiveContent()
-        requestID = UUID(); playback.stop(); image = nil; pdf = nil; lease = nil; preview = nil
+        requestID = UUID(); loaded = false; playback.stop(); image = nil; pdf = nil; lease = nil; preview = nil
     }
     private func cancelLink() {
         linkRequestID = UUID(); linkTask?.cancel(); linkTask = nil
@@ -433,6 +436,7 @@ struct OfflineReaderView: View {
                     revealHeading(initialFragment)
                 }
             }
+            loaded = true
         } catch is CancellationError {
             if requestID == token { release() }
         }
