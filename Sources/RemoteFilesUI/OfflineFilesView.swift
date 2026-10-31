@@ -34,29 +34,30 @@ import RemoteFilesCore
     }
 }
 
-/// Present natively from the toolbar anchor. UIKit requires an explicit popover source
+/// Present natively from a reader anchor. UIKit requires an explicit popover source
 /// on iPad; using an unanchored activity controller as SwiftUI sheet content loses it.
-private struct OfflineSharePresenter: UIViewControllerRepresentable {
+private struct OfflineSharePresenter: UIViewRepresentable {
     let item: OfflineShareItem?
     let onDismiss: (UUID) -> Void
-    func makeUIViewController(context: Context) -> AnchorController { AnchorController() }
-    func updateUIViewController(_ anchor: AnchorController, context: Context) {
+    func makeUIView(context: Context) -> AnchorView {
+        let view = AnchorView()
+        view.isUserInteractionEnabled = false
+        view.isAccessibilityElement = false
+        return view
+    }
+    func updateUIView(_ anchor: AnchorView, context: Context) {
         anchor.item = item
         anchor.onDismiss = onDismiss
         anchor.schedulePresentation()
     }
 
-    final class AnchorController: UIViewController, UIPopoverPresentationControllerDelegate {
+    final class AnchorView: UIView, UIPopoverPresentationControllerDelegate {
         var item: OfflineShareItem?
         var onDismiss: ((UUID) -> Void)?
         private var presentedID: UUID?
         private var completedID: UUID?
-        override func loadView() {
-            view = UIView()
-            view.isUserInteractionEnabled = false
-        }
-        override func viewDidAppear(_ animated: Bool) {
-            super.viewDidAppear(animated)
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
             schedulePresentation()
         }
         func schedulePresentation() {
@@ -64,8 +65,12 @@ private struct OfflineSharePresenter: UIViewControllerRepresentable {
             DispatchQueue.main.async { [weak self] in self?.presentShare() }
         }
         private func presentShare() {
-            guard let item, item.id != completedID, presentedID == nil, parent != nil, view.window != nil,
-                  presentedViewController == nil else { return }
+            guard let item, item.id != completedID, presentedID == nil,
+                  var presenter = window?.rootViewController else { return }
+            // Present from this window's current modal controller, including when
+            // Offline Files is itself displayed in a sheet.
+            while let presented = presenter.presentedViewController { presenter = presented }
+            guard !presenter.isBeingDismissed, presenter.viewIfLoaded?.window != nil else { return }
             presentedID = item.id
             let controller = item.makeActivity().controller
             let completion = controller.completionWithItemsHandler
@@ -76,11 +81,11 @@ private struct OfflineSharePresenter: UIViewControllerRepresentable {
                 else { onDismiss?(item.id) }
             }
             if let popover = controller.popoverPresentationController {
-                popover.sourceView = view
-                popover.sourceRect = view.bounds
+                popover.sourceView = self
+                popover.sourceRect = bounds
                 popover.delegate = self
             }
-            present(controller, animated: true)
+            presenter.present(controller, animated: true)
             controller.presentationController?.delegate = self
         }
         func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
@@ -320,16 +325,19 @@ struct OfflineReaderView: View {
                     }
                     .disabled(lease == nil)
                     .accessibilityHint("Shares the saved file’s original bytes")
-                    .background {
-                        OfflineSharePresenter(item: share) { id in
-                            if share?.id == id { share = nil }
-                        }
-                    }
                 }
             }
             if case .text = preview, [.markdown, .html, .svg].contains(kind) {
                 ToolbarItem(placement: .primaryAction) { Toggle("Source", isOn: $source) }
             }
+        }
+        .background(alignment: .topTrailing) {
+            // Native toolbar buttons can omit custom background views. Keep this
+            // source in the reader hierarchy so it has a window when sharing starts.
+            OfflineSharePresenter(item: share) { id in
+                if share?.id == id { share = nil }
+            }
+            .frame(width: 1, height: 1)
         }
         .task(id: canRead) {
             if canRead, lease == nil { await load() }

@@ -35,7 +35,9 @@ final class RemoteFilesUITests: XCTestCase {
         let file = app.buttons["offline-file-Quarterly review.md"]
         XCTAssertTrue(file.waitForExistence(timeout: 5)); file.tap()
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
-        XCTAssertTrue(app.buttons["Share Original"].exists)
+        // The Markdown scroll container appears while its document is still preparing.
+        // Wait for the leased reader's toolbar, rather than accepting that placeholder.
+        XCTAssertTrue(app.buttons["Share Original"].waitForExistence(timeout: 15))
         attachScreenshot("Saved folder nested Markdown reader")
         XCUIDevice.shared.press(.home)
         waitForBackground(app); app.activate()
@@ -114,11 +116,14 @@ final class RemoteFilesUITests: XCTestCase {
         let app = openDemoOfflineNavigationGuide()
         for _ in 0..<2 {
             app.buttons["Share Original"].tap()
-            let close = app.buttons["Close"].firstMatch
-            XCTAssertTrue(close.waitForExistence(timeout: 15), app.debugDescription)
+            let popup = app.popovers.firstMatch
+            XCTAssertTrue(popup.waitForExistence(timeout: 15), app.debugDescription)
+            XCTAssertTrue(popup.cells["Save to Files"].waitForExistence(timeout: 5))
+            let dismiss = app.otherElements["PopoverDismissRegion"].firstMatch
+            XCTAssertTrue(dismiss.exists)
             attachScreenshot("Offline original native share sheet")
-            close.tap()
-            XCTAssertTrue(close.waitForNonExistence(timeout: 5))
+            dismiss.tap()
+            XCTAssertTrue(popup.waitForNonExistence(timeout: 5))
             XCTAssertTrue(app.scrollViews["Rendered Markdown document"].firstMatch.waitForExistence(timeout: 15))
         }
     }
