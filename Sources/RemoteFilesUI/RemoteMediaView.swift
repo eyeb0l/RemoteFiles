@@ -359,7 +359,7 @@ struct PDFDocumentView: UIViewRepresentable {
         /// Saves where the reader is. Ignored until restoration so the initial layout at page 1
         /// never replaces a saved or requested position.
         func record() {
-            guard let view, view.isRestored, let anchor = view.readingAnchor() else { return }
+            guard let view, view.isRestored, !view.isAdjustingLayout, let anchor = view.readingAnchor() else { return }
             parent?.readingPosition?.pdfAnchor = anchor
         }
         @objc func pageChanged() {
@@ -374,21 +374,48 @@ struct PDFDocumentView: UIViewRepresentable {
 }
 
 /// Waits for a real layout before scrolling, since PDFKit ignores destinations in a zero-sized view.
+/// A later size change (rotation, iPad resizing) keeps the same reading position: PDFKit rescales
+/// the pages but would otherwise leave the old offset in place.
 final class RestoringPDFView: PDFView {
     var pendingRestoration: SavedReadingPosition.Anchor?
     var onRestored: (() -> Void)?
     private(set) var isRestored = false
     private var scheduled = false
     private var generation = 0
+    /// Captured before a size change, under the old layout, and restored after the new one.
+    private var resizeAnchor: SavedReadingPosition.Anchor?
+    private var resizeScheduled = false
+    /// True between a size change and its restoration; positions seen then are transitional.
+    var isAdjustingLayout: Bool { resizeAnchor != nil }
+
+    override var frame: CGRect { willSet { prepareForResize(to: newValue.size) } }
+    override var bounds: CGRect { willSet { prepareForResize(to: newValue.size) } }
+
+    private func prepareForResize(to size: CGSize) {
+        guard isRestored, resizeAnchor == nil, bounds.width > 0, bounds.height > 0, size != bounds.size else { return }
+        resizeAnchor = readingAnchor()
+    }
 
     func restart(with restoration: SavedReadingPosition.Anchor?) {
         generation += 1
         pendingRestoration = restoration; isRestored = false; scheduled = false
+        resizeAnchor = nil; resizeScheduled = false
         setNeedsLayout()
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        if isRestored, resizeAnchor != nil, !resizeScheduled, bounds.width > 0, bounds.height > 0 {
+            resizeScheduled = true
+            let expected = generation
+            // As with the first restoration, let autoScales apply the new width first.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.generation == expected else { return }
+                if let anchor = self.resizeAnchor { self.restore(anchor) }
+                self.resizeAnchor = nil; self.resizeScheduled = false
+                self.onRestored?()
+            }
+        }
         guard !isRestored, !scheduled, document != nil, bounds.width > 0, bounds.height > 0 else { return }
         scheduled = true
         let expected = generation

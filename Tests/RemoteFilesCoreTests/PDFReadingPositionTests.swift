@@ -10,6 +10,7 @@ import RemoteFilesCore
     var document: PDFDocument
     var restoration: SavedReadingPosition.Anchor?
     var page = 0
+    var width: CGFloat?
     let position: DocumentReadingPosition
     init(document: PDFDocument, restoration: SavedReadingPosition.Anchor?, position: DocumentReadingPosition) {
         self.document = document; self.restoration = restoration; self.position = position
@@ -21,6 +22,7 @@ private struct PDFFixture: View {
     var body: some View {
         PDFDocumentView(document: state.document, restoration: state.restoration,
                         readingPosition: state.position, onPageChange: { state.page = $0 })
+            .frame(width: state.width)
     }
 }
 
@@ -100,6 +102,30 @@ private struct PDFFixture: View {
         try writePDF(pages: 6, label: "Revised page", to: pdfURL)
         await recreated.preparePDF(fileURL: pdfURL, store: ReadingPositionStore(fileURL: store), connectionID: id, path: "/report.pdf")
         XCTAssertNil(recreated.pdfAnchor, "Changed PDF bytes start at the top")
+    }
+
+    func testWidthChangesKeepTheReadingPositionInsteadOfTheOldOffset() async throws {
+        let directory = try temporaryDirectory()
+        let pdfURL = directory.appendingPathComponent("report.pdf")
+        // Enough pages that the narrower layout can still scroll page 4 to the top.
+        try writePDF(pages: 20, to: pdfURL)
+        let position = DocumentReadingPosition(), saved = SavedReadingPosition.Anchor(kind: "pdf-page", ordinal: 3, fraction: 0.5)
+        let state = PDFFixtureState(document: try XCTUnwrap(PDFDocument(url: pdfURL)), restoration: saved, position: position)
+        let window = try host(state)
+        try await waitUntil({ self.pdfView(window)?.isRestored == true })
+        let view = try XCTUnwrap(pdfView(window))
+        // Narrower, as in rotation or a smaller iPad window, then back to full width.
+        for width in [window.bounds.width * 0.55, nil] {
+            state.width = width
+            try await waitUntil({ abs(view.bounds.width - (width ?? window.bounds.width)) < 1 && !view.isAdjustingLayout },
+                                "width=\(view.bounds.width)")
+            let anchor = try XCTUnwrap(view.readingAnchor())
+            XCTAssertEqual(anchor.ordinal, 3, "\(String(describing: width)): \(anchor)")
+            XCTAssertEqual(anchor.fraction, 0.5, accuracy: 0.05, "\(String(describing: width)): \(anchor)")
+        }
+        await position.flush()
+        XCTAssertEqual(position.pdfAnchor?.ordinal, 3, "Transitional layouts are never saved")
+        XCTAssertEqual(position.pdfAnchor?.fraction ?? -1, 0.5, accuracy: 0.05)
     }
 
     func testInitialLayoutDoesNotReplaceSavedPositionBeforeRestoration() async throws {
