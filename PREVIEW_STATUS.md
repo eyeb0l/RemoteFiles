@@ -2,6 +2,12 @@
 
 This is a dated record of feature work and validation, not a live test dashboard. Each result applies to the build, environment and date described with it; an installation or Simulator pass does not establish later physical-device acceptance. For current behavior, start with the [documentation index](docs/README.md). For checks still to perform, see [manual acceptance](docs/MANUAL_ACCEPTANCE.md) and the [roadmap](ROADMAP.md).
 
+**31 October 2026: PDF search pages and reading positions.**
+
+PDF results from live **Contents** search and saved search indexes open at their matching page, ahead of saved history; a page no longer present falls back to the saved position or the top. Remote PDFs save the page and vertical position within it, keyed to a hash of the downloaded bytes, so a changed PDF starts at the top. Zoom is not saved; Demo and offline copies write no history. The PDF header shows the current page.
+
+Local verification on an iPhone 18 Pro Simulator (iOS 27.2): the `simulator-core` acceptance lane passed (457 passed, 4 allowed skips), including four hosted PDF restoration tests; `swift test` passed the reading-position store tests on macOS; and the live and saved PDF/OCR search UI tests passed with the result opening at page 2. The `simulator-ui`, `voiceover` and release-device-compile lanes were left to CI. Physical-device acceptance ([step 13](docs/MANUAL_ACCEPTANCE.md)) is outstanding.
+
 **25 October 2026: offline folders and document links.**
 
 Individual files and complete folder trees can be kept in a protected, device-local Offline library with explicit updates/removal and saved dates. Folder snapshots preserve subfolders and empty directories, offer a hidden-file choice, and skip symbolic links and special files. Failed or cancelled updates keep the previous complete snapshot. The library is bounded to 32 folders, 100 files, 128 MiB per original and 512 MiB of committed originals, and Demo is isolated.

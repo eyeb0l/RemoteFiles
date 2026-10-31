@@ -116,4 +116,48 @@ final class ReadingPositionStoreTests: XCTestCase {
         let restored = await recreated.restore(connectionID: id, path: "/a", revision: valid.revision)
         XCTAssertEqual(restored, valid)
     }
+
+    func testPDFPageAnchorsRoundTripAndRejectInvalidPagePositions() async throws {
+        let url = location(); defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let id = UUID(), store = ReadingPositionStore(fileURL: url)
+        var value = SavedReadingPosition(revision: SavedReadingPosition.revision(for: "%PDF bytes"))
+        value.renderedAnchor = .init(kind: "pdf-page", ordinal: 7, fraction: 0.35)
+        try await store.save(value, connectionID: id, path: "/Reports/scan.pdf")
+        let restored = await ReadingPositionStore(fileURL: url).restore(connectionID: id, path: "/Reports/scan.pdf", revision: value.revision)
+        XCTAssertEqual(restored, value)
+        for invalid in [SavedReadingPosition.Anchor(kind: "pdf-page", ordinal: -1),
+                        .init(kind: "pdf-page", fraction: 1.5), .init(kind: "pdf-page", fraction: .nan)] {
+            value.renderedAnchor = invalid
+            try await store.save(value, connectionID: id, path: "/invalid.pdf")
+            let rejected = await store.restore(connectionID: id, path: "/invalid.pdf", revision: value.revision)
+            XCTAssertNil(rejected, "\(invalid)")
+        }
+    }
+
+    func testFileRevisionHashesEveryChunkLikeInMemoryContents() throws {
+        let url = location(); defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // Larger than two read chunks, with a change only in the final partial chunk.
+        let text = String(repeating: "page text ", count: 260_000) + "end"
+        try Data(text.utf8).write(to: url)
+        XCTAssertEqual(try SavedReadingPosition.revision(forFileAt: url), SavedReadingPosition.revision(for: text))
+        try Data((text.dropLast() + "!").utf8).write(to: url)
+        XCTAssertNotEqual(try SavedReadingPosition.revision(forFileAt: url), SavedReadingPosition.revision(for: text))
+        try Data().write(to: url)
+        XCTAssertEqual(try SavedReadingPosition.revision(forFileAt: url), SavedReadingPosition.revision(for: ""))
+    }
+
+    func testOpeningPageIsAOneShotRouteTargetSeparateFromThePath() {
+        let entry = RemoteEntry(name: "scan.pdf", path: "/Reports/scan.pdf", kind: .file, size: 10, canonicalRoot: "/Reports")
+        let target = entry.openingPage(3)
+        XCTAssertEqual(target.openingPage, 3)
+        XCTAssertEqual(target.path, entry.path); XCTAssertEqual(target.canonicalRoot, "/Reports")
+        XCTAssertNotEqual(target, entry, "Opening another page result produces a distinct route")
+        XCTAssertNil(entry.openingPage)
+        XCTAssertNil(entry.openingPage(0).openingPage)
+        XCTAssertNil(entry.openingPage(-2).openingPage)
+        XCTAssertNil(entry.openingPage(nil).openingPage)
+        XCTAssertEqual(entry.openingHeading("intro").openingPage(2).headingFragment, "intro")
+        XCTAssertNil(target.openingHeading("intro").openingPage, "Heading links never inherit a search page")
+    }
 }

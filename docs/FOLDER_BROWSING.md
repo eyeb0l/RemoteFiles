@@ -88,6 +88,10 @@ Try **Explore Demo → Projects → Search samples** and search contents for `IN
 
 *Screenshots from a passing signed Release UI test on a physical iPhone 17 Pro running iOS 27.2, using only bundled synthetic samples.*
 
+<img src="screenshots/folder-browsing/pdf-result-matching-page-simulator.png" width="240" alt="Text sample.pdf opened from its search result, with the page indicator showing Page 2 of 2">
+
+*Opening the embedded-text result shows its matching page. Captured from the passing UI test on an iPhone 18 Pro Simulator running iOS 27.2; physical-device acceptance is still outstanding.*
+
 Both options are off for an ordinary live search. OCR uses up to three supported device-preferred languages, falling back to English when none match. If Vision's accurate model cannot run, its fast model gets one attempt within the original time budget; cancellation never starts that fallback. The fast model supports fewer languages and can be less accurate. OCR can miss or misread text, especially handwriting, small text, unusual layouts and low-quality scans. Only the first frame of a multi-frame image is searched. Archives, audio and video remain unsupported, and encrypted or invalid PDFs cannot be searched. No document bytes or recognized text are sent to an OCR service.
 
 | iPhone | iPad folder column |
@@ -96,7 +100,7 @@ Both options are off for an ordinary live search. OCR uses up to three supported
 
 *Screenshots from passing simulator tests using demo files.*
 
-Results contain one match per file, nearest folder first and by name within each folder. SFTP fallback matches appear as each file is checked; server-assisted matches arrive together. The line number refers to source text or recognized image text; PDF matches show a page number. Opening a result uses the ordinary reader and its existing reading position; PDF results do not yet jump to the matching page. Use **Find in Document** in supported text readers to move between matches there. Completed results stay when you return; refresh starts a new search. The same controls and results work in the iPad folder column.
+Results contain one match per file, nearest folder first and by name within each folder. SFTP fallback matches appear as each file is checked; server-assisted matches arrive together. The line number refers to source text or recognized image text; PDF matches show a page number. Opening a result uses the ordinary reader. A PDF result opens at its matching page instead of the saved reading position; later scrolling is saved as usual. If the current PDF no longer has that page, it opens at its saved position or the top. Other results keep their existing reading position. Use **Find in Document** in supported text readers to move between matches there. Completed results stay when you return; refresh starts a new search. The same controls and results work in the iPad folder column.
 
 The search lists up to 1,000 folders, descends at most 16 levels, reads at most 500 candidate files, and retains at most 500 matching files. The default file-size limit is 256 KiB; enabling PDF text or OCR raises it to 2 MiB for supported files. Every search retains the conservative 16 MiB file-data read budget; directory listings and SSH protocol overhead are additional. Files advertised as larger are skipped without reading; unknown or stale sizes are still bounded by the transport. Failed reads reserve their entire possible transfer, including the EOF sentinel, so repeated failures cannot evade the budget.
 

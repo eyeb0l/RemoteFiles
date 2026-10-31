@@ -71,6 +71,8 @@ public struct RemoteEntry: Identifiable, Hashable, Sendable {
     public let exportFilename: String?
     /// A user-tapped heading link; never part of the remote filesystem path.
     public let headingFragment: String?
+    /// One-based PDF page from a search result, opened once instead of the saved reading position.
+    public let openingPage: Int?
     /// For a symbolic link resolved while listing; nil when it was not resolved.
     public let link: LinkResolution?
     public init(name: String, path: String, kind: Kind, size: UInt64? = nil, modifiedAt: Date? = nil, navigationRoot: String? = nil,
@@ -78,16 +80,21 @@ public struct RemoteEntry: Identifiable, Hashable, Sendable {
         self.name = name; self.path = path; self.kind = kind; self.size = size; self.modifiedAt = modifiedAt
         self.navigationRoot = navigationRoot; self.exportFilename = exportFilename
         self.canonicalRoot = canonicalRoot
-        self.headingFragment = nil; self.link = link
+        self.headingFragment = nil; self.openingPage = nil; self.link = link
     }
     public func openingHeading(_ fragment: String) -> RemoteEntry {
-        RemoteEntry(copying: self, headingFragment: fragment)
+        RemoteEntry(copying: self, headingFragment: fragment, openingPage: nil)
     }
-    private init(copying entry: RemoteEntry, headingFragment: String) {
+    /// A one-based page; values outside 1...Int32.max are ignored rather than clamped.
+    public func openingPage(_ page: Int?) -> RemoteEntry {
+        RemoteEntry(copying: self, headingFragment: headingFragment,
+                    openingPage: page.flatMap { (1...Int(Int32.max)).contains($0) ? $0 : nil })
+    }
+    private init(copying entry: RemoteEntry, headingFragment: String?, openingPage: Int?) {
         name = entry.name; path = entry.path; kind = entry.kind; size = entry.size; modifiedAt = entry.modifiedAt
         navigationRoot = entry.navigationRoot; exportFilename = entry.exportFilename; link = entry.link
         canonicalRoot = entry.canonicalRoot
-        self.headingFragment = headingFragment
+        self.headingFragment = headingFragment; self.openingPage = openingPage
     }
     /// The resolved target of a symbolic link, if any.
     public var linkTarget: RemoteEntry? {
