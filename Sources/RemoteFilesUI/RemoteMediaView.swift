@@ -11,8 +11,14 @@ struct RemoteMediaView: View {
     let entry: RemoteEntry
     let kind: DocumentKind
     let refreshID: Int
+    /// Owned by the reader route, so a PDF's position survives refresh and suspension.
+    var readingPosition: DocumentReadingPosition? = nil
     @State private var image: DisplayImage?
     @State private var pdf: PDFDocument?
+    /// Where a newly loaded PDF opens: a search result's page once, then the saved position.
+    @State private var pdfRestoration: SavedReadingPosition.Anchor?
+    @State private var pdfPage = 0
+    @State private var appliedOpeningPage = false
     @State private var loading = false
     @State private var downloadProgress = DownloadProgress()
     @State private var failure: String?
@@ -77,11 +83,13 @@ struct RemoteMediaView: View {
                     }
                 } else if kind == .pdf, let pdf {
                     VStack(spacing: 0) {
-                        Text("\(pdf.pageCount) \(pdf.pageCount == 1 ? "page" : "pages")")
-                            .font(.caption).foregroundStyle(.secondary)
+                        Text("Page \(min(pdfPage, pdf.pageCount - 1) + 1) of \(pdf.pageCount)")
+                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
-                        PDFDocumentView(document: pdf)
-                            .accessibilityLabel("PDF \(entry.name), \(pdf.pageCount) pages")
+                            .accessibilityIdentifier("PDF page indicator")
+                        PDFDocumentView(document: pdf, restoration: pdfRestoration, readingPosition: readingPosition,
+                                        onPageChange: { pdfPage = $0 })
+                            .accessibilityLabel("PDF \(entry.name), \(pdf.pageCount) \(pdf.pageCount == 1 ? "page" : "pages")")
                     }
                 } else if let player = playback.player {
                     VStack(spacing: 0) {
@@ -190,11 +198,24 @@ struct RemoteMediaView: View {
                     playback.stop(); return
                 }
             } else {
+                // Hash the bytes before PDFKit opens them: a changed document starts at the top.
+                var restorable = false
+                if let readingPosition {
+                    restorable = await model.preparePDFReadingPosition(readingPosition, fileURL: file, profile: profile, path: entry.path)
+                }
+                try Task.checkCancellation()
+                guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else { return }
                 guard let document = PDFDocument(url: file), document.pageCount > 0 else {
                     throw MediaPreviewError.invalidPDF
                 }
                 try Task.checkCancellation()
                 guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else { return }
+                let restoration = Self.pdfRestoration(openingPage: appliedOpeningPage ? nil : entry.openingPage,
+                                                      saved: restorable ? readingPosition?.pdfAnchor : nil,
+                                                      pageCount: document.pageCount)
+                appliedOpeningPage = true
+                if restorable, restoration != nil { readingPosition?.pdfAnchor = restoration }
+                pdfRestoration = restoration; pdfPage = restoration?.ordinal ?? 0
                 pdf = document
             }
             model.connectionStates[profile.id] = "Connected"
@@ -273,6 +294,15 @@ struct NativePlaybackView: UIViewControllerRepresentable {
     }
 }
 
+extension RemoteMediaView {
+    /// A search result's page wins once over saved history; either must exist in this revision.
+    static func pdfRestoration(openingPage: Int?, saved: SavedReadingPosition.Anchor?, pageCount: Int) -> SavedReadingPosition.Anchor? {
+        if let openingPage, (1...pageCount).contains(openingPage) { return .init(kind: "pdf-page", ordinal: openingPage - 1) }
+        guard let saved, saved.kind == "pdf-page", saved.ordinal < pageCount else { return nil }
+        return saved
+    }
+}
+
 private enum MediaPreviewError: LocalizedError {
     case invalidPDF
     var errorDescription: String? { "This file is not a readable PDF, or its PDF data is damaged." }
@@ -280,17 +310,145 @@ private enum MediaPreviewError: LocalizedError {
 
 struct PDFDocumentView: UIViewRepresentable {
     let document: PDFDocument
-    func makeUIView(context: Context) -> PDFView {
-        let view = PDFView()
+    /// Applied once after the first layout of each document; nil opens at the top.
+    var restoration: SavedReadingPosition.Anchor? = nil
+    var readingPosition: DocumentReadingPosition? = nil
+    /// Reports the zero-based page PDFKit considers current.
+    var onPageChange: ((Int) -> Void)? = nil
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeUIView(context: Context) -> RestoringPDFView {
+        let view = RestoringPDFView()
         view.autoScales = true
         view.displayMode = .singlePageContinuous
         view.displayDirection = .vertical
         view.usePageViewController(false)
         view.document = document
+        view.pendingRestoration = restoration
+        context.coordinator.attach(view, parent: self)
         return view
     }
-    func updateUIView(_ view: PDFView, context: Context) {
-        if view.document !== document { view.document = document }
+    func updateUIView(_ view: RestoringPDFView, context: Context) {
+        context.coordinator.parent = self
+        if view.document !== document {
+            view.document = document
+            view.restart(with: restoration)
+        }
+    }
+    static func dismantleUIView(_ view: RestoringPDFView, coordinator: Coordinator) {
+        coordinator.record()
+        coordinator.detach()
+    }
+
+    @MainActor final class Coordinator: NSObject {
+        var parent: PDFDocumentView?
+        private weak var view: RestoringPDFView?
+
+        func attach(_ view: RestoringPDFView, parent: PDFDocumentView) {
+            self.view = view; self.parent = parent
+            NotificationCenter.default.addObserver(self, selector: #selector(pageChanged), name: .PDFViewPageChanged, object: view)
+            view.onRestored = { [weak self] in self?.pageChanged() }
+            // The weak capture becomes a no-op once this view is gone; a newer view replaces it.
+            parent.readingPosition?.capturePDFPosition = { [weak self] in self?.record() }
+        }
+        func detach() {
+            if let view { NotificationCenter.default.removeObserver(self, name: .PDFViewPageChanged, object: view) }
+            view?.onRestored = nil
+            view = nil
+        }
+        /// Saves where the reader is. Ignored until restoration so the initial layout at page 1
+        /// never replaces a saved or requested position.
+        func record() {
+            guard let view, view.isRestored, !view.isAdjustingLayout, let anchor = view.readingAnchor() else { return }
+            parent?.readingPosition?.pdfAnchor = anchor
+        }
+        @objc func pageChanged() {
+            guard let view, view.isRestored else { return }
+            if let page = view.currentPage, let document = view.document {
+                let index = document.index(for: page)
+                if index != NSNotFound { parent?.onPageChange?(index) }
+            }
+            record()
+        }
+    }
+}
+
+/// Waits for a real layout before scrolling, since PDFKit ignores destinations in a zero-sized view.
+/// A later size change (rotation, iPad resizing) keeps the same reading position: PDFKit rescales
+/// the pages but would otherwise leave the old offset in place.
+final class RestoringPDFView: PDFView {
+    var pendingRestoration: SavedReadingPosition.Anchor?
+    var onRestored: (() -> Void)?
+    private(set) var isRestored = false
+    private var scheduled = false
+    private var generation = 0
+    /// Captured before a size change, under the old layout, and restored after the new one.
+    private var resizeAnchor: SavedReadingPosition.Anchor?
+    private var resizeScheduled = false
+    /// True between a size change and its restoration; positions seen then are transitional.
+    var isAdjustingLayout: Bool { resizeAnchor != nil }
+
+    override var frame: CGRect { willSet { prepareForResize(to: newValue.size) } }
+    override var bounds: CGRect { willSet { prepareForResize(to: newValue.size) } }
+
+    private func prepareForResize(to size: CGSize) {
+        guard isRestored, resizeAnchor == nil, bounds.width > 0, bounds.height > 0, size != bounds.size else { return }
+        resizeAnchor = readingAnchor()
+    }
+
+    func restart(with restoration: SavedReadingPosition.Anchor?) {
+        generation += 1
+        pendingRestoration = restoration; isRestored = false; scheduled = false
+        resizeAnchor = nil; resizeScheduled = false
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if isRestored, resizeAnchor != nil, !resizeScheduled, bounds.width > 0, bounds.height > 0 {
+            resizeScheduled = true
+            let expected = generation
+            // As with the first restoration, let autoScales apply the new width first.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.generation == expected else { return }
+                if let anchor = self.resizeAnchor { self.restore(anchor) }
+                self.resizeAnchor = nil; self.resizeScheduled = false
+                self.onRestored?()
+            }
+        }
+        guard !isRestored, !scheduled, document != nil, bounds.width > 0, bounds.height > 0 else { return }
+        scheduled = true
+        let expected = generation
+        // Let autoScales settle the page scale for this width before positioning.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.generation == expected else { return }
+            if let anchor = self.pendingRestoration { self.restore(anchor) }
+            self.pendingRestoration = nil
+            self.isRestored = true
+            self.onRestored?()
+        }
+    }
+
+    func restore(_ anchor: SavedReadingPosition.Anchor) {
+        guard anchor.kind == "pdf-page", let document, anchor.ordinal < document.pageCount,
+              let page = document.page(at: anchor.ordinal) else { return }
+        guard anchor.fraction > 0 else { go(to: page); return }
+        let box = page.bounds(for: displayBox)
+        go(to: PDFDestination(page: page, at: CGPoint(x: box.minX, y: box.maxY - CGFloat(anchor.fraction) * box.height)))
+    }
+
+    /// The page and vertical position at the top edge of the visible area.
+    func readingAnchor() -> SavedReadingPosition.Anchor? {
+        guard let document, bounds.height > 0 else { return nil }
+        let probe = CGPoint(x: bounds.midX, y: bounds.minY + safeAreaInsets.top + 1)
+        guard let page = page(for: probe, nearest: true) else { return nil }
+        let index = document.index(for: page)
+        guard index != NSNotFound else { return nil }
+        let box = page.bounds(for: displayBox)
+        guard box.height > 0 else { return nil }
+        let point = convert(probe, to: page)
+        let fraction = Double(min(1, max(0, (box.maxY - point.y) / box.height)))
+        return .init(kind: "pdf-page", ordinal: index, fraction: fraction.isFinite ? fraction : 0)
     }
 }
 #endif

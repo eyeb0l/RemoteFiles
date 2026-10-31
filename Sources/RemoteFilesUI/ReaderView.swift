@@ -63,7 +63,8 @@ struct ReaderView: View {
             Group {
                 if isMedia {
                     RemoteMediaView(model: model, profile: profile, entry: entry,
-                                    kind: DocumentPolicy.kind(filename: entry.name), refreshID: refreshID)
+                                    kind: DocumentPolicy.kind(filename: entry.name), refreshID: refreshID,
+                                    readingPosition: readingPosition)
                 } else if let preview, model.isForeground {
                     switch preview {
                     case .text(let text, let markdown): DocumentContentView(text: text, markdown: markdown, source: source, filename: entry.name, location: .init(profile: profile, path: entry.path, canonicalRoot: entry.canonicalRoot), resolver: model.resources, readingPosition: readingPosition, openDocumentLink: openLink, wrapLines: wrapLines, navigation: navigation).id(ContentIdentity(revision: contentRevision, images: imageVersion))

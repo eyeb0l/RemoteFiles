@@ -17,14 +17,15 @@ does not block RemoteFiles; see [dependency maintenance](docs/CITADEL_UPSTREAM.m
 ## Improvements under consideration
 
 - More verified private-key protection formats and hardware-backed security-key identities. OpenSSH RSA/ECDSA imports and optional biometric unlock are already available; see [key support](docs/KEY_SUPPORT.md).
-- Extend reading history to PDF and standalone image previews. Layout-independent text/block anchors cover Markdown, Source (including plain text) and static HTML; inactive reader-content eviction is implemented. Physical-device layout and memory acceptance remain outstanding. See [reader behavior](docs/READER.md).
-- Automatic or incremental search-index refresh and opening PDF search results at the matching page. [Folder search](docs/FOLDER_BROWSING.md) already supports explicit persistent local indexes, bounded PDF text and on-device OCR, plus case, whole-word and file-type filters. Saved indexes are snapshots and must be rebuilt to reflect remote changes.
+- Extend reading history to standalone image previews and offline PDF copies. Layout-independent text/block anchors cover Markdown, Source (including plain text) and static HTML; remote PDFs save their page position; inactive reader-content eviction is implemented. Physical-device layout and memory acceptance remain outstanding. See [reader behavior](docs/READER.md).
+- Automatic or incremental search-index refresh. [Folder search](docs/FOLDER_BROWSING.md) already supports explicit persistent local indexes, bounded PDF text and on-device OCR, plus case, whole-word and file-type filters. Saved indexes are snapshots and must be rebuilt to reflect remote changes.
 - Offline synchronization, File Provider, multiple jump hops, other protocols such as FTP/FTPS, optional terminal handoff, deeper Tailscale onboarding, and additional iPad keyboard and multiwindow workflows.
 - Byte-offset resume for interrupted SSH downloads, expanded transfer quotas, and physical-device background-transfer acceptance. Managed downloads restart interrupted files from the beginning.
 
 <a id="separate-write-capable-iteration"></a>
 ## Newly implemented
 
+- PDF search results open at their matching page, and remote PDFs remember their page position. See [reader behavior](docs/READER.md) and [folder search](docs/FOLDER_BROWSING.md).
 - Private-key export through Files, with device authentication and a separate confirmation; imported encryption is preserved. See [key support](docs/KEY_SUPPORT.md).
 - Opt-in public-key installation while saving a direct connection, using the existing reviewed installer. See [public-key installation](docs/PUBLIC_KEY_INSTALLATION.md).
 - Locally rendered Mermaid, mathematical notation and static HTML inside Markdown. Standalone HTML keeps its [static preview](docs/HTML_PREVIEWS.md).

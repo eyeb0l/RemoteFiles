@@ -11,6 +11,10 @@ import UIKit
     public var rendered: CGPoint = .zero { didSet { if rendered != oldValue { scheduleSave() } } }
     public var sourceAnchor: SavedReadingPosition.Anchor? { didSet { if sourceAnchor != oldValue { scheduleSave() } } }
     public var htmlAnchor: SavedReadingPosition.Anchor? { didSet { if htmlAnchor != oldValue { scheduleSave() } } }
+    /// The page and vertical position within it for a PDF preview.
+    public var pdfAnchor: SavedReadingPosition.Anchor? { didSet { if pdfAnchor != oldValue { scheduleSave() } } }
+    /// Set by a live PDF view so a lifecycle flush records its latest scroll position.
+    @ObservationIgnored var capturePDFPosition: (() -> Void)?
     // Weak renderer callbacks let a lifecycle flush await the final DOM capture without
     // retaining the WebKit view or document in the route's reading history.
     @ObservationIgnored var captureHTMLPosition: (() async -> Void)?
@@ -33,36 +37,60 @@ import UIKit
     public func prepare(text: String, store: ReadingPositionStore?, connectionID: UUID, path: String) async {
         let token = UUID(); preparationID = token
         let nextRevision = await Task.detached(priority: .utility) { SavedReadingPosition.revision(for: text) }.value
-        guard preparationID == token, !Task.isCancelled else { return }
+        await prepare(revision: nextRevision, token: token, store: store, connectionID: connectionID, path: path) {
+            overflowGeometry.documentDidChange(text)
+        }
+    }
+
+    /// Prepares history for a PDF from its local bytes. Returns false if hashing failed or a newer
+    /// preparation superseded this one; the caller should then not restore a position.
+    @discardableResult
+    public func preparePDF(fileURL: URL, store: ReadingPositionStore?, connectionID: UUID, path: String) async -> Bool {
+        let token = UUID(); preparationID = token
+        let hashing = Task.detached(priority: .utility) { try SavedReadingPosition.revision(forFileAt: fileURL) }
+        let nextRevision = await withTaskCancellationHandler { try? await hashing.value } onCancel: { hashing.cancel() }
+        guard let nextRevision else { return false }
+        return await prepare(revision: nextRevision, token: token, store: store, connectionID: connectionID, path: path) {}
+    }
+
+    @discardableResult
+    private func prepare(revision nextRevision: String, token: UUID, store: ReadingPositionStore?, connectionID: UUID, path: String,
+                         documentDidChange: () -> Void) async -> Bool {
+        guard preparationID == token, !Task.isCancelled else { return false }
         if self.revision == nextRevision, self.connectionID == connectionID,
-           self.path.map({ Data($0.utf8) == Data(path.utf8) }) == true { return }
+           self.path.map({ Data($0.utf8) == Data(path.utf8) }) == true { return true }
         await flush()
-        guard preparationID == token, !Task.isCancelled else { return }
+        guard preparationID == token, !Task.isCancelled else { return false }
         preparing = true
         defer { preparing = false }
         let restored = await store?.restore(connectionID: connectionID, path: path, revision: nextRevision)
-        guard preparationID == token, !Task.isCancelled else { return }
+        guard preparationID == token, !Task.isCancelled else { return false }
         self.store = store; self.connectionID = connectionID; self.path = path; revision = nextRevision
         htmlSessionID = nil; captureHTMLPosition = nil
-        overflowGeometry.documentDidChange(text)
+        documentDidChange()
+        pdfAnchor = restored?.renderedAnchor.flatMap { $0.kind == "pdf-page" ? $0 : nil }
         htmlAnchor = restored?.renderedAnchor.flatMap { $0.kind.hasPrefix("html-") ? $0 : nil }
-        overflowGeometry.snapshot = restored?.renderedAnchor.flatMap { $0.kind.hasPrefix("html-") ? nil : $0 }.map {
+        overflowGeometry.snapshot = restored?.renderedAnchor.flatMap { $0.kind.hasPrefix("html-") || $0.kind == "pdf-page" ? nil : $0 }.map {
             .init(kind: $0.kind, ordinal: $0.ordinal, character: $0.character, fraction: $0.fraction, viewportY: $0.viewportY)
         }
         sourceAnchor = restored?.sourceAnchor
         rendered = restored.map { CGPoint(x: $0.rendered.x, y: $0.rendered.y) } ?? .zero
         source = restored.map { CGPoint(x: $0.source.x, y: $0.source.y) } ?? .zero
+        return true
     }
 
     /// Flush on leaving the reader and before background suspension; ordinary scroll updates debounce.
     public func flush() async {
         pendingSave?.cancel(); pendingSave = nil
         await captureHTMLPosition?()
+        capturePDFPosition?()
+        // Capturing can schedule another debounced save; this flush already writes it.
+        pendingSave?.cancel(); pendingSave = nil
         guard let store, let connectionID, let path, let revision else { return }
         let snapshot = SavedReadingPosition(revision: revision,
             rendered: .init(x: Double(rendered.x), y: Double(rendered.y)),
             source: .init(x: Double(source.x), y: Double(source.y)),
-            renderedAnchor: htmlAnchor ?? overflowGeometry.snapshot.map {
+            renderedAnchor: htmlAnchor ?? pdfAnchor ?? overflowGeometry.snapshot.map {
                 .init(kind: $0.kind, ordinal: $0.ordinal, character: $0.character, fraction: $0.fraction, viewportY: $0.viewportY)
             }, sourceAnchor: sourceAnchor)
         do {
