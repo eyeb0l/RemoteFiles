@@ -305,6 +305,10 @@ final class AppModel {
     func prepareReadingPosition(_ position: DocumentReadingPosition, text: String, profile: ConnectionProfile, path: String) async {
         await position.prepare(text: text, store: demo ? nil : readingPositions, connectionID: profile.id, path: path)
     }
+    /// Returns false when the preview should open without a saved position.
+    func preparePDFReadingPosition(_ position: DocumentReadingPosition, fileURL: URL, profile: ConnectionProfile, path: String) async -> Bool {
+        await position.preparePDF(fileURL: fileURL, store: demo ? nil : readingPositions, connectionID: profile.id, path: path)
+    }
     func profile(_ id: UUID) -> ConnectionProfile? { metadata.connections.first { $0.id == id } }
     /// Installation is direct: a bastion-only identity must not prefill the destination account.
     func installationConnection(for identity: IdentityMetadata) -> ConnectionProfile? {

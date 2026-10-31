@@ -77,7 +77,7 @@ struct SearchIndexView: View {
                             dismiss()
                             // The reader rechecks the canonical search root when fetching current bytes.
                             let entry = RemoteEntry(name: match.entry.name, path: match.entry.path, kind: .file,
-                                size: match.entry.size, modifiedAt: match.entry.modifiedAt, canonicalRoot: root)
+                                size: match.entry.size, modifiedAt: match.entry.modifiedAt, canonicalRoot: root).openingPage(match.page)
                             model.openInWorkspace(.file(profile.id, entry))
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {

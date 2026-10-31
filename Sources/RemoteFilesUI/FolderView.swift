@@ -69,10 +69,12 @@ struct FolderSearchRow: Identifiable, Sendable {
     let row: FolderRow
     let subtitle: String
     let snippet: String?
+    /// The one-based PDF page of a content match, opened instead of the saved reading position.
+    let page: Int?
     var id: String { row.id }
-    init(_ entry: RemoteEntry, root: String, snippet: String? = nil) {
+    init(_ entry: RemoteEntry, root: String, snippet: String? = nil, page: Int? = nil) {
         row = FolderRow(entry)
-        self.snippet = snippet
+        self.snippet = snippet; self.page = page
         let parent = RemotePath.parent(of: entry.path)
         let prefix = root == "/" ? "/" : root + "/"
         let location = parent == root ? "In this folder" : "In " + (parent.hasPrefix(prefix) ? String(parent.dropFirst(prefix.count)) : parent)
@@ -126,7 +128,7 @@ struct FolderSearchState {
     mutating func apply(_ update: RemoteFolderSearch.Update, for key: Key) {
         guard self.key == key else { return }
         rows += update.matches.map { FolderSearchRow($0, root: key.root) }
-        rows += update.contentMatches.map { FolderSearchRow($0.entry, root: key.root, snippet: ($0.page.map { "Page \($0)" } ?? "Line \($0.line)") + " · " + $0.snippet) }
+        rows += update.contentMatches.map { FolderSearchRow($0.entry, root: key.root, snippet: ($0.page.map { "Page \($0)" } ?? "Line \($0.line)") + " · " + $0.snippet, page: $0.page) }
         progress = update
     }
 }
@@ -348,23 +350,23 @@ struct FolderView: View {
                     }
                 }
                 .font(.footnote).foregroundStyle(.secondary).listRowSeparator(.hidden)
-                ForEach(search.rows) { result in link(for: result.row, subtitle: result.subtitle, snippet: result.snippet) }
+                ForEach(search.rows) { result in link(for: result.row, subtitle: result.subtitle, snippet: result.snippet, page: result.page) }
             }
         }
         .listStyle(.plain)
     }
-    @ViewBuilder private func link(for row: FolderRow, subtitle: String, snippet: String? = nil) -> some View {
+    @ViewBuilder private func link(for row: FolderRow, subtitle: String, snippet: String? = nil, page: Int? = nil) -> some View {
         let entry = row.entry
-        if let destination = entry.followingLink() {
+        if let destination = entry.followingLink()?.openingPage(page) {
             // Resolved while listing: open the target directly.
             WorkspaceLink(route: route(destination)) { entryRow(row, subtitle: subtitle, snippet: snippet) }
                 .contextMenu { OfflinePinActions(model: model, profile: profile, entry: destination, includeHidden: showHidden) }
         } else if entry.kind == .symlink {
-            Button { resolve(entry) } label: {
+            Button { resolve(entry, page: page) } label: {
                 entryRow(row, subtitle: subtitle, snippet: snippet).overlay(alignment: .trailing) { if resolving == entry.path { ProgressView() } }
             }.disabled(resolving != nil)
         } else {
-            WorkspaceLink(route: route(entry)) { entryRow(row, subtitle: subtitle, snippet: snippet) }
+            WorkspaceLink(route: route(entry.openingPage(page))) { entryRow(row, subtitle: subtitle, snippet: snippet) }
                 .contextMenu { OfflinePinActions(model: model, profile: profile, entry: entry, includeHidden: showHidden) }
         }
     }
@@ -378,7 +380,7 @@ struct FolderView: View {
     private func route(_ entry: RemoteEntry) -> AppModel.Route {
         entry.kind == .directory ? .folder(profile.id, entry.path) : .file(profile.id, entry)
     }
-    private func resolve(_ entry: RemoteEntry) {
+    private func resolve(_ entry: RemoteEntry, page: Int? = nil) {
         guard !model.isDisconnecting else { return }
         let revision = model.sessionRevision
         resolving = entry.path
@@ -390,7 +392,7 @@ struct FolderView: View {
                 guard !model.isDisconnecting, model.sessionRevision == revision else { return }
                 let routed = RemoteEntry(name: target.name, path: target.path, kind: target.kind,
                                          size: target.size, modifiedAt: target.modifiedAt,
-                                         navigationRoot: target.navigationRoot, exportFilename: entry.name)
+                                         navigationRoot: target.navigationRoot, exportFilename: entry.name).openingPage(page)
                 if let workspaceNavigate { workspaceNavigate(route(routed)) } else { model.routes.append(route(routed)) }
             } catch { if !Task.isCancelled, !model.isDisconnecting, model.sessionRevision == revision { self.error = error.localizedDescription; model.handle(error, profile: profile) } }
         }

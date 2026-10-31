@@ -10,6 +10,8 @@ public struct SavedReadingPosition: Codable, Equatable, Sendable {
         fileprivate var isValid: Bool { x.isFinite && y.isFinite && x >= 0 && y >= 0 && x <= 100_000_000 && y <= 100_000_000 }
     }
     /// Content-free UTF-16 location, or a proportional position within a rendered block.
+    /// For `pdf-page`, `ordinal` is the zero-based page index and `fraction` the vertical
+    /// position within that page, measured from its top edge.
     public struct Anchor: Codable, Equatable, Sendable {
         public var kind: String
         public var ordinal: Int
@@ -21,7 +23,7 @@ public struct SavedReadingPosition: Codable, Equatable, Sendable {
             self.fraction = fraction; self.viewportY = viewportY
         }
         fileprivate var isValid: Bool {
-            ["prose", "image", "overflow", "source", "html-text", "html-block"].contains(kind) && ordinal >= 0 && ordinal <= 2_097_152 &&
+            ["prose", "image", "overflow", "source", "html-text", "html-block", "pdf-page"].contains(kind) && ordinal >= 0 && ordinal <= 2_097_152 &&
             character >= 0 && character <= 2_097_152 && fraction.isFinite && (0...1).contains(fraction) &&
             viewportY.isFinite && abs(viewportY) <= 100_000
         }
@@ -36,7 +38,24 @@ public struct SavedReadingPosition: Codable, Equatable, Sendable {
         self.renderedAnchor = renderedAnchor; self.sourceAnchor = sourceAnchor
     }
     public static func revision(for text: String) -> String {
-        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+        hex(SHA256.hash(data: Data(text.utf8)))
+    }
+    /// Hashes a local document in bounded chunks, so binary previews never load whole into memory.
+    /// Throws `CancellationError` between chunks when the calling task is cancelled.
+    public static func revision(forFileAt url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            try Task.checkCancellation()
+            let chunk = try handle.read(upToCount: 1_048_576)
+            guard let chunk, !chunk.isEmpty else { break }
+            hasher.update(data: chunk)
+        }
+        return hex(hasher.finalize())
+    }
+    private static func hex(_ digest: SHA256.Digest) -> String {
+        digest.map { String(format: "%02x", $0) }.joined()
     }
     fileprivate var isValid: Bool { revision.utf8.count == 64 && revision.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) } && rendered.isValid && source.isValid && (renderedAnchor?.isValid ?? true) && (sourceAnchor?.isValid ?? true) }
 }

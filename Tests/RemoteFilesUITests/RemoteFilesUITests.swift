@@ -706,6 +706,16 @@ final class RemoteFilesUITests: XCTestCase {
             XCTAssertTrue(result.label.localizedCaseInsensitiveContains("SEARCHABLE INVOICE"), result.label)
         }
         attachScreenshot("PDF and OCR live search on device")
+        // The embedded-text match is on page 2; its result opens there rather than at page 1.
+        liveResult("Text sample.pdf").tap()
+        let indicator = app.staticTexts["PDF page indicator"]
+        XCTAssertTrue(indicator.waitForExistence(timeout: 15), app.debugDescription)
+        let onMatchPage = expectation(for: NSPredicate(format: "label == %@", "Page 2 of 2"), evaluatedWith: indicator)
+        wait(for: [onMatchPage], timeout: 10)
+        attachScreenshot("PDF search result opened at its matching page")
+        let back = app.navigationBars.buttons["Search samples"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5)); back.tap()
+        XCTAssertTrue(liveResult("Text sample.pdf").waitForExistence(timeout: 10), "Completed results remain after returning")
         closeLiveSearch()
     }
 
@@ -762,7 +772,10 @@ final class RemoteFilesUITests: XCTestCase {
         attachScreenshot("Saved PDF and OCR search results")
         let pdfResult = app.buttons["saved-search-result-/Projects/Search samples/Text sample.pdf"]
         reveal(pdfResult); pdfResult.tap()
-        XCTAssertTrue(app.staticTexts["2 pages"].waitForExistence(timeout: 15), "A saved PDF result opens its current remote preview")
+        let indicator = app.staticTexts["PDF page indicator"]
+        XCTAssertTrue(indicator.waitForExistence(timeout: 15), "A saved PDF result opens its current remote preview")
+        let onMatchPage = expectation(for: NSPredicate(format: "label == %@", "Page 2 of 2"), evaluatedWith: indicator)
+        wait(for: [onMatchPage], timeout: 10)
         let back = app.navigationBars.buttons["Search samples"]
         XCTAssertTrue(back.waitForExistence(timeout: 5)); back.tap()
         app.buttons["Folder actions"].tap()
@@ -1394,7 +1407,7 @@ extension RealServerUITests {
         app.buttons["Done"].tap(); back()
 
         open("sample.pdf")
-        XCTAssertTrue(app.staticTexts["1 page"].waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(app.staticTexts.matching(identifier: "PDF page indicator").matching(NSPredicate(format: "label == %@", "Page 1 of 1")).firstMatch.waitForExistence(timeout: 30), app.debugDescription)
         let pdf = XCTAttachment(screenshot: app.screenshot()); pdf.name = "Real SFTP PDF preview"; pdf.lifetime = .keepAlways; add(pdf)
         back()
 
