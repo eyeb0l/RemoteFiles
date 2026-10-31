@@ -1112,6 +1112,120 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertEqual(after.connections, before.connections + 1, "The refresh opens a new SSH connection")
     }
 
+    /// A file large enough that a transfer is still reading when the proxy starts holding replies.
+    private func stallFixtureFile(_ fixture: Fixture) throws -> String {
+        let path = fixture.files + "/stall-" + UUID().uuidString + ".bin"
+        try Data((0..<8_388_608).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ $0 >> 9) }).write(to: URL(fileURLWithPath: path))
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: path) }
+        return path
+    }
+
+    /// Holds the server's replies once the first file bytes arrive, as when a phone loses its
+    /// network mid-transfer: the socket stays open, but nothing more is answered.
+    private func stallAfterFirstBytes(_ proxy: ReplyStallingProxy) -> DownloadProgressHandler {
+        let stalled = LockedTestFlag()
+        return { update in
+            if update.receivedBytes > 0, stalled.setOnce() { proxy.stallReplies() }
+        }
+    }
+
+    /// A regression would otherwise wait for TCP to give up. Dropping the proxy's sockets after
+    /// `limit` turns that into a fast failure of the elapsed-time assertion instead of a hang.
+    private func watchdog(_ proxy: ReplyStallingProxy, after limit: Duration = .seconds(20)) -> Task<Void, Never> {
+        Task {
+            do { try await Task.sleep(for: limit) } catch { return }
+            proxy.dropConnections()
+        }
+    }
+
+    /// On a physical iPhone in Airplane Mode a managed download showed no failure until the
+    /// network returned, despite its idle limit: the expired transfer waited for the server to
+    /// confirm its SFTP channel's close. It must fail at the limit plus the close grace period.
+    func testStalledManagedDownloadFailsAtItsIdleLimitWithoutWaitingForTheNetwork() async throws {
+        let (fixture, proxy, service, profile) = try await connectedThroughProxy(name: "Stalled managed download")
+        await service.setTransferTimings(idle: .seconds(2), closeGrace: .seconds(1))
+        let source = try stallFixtureFile(fixture)
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("stalled-" + UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: destination) }
+        let before = await service.metrics()
+        let guardTask = watchdog(proxy)
+        let started = ContinuousClock.now
+        do {
+            _ = try await service.downloadManagedFile(profile: profile, path: source, allowedRoot: fixture.files,
+                destination: destination, limit: 16_777_216, progress: stallAfterFirstBytes(proxy))
+            XCTFail("A transfer whose replies stop must not succeed")
+        } catch RemoteFileError.timedOut {
+        } catch {
+            XCTFail("Expected the idle limit to report a timeout, got \(error)")
+        }
+        guardTask.cancel()
+        let elapsed = ContinuousClock.now - started
+        XCTAssertGreaterThan(proxy.heldReplyBytes, 0, "The server kept answering, but its replies were held")
+        XCTAssertLessThan(elapsed, .seconds(10), "The idle limit plus the close grace must end the transfer, not the network")
+        proxy.resumeReplies()
+        let listing = try await service.listDirectory(profile: profile, path: fixture.files)
+        XCTAssertFalse(listing.entries.isEmpty)
+        let after = await service.metrics()
+        XCTAssertEqual(after.connections, before.connections + 1, "The closed socket is replaced by a new connection")
+    }
+
+    /// Cancelling an offline update in Airplane Mode took about three minutes to take effect.
+    /// A cancelled dedicated transfer must return once the close grace period has passed.
+    func testCancellingAStalledTransferReturnsAfterTheCloseGrace() async throws {
+        let (fixture, proxy, service, profile) = try await connectedThroughProxy(name: "Cancelled stalled transfer")
+        await service.setTransferTimings(idle: .seconds(60), closeGrace: .seconds(1))
+        let source = try stallFixtureFile(fixture)
+        let root = try await service.listDirectory(profile: profile, path: fixture.files).path
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("cancelled-" + UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: destination) }
+        let transfer = Task {
+            try await service.downloadSnapshotFile(profile: profile, path: root + "/" + RemotePath.name(of: source),
+                canonicalRoot: root, destination: destination, limit: 16_777_216, progress: stallAfterFirstBytes(proxy))
+        }
+        try await proxy.waitForHeldReplies()
+        let guardTask = watchdog(proxy)
+        let cancelled = ContinuousClock.now
+        transfer.cancel()
+        do {
+            _ = try await transfer.value
+            XCTFail("A cancelled transfer must not succeed")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "Expected cancellation, got \(error)")
+        }
+        guardTask.cancel()
+        XCTAssertLessThan(ContinuousClock.now - cancelled, .seconds(6),
+                          "Cancellation must not wait for the server to confirm the channel's close")
+        proxy.resumeReplies()
+        let listing = try await service.listDirectory(profile: profile, path: fixture.files)
+        XCTAssertFalse(listing.entries.isEmpty, "Browsing reconnects after the socket was closed")
+    }
+
+    /// The socket is closed only when the polite close cannot drain: a cancelled transfer whose
+    /// server still answers keeps the SSH connection for the next operation.
+    func testCancellingAnAnsweredTransferKeepsTheConnection() async throws {
+        let (fixture, _, service, profile) = try await connectedThroughProxy(name: "Cancelled answered transfer")
+        await service.setTransferTimings(idle: .seconds(60), closeGrace: .seconds(2))
+        let source = try stallFixtureFile(fixture)
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("answered-" + UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: destination) }
+        let before = await service.metrics()
+        let started = LockedTestFlag()
+        let transfer = Task {
+            try await service.downloadManagedFile(profile: profile, path: source, allowedRoot: fixture.files,
+                destination: destination, limit: 16_777_216, progress: { update in
+                    if update.receivedBytes > 0 { _ = started.setOnce() }
+                })
+        }
+        while !started.isSet { try await Task.sleep(for: .milliseconds(5)) }
+        transfer.cancel()
+        _ = try? await transfer.value
+        // Past the grace period: a needless hard close would have happened by now.
+        try await Task.sleep(for: .seconds(3))
+        _ = try await service.listDirectory(profile: profile, path: fixture.files)
+        let after = await service.metrics()
+        XCTAssertEqual(after.connections, before.connections, "An answered close must not replace the connection")
+    }
+
     /// Unlike TreeService's fail-once error, every outcome here comes from the real adapter and
     /// OpenSSH. Hold replies before OPENDIR completes, stagger three peers behind the first listing,
     /// then release replies as that first deadline closes their shared channel. The peers still
@@ -1886,4 +2000,12 @@ final class LinkResolutionSchedulingTests: XCTestCase {
 private actor LookupCounter {
     private(set) var count = 0
     func started() { count += 1 }
+}
+
+private final class LockedTestFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.withLock { value } }
+    /// Returns true only for the first caller.
+    func setOnce() -> Bool { lock.withLock { defer { value = true }; return !value } }
 }

@@ -20,6 +20,11 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching, Re
     private var pendingControl: SocketControl?
     private var generation: UInt64 = 0
     private var measurements = TransportMetrics()
+    /// Managed transfers fail after this long without receiving file bytes.
+    private var managedTransferIdle: Duration = .seconds(60)
+    /// How long a dedicated transfer may take to drain after its channel was asked to close
+    /// before the connection's socket is closed too. See `performOnDedicatedChannel`.
+    private var dedicatedCloseGrace: Duration = .seconds(5)
 
     public init(identityStore: IdentityStore, trustStore: HostTrustStore,
                 metadataStore: MetadataStore, timeoutSeconds: UInt64 = 15) {
@@ -30,6 +35,11 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching, Re
     }
 
     public func metrics() -> TransportMetrics { measurements }
+
+    /// Shortens transfer timings so tests need not wait the production intervals.
+    func setTransferTimings(idle: Duration, closeGrace: Duration) {
+        managedTransferIdle = idle; dedicatedCloseGrace = closeGrace
+    }
 
     func searchFolders(query: String, root: String, profile: ConnectionProfile, includeHidden: Bool,
                        limits: RemoteFolderSearch.Limits, content: RemoteFolderSearch.ContentLimits?) async throws -> RemoteFolderSearch.Update? {
@@ -358,7 +368,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching, Re
                           managed: Bool = false) async throws -> RemoteEntry {
         guard limit > 0, limit < Int.max else { throw RemoteFileError.tooLarge(limit) }
         let session = try await session(for: profile)
-        let result = try await performOnDedicatedChannel(session: session, budget: managed ? .idle(.seconds(60)) : .total(180)) { sftp, activity in
+        let result = try await performOnDedicatedChannel(session: session, budget: managed ? .idle(managedTransferIdle) : .total(180)) { sftp, activity in
             let root = try await sftp.getRealPath(atPath: Self.validated(allowedRoot))
             let canonical = try await sftp.getRealPath(atPath: Self.validated(path))
             if canonicalPaths {
@@ -620,11 +630,22 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching, Re
         operation: @escaping @Sendable (SFTPClient, TransferActivity) async throws -> T) async throws -> T {
         let channel = SFTPChannelControl()
         measurements.sftpChannels += 1
+        let drained = LockedFlag(), grace = dedicatedCloseGrace
+        // The caller waits for `work` to drain, so a late write cannot follow a cancelled or
+        // expired transfer. Closing the SFTP channel needs the server's reply, which never
+        // arrives over a dead network, and the drain would then wait for TCP to give up or the
+        // network to return. If the channel has not drained within the grace period, close the
+        // socket: pending requests then fail locally and the caller sees the outcome.
         let close: @Sendable () -> Void = {
             channel.close()
-            if !channel.hasClient { session.control.close() }
+            guard channel.hasClient else { session.control.close(); return }
+            Task {
+                try? await Task.sleep(for: grace)
+                if !drained.isSet { session.control.close() }
+            }
         }
         let work: @Sendable (TransferActivity) async throws -> T = { activity in
+            defer { drained.set() }
             let sftp = try await session.client.openSFTP(logger: Self.sftpLogger())
             channel.install(sftp)
             do {

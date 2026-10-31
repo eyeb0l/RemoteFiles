@@ -16,8 +16,10 @@ from the open handle, and enforces the 128 MiB limit on every received chunk. Th
 exporter also checks advertised, returned and final disk size. There is at most
 one transfer or prepared output. Preparation times out after 180 seconds. A
 cancelled worker cannot publish a late file or permit an overlapping transfer
-until it drains. Disconnect retires the transport and drains the old exporter
-before creating a replacement.
+until it drains. If the server doesn't confirm closing the transfer within 5 seconds,
+as when the network has gone, the SSH connection is closed so the drain completes
+locally. Disconnect retires the transport and drains the old exporter before
+creating a replacement.
 
 This confinement is a client policy for a trusted SSH server. Portable SFTP v3
 cannot atomically open a child beneath an anchored directory without following
