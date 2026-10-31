@@ -1,6 +1,8 @@
 #if os(iOS)
 import XCTest
 import Foundation
+import UIKit
+import UniformTypeIdentifiers
 import Crypto
 import NIOSSH
 import RemoteFilesCore
@@ -530,13 +532,34 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
         while model.pinningName != nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
         let store = try XCTUnwrap(model.offlineStore), pin = try XCTUnwrap(model.offlinePins.first)
         var lease: OfflineFileLease? = try await store.lease(pin.id)
+        weak var retainedLease = lease
         let url = try XCTUnwrap(lease?.url)
         var share: OfflineShareItem? = OfflineShareItem(lease: try XCTUnwrap(lease))
-        lease = nil
+        let controller = try XCTUnwrap(share).makeController()
+        let provider = try XCTUnwrap(controller.activityItemsConfiguration?.itemProvidersForActivityItemsConfiguration.first)
+        XCTAssertEqual(provider.suggestedName, "copy.txt")
+        lease = nil; share = nil
         await model.removeOfflinePin(pin)
-        XCTAssertEqual(try Data(contentsOf: try XCTUnwrap(share?.lease.url)), Data("changed server bytes\r\n東京  ".utf8))
-        share = nil
+        XCTAssertNotNil(retainedLease, "An active share must outlive both its reader and its pin")
+        let copy: (URL, Data) = try await withCheckedThrowingContinuation { continuation in
+            provider.loadFileRepresentation(forTypeIdentifier: UTType.data.identifier) { url, error in
+                do {
+                    if let error { throw error }
+                    guard let url else { throw OfflineFileError.missing }
+                    continuation.resume(returning: (url, try Data(contentsOf: url)))
+                } catch { continuation.resume(throwing: error) }
+            }
+        }
+        XCTAssertEqual(copy.1, Data("changed server bytes\r\n東京  ".utf8))
+        XCTAssertNotEqual(copy.0, url, "The receiving service gets a copy, not in-place access")
+        XCTAssertNotNil(retainedLease)
+        controller.completionWithItemsHandler?(nil, true, nil, nil)
+        let completionDeadline = ContinuousClock.now + .seconds(5)
+        while retainedLease != nil, ContinuousClock.now < completionDeadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertNil(retainedLease)
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        // Cached completed activity controllers/providers must no longer own the file.
+        withExtendedLifetime((controller, provider)) {}
     }
 
     func testOfflineSaveCancelsOnBackgroundAndLeavesNoLateCopy() async throws {
