@@ -2,6 +2,10 @@
 
 This is a dated record of feature work and validation, not a live test dashboard. Each result applies to the build, environment and date described with it; an installation or Simulator pass does not establish later physical-device acceptance. For current behavior, start with the [documentation index](docs/README.md). For checks still to perform, see [manual acceptance](docs/MANUAL_ACCEPTANCE.md) and the [roadmap](ROADMAP.md).
 
+**31 October 2026: physical iPhone acceptance session.**
+
+The physical iPhone 17 Pro (iOS 27.2) ran the demo UI tests and a hands-on pass against the real MacBook server over Tailscale, using PR #46's signed Release build. Passed: PDF page navigation (after a rotation fix), managed downloads and Save to Files with matching SHA-256, offline files, folders and links in Airplane Mode, encrypted-key import, unlock and byte-identical export, appearance and accessibility, and two recorded cellular runs covering network interruption and Wi-Fi/cellular handoff. 28 of 29 demo UI tests passed; RSA paste import failed in the test only. Found: transfers don't notice a dead network until it returns or 180 seconds pass, and following offline links can exhaust the four preview leases. Off-site use, file protection while locked, iPad, a production bastion and a changed server key remain. See [the session record](docs/REAL_SERVER_ACCEPTANCE.md#31-october-2026-iphone-session).
+
 **31 October 2026: PDF search pages and reading positions.**
 
 PDF results from live **Contents** search and saved search indexes open at their matching page, ahead of saved history; a page no longer present falls back to the saved position or the top. Remote PDFs save the page and vertical position within it, keyed to a hash of the downloaded bytes, so a changed PDF starts at the top. Zoom is not saved; Demo and offline copies write no history. The PDF header shows the current page.
