@@ -351,7 +351,10 @@ final class RemoteFilesUITests: XCTestCase {
         let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Preview.html,")).firstMatch
         revealFolderRow(row, in: app).tap()
         XCTAssertTrue(app.buttons["Source"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.webViews.staticTexts["HTML preview"].waitForExistence(timeout: 15), app.debugDescription)
+        // Each render starts a new WebKit content process. Wait past the app's 30-second
+        // rendering guard so a slow launch is judged by the app, not by a shorter test timeout.
+        let rendering: TimeInterval = 35
+        XCTAssertTrue(app.webViews.staticTexts["HTML preview"].waitForExistence(timeout: rendering), app.debugDescription)
         XCTAssertTrue(app.webViews.staticTexts["Sample table"].exists, app.debugDescription)
         attachScreenshot("HTML rendered page")
         app.buttons["Source"].tap()
@@ -366,9 +369,9 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Source Copied"].waitForExistence(timeout: 5))
         dismissDocumentActions(in: app)
         app.buttons["Rendered"].tap()
-        XCTAssertTrue(app.webViews.staticTexts["HTML preview"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.webViews.staticTexts["HTML preview"].waitForExistence(timeout: rendering), app.debugDescription)
         app.buttons["Document actions"].tap(); app.buttons["Refresh"].tap()
-        XCTAssertTrue(app.webViews.staticTexts["HTML preview"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.webViews.staticTexts["HTML preview"].waitForExistence(timeout: rendering), app.debugDescription)
     }
 
     func testDemoAudioAndVideoHaveNativePlaybackControls() throws {
