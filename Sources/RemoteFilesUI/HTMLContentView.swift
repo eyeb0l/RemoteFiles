@@ -36,7 +36,11 @@ struct HTMLContentView: View {
                 let blockers = try await SVGResourceBlocker.rules()
                 try Task.checkCancellation()
                 rules = blockers
-                try await Task.sleep(for: .seconds(15))
+                // A hang guard, not a performance target. Every rendered view starts a new WebKit
+                // content process, and on loaded hosted runners those launches took 13 seconds or
+                // more, so a 15-second guard failed documents that rendered moments later
+                // (docs/CI.md). Source stays one tap away while this spinner shows.
+                try await Task.sleep(for: .seconds(30))
                 if !loaded { error = "This HTML could not finish rendering. Use Source to inspect it." }
             } catch is CancellationError { }
             catch { self.error = error.localizedDescription }

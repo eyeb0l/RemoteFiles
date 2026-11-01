@@ -438,6 +438,25 @@ Each one was investigated before any rerun:
   the 30-second search time limit plus 16 seconds. The output-bound and helper commands now
   get that production allowance. The cancellation and deadline commands keep their own
   5- and 1-second bounds and their 2- and 3-second return-time assertions.
+- **HTML rendering guard.** `testHTMLRenderedSourceAndRefresh` hit the app's 15-second
+  HTML rendering guard on main twice: on the first render in
+  [run 41268255736](https://github.com/eyeb0l/RemoteFiles/actions/runs/41268255736), and after
+  returning from Source in attempt 1 of
+  [run 41317772450](https://github.com/eyeb0l/RemoteFiles/actions/runs/41317772450). The
+  recording shows the spinner for the whole 15 seconds; the first render of that run took
+  about 11 seconds, and attempt 2 rendered in about 7 and 5 seconds. Each rendered view starts
+  a new WebKit content process, and launches of 13 seconds or more were recorded on these
+  runners. This revisits the decision above to keep production rendering limits: the guard
+  catches hung renders, and 15 seconds also failed slow but healthy ones. It is now
+  30 seconds, and the journey's three render waits are 35 seconds so the app, not the test,
+  decides. To reproduce, each new WebContent process of a local iOS 27.2 simulator was paused
+  with `SIGSTOP` for 13 seconds, and WebKit then logged 14.6–15.2-second launches. The
+  unchanged journey failed its first render with the app's "could not finish rendering"
+  message. After the change all three renders finished in about 22 seconds and the journey
+  passed. With 20-second pauses the change still failed the second render: under memory
+  pressure WebKit had also relaunched its network and GPU processes, and that render needed
+  about 32 seconds. The guard covers the launches recorded on hosted runners, not unlimited
+  ones. SVG keeps 15 seconds and Markdown 20 seconds; neither has failed on main.
 
 HTML reading-position timeouts were seen only while several local simulator jobs ran;
 those methods took 75–189 seconds each. Hosted runs took at most 5.1 seconds, so their
