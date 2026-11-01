@@ -71,15 +71,28 @@ struct StaticHTMLWebView: UIViewRepresentable {
     }
     /// WebKit's CSS scroll anchoring requests its own native scroll after reflow,
     /// which can override or interrupt the app's text/block anchor restoration.
-    static func html(_ source: String) -> String {
+    ///
+    /// Text size zooms the root element, not `WKWebView.pageZoom`. On iOS, pageZoom
+    /// also scales the `device-width` layout viewport, so the page keeps its unzoomed
+    /// width and runs off the right edge. Root `zoom` scales authored CSS too, but
+    /// lays the page out within the view's width, so text wraps.
+    static func html(_ source: String, textScale: Double = 1) -> String {
         """
         <!doctype html><html><head>
         <meta charset="utf-8">
         <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>:root{color-scheme:light dark;overflow-anchor:none!important}body{font:17px -apple-system,sans-serif;margin:20px;overflow-wrap:break-word}img,video,svg{max-width:100%;height:auto}</style>
+        <style>:root{color-scheme:light dark;overflow-anchor:none!important;zoom:\(cssNumber(textScale))}body{font:17px -apple-system,sans-serif;margin:20px;overflow-wrap:break-word}img,video,svg{max-width:100%;height:auto}</style>
         </head><body>\(source)</body></html>
         """
+    }
+    private static func cssNumber(_ scale: Double) -> String {
+        String(format: "%.4f", scale.isFinite && scale > 0 ? scale : 1)
+    }
+    /// Applies a changed text size to the loaded wrapper without reloading the document.
+    static func applyTextScale(_ scale: Double, in view: WKWebView) {
+        view.evaluateJavaScript("document.documentElement.style.zoom = '\(cssNumber(scale))'",
+                                in: nil, in: .defaultClient) { _ in }
     }
     func makeCoordinator() -> Coordinator {
         Coordinator(readingPosition: readingPosition, onFinish: onFinish, onFailure: onFailure, openExternalLink: openExternalLink)
@@ -99,11 +112,12 @@ struct StaticHTMLWebView: UIViewRepresentable {
         let coordinator = context.coordinator
         if coordinator.text.map({ $0.utf8.elementsEqual(text.utf8) }) != true {
             coordinator.beginLoading(text)
-            coordinator.navigation = view.loadHTMLString(Self.html(text), baseURL: nil)
-        }
-        if abs(view.pageZoom - fontScale) > 0.001 {
+            coordinator.textScale = fontScale; coordinator.loadedTextScale = fontScale
+            coordinator.navigation = view.loadHTMLString(Self.html(text, textScale: fontScale), baseURL: nil)
+        } else if abs(coordinator.textScale - fontScale) > 0.001 {
             coordinator.restorePosition()
-            view.pageZoom = fontScale
+            coordinator.textScale = fontScale
+            Self.applyTextScale(fontScale, in: view)
         }
     }
     static func dismantleUIView(_ view: WKWebView, coordinator: Coordinator) {
@@ -112,6 +126,9 @@ struct StaticHTMLWebView: UIViewRepresentable {
     }
     @MainActor final class Coordinator: NSObject, WKNavigationDelegate, UIScrollViewDelegate {
         var text: String?
+        /// The current text size, and the one the loading document's wrapper was built with.
+        var textScale: Double = 1
+        var loadedTextScale: Double = 1
         var navigation: WKNavigation?
         var initialNavigation = true
         var finishedLoading = false
@@ -226,7 +243,7 @@ struct StaticHTMLWebView: UIViewRepresentable {
                     do { try await Task.sleep(for: .milliseconds(80)) } catch { return }
                 }
                 guard let view, view.window != nil, view.bounds.width > 0, view.bounds.height > 0 else { return }
-                // WebKit lays out asynchronously after UIKit bounds/pageZoom changes.
+                // WebKit lays out asynchronously after UIKit bounds/text-size changes.
                 // Keep the original target throughout these bounded corrections.
                 var corrections = 0
                 for attempt in 0..<60 {
@@ -282,6 +299,8 @@ struct StaticHTMLWebView: UIViewRepresentable {
         func webView(_ view: WKWebView, didFinish navigation: WKNavigation!) {
             guard navigation === self.navigation else { return }
             initialNavigation = false
+            // A text-size change during loading may have reached the previous document.
+            if abs(textScale - loadedTextScale) > 0.001 { StaticHTMLWebView.applyTextScale(textScale, in: view) }
             // App-owned inspection still works with content JavaScript disabled.
             // This avoids displaying an empty React/Vue entry point as a successful preview.
             let hasScripts = text?.range(of: #"<script(?:\s|>)"#, options: [.regularExpression, .caseInsensitive]) != nil

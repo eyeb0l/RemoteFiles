@@ -302,6 +302,66 @@ import RemoteFilesCore
         try await wait("script-only entry", failure: { nil }) { finished }
         XCTAssertTrue(needsScripts, "An app entry file must not be presented as a successfully rendered blank page")
     }
+    /// iOS lays a page out at its `device-width` viewport. Text size must not widen that layout
+    /// (as `WKWebView.pageZoom` did, by its own factor), so headings and text wrap within the view.
+    func testLargeTextSizeReflowsWithinTheViewWidth() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 402, height: 874)
+        let rules = try await SVGResourceBlocker.rules()
+        var finished = false, failure: String?
+        let source = """
+        <!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>body{font:18px -apple-system,sans-serif;padding:24px}</style></head><body>
+        <h1>HTML preview heading that must wrap at accessibility text sizes</h1>
+        <p id="line" style="font-size:20px;line-height:30px;margin:0">One line</p>
+        <p>A styled document with <strong>bold text</strong> and Unicode: café 東京 🌍, long enough to wrap.</p>
+        </body></html>
+        """
+        func renderer(_ scale: Double) -> StaticHTMLWebView {
+            StaticHTMLWebView(text: source, filename: "Preview.html", rules: rules, readingPosition: DocumentReadingPosition(),
+                fontScale: scale, onFinish: { _ in finished = true }, onFailure: { failure = $0 },
+                openExternalLink: { _ in XCTFail("No automatic browser navigation") })
+        }
+        let host = UIHostingController(rootView: renderer(1.83))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        try await wait("large text size", failure: { failure }) { finished }
+        func views(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(views) }
+        let view = try XCTUnwrap(views(host.view).compactMap { $0 as? WKWebView }.first)
+        XCTAssertEqual(view.pageZoom, 1, accuracy: 0.001)
+        func number(_ script: String) async throws -> Double {
+            let value = try await view.evaluateJavaScript(script, in: nil, contentWorld: .defaultClient)
+            return try XCTUnwrap(value as? NSNumber).doubleValue
+        }
+        /// The 30-pixel line in native points, and the widest layout in native points.
+        func geometry() async throws -> (line: Double, width: Double) {
+            let cssScale = view.bounds.width / CGFloat(try await number("visualViewport.width"))
+            let line = try await number("document.getElementById('line').getBoundingClientRect().height")
+            let width = try await number("document.documentElement.scrollWidth")
+            return (line * cssScale, max(width * cssScale, view.scrollView.contentSize.width))
+        }
+        /// Waits for the settled layout: the first commit can precede the viewport's width.
+        func settled(line points: Double) async throws -> (line: Double, width: Double) {
+            let deadline = ContinuousClock.now + .seconds(30)
+            var current = try await geometry()
+            while abs(current.line - points) > 1 || current.width > view.bounds.width + 1, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(50))
+                current = try await geometry()
+            }
+            XCTAssertEqual(current.line, points, accuracy: 1, "Text must follow the text-size scale")
+            return current
+        }
+        let large = try await settled(line: 30 * 1.83)
+        XCTAssertLessThanOrEqual(large.width, view.bounds.width + 1,
+            "Content laid out \(large.width) points wide in a \(view.bounds.width)-point view")
+
+        host.rootView = renderer(1.3)
+        let changed = try await settled(line: 30 * 1.3)
+        XCTAssertLessThanOrEqual(changed.width, view.bounds.width + 1, "A live text-size change must also reflow")
+    }
 }
 
 @MainActor private final class SVGAttackProbe: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKURLSchemeHandler {

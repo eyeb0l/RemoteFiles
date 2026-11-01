@@ -60,6 +60,31 @@ import RemoteFilesCore
         }
     }
 
+    /// Text size is the wrapper's root CSS zoom. Its DOM rectangles are zoomed, so an anchor
+    /// captured at one size must still return its passage to the same viewport offset at another.
+    func testTextAnchorRestoresAfterRootZoomTextSizeChanges() async throws {
+        let fixture = try await host()
+        addTeardownBlock { @MainActor in fixture.close() }
+        try await load(prose, in: fixture.view)
+        for (from, to) in [(1.0, 1.83), (1.83, 1.0)] {
+            let scroll = fixture.view.scrollView
+            scroll.setContentOffset(CGPoint(x: 0, y: from == 1 ? 1700 : 3400), animated: false)
+            try await waitUntil { abs(try await self.number("window.scrollY", in: fixture.view) - scroll.contentOffset.y) < 2 }
+            let captured = try await HTMLReadingAnchor.capture(in: fixture.view)
+            let anchor = try XCTUnwrap(captured)
+            XCTAssertEqual(anchor.kind, "html-text")
+            let height = scroll.contentSize.height
+            StaticHTMLWebView.applyTextScale(to, in: fixture.view)
+            try await waitUntil { to > from ? scroll.contentSize.height > height * 1.5 : scroll.contentSize.height < height / 1.5 }
+            XCTAssertLessThanOrEqual(scroll.contentSize.width, fixture.view.bounds.width + 1, "Text size must reflow, not widen")
+            let restored = try await HTMLReadingAnchor.restore(anchor, in: fixture.view)
+            XCTAssertTrue(restored)
+            try await waitUntil {
+                abs(try await self.characterY(anchor.character, in: fixture.view) - anchor.viewportY) < 3
+            }
+        }
+    }
+
     func testVisualBlockAnchorKeepsItsProportionalPositionAfterResize() async throws {
         let fixture = try await host()
         addTeardownBlock { @MainActor in fixture.close() }

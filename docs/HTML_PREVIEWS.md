@@ -29,7 +29,12 @@ document JavaScript still disabled. It visits at most 20,000 DOM nodes and
 cache. Each inspection has a one-second deadline so a stalled WebKit process
 cannot indefinitely retain a departing reader. Hidden or fixed/sticky content is not used as a reading target. Tables,
 preformatted blocks and visual elements use a proportional block location.
-Font-size changes scale the rendered preview, including authored CSS. The
+Font-size changes scale the rendered preview, including authored CSS, through
+CSS `zoom` on the wrapper's root element rather than `WKWebView.pageZoom`. On
+iOS, pageZoom also scales the `device-width` layout viewport, so at accessibility
+sizes the page kept its unzoomed width and ran off the right edge; root `zoom`
+lays the page out within the view's width, so text and headings wrap. Content an
+author made wide, such as a fixed-width table, can still scroll sideways. The
 wrapper disables CSS scroll anchoring (`overflow-anchor`) because WebKit's own
 post-reflow scroll request competes with app-owned anchor restoration. The
 reader starts restoring, capturing and tracking scrolls only after WebKit's
