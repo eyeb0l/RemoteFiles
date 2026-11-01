@@ -35,6 +35,9 @@ struct EnhancedMarkdownView: View {
                             filename: URLComponents(string: reference)?.path.split(separator: "/").last.map(String.init) ?? reference,
                             location: location, alt: alt)
                     })
+                    // Run the page to the bottom edge; the web view's automatic content
+                    // inset keeps the last line clear of the home indicator.
+                    .ignoresSafeArea(.container, edges: .bottom)
                 if !loaded { ProgressView("Rendering Markdown…") }
             } else { ProgressView("Preparing Markdown…") }
         }
