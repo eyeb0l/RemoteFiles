@@ -854,6 +854,14 @@ final class SFTPIntegrationTests: XCTestCase {
             try bytes.write(to: URL(fileURLWithPath: root + "/" + name))
             try Data("outside the indexed folder".utf8).write(to: URL(fileURLWithPath: outside + "/" + name))
         }
+        // Vision compiles its accurate text-recognition model for the Neural Engine on first use.
+        // With a cold compile cache that took 30–50 seconds on an Apple silicon Mac, using the
+        // index's whole 30-second budget before any file was saved; virtual CI Macs fall back to
+        // the fast model at once. Compile it before the timed build, which keeps its own budget.
+        let warmUp = ContinuousClock.now
+        _ = try await SearchDocumentExtractor.extract(try XCTUnwrap(originals["image.png"]), filename: "image.png",
+            options: .init(includePDF: true, includeOCR: true), deadline: .now + .seconds(120))
+        print("OCR warm-up took \(ContinuousClock.now - warmUp)")
         let snapshot = try await RemoteFolderSearch.buildIndex(below: root, profile: profile, service: service,
             includeHidden: false, extraction: .init(includePDF: true, includeOCR: true))
         XCTAssertEqual(Set(snapshot.documents.map(\.entry.name)), Set(originals.keys))
