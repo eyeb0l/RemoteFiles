@@ -136,6 +136,8 @@ struct SourceCodeView: View {
                     highlighted: highlightedRequest == request ? highlighted : nil,
                     readingPosition: readingPosition, reveal: reveal, wrapLines: wrapLines,
                     revealPending: revealPending, onReveal: onReveal)
+                // Scroll to the bottom edge; UITextView insets its content for the home indicator.
+                .ignoresSafeArea(.container, edges: .bottom)
             } else { ordinaryText }
             #else
             ordinaryText
