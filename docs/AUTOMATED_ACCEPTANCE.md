@@ -112,7 +112,8 @@ ordering change retains every speech, navigation and state-restoration assertion
 and does not retry or skip service failures. For the same reason the long JSON
 and SVG journey enables VoiceOver before opening each preview, then focuses and
 double-taps the touch-staged row, and stays in VoiceOver to switch the SVG to
-Source. CI run 40241708814 failed with `No speech available` after re-enabling
+Source. After the double-tap it waits for VoiceOver focus to leave the row: a
+preview's elements can exist before VoiceOver handles the screen change. CI run 40241708814 failed with `No speech available` after re-enabling
 the service on the settled SVG Source view (the same tree had passed), and an
 Xcode 27.2 Simulator failed the same way on every settled-preview enable.
 
