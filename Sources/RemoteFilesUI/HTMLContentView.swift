@@ -21,6 +21,8 @@ struct HTMLContentView: View {
                 StaticHTMLWebView(text: text, filename: filename, rules: rules, readingPosition: readingPosition, fontScale: fontSize / 17,
                     onFinish: { needsScripts = $0; loaded = true },
                     onFailure: { error = $0 }, openExternalLink: { openURL($0) })
+                    // Run the page to the bottom edge; the web view insets its end for the home indicator.
+                    .ignoresSafeArea(.container, edges: .bottom)
                     .opacity(needsScripts ? 0 : 1)
                     .accessibilityHidden(needsScripts)
                 if needsScripts {
@@ -87,7 +89,8 @@ struct StaticHTMLWebView: UIViewRepresentable {
         context.coordinator.attach(view)
         view.navigationDelegate = context.coordinator
         view.scrollView.delegate = context.coordinator
-        // SwiftUI already places this viewport within the reader's safe area.
+        // Reading positions use native offsets, so UIKit must not shift the origin.
+        // AnchoredHTMLWebView applies only the bottom safe area, as an explicit inset.
         view.scrollView.contentInsetAdjustmentBehavior = .never
         view.accessibilityIdentifier = "Rendered HTML document"
         return view
@@ -231,7 +234,7 @@ struct StaticHTMLWebView: UIViewRepresentable {
                     guard let self, self.active, self.generation == token,
                           self.readingPosition.htmlSessionID == self.sessionID,
                           !view.scrollView.isDragging, !view.scrollView.isDecelerating else { return }
-                    let maxY = max(0, view.scrollView.contentSize.height - view.scrollView.bounds.height)
+                    let maxY = view.scrollView.maximumReadingOffset.y
                     // didFinish/DOM readiness can precede delivery of WebKit's native
                     // scroll geometry. Do not consume the target by clamping it to zero
                     // during that interval. Truly shorter documents clamp at the deadline.
@@ -246,9 +249,9 @@ struct StaticHTMLWebView: UIViewRepresentable {
                     let scroll = view.scrollView
                     // DOM work only resolves geometry. Apply scrolling natively after
                     // cancellation checks so an old WebKit reply cannot undo user input.
-                    self.expectedOffset = CGPoint(
-                        x: min(max(0, fallback.x), max(0, scroll.contentSize.width - scroll.bounds.width)),
-                        y: min(max(0, target?.y ?? fallback.y), max(0, scroll.contentSize.height - scroll.bounds.height)))
+                    let limit = scroll.maximumReadingOffset
+                    self.expectedOffset = CGPoint(x: min(max(0, fallback.x), limit.x),
+                                                  y: min(max(0, target?.y ?? fallback.y), limit.y))
                     self.restorationViewport = view.bounds.size
                     self.restorationContent = scroll.contentSize
                     self.applyingRestoration = true
@@ -327,9 +330,9 @@ struct StaticHTMLWebView: UIViewRepresentable {
                 restorationContent = scrollView.contentSize
                 if applyingRestoration { return }
                 if layoutChanged {
-                    let clamped = CGPoint(
-                        x: min(max(0, expectedOffset.x), max(0, scrollView.contentSize.width - scrollView.bounds.width)),
-                        y: min(max(0, expectedOffset.y), max(0, scrollView.contentSize.height - scrollView.bounds.height)))
+                    let limit = scrollView.maximumReadingOffset
+                    let clamped = CGPoint(x: min(max(0, expectedOffset.x), limit.x),
+                                          y: min(max(0, expectedOffset.y), limit.y))
                     if abs(scrollView.contentOffset.y - clamped.y) < 1 &&
                         abs(scrollView.contentOffset.x - clamped.x) < 1 {
                         expectedOffset = clamped
@@ -379,11 +382,26 @@ final class AnchoredHTMLWebView: WKWebView {
         userScrolled?()
         return super.accessibilityScroll(direction)
     }
+    override func safeAreaInsetsDidChange() {
+        super.safeAreaInsetsDidChange()
+        // The preview extends under the home indicator; let the end of the page scroll clear of it.
+        guard scrollView.contentInset.bottom != safeAreaInsets.bottom else { return }
+        scrollView.contentInset.bottom = safeAreaInsets.bottom
+        scrollView.verticalScrollIndicatorInsets.bottom = safeAreaInsets.bottom
+    }
     override func layoutSubviews() {
         let changed = previousSize != .zero && previousSize != bounds.size
         previousSize = bounds.size
         super.layoutSubviews()
         if changed { layoutChanged?() }
+    }
+}
+
+private extension UIScrollView {
+    /// The furthest offset a restored reading position may use, including the bottom inset.
+    var maximumReadingOffset: CGPoint {
+        CGPoint(x: max(0, contentSize.width - bounds.width),
+                y: max(0, contentSize.height - bounds.height + adjustedContentInset.bottom))
     }
 }
 #endif
