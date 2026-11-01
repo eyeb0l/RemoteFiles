@@ -101,13 +101,14 @@ extension XCUIApplication {
         }
         return result
     }
-    private func focus(_ contains: String, name: String, limit: Int = 35, backward: Bool = false) throws {
+    @discardableResult
+    private func focus(_ contains: String, name: String, limit: Int = 35, backward: Bool = false) throws -> String {
         var value = try service.currentSpeech().utterance
         var previous = ""
         var duplicates = 0
         for _ in 0..<limit {
             print("VO FOCUS \(name): \(value)")
-            if value.localizedCaseInsensitiveContains(contains) { return }
+            if value.localizedCaseInsensitiveContains(contains) { return value }
             previous = value
             if backward { value = try service.moveBackward().utterance }
             else { value = try service.moveForward().utterance }
@@ -119,8 +120,20 @@ extension XCUIApplication {
     private func open(_ row: XCUIElement, _ app: XCUIApplication) throws {
         let label = row.label.components(separatedBy: ",").first ?? row.label
         row.tap()
-        try focus(label, name: "open \(label)", limit: 3)
+        let activated = try focus(label, name: "open \(label)", limit: 3)
         row.doubleTap()
+        // The destination's elements can exist before VoiceOver handles its screen change.
+        // Until then focus stays on the activated control, and traversal from there skips
+        // the destination's first elements, so wait for the focus to move before speaking.
+        let deadline = Date().addingTimeInterval(10)
+        var current = activated
+        while Date() < deadline {
+            // Speech is briefly unavailable while VoiceOver moves focus between screens.
+            if let value = try? service.currentSpeech().utterance { current = value }
+            if current != activated { print("VO FOCUS moved from \(label): \(current)"); return }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        throw NSError(domain: "VoiceOverFocusNotMoved", code: 1, userInfo: [NSLocalizedDescriptionKey: "VoiceOver focus stayed on \(activated) after opening it"])
     }
     private func capture(_ name: String, _ app: XCUIApplication) {
         print("VO HIERARCHY \(name)\n\(app.debugDescription)")
