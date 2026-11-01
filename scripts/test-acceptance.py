@@ -9,6 +9,7 @@ import time
 MODULE_STARTED = time.monotonic()
 
 import argparse
+import contextlib
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import hashlib
@@ -21,6 +22,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 
 
 # Simulator filesystems cannot establish physical-device Data Protection classes. The Face ID
@@ -239,6 +241,76 @@ def log_tests(path):
     return tests
 
 
+def parse_ps_cpu(text):
+    """Parse `ps -Aro pcpu=,comm=` output into (percent, process name) pairs."""
+    rows = []
+    for line in text.splitlines():
+        fields = line.strip().split(None, 1)
+        if len(fields) != 2:
+            continue
+        try:
+            rows.append((float(fields[0]), fields[1].rsplit("/", 1)[-1]))
+        except ValueError:
+            continue
+    return rows
+
+
+def summarize_load(samples, limit=12):
+    """Average each process name's CPU share across samples; samples are lists of (percent, name)."""
+    totals = defaultdict(float)
+    for rows in samples:
+        for percent, name in rows:
+            totals[name] += percent
+    count = max(1, len(samples))
+    return [[name, round(total / count, 1)] for name, total in
+            sorted(totals.items(), key=lambda item: -item[1])[:limit]]
+
+
+class LoadSampler:
+    """Records the host load average and busiest processes while a lane runs, so a slow
+    runner's CPU consumers can be read from evidence instead of guessed."""
+    def __init__(self, path, interval=15, read_ps=None):
+        self.path, self.interval = path, interval
+        self.read_ps = read_ps or (lambda: subprocess.run(["ps", "-Aro", "pcpu=,comm="], capture_output=True,
+                                                          text=True, timeout=10).stdout)
+        self.samples, self.loads = [], []
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def sample(self, handle):
+        load = list(os.getloadavg())
+        try:
+            rows = parse_ps_cpu(self.read_ps())
+        except (OSError, subprocess.SubprocessError):
+            rows = []
+        self.samples.append(rows)
+        self.loads.append(load[0])
+        busiest = ", ".join("%s %.0f%%" % (name, percent) for percent, name in rows[:8])
+        handle.write(datetime.now(timezone.utc).strftime("%H:%M:%S") + " load %.1f %.1f %.1f | " % tuple(load) + busiest + "\n")
+        handle.flush()
+
+    def _run(self):
+        with self.path.open("w") as handle:
+            while True:
+                self.sample(handle)
+                if self.stopped.wait(self.interval):
+                    return
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stopped.set()
+        self.thread.join(timeout=30)
+
+    def summary(self):
+        return {"log": str(self.path), "samples": len(self.samples),
+                "load_1m_max": round(max(self.loads), 1) if self.loads else None,
+                "load_1m_mean": round(sum(self.loads) / len(self.loads), 1) if self.loads else None,
+                "busiest_processes": summarize_load(self.samples)}
+
+
 class Run:
     def __init__(self, root, output, metadata, timeout=1800):
         self.root, self.output, self.metadata = root, output, metadata
@@ -271,7 +343,8 @@ class Run:
             invocation = ["/usr/bin/time", "-l", "-o", str(resources)] + invocation
         # Lanes wrapped by scripts/test-openssh.sh retain the fixture's complete server log.
         env = dict(self.env, REMOTEFILES_SSHD_LOG=str(self.output / (name + "-sshd.log")))
-        with path.open("w") as handle:
+        sampler = LoadSampler(self.output / (name + "-load.log")) if self.measure_resources and sys.platform == "darwin" else None
+        with path.open("w") as handle, (sampler or contextlib.nullcontext()):
             process = subprocess.Popen(invocation, cwd=cwd or self.root,
                                        env=env, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
             try:
@@ -296,8 +369,14 @@ class Run:
                 "status": "passed" if exit_code == 0 and not errors else "failed", "errors": errors}
         if resources.exists():
             lane["resource_log"] = str(resources)
+        if sampler is not None:
+            lane["host_load"] = sampler.summary()
         self.lanes.append(lane)
         print(name + ": " + lane["status"] + " (log: " + str(path) + ")", flush=True)
+        if sampler is not None:
+            load = lane["host_load"]
+            print(name + " host load: 1-minute max " + str(load["load_1m_max"]) + ", mean " + str(load["load_1m_mean"]) +
+                  "; busiest: " + ", ".join("%s %s%%" % (n, p) for n, p in load["busiest_processes"][:8]), flush=True)
         self.save()
         return lane
 

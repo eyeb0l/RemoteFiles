@@ -59,6 +59,34 @@ class AcceptanceRunnerTests(unittest.TestCase):
         self.check_skipped_result("LatencyBenchmarkTests/testRoundTripSensitiveOperations", (), "failed")
 
 
+class HostLoadSamplerTests(unittest.TestCase):
+    def test_ps_rows_are_parsed_and_summarized_by_average_process_share(self):
+        rows = acceptance.parse_ps_cpu(" 95.0 /usr/libexec/backboardd\n 40.5 RemoteFiles\nbad line\n 12.0 /a/b/testmanagerd\n")
+        self.assertEqual(rows, [(95.0, "backboardd"), (40.5, "RemoteFiles"), (12.0, "testmanagerd")])
+        summary = acceptance.summarize_load([rows, [(5.0, "backboardd"), (30.0, "SimRenderServer")]])
+        self.assertEqual(summary[0], ["backboardd", 50.0])
+        self.assertEqual([name for name, _ in summary], ["backboardd", "RemoteFiles", "SimRenderServer", "testmanagerd"])
+
+    def test_sampler_records_load_while_running_and_survives_ps_failures(self):
+        calls = []
+        def read_ps():
+            calls.append(1)
+            if len(calls) == 2:
+                raise OSError("ps unavailable")
+            return " 80.0 /System/SimRenderServer\n"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "lane-load.log"
+            with acceptance.LoadSampler(path, interval=0.01, read_ps=read_ps) as sampler:
+                while len(calls) < 3:
+                    pass
+            summary = sampler.summary()
+            self.assertGreaterEqual(summary["samples"], 3)
+            self.assertEqual(summary["busiest_processes"][0][0], "SimRenderServer")
+            self.assertIsNotNone(summary["load_1m_max"])
+            self.assertIn("load ", path.read_text())
+            self.assertIn("SimRenderServer 80%", path.read_text())
+
+
 class LogResultTests(unittest.TestCase):
     def test_xcresult_timeout_is_reported_when_the_log_has_no_completed_result(self):
         with tempfile.TemporaryDirectory() as directory:
