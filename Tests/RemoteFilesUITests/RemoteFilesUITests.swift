@@ -5,11 +5,27 @@ import Security
 import NIOSSH
 @testable import RemoteFilesCore
 
+extension XCUIApplication {
+    /// The app under test, without Xcode's console mirroring of unified logs.
+    ///
+    /// XCTest answers each accessibility query on the app's main thread and logs every
+    /// attribute it fetches (about 9 MB per journey). With `OS_ACTIVITY_DT_MODE` set, those
+    /// messages are also written synchronously to the app's stderr, a pseudo-terminal that
+    /// xcodebuild drains through its own main thread. On a loaded CI runner xcodebuild runs at
+    /// utility priority and stops draining, so the app blocks in `writev` while serving the
+    /// query and XCTest reports snapshot timeouts. The messages still reach the unified log.
+    static func underTest() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["OS_ACTIVITY_DT_MODE"] = "NO"
+        return app
+    }
+}
+
 @MainActor
 final class RemoteFilesUITests: XCTestCase {
     func testOfflineFolderSnapshotBrowsesSubfoldersAfterDisconnectBackgroundAndRelaunch() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         let reports = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports,")).firstMatch
@@ -173,7 +189,7 @@ final class RemoteFilesUITests: XCTestCase {
 
     func testOfflineAudioPinnedFromFolderKeepsLocalPlaybackControls() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         let audio = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Sample audio.m4a,")).firstMatch
@@ -209,7 +225,7 @@ final class RemoteFilesUITests: XCTestCase {
         let isPad = UIDevice.current.userInterfaceIdiom == .pad
         if isPad { XCUIDevice.shared.orientation = .landscapeLeft }
         defer { if isPad { XCUIDevice.shared.orientation = .portrait } }
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         // With no folder chosen the library opens itself, even where it has to overlay.
         waitUntilHittable(projects); projects.tap()
@@ -292,7 +308,7 @@ final class RemoteFilesUITests: XCTestCase {
 
     func testWrapLinesToggleAndPreferenceSurviveReopeningSource() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
         func openExample() {
             let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
             XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
@@ -329,7 +345,7 @@ final class RemoteFilesUITests: XCTestCase {
 
     func testHTMLRenderedSourceAndRefresh() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Preview.html,")).firstMatch
@@ -357,7 +373,7 @@ final class RemoteFilesUITests: XCTestCase {
 
     func testDemoAudioAndVideoHaveNativePlaybackControls() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         for filename in ["Sample audio.m4a", "Sample video.mp4"] {
@@ -395,7 +411,7 @@ final class RemoteFilesUITests: XCTestCase {
 
     func testLongJSONAndSVGRenderedSourcePreview() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         let json = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Long lines.json,")).firstMatch
@@ -451,7 +467,7 @@ final class RemoteFilesUITests: XCTestCase {
     }
     func testRecentSwipeRemovesOnlyEntryAndReaderDisconnectReturnsHome() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly review.md,")).firstMatch
@@ -473,7 +489,7 @@ final class RemoteFilesUITests: XCTestCase {
     }
     func testDisconnectFromNestedFolderClearsStackAndReconnectsFromHome() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         let reports = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports,")).firstMatch
@@ -488,7 +504,7 @@ final class RemoteFilesUITests: XCTestCase {
     }
     func testSearchingSubfoldersFindsNestedNamesKeepsResultsAndSwitchesBack() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
@@ -532,7 +548,7 @@ final class RemoteFilesUITests: XCTestCase {
         let isPad = UIDevice.current.userInterfaceIdiom == .pad
         if isPad { XCUIDevice.shared.orientation = .landscapeLeft }
         defer { if isPad { XCUIDevice.shared.orientation = .portrait } }
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         waitUntilHittable(projects); projects.tap()
         let reports = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports, Folder")).firstMatch
@@ -573,7 +589,7 @@ final class RemoteFilesUITests: XCTestCase {
     // independent of deletion so both fit the unchanged per-method CI deadline.
     private func exerciseSavedSearchIndex(exportOriginal: Bool) {
         continueAfterFailure = false
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         let reports = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports, Folder")).firstMatch
         func openReports() {
@@ -815,7 +831,7 @@ final class RemoteFilesUITests: XCTestCase {
 
     func testSourceSyntaxHighlightingAndMarkdownSource() throws {
         continueAfterFailure = false
-        let app = XCUIApplication()
+        let app = XCUIApplication.underTest()
         app.launchArguments = ["--demo"]
         app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
@@ -857,7 +873,7 @@ final class RemoteFilesUITests: XCTestCase {
 
     func testLargeFolderKeepsScrollPositionAfterOpeningFile() throws {
         continueAfterFailure = false
-        let app = XCUIApplication()
+        let app = XCUIApplication.underTest()
         app.launchArguments = ["--demo"]
         app.launch()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch.tap()
@@ -881,7 +897,7 @@ final class RemoteFilesUITests: XCTestCase {
 
     func testLinkedFolderOpensInOneTapAndSortBySizeReordersFiles() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
@@ -912,7 +928,7 @@ final class RemoteFilesUITests: XCTestCase {
 
     func testBrowseReadRefreshAndReturn() throws {
         continueAfterFailure = false
-        let app = XCUIApplication()
+        let app = XCUIApplication.underTest()
         app.launchArguments = ["--demo"]
         // Profiling attaches to a freshly launched process before XCTest drives the journey.
         // Normal test runs still own launch; only the explicit profiling harness reuses it.
@@ -948,7 +964,7 @@ final class RemoteFilesUITests: XCTestCase {
 
     func testNormalLaunchOffersUsableConnectionSetup() throws {
         continueAfterFailure = false
-        let app = XCUIApplication()
+        let app = XCUIApplication.underTest()
         app.launch()
         let add = app.buttons["Add Connection"].firstMatch
         XCTAssertTrue(add.waitForExistence(timeout: 15))
@@ -986,7 +1002,7 @@ final class RemoteFilesUITests: XCTestCase {
             // Fail before interacting with the app if this device generated an invalid fixture.
             let imported = try OpenSSHIdentityParser.parse(fixture.privateText, passphrase: nil)
             XCTAssertEqual(String(openSSHPublicKey: imported.key.nioPrivateKey.publicKey), fixture.publicKey)
-            let app = XCUIApplication()
+            let app = XCUIApplication.underTest()
             app.launch()
             app.buttons["Settings"].tap()
             app.buttons["SSH Keys"].tap()
@@ -1035,7 +1051,7 @@ final class RemoteFilesUITests: XCTestCase {
 
     func testKeyDetailsShowFingerprintAndPublicKeyWithoutAddedHyphens() throws {
         continueAfterFailure = false
-        let app = XCUIApplication()
+        let app = XCUIApplication.underTest()
         app.launch()
         app.buttons["Settings"].tap()
         app.buttons["SSH Keys"].tap()
@@ -1180,7 +1196,7 @@ final class RemoteFilesUITests: XCTestCase {
     }
 
     private func launchDemoSearchSamples() -> XCUIApplication {
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         waitUntilHittable(projects); projects.tap()
         let samples = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Search samples, Folder")).firstMatch
@@ -1190,7 +1206,7 @@ final class RemoteFilesUITests: XCTestCase {
     }
 
     private func launchDemoReader(filename: String, markdown: Bool = true) -> XCUIApplication {
-        let app = XCUIApplication()
+        let app = XCUIApplication.underTest()
         app.launchArguments = ["--demo"]
         app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
@@ -1307,7 +1323,7 @@ final class RealServerUITests: XCTestCase {
 
     func testPreparePublicIdentity() throws {
         try enabled()
-        let app = XCUIApplication()
+        let app = XCUIApplication.underTest()
         app.launch()
         app.buttons["Settings"].tap()
         app.buttons["SSH Keys"].tap()
@@ -1336,7 +1352,7 @@ extension RealServerUITests {
         let username = try XCTUnwrap(env["REMOTEFILES_REAL_USER"])
         let directory = try XCTUnwrap(env["REMOTEFILES_REAL_DIRECTORY"])
         let fingerprint = try XCTUnwrap(env["REMOTEFILES_REAL_FINGERPRINT"])
-        let app = XCUIApplication()
+        let app = XCUIApplication.underTest()
         app.launch()
         let connectionName = "My MacBook"
         let connection = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", connectionName + ",")).firstMatch
@@ -1393,7 +1409,7 @@ extension RealServerUITests {
 extension RealServerUITests {
     func testSavedConnectionReopensRealProject() throws {
         try enabled()
-        let app = XCUIApplication()
+        let app = XCUIApplication.underTest()
         app.launch()
         let connection = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "My MacBook,")).firstMatch
         XCTAssertTrue(connection.waitForExistence(timeout: 10))
@@ -1423,7 +1439,7 @@ extension RealServerUITests {
         try enabled()
         try XCTSkipUnless(ProcessInfo.processInfo.environment["REMOTEFILES_FORMAT_FIXTURES"] == "1",
                           "Generate format fixtures in the Image checks SFTP folder first")
-        let app = XCUIApplication(); app.launch()
+        let app = XCUIApplication.underTest(); app.launch()
         let connection = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Image checks,")).firstMatch
         XCTAssertTrue(connection.waitForExistence(timeout: 10)); connection.tap()
 
@@ -1456,7 +1472,7 @@ extension RealServerUITests {
 extension RealServerUITests {
     func testAuditRemoteInlineImages() throws {
         try enabled()
-        let app = XCUIApplication(); app.launch()
+        let app = XCUIApplication.underTest(); app.launch()
         let audit = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "audit.md,")).firstMatch
         XCTAssertTrue(audit.waitForExistence(timeout: 10), app.debugDescription)
         if !audit.isHittable { app.swipeUp() }
@@ -1488,7 +1504,7 @@ extension RealServerUITests {
 extension RealServerUITests {
     func testRelativeLargeAndMissingImages() throws {
         try enabled()
-        let app = XCUIApplication(); app.launch()
+        let app = XCUIApplication.underTest(); app.launch()
         let connection = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Image checks,")).firstMatch
         if !connection.waitForExistence(timeout: 2) {
             let add = app.buttons["Add Connection"]
@@ -1530,7 +1546,7 @@ extension RealServerUITests {
 extension RealServerUITests {
     func testImageFreeReadmeRendersBeforeAndAfterSourceSwitch() throws {
         try enabled()
-        let app = XCUIApplication(); app.launch()
+        let app = XCUIApplication.underTest(); app.launch()
         let readme = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "README.md,")).firstMatch
         XCTAssertTrue(readme.waitForExistence(timeout: 10), app.debugDescription)
         if !readme.isHittable { app.swipeUp() }
@@ -1550,7 +1566,7 @@ extension RealServerUITests {
 extension RealServerUITests {
     func testBackgroundReconnectsToChangedRealServerDocument() throws {
         try enabled()
-        let app = XCUIApplication()
+        let app = XCUIApplication.underTest()
         app.launch()
         let connection = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Image checks,")).firstMatch
         XCTAssertTrue(connection.waitForExistence(timeout: 10), app.debugDescription)
@@ -1582,7 +1598,7 @@ extension RealServerUITests {
         try enabled()
         let host = try XCTUnwrap(ProcessInfo.processInfo.environment["REMOTEFILES_LAN_HOST"])
         let fingerprint = try XCTUnwrap(ProcessInfo.processInfo.environment["REMOTEFILES_LAN_FINGERPRINT"])
-        let app = XCUIApplication()
+        let app = XCUIApplication.underTest()
         app.launch()
         let localProfile = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Local network check,")).firstMatch
         if !localProfile.waitForExistence(timeout: 2) {

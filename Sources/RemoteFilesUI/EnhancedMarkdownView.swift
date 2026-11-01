@@ -142,13 +142,13 @@ struct EnhancedMarkdownWebView: UIViewRepresentable {
         }
         if !active { coordinator.cancelImages() }
         if coordinator.source?.utf8.elementsEqual(text.utf8) != true {
-            coordinator.cancelImages(); coordinator.source = text
+            coordinator.cancelImages(); coordinator.cancelGeometryWait(); coordinator.source = text
             coordinator.finished = false; coordinator.initialNavigation = true
             coordinator.load = view.loadHTMLString(Self.html, baseURL: nil)
         } else { coordinator.updateTextSize(); coordinator.revealIfNeeded() }
     }
     static func dismantleUIView(_ view: WKWebView, coordinator: Coordinator) {
-        coordinator.mounted = false; coordinator.cancelImages()
+        coordinator.mounted = false; coordinator.cancelImages(); coordinator.cancelGeometryWait()
         if coordinator.finished { coordinator.parent.readingPosition.rendered = view.scrollView.contentOffset }
         view.configuration.userContentController.removeScriptMessageHandler(forName: "markdownImage", contentWorld: .defaultClient)
         view.stopLoading(); view.navigationDelegate = nil; view.scrollView.delegate = nil
@@ -169,6 +169,9 @@ struct EnhancedMarkdownWebView: UIViewRepresentable {
         var imageTasks: [Int: Task<Void, Never>] = [:]
         var pendingImages: Set<Int> = []
         var lastReveal: UUID?
+        private var geometryObservation: NSKeyValueObservation?
+        private var geometryDeadline: Task<Void, Never>?
+        private var geometryReady: (() -> Void)?
         init(parent: EnhancedMarkdownWebView) { self.parent = parent }
         func cancelImages() { imageTasks.values.forEach { $0.cancel() }; imageTasks = [:]; pendingImages = [] }
         func webView(_ view: WKWebView, didFinish navigation: WKNavigation!) {
@@ -188,13 +191,43 @@ struct EnhancedMarkdownWebView: UIViewRepresentable {
                     self.images = (result["images"] as? [[String: String]] ?? []).prefix(EnhancedMarkdownPolicy.maximumImages).map {
                         ($0["reference"] ?? "", $0["alt"] ?? "")
                     }
-                    view.scrollView.setContentOffset(self.parent.readingPosition.rendered, animated: false)
-                    self.finished = true; self.updateTextSize(); self.parent.onFinish(); self.revealIfNeeded()
-                    for index in self.pendingImages { self.loadImage(index) }; self.pendingImages = []
+                    let height = CGFloat((result["height"] as? NSNumber)?.doubleValue ?? 0)
+                    self.afterRenderedGeometry(of: view, documentHeight: height) { [weak self, weak view] in
+                        guard let self, self.mounted, let view, navigation === self.load else { return }
+                        view.scrollView.setContentOffset(self.parent.readingPosition.rendered, animated: false)
+                        self.finished = true; self.updateTextSize(); self.parent.onFinish(); self.revealIfNeeded()
+                        for index in self.pendingImages { self.loadImage(index) }; self.pendingImages = []
+                    }
                 case .failure:
                     self.parent.onFailure("This Markdown could not be rendered. Use Source or refresh to try again.")
                 }
             }
+        }
+        /// `render` resolves before WebKit commits the rendered layout, so the native scroll view
+        /// can still have the empty template's height. That commit can reset an offset applied
+        /// meanwhile to the top, and scroll tracking would then save the top as the reading
+        /// position. Restore and start tracking once native geometry covers the document, after
+        /// leaving the commit's callback. If it never does, proceed after a bounded wait.
+        private func afterRenderedGeometry(of view: WKWebView, documentHeight: CGFloat, _ ready: @escaping () -> Void) {
+            cancelGeometryWait()
+            let committed = { (scroll: UIScrollView) in scroll.contentSize.height + 1 >= documentHeight * scroll.zoomScale }
+            guard !committed(view.scrollView) else { ready(); return }
+            geometryReady = ready
+            geometryObservation = view.scrollView.observe(\.contentSize) { [weak self] scroll, _ in
+                guard MainActor.assumeIsolated({ committed(scroll) }) else { return }
+                Task { @MainActor [weak self] in self?.finishGeometryWait() }
+            }
+            geometryDeadline = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                self?.finishGeometryWait()
+            }
+        }
+        private func finishGeometryWait() {
+            guard let ready = geometryReady else { return }
+            cancelGeometryWait(); ready()
+        }
+        func cancelGeometryWait() {
+            geometryObservation = nil; geometryDeadline?.cancel(); geometryDeadline = nil; geometryReady = nil
         }
         func updateTextSize() {
             guard mounted, finished, let view, appliedBodyPointSize != bodyPointSize else { return }

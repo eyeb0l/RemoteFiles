@@ -141,7 +141,9 @@
     }, {rootMargin:'300px'});
     for (const image of images) observer.observe(image.button);
     document.documentElement.dataset.rendered = 'true';
-    return {generation:revision,images:images.map(image => ({reference:image.reference,alt:image.alt}))};
+    // The native scroll view receives this height in a later layer-tree commit.
+    return {generation:revision,height:document.documentElement.scrollHeight,
+      images:images.map(image => ({reference:image.reference,alt:image.alt}))};
   }
   function setImage(index, revision, data, error) {
     if (revision !== generation || !images[index]) return;

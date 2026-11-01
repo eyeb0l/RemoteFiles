@@ -384,3 +384,41 @@ The bare HTML fixture now waits for an after-screen-updates WebKit snapshot
 before returning to its caller. This synchronizes its initial presentation before
 the test establishes a nonzero reading position. Initial-offset, traversal-limit,
 anchor and post-resize assertions remain unchanged, as do all existing deadlines.
+
+## Console back-pressure and readiness fixes
+
+Several journeys failed intermittently on `main` and unrelated PRs in late October.
+Each one was investigated before any rerun:
+
+- **UI snapshot timeouts.** Content search, adaptive workspace and linked-folder
+  journeys timed out while XCTest asked a just-launched or idle app for elements;
+  queries took 14–31 seconds and logged `(retry 1)`/`(retry 2)`. The spindump that
+  XCTest captured in [run 41228358818](https://github.com/eyeb0l/RemoteFiles/actions/runs/41228358818)
+  showed the app's main thread blocked in `writev` to its stderr pseudo-terminal while
+  serving the query. XCTest's in-app automation logs every attribute it fetches (about
+  9 MB per journey), and Xcode's `OS_ACTIVITY_DT_MODE` mirrors that output to stderr.
+  xcodebuild drains the terminal through its main thread, which runs at utility priority
+  on CI runners and was runnable but starved. Pausing xcodebuild locally reproduced the
+  same failure line and retries. UI-tested apps now launch with `OS_ACTIVITY_DT_MODE=NO`;
+  the messages still reach the unified log. With the same pause, queries answered in
+  0.14 seconds and the journey passed.
+- **VoiceOver JSON speech.** The preview opened, but VoiceOver had not yet moved focus
+  off the activated row, so traversal skipped to the end of the JSON. Opening a row now
+  waits up to 10 seconds for the focused utterance to change before reading speech.
+- **Offline reader Back position.** The rich Markdown renderer restored its saved offset
+  as soon as `render()` resolved, while the native scroll view still had the empty
+  template's 772-point height. A later WebKit commit could reset that offset, and scroll
+  tracking then saved the top. Restoration and tracking now wait until native geometry
+  covers the rendered document, as the HTML reader does. A hosted regression failed 4 of
+  5 runs before the change. The offline lifecycle test waits for the reader's progress
+  indicator to disappear before scrolling. Its first reader also gets a 60-second bound
+  for WebKit's process cold start, measured at 23–28 seconds on a loaded Mac; later steps
+  keep 15 seconds.
+- **Saved-index OCR budget.** On an Apple silicon Mac with a purged Neural Engine cache,
+  Vision's first model compile used the index's whole 30-second budget. The boundary test
+  now compiles the model once before its timed build. Virtual CI Macs use the fast model
+  and were unaffected.
+
+HTML reading-position timeouts were seen only while several local simulator jobs ran;
+those methods took 75–189 seconds each. Hosted runs took at most 5.1 seconds, so their
+15-second waits are unchanged. No lane budget, allowed skip or retry changed.

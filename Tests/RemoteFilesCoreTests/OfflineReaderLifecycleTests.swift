@@ -72,7 +72,12 @@ private struct OfflineReaderFixture: View {
         defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKeyAndVisible() }
 
         state.path.append(.init(pin: first))
-        var web = try await reader(in: window, named: "README.md")
+        // The first reader also starts WebKit's GPU and networking processes. Measured cold
+        // starts on a loaded host took 23–28 seconds before any page could render, so it gets
+        // the same 60-second bound as the renderer-defense warm-up; every later step keeps 15.
+        let coldStart = ContinuousClock.now
+        var web = try await reader(in: window, named: "README.md", timeout: .seconds(60))
+        print("Offline reader first render after \(ContinuousClock.now - coldStart)")
         web.scrollView.setContentOffset(CGPoint(x: 0, y: 500), animated: false)
         try await Task.sleep(for: .milliseconds(100))
         let originalURL = try XCTUnwrap(leaseURLs(directory).first)
@@ -147,19 +152,29 @@ private struct OfflineReaderFixture: View {
         if let web = view as? WKWebView { return [web] }
         return view.subviews.flatMap { webViews(in: $0) }
     }
-    private func reader(in window: UIWindow, named name: String) async throws -> WKWebView {
+    /// Returns once the reader has finished: its document is rendered, its saved position is
+    /// applied and it records scrolling. Until then it shows a progress indicator, and an offset
+    /// set by the test would be replaced by the reader's own restoration.
+    private func reader(in window: UIWindow, named name: String,
+                        timeout: Duration = .seconds(15), line: UInt = #line) async throws -> WKWebView {
         var result: WKWebView?
-        try await waitUntil {
-            guard let web = self.webViews(in: window).last, web.scrollView.contentSize.height > web.bounds.height else { return false }
+        try await waitUntil(timeout: timeout, line: line) {
+            guard let web = self.webViews(in: window).last, web.scrollView.contentSize.height > web.bounds.height,
+                  !self.showsProgress(window) else { return false }
             let title = try? await web.evaluateJavaScript("document.querySelector('h1')?.textContent") as? String
-            guard title == name else { return false }
+            guard title == name, !self.showsProgress(window) else { return false }
             result = web
             return true
         }
         return try XCTUnwrap(result)
     }
-    private func waitUntil(_ condition: () async throws -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
-        let deadline = ContinuousClock.now + .seconds(15)
+    private func showsProgress(_ view: UIView) -> Bool {
+        if let indicator = view as? UIActivityIndicatorView, indicator.isAnimating, !indicator.isHidden { return true }
+        return view.subviews.contains { showsProgress($0) }
+    }
+    private func waitUntil(timeout: Duration = .seconds(15), file: StaticString = #filePath, line: UInt = #line,
+                           _ condition: () async throws -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             if try await condition() { return }
             try await Task.sleep(for: .milliseconds(25))

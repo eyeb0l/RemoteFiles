@@ -322,6 +322,43 @@ import WebKit
         XCTAssertEqual(loads, 1, "Dynamic Type updates CSS without reloading the document or its images")
     }
 
+    func testSavedPositionWaitsForRenderedGeometryAndSurvivesTheCommit() async throws {
+        let rules = try await SVGResourceBlocker.rules()
+        let scripts = try EnhancedMarkdownPolicy.rendererScripts()
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene); self.window = window
+        let position = DocumentReadingPosition()
+        position.rendered = CGPoint(x: 0, y: 500)
+        var finishedGeometry: (offset: CGFloat, content: CGFloat, viewport: CGFloat)?
+        func web(_ root: UIView) -> WKWebView? {
+            if let view = root as? WKWebView { return view }
+            return root.subviews.lazy.compactMap { web($0) }.first
+        }
+        let text = "# Saved place\n\n$x$\n\n" + (0..<80).map { "Paragraph \($0) of the saved document.\n\n" }.joined()
+        window.rootViewController = UIHostingController(rootView: EnhancedMarkdownWebView(text: text,
+            scripts: scripts, rules: rules, readingPosition: position, navigation: nil,
+            location: nil, resolver: nil, active: true,
+            onFinish: {
+                guard let scroll = web(window)?.scrollView else { return }
+                finishedGeometry = (scroll.contentOffset.y, scroll.contentSize.height, scroll.bounds.height)
+            }, onFailure: { XCTFail($0) },
+            openExternalLink: { _ in }, openDocumentLink: nil, openImage: { _, _ in }))
+        window.makeKeyAndVisible()
+        let deadline = ContinuousClock.now + .seconds(20)
+        while finishedGeometry == nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(25)) }
+        let finished = try XCTUnwrap(finishedGeometry, "The reader must finish rendering")
+        // Before WebKit commits the rendered layout, the native scroll view still has the empty
+        // template's height and that commit can reset an applied offset to the top.
+        XCTAssertGreaterThanOrEqual(finished.content - finished.viewport, 500,
+                                    "The saved position must be applied to the rendered document's geometry")
+        XCTAssertEqual(finished.offset, 500, accuracy: 1)
+        try await Task.sleep(for: .milliseconds(500))
+        let view = try XCTUnwrap(web(window))
+        XCTAssertEqual(view.scrollView.contentOffset.y, 500, accuracy: 1)
+        XCTAssertEqual(position.rendered.y, 500, accuracy: 1, "Layout commits must not replace the saved position")
+    }
+
     func testNotationBudgetsAndSourceLimitFailClosed() async throws {
         let view = try await renderer()
         _ = try await render(Array(repeating: "$x$", count: 129).joined(separator: "\n\n"), in: view)

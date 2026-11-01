@@ -1,8 +1,18 @@
 import XCTest
 
+extension XCUIApplication {
+    /// Launches without Xcode's synchronous console mirroring of unified logs, which can block
+    /// the app's main thread while it answers XCTest queries; see RemoteFilesUITests.swift.
+    static func underTest() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["OS_ACTIVITY_DT_MODE"] = "NO"
+        return app
+    }
+}
+
 @MainActor final class SmallFeaturesUITests: XCTestCase {
     private func app(_ name: String, extra: [String] = []) -> XCUIApplication {
-        let app = XCUIApplication(); app.launchArguments = ["--small-features-fixture", "--feature-case=\(name)"] + extra
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--small-features-fixture", "--feature-case=\(name)"] + extra
         app.launch(); return app
     }
     private func capture(_ name: String, _ app: XCUIApplication) {
