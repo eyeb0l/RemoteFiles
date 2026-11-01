@@ -232,7 +232,7 @@ final class AppModel {
                             await self?.updateFolderPinProgress(progress, token: token)
                         }
                 } else {
-                    _ = try await store.pin(profile: profile, entry: entry, allowedRoot: profile.startingDirectory,
+                    _ = try await store.pin(profile: profile, entry: entry, allowedRoot: entry.selectionRoot,
                                             service: transport, operationID: token) { [weak self] progress in
                         await self?.updatePinProgress(progress, token: token)
                     }

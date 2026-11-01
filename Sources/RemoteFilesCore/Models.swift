@@ -96,6 +96,12 @@ public struct RemoteEntry: Identifiable, Hashable, Sendable {
         canonicalRoot = entry.canonicalRoot
         self.headingFragment = headingFragment; self.openingPage = openingPage
     }
+    /// The boundary for a file the user explicitly chose to download, keep offline or save:
+    /// a saved-search result keeps its index's canonical root, and anything else its own
+    /// folder. Transports still canonicalize both paths, so a path or folder replaced by a
+    /// symbolic link to somewhere else is rejected. Relative document links and images keep
+    /// the connection's starting folder instead; they are chosen by a document, not the user.
+    public var selectionRoot: String { canonicalRoot ?? RemotePath.parent(of: path) }
     /// The resolved target of a symbolic link, if any.
     public var linkTarget: RemoteEntry? {
         if case .target(let target) = link { return target }

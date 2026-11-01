@@ -99,16 +99,30 @@ final class DownloadManagerTests: XCTestCase {
         XCTAssertTrue(roots.isEmpty, "An unsupported managed contract must not silently select a different transport contract")
     }
 
-    func testIndexedDownloadsRetainConnectionBoundaryBeforeSnapshotFallback() async throws {
+    /// A user-chosen saved-index result outside the starting folder downloads, bounded by its
+    /// index's own canonical root and never through an ordinary redirect-following download.
+    func testIndexedDownloadsOutsideTheStartingFolderUseTheirIndexBoundary() async throws {
         let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
         let service = IndexedDownloadFixture()
         let manager = try DownloadManager(service: service, directory: directory)
-        let id = try manager.enqueue(profile: profile, entry: .init(name: "report.bin", path: "/outside/report.bin", kind: .file, canonicalRoot: "/"))
+        let id = try manager.enqueue(profile: profile, entry: .init(name: "report.bin", path: "/outside/report.bin", kind: .file, canonicalRoot: "/outside"))
         try await wait { manager.activeID == nil }
-        XCTAssertEqual(manager.items.first?.state, .failed)
-        XCTAssertThrowsError(try manager.completedURL(id))
+        XCTAssertEqual(manager.items.first?.state, .completed)
+        XCTAssertEqual(try Data(contentsOf: manager.completedURL(id)), Data("snapshot".utf8))
         let ordinary = await service.ordinaryRequests, roots = await service.snapshotRoots
-        XCTAssertEqual(ordinary, 0); XCTAssertTrue(roots.isEmpty)
+        XCTAssertEqual(ordinary, 0); XCTAssertEqual(roots, ["/outside"])
+    }
+
+    /// An ordinary download outside the starting folder is bounded by the file's own folder.
+    func testDownloadsOutsideTheStartingFolderUseTheFilesOwnFolder() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let service = DownloadFixture(bytes: Data([7]))
+        let manager = try DownloadManager(service: service, directory: directory)
+        let id = try manager.enqueue(profile: profile, entry: .init(name: "notes.txt", path: "/elsewhere/project/notes.txt", kind: .file))
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(try Data(contentsOf: manager.completedURL(id)), Data([7]))
+        let requests = await service.requests
+        XCTAssertEqual(requests.map(\.root), ["/elsewhere/project"])
     }
 
     func testProtectionLockRacePreservesBytesReservesQuotaAndFinalizesWithoutNetwork() async throws {
@@ -292,7 +306,7 @@ final class DownloadManagerTests: XCTestCase {
         try restored.remove(id)
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
         let requests = await service.requests
-        XCTAssertEqual(requests.first?.root, "/safe")
+        XCTAssertEqual(requests.first?.root, "/safe", "A file's own folder bounds its download")
         XCTAssertEqual(requests.first?.limit, DownloadManager.maximumFileBytes)
     }
     func testCancellationDrainsBeforeNextJobAndDiscardsLateBytes() async throws {

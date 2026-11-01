@@ -115,7 +115,7 @@ struct ReaderView: View {
                 } label: { Label("Document actions", systemImage: "ellipsis.circle") }
             }
         }
-        .modifier(OriginalFileExportControl(profile: profile, entry: entry, allowedRoot: profile.startingDirectory,
+        .modifier(OriginalFileExportControl(profile: profile, entry: entry, allowedRoot: entry.selectionRoot,
                                             exporter: model.originalExporter, isEnabled: model.isForeground && !model.isDisconnecting,
                                             onError: { error in
                                                 model.handle(error, profile: profile)

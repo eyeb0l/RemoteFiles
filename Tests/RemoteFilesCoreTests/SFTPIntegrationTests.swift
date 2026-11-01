@@ -649,8 +649,9 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: ordinary), Data("replacement".utf8))
     }
 
-    @MainActor
-    func testIndexedManagedDownloadsKeepBothConnectionAndIndexBoundaries() async throws {
+    /// A saved-index result outside the starting folder downloads within its index's
+    /// canonical root; a result outside that index root is still rejected.
+    @MainActor func testIndexedManagedDownloadsOutsideTheStartingFolderKeepTheirIndexBoundary() async throws {
         let fixture = try Fixture(), stores = try Stores(fixture: fixture)
         let identity = try await stores.identity.generate(name: "Indexed managed boundaries")
         try fixture.authorize(identity.publicKey)
@@ -675,32 +676,31 @@ final class SFTPIntegrationTests: XCTestCase {
         let services: [any RemoteFileService] = [managed, fallback]
         for (offset, service) in services.enumerated() {
             let manager = try DownloadManager(service: service, directory: local.appendingPathComponent(String(offset)))
-            var rejected = 0
-            for canonicalRoot in [root, root + "/private"] {
-                let outside = RemoteEntry(name: "report.bin", path: root + "/private/report.bin", kind: .file, canonicalRoot: canonicalRoot)
-                let id = try manager.enqueue(profile: profile, entry: outside, onFailure: { error, _ in
-                    guard case OriginalFileExportError.outsideRoot = error else { return XCTFail("Expected connection-root rejection, got \(error)") }
-                    rejected += 1
-                })
+            func run(_ entry: RemoteEntry) async throws -> UUID {
+                let id = try manager.enqueue(profile: profile, entry: entry)
                 let deadline = ContinuousClock.now + .seconds(10)
                 while manager.activeID != nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
                 XCTAssertNil(manager.activeID)
-                XCTAssertEqual(manager.items.first { $0.id == id }?.state, .failed)
-                XCTAssertThrowsError(try manager.completedURL(id))
+                return id
             }
-            XCTAssertEqual(rejected, 2)
-            // A canonical ancestor index must not reject results that remain inside
-            // the configured connection folder, including its symlink spelling.
-            let inside = RemoteEntry(name: "report.bin", path: root + "/projects/report.bin", kind: .file, canonicalRoot: root)
-            let id = try manager.enqueue(profile: profile, entry: inside)
-            let deadline = ContinuousClock.now + .seconds(10)
-            while manager.activeID != nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
-            XCTAssertNil(manager.activeID)
-            XCTAssertEqual(try Data(contentsOf: manager.completedURL(id)), Data("projects".utf8))
+            // Outside the configured starting folder, from an ancestor index and from an index
+            // of that folder itself.
+            for canonicalRoot in [root, root + "/private"] {
+                let outside = RemoteEntry(name: "report.bin", path: root + "/private/report.bin", kind: .file, canonicalRoot: canonicalRoot)
+                let id = try await run(outside)
+                XCTAssertEqual(try Data(contentsOf: manager.completedURL(id)), Data("private".utf8))
+            }
+            // The index root still bounds its results.
+            let escaped = RemoteEntry(name: "report.bin", path: root + "/projects/report.bin", kind: .file, canonicalRoot: root + "/private")
+            let id = try await run(escaped)
+            XCTAssertEqual(manager.items.first { $0.id == id }?.state, .failed)
+            XCTAssertThrowsError(try manager.completedURL(id))
         }
     }
 
-    func testIndexedExportsKeepBothConnectionAndIndexBoundaries() async throws {
+    /// Save Original and Keep Offline use the chosen result's own boundary: a saved-index
+    /// result outside the starting folder exports within its index root, and only there.
+    func testIndexedExportsOutsideTheStartingFolderKeepTheirIndexBoundary() async throws {
         let fixture = try Fixture(), stores = try Stores(fixture: fixture)
         let identity = try await stores.identity.generate(name: "Indexed export boundaries")
         try fixture.authorize(identity.publicKey)
@@ -727,34 +727,75 @@ final class SFTPIntegrationTests: XCTestCase {
             service: service, includeHidden: false)
         let listed = try XCTUnwrap(snapshot.documents.first?.entry)
         let saved = RemoteEntry(name: listed.name, path: listed.path, kind: .file, canonicalRoot: outsideRoot)
+        XCTAssertEqual(saved.selectionRoot, outsideRoot)
         let exporter = RemoteOriginalExporter(service: service, directory: local.appendingPathComponent("exports"))
         for entry in [listed, saved] {
-            do {
-                let result = try await exporter.prepare(profile: profile, entry: entry, allowedRoot: profile.startingDirectory)
-                XCTAssertEqual(try Data(contentsOf: result.url), Data("private".utf8))
-                await exporter.release(result.id)
-                XCTFail("Indexing an outside folder must not make its files exportable")
-            } catch OriginalFileExportError.outsideRoot { }
+            let result = try await exporter.prepare(profile: profile, entry: entry, allowedRoot: entry.selectionRoot)
+            XCTAssertEqual(try Data(contentsOf: result.url), Data("private".utf8))
+            await exporter.release(result.id)
         }
         let offline = try OfflineFileStore(directory: local.appendingPathComponent("offline"))
-        do {
-            _ = try await offline.pin(profile: profile, entry: saved, allowedRoot: profile.startingDirectory, service: service)
-            XCTFail("Keep Offline must retain the same connection export boundary")
-        } catch OriginalFileExportError.outsideRoot { }
-        let pins = await offline.snapshot()
-        XCTAssertTrue(pins.isEmpty)
+        let pin = try await offline.pin(profile: profile, entry: saved, allowedRoot: saved.selectionRoot, service: service)
+        XCTAssertEqual(pin.path, saved.path)
 
-        // An index may cover an ancestor: its in-connection results remain exportable,
-        // even when the configured starting folder itself is a symlink.
-        let ancestor = try await RemoteFolderSearch.buildIndex(below: root, profile: profile,
-            service: service, includeHidden: false)
-        let inside = try XCTUnwrap(ancestor.documents.first { $0.entry.path == root + "/projects/report.txt" }?.entry)
-        let selected = RemoteEntry(name: inside.name, path: inside.path, kind: .file, canonicalRoot: root)
-        let result = try await exporter.prepare(profile: profile, entry: selected, allowedRoot: profile.startingDirectory)
-        XCTAssertEqual(try Data(contentsOf: result.url), Data("projects".utf8))
-        await exporter.release(result.id)
-        let pin = try await offline.pin(profile: profile, entry: selected, allowedRoot: profile.startingDirectory, service: service)
-        XCTAssertEqual(pin.path, selected.path)
+        // A result claiming a path outside its index root is still rejected.
+        let escaped = RemoteEntry(name: "report.txt", path: root + "/projects/report.txt", kind: .file, canonicalRoot: outsideRoot)
+        do {
+            let result = try await exporter.prepare(profile: profile, entry: escaped, allowedRoot: escaped.selectionRoot)
+            await exporter.release(result.id)
+            XCTFail("An index root must still bound its results")
+        } catch OriginalFileExportError.outsideRoot { }
+    }
+
+    /// Files and folders chosen outside the starting folder can be downloaded and kept offline;
+    /// each stays bounded by the chosen item, so symbolic links leading out of it are rejected.
+    @MainActor func testExplicitTransfersOutsideTheStartingFolderStayWithinTheChosenItem() async throws {
+        let fixture = try Fixture(), stores = try Stores(fixture: fixture)
+        let identity = try await stores.identity.generate(name: "Outside starting folder")
+        try fixture.authorize(identity.publicKey)
+        var profile = try await stores.profile(identity: identity)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        let fm = FileManager.default
+        let start = fixture.files + "/start-" + UUID().uuidString, outside = fixture.files + "/outside-" + UUID().uuidString
+        let local = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { for path in [start, outside] { try? fm.removeItem(atPath: path) }; try? fm.removeItem(at: local) }
+        try fm.createDirectory(atPath: start, withIntermediateDirectories: true)
+        try fm.createDirectory(atPath: outside + "/nested", withIntermediateDirectories: true)
+        try Data("outside bytes".utf8).write(to: URL(fileURLWithPath: outside + "/notes.txt"))
+        try Data("nested bytes".utf8).write(to: URL(fileURLWithPath: outside + "/nested/child.txt"))
+        // Inside the chosen folder, but leading out of it.
+        try fm.createSymbolicLink(atPath: outside + "/escape.txt", withDestinationPath: fixture.files + "/original.txt")
+        profile.startingDirectory = start
+        let folder = try await service.listDirectory(profile: profile, path: outside)
+        let notes = try XCTUnwrap(folder.entries.first { $0.name == "notes.txt" })
+
+        let manager = try DownloadManager(service: service, directory: local.appendingPathComponent("downloads"))
+        func download(_ entry: RemoteEntry) async throws -> UUID {
+            let id = try manager.enqueue(profile: profile, entry: entry)
+            let deadline = ContinuousClock.now + .seconds(10)
+            while manager.activeID != nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertNil(manager.activeID)
+            return id
+        }
+        let downloaded = try await download(notes)
+        XCTAssertEqual(try Data(contentsOf: manager.completedURL(downloaded)), Data("outside bytes".utf8))
+        let escape = RemoteEntry(name: "escape.txt", path: folder.path + "/escape.txt", kind: .file)
+        let refused = try await download(escape)
+        XCTAssertEqual(manager.items.first { $0.id == refused }?.state, .failed, "A link out of the chosen file's folder must not download")
+
+        let store = try OfflineFileStore(directory: local.appendingPathComponent("offline"))
+        let pin = try await store.pin(profile: profile, entry: notes, allowedRoot: notes.selectionRoot, service: service)
+        let lease = try await store.lease(pin.id)
+        XCTAssertEqual(try Data(contentsOf: lease.url), Data("outside bytes".utf8))
+        do {
+            _ = try await store.pin(profile: profile, entry: escape, allowedRoot: escape.selectionRoot, service: service)
+            XCTFail("Keep Offline must reject a link out of the chosen file's folder")
+        } catch OriginalFileExportError.outsideRoot { }
+        let saved = try await store.pinFolder(profile: profile, path: folder.path, service: service)
+        XCTAssertEqual(saved.fileIDs.count, 2, "The folder's two regular files are saved")
+        XCTAssertEqual(saved.skippedLinks, 1, "The escaping link is skipped, not followed")
     }
 
     func testSavedSearchResultsRejectRootRedirectsForTextMediaAndExports() async throws {
@@ -924,17 +965,15 @@ final class SFTPIntegrationTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("offline-sftp-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try OfflineFileStore(directory: directory)
-        let pin = try await store.pin(profile: profile,
-            entry: .init(name: "original.txt", path: fixture.files + "/original.txt", kind: .file),
-            allowedRoot: profile.startingDirectory, service: service)
+        let original = RemoteEntry(name: "original.txt", path: fixture.files + "/original.txt", kind: .file)
+        let pin = try await store.pin(profile: profile, entry: original, allowedRoot: original.selectionRoot, service: service)
         await service.disconnect()
         let lease = try await store.lease(pin.id)
         XCTAssertEqual(try Data(contentsOf: lease.url), Data("é 東京\r\n\ttrailing spaces  \r\n".utf8))
         do {
-            _ = try await store.pin(profile: profile,
-                entry: .init(name: "outside-export.txt", path: fixture.files + "/outside-export.txt", kind: .file),
-                allowedRoot: profile.startingDirectory, service: service)
-            XCTFail("Pinning must reject a symlink outside the configured root")
+            let escaping = RemoteEntry(name: "outside-export.txt", path: fixture.files + "/outside-export.txt", kind: .file)
+            _ = try await store.pin(profile: profile, entry: escaping, allowedRoot: escaping.selectionRoot, service: service)
+            XCTFail("Pinning must reject a symlink leading out of the chosen file's folder")
         } catch OriginalFileExportError.outsideRoot { }
         await store.cancelAndDrain()
         let saved = await store.snapshot()
