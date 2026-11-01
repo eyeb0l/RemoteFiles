@@ -204,10 +204,19 @@ import RemoteFilesCore
 }
 
 @MainActor final class HTMLDisplayTests: XCTestCase {
-    private func wait(_ ready: () -> Bool) async throws {
-        let deadline = ContinuousClock.now + .seconds(15)
-        while !ready(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(25)) }
-        XCTAssertTrue(ready(), "HTML renderer must finish loading")
+    /// A hang guard, not the production deadline: `HTMLContentView` keeps its own 15-second
+    /// rendering allowance, which the UI lane's HTML journey exercises. These checks concern
+    /// what a finished document may do, so they wait for the same 60-second cold-start bound as
+    /// the SVG renderer defenses. On a loaded hosted runner a WebContent launch has taken 13
+    /// seconds, and a second one started 12.6 seconds into the defenses test (docs/CI.md). A
+    /// navigation failure ends the wait and names its reason.
+    private func wait(_ name: String, failure: () -> String?, _ ready: () -> Bool) async throws {
+        let started = ContinuousClock.now
+        let deadline = started + .seconds(60)
+        while !ready(), failure() == nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(25)) }
+        let elapsed = ContinuousClock.now - started
+        print("HTML DISPLAY TIMING \(name) document=\(elapsed)")
+        XCTAssertTrue(ready(), "HTML renderer must finish loading (\(elapsed), \(failure() ?? "no navigation failure"))")
     }
     func testStyledHTMLRendersDOMAndVisiblePixels() async throws {
         let rules = try await SVGResourceBlocker.rules()
@@ -229,7 +238,7 @@ import RemoteFilesCore
         }
         XCTAssertTrue(view.window === window)
         view.loadHTMLString(StaticHTMLWebView.html(source), baseURL: nil)
-        try await wait { probe.finished }
+        try await wait("styled", failure: { probe.failure }) { probe.finished }
         let body = try await view.evaluateJavaScript("document.body.innerText") as? String
         XCTAssertTrue(body?.contains("café 東京") == true)
         XCTAssertTrue(body?.contains("Rendered cell") == true)
@@ -269,7 +278,7 @@ import RemoteFilesCore
         </body></html>
         """
         view.loadHTMLString(StaticHTMLWebView.html(source), baseURL: nil)
-        try await wait { probe.finished }
+        try await wait("defenses", failure: { probe.failure }) { probe.finished }
         try await Task.sleep(for: .milliseconds(300))
         XCTAssertEqual(probe.scripts, 0)
         XCTAssertEqual(probe.resources, 0)
@@ -290,14 +299,21 @@ import RemoteFilesCore
             onFailure: { XCTFail($0) }, openExternalLink: { _ in XCTFail("No automatic browser navigation") }))
         window.makeKeyAndVisible()
         defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
-        try await wait { finished }
+        try await wait("script-only entry", failure: { nil }) { finished }
         XCTAssertTrue(needsScripts, "An app entry file must not be presented as a successfully rendered blank page")
     }
 }
 
 @MainActor private final class SVGAttackProbe: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKURLSchemeHandler {
     var finished = false, scripts = 0, resources = 0
+    /// Why the main navigation ended without finishing, so a failed load is not reported as a slow one.
+    var failure: String?
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finished = true }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failure = "navigation failed: \(error)" }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        failure = "provisional navigation failed: \(error)"
+    }
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { failure = "the WebContent process ended" }
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) { scripts += 1 }
     func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
         resources += 1

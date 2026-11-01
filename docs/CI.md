@@ -418,6 +418,26 @@ Each one was investigated before any rerun:
   Vision's first model compile used the index's whole 30-second budget. The boundary test
   now compiles the model once before its timed build. Virtual CI Macs use the fast model
   and were unaffected.
+- **Static HTML defenses.** After #52 merged, main's
+  [run 41280678027](https://github.com/eyeb0l/RemoteFiles/actions/runs/41280678027)
+  failed `testHTMLCannotRunDocumentScriptsOrLoadResources`: its document did not finish
+  within the test's 15-second wait, although its DOM was readable afterwards and the next two
+  HTML tests passed in 1.6 and 1.3 seconds. The host log shows a second WebContent process
+  starting 12.6 seconds into the test; the attack document's cross-site frame is the likely
+  reason, though the log does not prove it. Launches of that length were recorded on these
+  runners before. The wait was a hang guard, not the production deadline, which
+  `HTMLContentView` keeps at 15 seconds and the UI lane's HTML journey still exercises. The
+  three `HTMLDisplayTests` now wait the same 60-second
+  cold-start bound as the SVG defenses, print `HTML DISPLAY TIMING`, and report a failed or
+  terminated navigation by reason instead of as a timeout.
+- **Search helper allowance.** The same run failed
+  `testBoundedSearchExecClosesOnOutputOverflowCancellationAndDeadlineWithoutClosingSFTP`
+  with an uncaught `timedOut` from its final command. The fixture `sshd` log shows
+  authentication taking 2.5 seconds and `printf` 1.5 seconds; the Python search helper then
+  missed the test's 5-second allowance, which production never uses: `serverSearch` allows
+  the 30-second search time limit plus 16 seconds. The output-bound and helper commands now
+  get that production allowance. The cancellation and deadline commands keep their own
+  5- and 1-second bounds and their 2- and 3-second return-time assertions.
 
 HTML reading-position timeouts were seen only while several local simulator jobs ran;
 those methods took 75–189 seconds each. Hosted runs took at most 5.1 seconds, so their
