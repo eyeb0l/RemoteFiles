@@ -136,7 +136,8 @@ final class RemoteFilesUITests: XCTestCase {
             app.buttons["Share Original"].tap()
             let popup = app.popovers.firstMatch
             XCTAssertTrue(popup.waitForExistence(timeout: 15), app.debugDescription)
-            XCTAssertTrue(popup.cells["Save to Files"].waitForExistence(timeout: 5))
+            // A separate system process fills the sheet's activity list; it can start slowly on loaded runners.
+            XCTAssertTrue(popup.cells["Save to Files"].waitForExistence(timeout: 30), app.debugDescription)
             let dismiss = app.otherElements["PopoverDismissRegion"].firstMatch
             XCTAssertTrue(dismiss.exists)
             attachScreenshot("Offline original native share sheet")
@@ -173,7 +174,8 @@ final class RemoteFilesUITests: XCTestCase {
         app.terminate(); app.launch()
         XCTAssertTrue(library.waitForExistence(timeout: 15)); library.tap()
         XCTAssertTrue(file.waitForExistence(timeout: 10)); file.tap()
-        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].firstMatch.waitForExistence(timeout: 15))
+        // The first read of the saved copy in a fresh process has no app deadline; give it a cold-start bound.
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].firstMatch.waitForExistence(timeout: 60), app.debugDescription)
         app.navigationBars.buttons["Offline Files"].tap()
         XCTAssertTrue(file.waitForExistence(timeout: 5)); file.press(forDuration: 1)
         app.buttons["Remove Offline Copy"].tap()

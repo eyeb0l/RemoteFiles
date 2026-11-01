@@ -461,3 +461,39 @@ Each one was investigated before any rerun:
 HTML reading-position timeouts were seen only while several local simulator jobs ran;
 those methods took 75–189 seconds each. Hosted runs took at most 5.1 seconds, so their
 15-second waits are unchanged. No lane budget, allowed skip or retry changed.
+
+## Offline reader and share sheet waits
+
+On 1 November, [PR #56](https://github.com/eyeb0l/RemoteFiles/pull/56) failed UI shard 1
+in all three attempts of [run 41335073198](https://github.com/eyeb0l/RemoteFiles/actions/runs/41335073198),
+each time in a different method that the PR did not touch. Each was investigated
+before a rerun:
+
+- **Offline copy after relaunch.** In attempt 2,
+  `testOfflineCopyOpensAfterDisconnectAndRelaunchAndCanBeRemoved` relaunched the app,
+  opened the saved copy, and still found `Opening saved copy…` when its 15-second wait
+  ended. The UI hierarchy captured at the failure showed no error. Earlier opens of the
+  same copy in that run took 1–3 seconds. Reading a saved copy (lease, fingerprint check,
+  text preview and heading index) has no app deadline, so the test's wait was the only
+  bound, and the first read in a fresh process paid that process's cold start on a loaded
+  runner. That wait is now 60 seconds, the cold-start bound the offline lifecycle test
+  already gives its first reader. The other offline reader waits stay at 15 seconds.
+- **Share sheet contents.** In the same attempt, `testOfflineShareOriginalPresentsAndCancels`
+  found the share popover within 1 second, but its `ShareSheet.RemoteContainerView` was
+  still empty when the 5-second wait for `Save to Files` ended. That list comes from a
+  system service outside the app. The cell wait is now 30 seconds; the popover's own
+  15-second wait is unchanged.
+- **App termination.** Attempt 1's `testDemoAudioAndVideoHaveNativePlaybackControls`
+  finished its steps in 55 seconds, then XCTest's own `Tear Down` took 131 seconds to
+  terminate the app and exceeded the 180-second method allowance. Its spindump
+  recorded no samples. In attempt 3, launching
+  `testKeyDetailsShowFingerprintAndPublicKeyWithoutAddedHyphens` spent 65 seconds
+  terminating the previous instance and failed with `Failed to terminate`. The app
+  registers no termination work (no `willTerminate` handler or background task), so the
+  test code cannot shorten these steps. Treat a termination failure as runner
+  infrastructure once its log shows this pattern.
+
+Neither wait change was reproduced locally: pausing the app or the simulator's sharing
+services with `SIGSTOP` made XCTest's queries block until they resumed, and then
+succeed, rather than letting the wait run out. Both changed methods pass locally. No lane
+budget, allowed skip or retry changed.
