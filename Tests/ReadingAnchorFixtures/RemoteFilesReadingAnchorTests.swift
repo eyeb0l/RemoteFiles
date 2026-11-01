@@ -1,11 +1,21 @@
 import XCTest
 
+extension XCUIApplication {
+    /// Launches without Xcode's synchronous console mirroring of unified logs, which can block
+    /// the app's main thread while it answers XCTest queries; see RemoteFilesUITests.swift.
+    static func underTest() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["OS_ACTIVITY_DT_MODE"] = "NO"
+        return app
+    }
+}
+
 /// Dedicated owned-fixture UI lane. Observe the actual RemoteInlineImage button frame;
 /// do not use these accessibility queries as rendering-performance instrumentation.
 @MainActor final class ReadingAnchorUITests: XCTestCase {
     private func roundTrip(arguments: [String]) throws {
         continueAfterFailure = false
-        let app = XCUIApplication(); app.launchArguments = arguments; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = arguments; app.launch()
         let rendered = app.scrollViews["Rendered Markdown document"]
         XCTAssertTrue(rendered.waitForExistence(timeout: 15))
         let image = app.buttons["Open image anchor.png"]

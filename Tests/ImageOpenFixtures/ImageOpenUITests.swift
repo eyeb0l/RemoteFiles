@@ -1,8 +1,18 @@
 import XCTest
 
+extension XCUIApplication {
+    /// Launches without Xcode's synchronous console mirroring of unified logs, which can block
+    /// the app's main thread while it answers XCTest queries; see RemoteFilesUITests.swift.
+    static func underTest() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["OS_ACTIVITY_DT_MODE"] = "NO"
+        return app
+    }
+}
+
 @MainActor final class ImageOpenUITests: XCTestCase {
     private func app(exists: Bool = false) -> XCUIApplication {
-        let app = XCUIApplication()
+        let app = XCUIApplication.underTest()
         app.launchArguments = ["--missing-image-fixture"] + (exists ? ["--image-exists"] : [])
         app.launch()
         return app

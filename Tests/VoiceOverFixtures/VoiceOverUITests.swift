@@ -1,8 +1,18 @@
 import XCTest
 
+extension XCUIApplication {
+    /// Launches without Xcode's synchronous console mirroring of unified logs, which can block
+    /// the app's main thread while it answers XCTest queries; see RemoteFilesUITests.swift.
+    static func underTest() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["OS_ACTIVITY_DT_MODE"] = "NO"
+        return app
+    }
+}
+
 @MainActor final class VoiceOverChecks: XCTestCase {
     func testLongJSONAndSVGHaveReadOnlyVoiceOverPreviews() throws {
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         let json = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Long lines.json,")).firstMatch
@@ -119,7 +129,7 @@ import XCTest
     }
     func testDemoReaderVoiceOverJourney() throws {
         continueAfterFailure = true
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]
         try withVoiceOver {
             // Launch with VoiceOver already enabled so the initial screen change
             // establishes focus. Enabling it on an idle Home screen can leave
@@ -171,7 +181,7 @@ import XCTest
     }
     func testImageViewerFailureRetryShareAndReturn() throws {
         continueAfterFailure = true
-        let app = XCUIApplication(); app.launchArguments = ["--voiceover-image-fixture"]
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--voiceover-image-fixture"]
         try withVoiceOver {
             // Keep VoiceOver enabled through launch, then explicitly focus the
             // asynchronously loaded image before querying speech, as for JSON/SVG.
@@ -216,7 +226,7 @@ import XCTest
         }
     }
     func testTableCellLinkAndFollowingLinkRemainAccessible() throws {
-        let app = XCUIApplication()
+        let app = XCUIApplication.underTest()
         app.launchArguments = ["--voiceover-table-links-fixture"]
         app.launch()
         XCTAssertTrue(app.staticTexts["Local Markdown heading"].waitForExistence(timeout: 10))
@@ -230,7 +240,7 @@ import XCTest
         }
     }
     func testCachedRefreshingAndFailureSpeech() throws {
-        let app = XCUIApplication()
+        let app = XCUIApplication.underTest()
         app.launchArguments = ["--voiceover-stale-fixture", "--voiceover-delayed-fixture"]
         try withVoiceOver {
             app.launch()
@@ -247,7 +257,7 @@ import XCTest
         }
     }
     func testRecentRemovalVoiceOverActionDiscoveryAndSwipeControlKeepHomeAccessible() throws {
-        let app = XCUIApplication(); app.launchArguments = ["--small-features-fixture", "--feature-case=vo-recents"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--small-features-fixture", "--feature-case=vo-recents"]; app.launch()
         let recent = app.buttons["recent-F3000000-0000-0000-0000-000000000001"]
         XCTAssertTrue(recent.waitForExistence(timeout: 15))
         try withVoiceOver {
@@ -283,7 +293,7 @@ import XCTest
         }
     }
     func testNestedDisconnectVoiceOverReturnsFocusToHome() throws {
-        let app = XCUIApplication(); app.launchArguments = ["--small-features-fixture", "--feature-case=vo-disconnect", "--feature-slow-read"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--small-features-fixture", "--feature-case=vo-disconnect", "--feature-slow-read"]; app.launch()
         XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 15))
         try withVoiceOver {
             try focus("Projects", name: "fixture Home", limit: 35)
@@ -301,7 +311,7 @@ import XCTest
         }
     }
     func testPublicKeyConfirmationVoiceOverAccountKeyCancelAndResult() throws {
-        let app = XCUIApplication(); app.launchArguments = ["--small-features-fixture", "--feature-case=vo-key-install"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--small-features-fixture", "--feature-case=vo-key-install"]; app.launch()
         XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 15))
         app.buttons["Settings"].tap(); app.buttons["SSH Keys"].tap()
         let identity = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Fixture Public Identity")).firstMatch
