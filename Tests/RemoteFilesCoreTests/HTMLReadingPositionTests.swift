@@ -149,6 +149,26 @@ import RemoteFilesCore
         StaticHTMLWebView.dismantleUIView(fixture.view, coordinator: coordinator)
     }
 
+    /// The reader runs the preview under the home indicator, so the page's end sits one
+    /// bottom inset beyond the plain content-minus-bounds offset.
+    func testBottomSafeAreaBecomesAnInsetThatRestorationCanReach() async throws {
+        let fixture = try await host(bottomSafeArea: 50)
+        addTeardownBlock { @MainActor in fixture.close() }
+        let inset = fixture.view.safeAreaInsets.bottom
+        XCTAssertGreaterThanOrEqual(inset, 50)
+        XCTAssertEqual(fixture.view.scrollView.contentInset.bottom, inset)
+        XCTAssertEqual(fixture.view.scrollView.verticalScrollIndicatorInsets.bottom, inset)
+        let position = DocumentReadingPosition()
+        position.rendered = CGPoint(x: 0, y: 1_000_000)
+        let coordinator = coordinate(fixture.view, position: position)
+        try await waitUntil(timeout: .seconds(30)) { coordinator.finishedLoading }
+        let scroll = fixture.view.scrollView
+        try await waitUntil {
+            abs(scroll.contentOffset.y - (scroll.contentSize.height - scroll.bounds.height + inset)) < 1
+        }
+        StaticHTMLWebView.dismantleUIView(fixture.view, coordinator: coordinator)
+    }
+
     func testCoordinatorRestoresPersistedPassageAtNewWidthAndAfterLiveResize() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
@@ -395,7 +415,7 @@ import RemoteFilesCore
         }
     }
 
-    private func host(width: CGFloat = 360) async throws -> Fixture {
+    private func host(width: CGFloat = 360, bottomSafeArea: CGFloat? = nil) async throws -> Fixture {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previous = scene.windows.first { $0.isKeyWindow }
         let window = UIWindow(windowScene: scene)
@@ -407,6 +427,12 @@ import RemoteFilesCore
         controller.view.addSubview(view)
         window.rootViewController = controller
         window.makeKeyAndVisible()
+        if let bottomSafeArea {
+            // Overlap the bottom safe area, as the reader's preview does.
+            controller.additionalSafeAreaInsets.bottom = bottomSafeArea
+            view.frame.origin.y = window.bounds.height - view.frame.height
+            controller.view.layoutIfNeeded()
+        }
         view.layoutIfNeeded()
         return Fixture(view: view, window: window, previous: previous)
     }
