@@ -69,11 +69,9 @@ actor OfflineFolderDownload {
     private func walk() async throws -> PreparedOfflineFolder {
         try Task.checkCancellation()
         try OfflineFileStore.protectDirectory(directory)
-        let boundary = try await service.resolveEntry(profile: profile, path: profile.startingDirectory)
-        try Task.checkCancellation()
-        guard boundary.kind == .directory, OfflineFolderPin.validPath(boundary.path), RemoteResourcePath.contains(path, in: boundary.path) else {
-            throw RemoteDocumentLinkError.outsideConnection
-        }
+        // The chosen folder is the boundary, wherever it is. Each listing must report exactly
+        // the path requested, so a folder replaced by a symbolic link is rejected, and every
+        // member must stay inside the chosen folder.
         var result = PreparedOfflineFolder(), state = OfflineFolderProgress()
         var queue: [(String, Int)] = [(path, 0)], index = 0, scanned = 0, bytes = 0
         var seen = Set<Data>([Data(path.utf8)])

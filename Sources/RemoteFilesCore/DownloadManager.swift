@@ -230,14 +230,8 @@ public final class DownloadManager {
                 }
                 let remote: RemoteEntry
                 if let root = item.canonicalRoot {
-                    // An index can cover an ancestor or an unrelated folder. Its exact
-                    // canonical paths supplement the connection's download boundary.
-                    let connectionRoot = try await service.resolveEntry(profile: item.profile, path: item.profile.startingDirectory)
-                    try Task.checkCancellation()
-                    guard connectionRoot.kind == .directory,
-                          RemoteResourcePath.contains(item.path, in: connectionRoot.path) else {
-                        throw OriginalFileExportError.outsideRoot
-                    }
+                    // A saved-index result stays within the index's exact canonical root,
+                    // wherever that index was built.
                     if let managed = service as? any ManagedRemoteFileDownloading {
                         remote = try await managed.downloadManagedSnapshotFile(profile: item.profile, path: item.path,
                             canonicalRoot: root, destination: target, limit: limit, progress: progress)
@@ -247,10 +241,10 @@ public final class DownloadManager {
                     }
                 } else if let managed = service as? any ManagedRemoteFileDownloading {
                     remote = try await managed.downloadManagedFile(profile: item.profile, path: item.path,
-                        allowedRoot: item.profile.startingDirectory, destination: target, limit: limit, progress: progress)
+                        allowedRoot: RemotePath.parent(of: item.path), destination: target, limit: limit, progress: progress)
                 } else {
                     remote = try await service.downloadFile(profile: item.profile, path: item.path,
-                        allowedRoot: item.profile.startingDirectory, destination: target, limit: limit, progress: progress)
+                        allowedRoot: RemotePath.parent(of: item.path), destination: target, limit: limit, progress: progress)
                 }
                 try Task.checkCancellation()
                 guard remote.kind == .file else { throw OriginalFileExportError.notRegularFile }
@@ -265,10 +259,16 @@ public final class DownloadManager {
                     try self.finalizeDownload(item.id)
                 }
             } catch {
+                // Describe a moved or redirected selection in terms of the chosen file. The
+                // original error still reaches onFailure, which treats it as a security event.
+                let shown: Error = switch error {
+                case RemoteDocumentLinkError.outsideConnection, RemoteResourceError.outsideDocument: OriginalFileExportError.outsideRoot
+                default: error
+                }
                 if let index = self.index(item.id),
                    self.items[index].state == .downloading || self.items[index].state == .pendingFinalization {
                     self.items[index].state = error is CancellationError ? .cancelled : .failed
-                    self.items[index].message = error is CancellationError ? nil : error.localizedDescription
+                    self.items[index].message = error is CancellationError ? nil : shown.localizedDescription
                     if !(error is CancellationError) { context.onFailure?(error, item.profile) }
                 }
             }

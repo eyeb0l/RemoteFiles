@@ -83,18 +83,32 @@ public struct RemoteEntry: Identifiable, Hashable, Sendable {
         self.headingFragment = nil; self.openingPage = nil; self.link = link
     }
     public func openingHeading(_ fragment: String) -> RemoteEntry {
-        RemoteEntry(copying: self, headingFragment: fragment, openingPage: nil)
+        RemoteEntry(copying: self, headingFragment: fragment, openingPage: nil, canonicalRoot: canonicalRoot)
     }
     /// A one-based page; values outside 1...Int32.max are ignored rather than clamped.
     public func openingPage(_ page: Int?) -> RemoteEntry {
         RemoteEntry(copying: self, headingFragment: headingFragment,
-                    openingPage: page.flatMap { (1...Int(Int32.max)).contains($0) ? $0 : nil })
+                    openingPage: page.flatMap { (1...Int(Int32.max)).contains($0) ? $0 : nil }, canonicalRoot: canonicalRoot)
     }
-    private init(copying entry: RemoteEntry, headingFragment: String?, openingPage: Int?) {
+    private init(copying entry: RemoteEntry, headingFragment: String?, openingPage: Int?, canonicalRoot: String?) {
         name = entry.name; path = entry.path; kind = entry.kind; size = entry.size; modifiedAt = entry.modifiedAt
         navigationRoot = entry.navigationRoot; exportFilename = entry.exportFilename; link = entry.link
-        canonicalRoot = entry.canonicalRoot
+        self.canonicalRoot = canonicalRoot
         self.headingFragment = headingFragment; self.openingPage = openingPage
+    }
+    /// The boundary for a file the user explicitly chose to download, keep offline or save:
+    /// a saved-search result keeps its index's canonical root, and anything else its own
+    /// folder. Transports still canonicalize both paths, so a path or folder replaced by a
+    /// symbolic link to somewhere else is rejected. Relative document links and images keep
+    /// the connection's starting folder instead; they are chosen by a document, not the user.
+    public var selectionRoot: String { canonicalRoot ?? RemotePath.parent(of: path) }
+    /// This entry for a download, Keep Offline or Save Original: bounded by `selectionRoot`
+    /// through the exact canonical contract saved-search results use. The root and the file
+    /// must still resolve to exactly these paths, so a parent folder replaced by a symbolic
+    /// link after listing is rejected rather than moving the boundary with it. Pass it only
+    /// to transfers: readers use `canonicalRoot` to confine previews and their resources.
+    public var selectedForTransfer: RemoteEntry {
+        RemoteEntry(copying: self, headingFragment: headingFragment, openingPage: openingPage, canonicalRoot: selectionRoot)
     }
     /// The resolved target of a symbolic link, if any.
     public var linkTarget: RemoteEntry? {

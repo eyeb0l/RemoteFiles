@@ -33,6 +33,40 @@ final class OriginalFileExportTests: XCTestCase {
         (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
     }
 
+    /// Chosen files export within their own folder, which the transport resolves first. Every
+    /// folder the demo lists must therefore resolve as a folder, or demo exports fail.
+    func testEveryDemoFolderResolvesAsAFolder() async throws {
+        let demo = DemoRemoteFileService(delayNanoseconds: 0)
+        let profile = ConnectionProfile(name: "Demo", host: "demo.invalid", username: "demo", identityID: UUID(), startingDirectory: "/Projects")
+        var queue = ["/Projects"], seen = Set<String>(), checked = 0
+        while let folder = queue.popLast() {
+            guard seen.insert(folder).inserted else { continue }
+            let resolved = try await demo.resolveEntry(profile: profile, path: folder)
+            XCTAssertEqual(resolved.kind, .directory, folder); XCTAssertEqual(resolved.path, folder)
+            checked += 1
+            let listing = try await demo.listDirectory(profile: profile, path: folder)
+            // Links resolve elsewhere; only real child folders are walked.
+            queue += listing.entries.filter { $0.kind == .directory }.map(\.path)
+        }
+        XCTAssertGreaterThanOrEqual(checked, 6)
+    }
+
+    func testDemoThousandFilesReportSavesOriginalAndKeepsOffline() async throws {
+        let demo = DemoRemoteFileService(delayNanoseconds: 0)
+        let profile = ConnectionProfile(name: "Demo", host: "demo.invalid", username: "demo", identityID: UUID(), startingDirectory: "/Projects")
+        let listing = try await demo.listDirectory(profile: profile, path: "/Projects/Thousand files")
+        let report = try XCTUnwrap(listing.entries.first)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exporter = RemoteOriginalExporter(service: demo, directory: directory.appendingPathComponent("exports"))
+        let prepared = try await exporter.prepare(profile: profile, entry: report.selectedForTransfer, allowedRoot: report.selectionRoot)
+        XCTAssertEqual(prepared.filename, report.name)
+        await exporter.release(prepared.id)
+        let store = try OfflineFileStore(directory: directory.appendingPathComponent("offline"))
+        let pin = try await store.pin(profile: profile, entry: report.selectedForTransfer, allowedRoot: report.selectionRoot, service: demo)
+        XCTAssertEqual(pin.path, report.path)
+    }
+
     func testExactTextAndBinaryBytesUseOriginalNameAndExtension() async throws {
         let cases: [(String, Data)] = [
             ("Notes — 東京.txt", Data(" \tCafé 東京 ✨\r\nsecond line  \r\n\t".utf8)),

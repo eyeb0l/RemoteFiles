@@ -73,7 +73,7 @@ public actor DemoRemoteFileService: RemoteFileService {
                 .init(name: "Roadmap notes.md", path: path + "/Roadmap notes.md", kind: .file, size: UInt64(Self.report.utf8.count))
             ])
         }
-        if path == "/Projects/Thousand files" {
+        if path == Self.thousandFilesFolder {
             return DirectorySnapshot(path: path, entries: (1...1000).map { RemoteEntry(name: "Report \($0).md", path: path + "/Report \($0).md", kind: .file, size: 8192) })
         }
         var entries: [RemoteEntry] = [
@@ -134,7 +134,8 @@ public actor DemoRemoteFileService: RemoteFileService {
     }
     public func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
         try await pause()
-        if path == "." || path == "/Projects" || path == Self.searchSampleFolder || path.hasSuffix("/Reports") || path.hasSuffix("/Reports/2026") || path.hasSuffix("/Empty") {
+        if path == "." || path == "/Projects" || path == Self.searchSampleFolder || path == Self.thousandFilesFolder ||
+            path.hasSuffix("/Reports") || path.hasSuffix("/Reports/2026") || path.hasSuffix("/Empty") {
             let canonical = path == "." ? "/Projects" : path
             return RemoteEntry(name: RemotePath.name(of: canonical), path: canonical, kind: .directory)
         }
@@ -203,6 +204,7 @@ public actor DemoRemoteFileService: RemoteFileService {
     public func disconnect() { generation += 1 }
 
     private static let searchSampleFolder = "/Projects/Search samples"
+    private static let thousandFilesFolder = "/Projects/Thousand files"
     private static let searchSampleNames = ["Text sample.pdf", "Scanned sample.pdf", "Image sample.png"]
     private static func searchSampleFile(_ path: String) -> URL? {
         let resource: String

@@ -21,7 +21,7 @@ While listing a folder, RemoteFiles looks up where its symbolic links point. It 
 - **Broken link:** the target is missing or the link is part of a loop. Tapping it checks the server again, so a repaired link still opens.
 - **Unresolved link:** shown as **Symbolic link** and resolved when tapped. This covers permission errors, transport failures, and links after the first 256 in one folder.
 
-Links open their canonical target, so the path bar shows where you actually are. Like the listing itself, a resolved target can become stale; **Refresh** lists the folder and its links again. Browsing is not confined to the starting folder, but document links, images and original-file export keep their canonical folder checks.
+Links open their canonical target, so the path bar shows where you actually are. Like the listing itself, a resolved target can become stale; **Refresh** lists the folder and its links again. Browsing is not confined to the starting folder, and neither are files and folders you choose to download, keep offline or save: each stays within its own canonical folder. Relative document links and Markdown images, which a document chooses rather than you, keep the starting-folder check.
 
 ## Sorting
 

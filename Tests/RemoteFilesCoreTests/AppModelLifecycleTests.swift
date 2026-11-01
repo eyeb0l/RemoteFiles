@@ -20,9 +20,17 @@ private actor BackgroundExportService: RemoteFileService {
         .init(path: path, entries: [])
     }
     func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
-        .init(name: RemotePath.name(of: path), path: path, kind: .file)
+        // Fixture paths: names with an extension are files, the rest are folders.
+        .init(name: RemotePath.name(of: path), path: path, kind: RemotePath.name(of: path).contains(".") ? .file : .directory)
     }
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { bytes }
+    /// Chosen files use the exact canonical contract; like the real transports, confine the
+    /// path to its root, then transfer exactly as an ordinary download.
+    func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL,
+                              limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        guard RemoteResourcePath.contains(path, in: canonicalRoot) else { throw RemoteDocumentLinkError.outsideConnection }
+        return try await downloadFile(profile: profile, path: path, allowedRoot: canonicalRoot, destination: destination, limit: limit)
+    }
     func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String,
                       destination: URL, limit: Int) async throws -> RemoteEntry {
         downloads += 1

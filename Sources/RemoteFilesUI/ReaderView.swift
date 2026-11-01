@@ -115,10 +115,10 @@ struct ReaderView: View {
                 } label: { Label("Document actions", systemImage: "ellipsis.circle") }
             }
         }
-        .modifier(OriginalFileExportControl(profile: profile, entry: entry, allowedRoot: profile.startingDirectory,
+        .modifier(OriginalFileExportControl(profile: profile, entry: entry.selectedForTransfer, allowedRoot: entry.selectionRoot,
                                             exporter: model.originalExporter, isEnabled: model.isForeground && !model.isDisconnecting,
                                             onError: { error in
-                                                model.handle(error, profile: profile)
+                                                model.handleTransferFailure(error, profile: profile)
                                                 return model.sheet != nil || model.errorMessage != nil
                                             }))
         .alert("Couldn’t open link", isPresented: Binding(get: { linkError != nil }, set: { if !$0 { linkError = nil } })) {
