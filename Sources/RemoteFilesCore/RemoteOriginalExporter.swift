@@ -19,7 +19,7 @@ public enum OriginalFileExportError: LocalizedError, Sendable {
         case .alreadyPreparing: return "Finish or cancel the current export before preparing another file."
         case .invalidFilename: return "This filename cannot be saved safely on this device."
         case .notRegularFile: return "Only regular files can be exported."
-        case .outsideRoot: return "This file resolves outside the connection’s starting folder."
+        case .outsideRoot: return "This file or its folder has moved or now leads somewhere else. Refresh the folder and choose it again."
         case .timedOut: return "Preparing this export timed out. Try again."
         case .tooLarge(let limit):
             return "Too Large to Export. The limit is \(ByteCountFormatter.string(fromByteCount: Int64(limit), countStyle: .file))."

@@ -8,8 +8,9 @@ including a selected symlink alias after its preview resolves to a canonical fil
 Unsupported preview types and empty files can still be exported.
 
 Only regular files can export, including files outside the connection’s starting
-folder. Each export is confined to the chosen file’s canonical folder, so a path
-replaced by a symbolic link leading elsewhere is rejected. Saved search results
+folder. The file and its folder must still resolve to exactly the canonical paths
+you chose, so a file or folder replaced by a symbolic link leading elsewhere is
+rejected. Saved search results
 must remain inside their original canonical index root instead.
 The SFTP transport checks REALPATH for the configured root and target, rejects
 escaping symlinks, rechecks stable root/target paths after opening, reads metadata

@@ -172,7 +172,7 @@ final class AppModel {
     func enqueueDownload(profile: ConnectionProfile, entry: RemoteEntry) {
         guard isForeground, !isDisconnecting, disconnectWork == nil, let downloads else { return }
         do {
-            try downloads.enqueue(profile: profile, entry: entry, service: demo ? demoDownloadTransport : downloadTransport,
+            try downloads.enqueue(profile: profile, entry: entry.selectedForTransfer, service: demo ? demoDownloadTransport : downloadTransport,
                 onFailure: { [weak self] error, profile in self?.handleDownloadFailure(error, profile: profile) })
             sheet = .downloads
         }
@@ -188,7 +188,7 @@ final class AppModel {
     }
     private func handleDownloadFailure(_ error: Error, profile: ConnectionProfile) {
         guard isForeground, isSecurityError(error) else { return }
-        handle(error, profile: profile)
+        handleTransferFailure(error, profile: profile)
     }
     func foregroundDownloads() { downloads?.setForeground(true, sceneID: downloadSceneRegistration?.id) }
     private func loadOfflineLibrary() async {
@@ -232,7 +232,7 @@ final class AppModel {
                             await self?.updateFolderPinProgress(progress, token: token)
                         }
                 } else {
-                    _ = try await store.pin(profile: profile, entry: entry, allowedRoot: entry.selectionRoot,
+                    _ = try await store.pin(profile: profile, entry: entry.selectedForTransfer, allowedRoot: entry.selectionRoot,
                                             service: transport, operationID: token) { [weak self] progress in
                         await self?.updatePinProgress(progress, token: token)
                     }
@@ -240,14 +240,14 @@ final class AppModel {
             } catch is CancellationError { }
             catch {
                 if !Task.isCancelled, revision == sessionRevision, isForeground {
-                    if isSecurityError(error) { handle(error, profile: profile) }
+                    if isSecurityError(error) { handleTransferFailure(error, profile: profile) }
                     else if let remote = error as? RemoteFileError {
                         switch remote {
                         case .connectionEnded, .timedOut, .unavailable: handle(error, profile: profile)
                         default: break
                         }
                     }
-                    if sheet == nil || sheet?.id == "offlineFiles" { errorMessage = error.localizedDescription }
+                    if sheet == nil || sheet?.id == "offlineFiles" { errorMessage = Self.transferMessage(for: error) }
                 }
             }
             // A cancelled future-backed transfer can still be draining. Keep the UI slot until
@@ -420,6 +420,20 @@ final class AppModel {
             if !demo { try await metadataStore.removeRecent(id: location.id) }
             metadata.recents.removeAll { $0.id == location.id }
         } catch { errorMessage = "Couldn’t remove this recent entry. \(error.localizedDescription)" }
+    }
+    /// Escalates like `handle`, but describes a chosen file or folder that moved or now leads
+    /// elsewhere in its own terms. The document-link message would blame the starting folder,
+    /// which no longer bounds downloads, Keep Offline or Save Original.
+    func handleTransferFailure(_ error: Error, profile: ConnectionProfile) {
+        handle(error, profile: profile)
+        if errorMessage == error.localizedDescription { errorMessage = Self.transferMessage(for: error) }
+    }
+    static func transferMessage(for error: Error) -> String {
+        switch error {
+        case RemoteDocumentLinkError.outsideConnection, RemoteResourceError.outsideDocument:
+            return OriginalFileExportError.outsideRoot.localizedDescription
+        default: return error.localizedDescription
+        }
     }
     func handle(_ error: Error, profile: ConnectionProfile) {
         guard !isDisconnecting else { return }

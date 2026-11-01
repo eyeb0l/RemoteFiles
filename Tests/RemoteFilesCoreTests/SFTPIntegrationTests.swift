@@ -779,24 +779,54 @@ final class SFTPIntegrationTests: XCTestCase {
             XCTAssertNil(manager.activeID)
             return id
         }
-        let downloaded = try await download(notes)
+        let downloaded = try await download(notes.selectedForTransfer)
         XCTAssertEqual(try Data(contentsOf: manager.completedURL(downloaded)), Data("outside bytes".utf8))
         let escape = RemoteEntry(name: "escape.txt", path: folder.path + "/escape.txt", kind: .file)
-        let refused = try await download(escape)
+        let refused = try await download(escape.selectedForTransfer)
         XCTAssertEqual(manager.items.first { $0.id == refused }?.state, .failed, "A link out of the chosen file's folder must not download")
 
         let store = try OfflineFileStore(directory: local.appendingPathComponent("offline"))
-        let pin = try await store.pin(profile: profile, entry: notes, allowedRoot: notes.selectionRoot, service: service)
+        let pin = try await store.pin(profile: profile, entry: notes.selectedForTransfer, allowedRoot: notes.selectionRoot, service: service)
         let lease = try await store.lease(pin.id)
         XCTAssertEqual(try Data(contentsOf: lease.url), Data("outside bytes".utf8))
         do {
-            _ = try await store.pin(profile: profile, entry: escape, allowedRoot: escape.selectionRoot, service: service)
+            _ = try await store.pin(profile: profile, entry: escape.selectedForTransfer, allowedRoot: escape.selectionRoot, service: service)
             XCTFail("Keep Offline must reject a link out of the chosen file's folder")
-        } catch OriginalFileExportError.outsideRoot { }
+        } catch { XCTAssertTrue(Self.isBoundaryRejection(error), "\(error)") }
         let saved = try await store.pinFolder(profile: profile, path: folder.path, service: service)
         XCTAssertEqual(saved.fileIDs.count, 2, "The folder's two regular files are saved")
         XCTAssertEqual(saved.skippedLinks, 1, "The escaping link is skipped, not followed")
+
+        // The chosen file's folder is replaced by a link to another folder holding a file of
+        // the same name. The boundary must not move with the redirect.
+        let moved = fixture.files + "/moved-" + UUID().uuidString
+        defer { try? fm.removeItem(atPath: moved); try? fm.removeItem(atPath: outside + "-original") }
+        try fm.createDirectory(atPath: moved, withIntermediateDirectories: true)
+        try Data("redirected bytes".utf8).write(to: URL(fileURLWithPath: moved + "/notes.txt"))
+        try fm.moveItem(atPath: outside, toPath: outside + "-original")
+        try fm.createSymbolicLink(atPath: outside, withDestinationPath: moved)
+        let redirected = try await download(notes.selectedForTransfer)
+        XCTAssertEqual(manager.items.first { $0.id == redirected }?.state, .failed, "A download must not follow a redirected folder")
+        XCTAssertThrowsError(try manager.completedURL(redirected))
+        do {
+            _ = try await store.pin(profile: profile, entry: notes.selectedForTransfer, allowedRoot: notes.selectionRoot, service: service)
+            XCTFail("Keep Offline must not follow a redirected folder")
+        } catch { XCTAssertTrue(Self.isBoundaryRejection(error), "\(error)") }
+        let exporter = RemoteOriginalExporter(service: service, directory: local.appendingPathComponent("exports"))
+        do {
+            let result = try await exporter.prepare(profile: profile, entry: notes.selectedForTransfer, allowedRoot: notes.selectionRoot)
+            await exporter.release(result.id)
+            XCTFail("Save Original must not follow a redirected folder")
+        } catch { XCTAssertTrue(Self.isBoundaryRejection(error), "\(error)") }
     }
+    /// A refused selection fails for a boundary reason: the exact canonical check reports the
+    /// security error `outsideConnection`, the exporter's own check `outsideRoot`.
+    private static func isBoundaryRejection(_ error: Error) -> Bool {
+        if case RemoteDocumentLinkError.outsideConnection = error { return true }
+        if case OriginalFileExportError.outsideRoot = error { return true }
+        return false
+    }
+
 
     func testSavedSearchResultsRejectRootRedirectsForTextMediaAndExports() async throws {
         let fixture = try Fixture(), stores = try Stores(fixture: fixture)
