@@ -162,6 +162,30 @@ private struct ReadingPositionFixture: View {
         try await assertRestored(window, to: CGPoint(x: 0, y: 600))
     }
 
+    /// Source runs under the home indicator, so its end lies one bottom inset past
+    /// content-minus-bounds. Returning to source must not tuck the last lines back under it.
+    func testSourceScrolledToTheEndRestoresClearOfTheHomeIndicator() async throws {
+        let state = ReadingFixtureState(); state.source = true
+        let window = try host(state)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await waitUntil { self.scrollView(window) is SourceTextView }
+        let view = try XCTUnwrap(scrollView(window) as? SourceTextView)
+        try await waitUntil { view.pendingOffset == nil && !view.restoreAnchor }
+        XCTAssertGreaterThan(view.adjustedContentInset.bottom, 0, "The source viewport must extend under the home indicator")
+        func end(_ view: UIScrollView) -> CGFloat {
+            view.contentSize.height - view.bounds.height + view.adjustedContentInset.bottom
+        }
+        view.setContentOffset(CGPoint(x: 0, y: end(view)), animated: false)
+        view.captureReadingAnchor()
+        try await waitUntil { abs(state.position.source.y - end(view)) < 2 }
+        try await switchMode(state, toSource: false, in: window)
+        try await switchMode(state, toSource: true, in: window)
+        try await waitUntil({
+            guard let restored = self.scrollView(window) as? SourceTextView, restored !== view else { return false }
+            return !restored.restoreAnchor && abs(restored.contentOffset.y - end(restored)) < 2
+        }, diagnostics: { self.describeScrollViews(window) })
+    }
+
     func testUnwrappedSourceAnchorClampsHorizontalOffsetAfterLayoutShrinks() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
