@@ -1,6 +1,8 @@
 #if os(iOS)
 import XCTest
 import Foundation
+import UIKit
+import UniformTypeIdentifiers
 import Crypto
 import NIOSSH
 import RemoteFilesCore
@@ -520,23 +522,48 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
     }
 
     func testOfflineShareItemRetainsTheFileWhenReaderAndPinAreRemoved() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let service = BackgroundExportService(), model = try AppModel(directory: directory, fileService: service)
-        await service.disconnect(); await model.load()
-        let profile = ConnectionProfile(name: "Offline share", host: "fixture.invalid", username: "reader", identityID: UUID(), startingDirectory: "/fixture")
-        model.pinOffline(profile: profile, entry: .init(name: "copy.txt", path: "/fixture/copy.txt", kind: .file))
-        let deadline = ContinuousClock.now + .seconds(5)
-        while model.pinningName != nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
-        let store = try XCTUnwrap(model.offlineStore), pin = try XCTUnwrap(model.offlinePins.first)
-        var lease: OfflineFileLease? = try await store.lease(pin.id)
-        let url = try XCTUnwrap(lease?.url)
-        var share: OfflineShareItem? = OfflineShareItem(lease: try XCTUnwrap(lease))
-        lease = nil
-        await model.removeOfflinePin(pin)
-        XCTAssertEqual(try Data(contentsOf: try XCTUnwrap(share?.lease.url)), Data("changed server bytes\r\n東京  ".utf8))
-        share = nil
-        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        // Both completing an activity and cancelling its UI must release cached providers.
+        for completed in [true, false] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let service = BackgroundExportService(), model = try AppModel(directory: directory, fileService: service)
+            await service.disconnect(); await model.load()
+            let profile = ConnectionProfile(name: "Offline share", host: "fixture.invalid", username: "reader", identityID: UUID(), startingDirectory: "/fixture")
+            model.pinOffline(profile: profile, entry: .init(name: "copy.txt", path: "/fixture/copy.txt", kind: .file))
+            let deadline = ContinuousClock.now + .seconds(5)
+            while model.pinningName != nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            let store = try XCTUnwrap(model.offlineStore), pin = try XCTUnwrap(model.offlinePins.first)
+            var lease: OfflineFileLease? = try await store.lease(pin.id)
+            weak var retainedLease = lease
+            let url = try XCTUnwrap(lease?.url)
+            var share: OfflineShareItem? = OfflineShareItem(lease: try XCTUnwrap(lease))
+            // Inspect the exact input supplied to UIKit, not UIResponder's unrelated
+            // activityItemsConfiguration property (which can legitimately be nil).
+            let (controller, provider) = try XCTUnwrap(share).makeActivity()
+            XCTAssertEqual(provider.suggestedName, "copy.txt")
+            lease = nil; share = nil
+            await model.removeOfflinePin(pin)
+            XCTAssertNotNil(retainedLease, "An active share must outlive both its reader and its pin")
+            let copy: (URL, Data) = try await withCheckedThrowingContinuation { continuation in
+                provider.loadFileRepresentation(forTypeIdentifier: UTType.data.identifier) { url, error in
+                    do {
+                        if let error { throw error }
+                        guard let url else { throw OfflineFileError.missing }
+                        continuation.resume(returning: (url, try Data(contentsOf: url)))
+                    } catch { continuation.resume(throwing: error) }
+                }
+            }
+            XCTAssertEqual(copy.1, Data("changed server bytes\r\n東京  ".utf8))
+            XCTAssertNotEqual(copy.0, url, "The receiving service gets a copy, not in-place access")
+            XCTAssertNotNil(retainedLease)
+            controller.completionWithItemsHandler?(nil, completed, nil, nil)
+            let completionDeadline = ContinuousClock.now + .seconds(5)
+            while retainedLease != nil, ContinuousClock.now < completionDeadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertNil(retainedLease)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+            // Cached completed activity controllers/providers must no longer own the file.
+            withExtendedLifetime((controller, provider)) {}
+        }
     }
 
     func testOfflineSaveCancelsOnBackgroundAndLeavesNoLateCopy() async throws {

@@ -1,19 +1,111 @@
 #if os(iOS)
 import SwiftUI
 import PDFKit
-import CoreTransferable
 import UniformTypeIdentifiers
 import RemoteFilesCore
 
-/// The item provider retains the lease while handing the file to the share service, even if
-/// navigation releases the reader. The receiving service gets a copy, not an in-place file.
-struct OfflineShareItem: Transferable {
-    let lease: OfflineFileLease
-    static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(exportedContentType: .data) { item in
-            SentTransferredFile(item.lease.url, allowAccessingOriginalFile: false)
-        }.suggestedFileName { $0.lease.url.lastPathComponent }
+/// Created only after Share Original is tapped. Cached toolbar/provider values must not
+/// retain an idle reader's lease; an actual share owns it until the activity completes.
+@MainActor final class OfflineShareItem: Identifiable {
+    let id = UUID()
+    private(set) var lease: OfflineFileLease?
+    init(lease: OfflineFileLease) { self.lease = lease }
+
+    func finish() { lease = nil }
+
+    func makeActivity() -> (controller: UIActivityViewController, provider: NSItemProvider) {
+        let provider = NSItemProvider()
+        provider.suggestedName = lease?.url.lastPathComponent
+        provider.registerFileRepresentation(forTypeIdentifier: UTType.data.identifier, fileOptions: [], visibility: .all) { [self] completion in
+            Task { @MainActor in
+                guard let lease else { completion(nil, false, OfflineFileError.missing); return }
+                // No open-in-place access: the service receives its own copy.
+                Task.detached {
+                    withExtendedLifetime(lease) { completion(lease.url, false, nil) }
+                }
+            }
+            return nil
+        }
+        let controller = UIActivityViewController(activityItemsConfiguration: UIActivityItemsConfiguration(itemProviders: [provider]))
+        controller.completionWithItemsHandler = { [self] _, _, _, _ in
+            Task { @MainActor in lease = nil }
+        }
+        return (controller, provider)
     }
+}
+
+/// Present natively from a reader anchor. UIKit requires an explicit popover source
+/// on iPad; using an unanchored activity controller as SwiftUI sheet content loses it.
+private struct OfflineSharePresenter: UIViewRepresentable {
+    let item: OfflineShareItem?
+    let onDismiss: (UUID) -> Void
+    func makeUIView(context: Context) -> AnchorView {
+        let view = AnchorView()
+        view.isUserInteractionEnabled = false
+        view.isAccessibilityElement = false
+        return view
+    }
+    func updateUIView(_ anchor: AnchorView, context: Context) {
+        anchor.item = item
+        anchor.onDismiss = onDismiss
+        anchor.schedulePresentation()
+    }
+
+    final class AnchorView: UIView, UIPopoverPresentationControllerDelegate {
+        var item: OfflineShareItem?
+        var onDismiss: ((UUID) -> Void)?
+        private var presentedID: UUID?
+        private var completedID: UUID?
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            schedulePresentation()
+        }
+        func schedulePresentation() {
+            // SwiftUI updates must not synchronously mutate presentation state.
+            DispatchQueue.main.async { [weak self] in self?.presentShare() }
+        }
+        private func presentShare() {
+            guard let item, item.id != completedID, presentedID == nil,
+                  var presenter = window?.rootViewController else { return }
+            // Present from this window's current modal controller, including when
+            // Offline Files is itself displayed in a sheet.
+            while let presented = presenter.presentedViewController { presenter = presented }
+            guard !presenter.isBeingDismissed, presenter.viewIfLoaded?.window != nil else { return }
+            presentedID = item.id
+            let controller = item.makeActivity().controller
+            let completion = controller.completionWithItemsHandler
+            let onDismiss = self.onDismiss
+            controller.completionWithItemsHandler = { [weak self] activity, completed, values, error in
+                completion?(activity, completed, values, error)
+                if let self { self.finish(item.id) }
+                else { onDismiss?(item.id) }
+            }
+            if let popover = controller.popoverPresentationController {
+                popover.sourceView = self
+                popover.sourceRect = bounds
+                popover.delegate = self
+            }
+            presenter.present(controller, animated: true)
+            controller.presentationController?.delegate = self
+        }
+        func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+            guard let item else { return }
+            item.finish()
+            finish(item.id)
+        }
+        private func finish(_ id: UUID) {
+            guard presentedID == id else { return }
+            completedID = id
+            presentedID = nil
+            onDismiss?(id)
+        }
+    }
+}
+
+/// SwiftUI may cache copies of a covered view and its callbacks. They share this owner,
+/// so releasing the reader clears the lease even when an old view value is retained.
+@MainActor @Observable private final class OfflineReaderLeaseState {
+    var value: OfflineFileLease?
 }
 
 struct OfflinePinActions: View {
@@ -163,7 +255,9 @@ struct OfflineReaderView: View {
     let initialFragment: String?
     let openDocument: (OfflineDocumentRoute) -> Void
     @Environment(\.scenePhase) private var scenePhase
-    @State private var lease: OfflineFileLease?
+    @State private var leaseState = OfflineReaderLeaseState()
+    @State private var share: OfflineShareItem?
+    @State private var visible = false
     @State private var preview: DocumentPreview?
     @State private var image: DisplayImage?
     @State private var pdf: PDFDocument?
@@ -171,6 +265,9 @@ struct OfflineReaderView: View {
     @State private var source = false
     @State private var failure: String?
     @State private var loading = true
+    /// Set only when a load completes. A retained lease alone doesn't mean the preview is
+    /// ready: an interrupted load can still hold one and release it when it finally ends.
+    @State private var loaded = false
     @State private var requestID = UUID()
     @State private var navigation = ReaderNavigationState()
     @State private var readingPosition = DocumentReadingPosition()
@@ -178,8 +275,13 @@ struct OfflineReaderView: View {
     @State private var linkError: String?
     @State private var linkTask: Task<Void, Never>?
     @State private var linkRequestID = UUID()
+    private var lease: OfflineFileLease? {
+        get { leaseState.value }
+        nonmutating set { leaseState.value = newValue }
+    }
     private var savedCopy: OfflinePin { lease?.pin ?? pin }
     private var kind: DocumentKind { DocumentPolicy.kind(filename: savedCopy.documentFilename) }
+    private var canRead: Bool { visible && scenePhase == .active }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -219,15 +321,32 @@ struct OfflineReaderView: View {
         }
         .navigationTitle(savedCopy.filename).navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if let lease { ToolbarItem(placement: .primaryAction) { ShareLink(item: OfflineShareItem(lease: lease), preview: SharePreview(savedCopy.filename)) { Label("Share Original", systemImage: "square.and.arrow.up") } } }
+            if lease != nil || share != nil {
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Share Original", systemImage: "square.and.arrow.up") {
+                        if let lease { share = OfflineShareItem(lease: lease) }
+                    }
+                    .disabled(lease == nil)
+                    .accessibilityHint("Shares the saved file’s original bytes")
+                }
+            }
             if case .text = preview, [.markdown, .html, .svg].contains(kind) {
                 ToolbarItem(placement: .primaryAction) { Toggle("Source", isOn: $source) }
             }
         }
-        .task(id: scenePhase) {
-            if scenePhase == .active { await load() }
+        .background(alignment: .topTrailing) {
+            // Native toolbar buttons can omit custom background views. Keep this
+            // source in the reader hierarchy so it has a window when sharing starts.
+            OfflineSharePresenter(item: share) { id in
+                if share?.id == id { share = nil }
+            }
+            .frame(width: 1, height: 1)
         }
-        .onDisappear { release() }
+        .task(id: canRead) {
+            if canRead, !loaded { await load() }
+        }
+        .onAppear { visible = true }
+        .onDisappear { visible = false; release() }
         .onChange(of: scenePhase) { _, phase in if phase == .background { release() } }
         .alert("Couldn’t open link", isPresented: Binding(get: { linkError != nil }, set: { if !$0 { linkError = nil } })) {
             Button("OK") { linkError = nil }
@@ -240,14 +359,14 @@ struct OfflineReaderView: View {
         cancelLink()
         navigation.clear()
         readingPosition.overflowGeometry.releaseInactiveContent()
-        requestID = UUID(); playback.stop(); image = nil; pdf = nil; lease = nil; preview = nil
+        requestID = UUID(); loaded = false; playback.stop(); image = nil; pdf = nil; lease = nil; preview = nil
     }
     private func cancelLink() {
         linkRequestID = UUID(); linkTask?.cancel(); linkTask = nil
     }
     private func openLink(_ url: URL) {
         cancelLink()
-        guard scenePhase == .active, let local = lease,
+        guard canRead, let sourcePin = lease?.pin,
               var components = URLComponents(string: url.absoluteString),
               components.scheme == nil, components.host == nil else { return }
         guard components.query == nil else { linkError = RemoteDocumentLinkError.queryUnsupported.localizedDescription; return }
@@ -259,15 +378,15 @@ struct OfflineReaderView: View {
         linkTask = Task {
             defer { if linkRequestID == token { linkTask = nil } }
             do {
-                let target = try await store.resolveDocumentLink(from: local.pin, reference: reference)
+                let target = try await store.resolveDocumentLink(from: sourcePin, reference: reference)
                 try Task.checkCancellation()
-                guard linkRequestID == token, scenePhase == .active else { return }
+                guard linkRequestID == token, canRead else { return }
                 if fragment != nil, DocumentPolicy.kind(filename: target.documentFilename) != .markdown {
                     linkError = "Heading links require a Markdown document. Open the file using a link without the # heading fragment."
-                } else if target.id == local.pin.id, let fragment { revealHeading(fragment) }
+                } else if target.id == sourcePin.id, let fragment { revealHeading(fragment) }
                 else { openDocument(.init(pin: target, fragment: fragment)) }
             } catch {
-                guard !Task.isCancelled, linkRequestID == token, scenePhase == .active else { return }
+                guard !Task.isCancelled, linkRequestID == token, canRead else { return }
                 linkError = error.localizedDescription
             }
         }
@@ -317,8 +436,13 @@ struct OfflineReaderView: View {
                     revealHeading(initialFragment)
                 }
             }
-        } catch is CancellationError { }
-        catch { if requestID == token, !Task.isCancelled { failure = error.localizedDescription } }
+            loaded = true
+        } catch is CancellationError {
+            if requestID == token { release() }
+        }
+        catch {
+            if requestID == token, !Task.isCancelled { failure = error.localizedDescription }
+        }
     }
 }
 #endif
