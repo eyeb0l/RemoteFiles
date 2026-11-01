@@ -63,10 +63,16 @@ final class SFTPIntegrationTests: XCTestCase {
         let sftp = try await client.openSFTP()
         let link = try await sftp.readSymbolicLink(atPath: fixture.files + "/report-link.md")
         XCTAssertEqual(link, "report.md", "READLINK must return the raw target")
+        // Commands that must finish get the production allowance: the search time limit plus one
+        // second and the service's 15-second timeout, as `serverSearch` computes it. The cancellation
+        // and deadline checks below bound their own commands. On a hosted runner under heavy load,
+        // authentication took 2.5 seconds, printf took 1.5 seconds and the Python helper missed a
+        // 5-second allowance (docs/CI.md).
+        let allowance = UInt64(RemoteFolderSearch.Limits().timeLimit.components.seconds) + 1 + 15
         for command in ["printf '%02000d' 0", "printf '%02000d' 0 >&2"] {
             do {
                 _ = try await SFTPRemoteFileService.executeSearchCommand(client: client, command: command,
-                                                                        timeout: 5, maxResponseSize: 64)
+                                                                        timeout: allowance, maxResponseSize: 64)
                 XCTFail("Both output streams must be bounded")
             } catch CitadelError.commandOutputTooLarge { }
             _ = try await sftp.getRealPath(atPath: fixture.files)
@@ -76,7 +82,7 @@ final class SFTPIntegrationTests: XCTestCase {
             try await SFTPRemoteFileService.executeSearchCommand(client: client, command: "sleep 5",
                 timeout: 5, maxResponseSize: 64, onChannelCreated: { opened.fulfill() })
         }
-        await fulfillment(of: [opened], timeout: 5)
+        await fulfillment(of: [opened], timeout: TimeInterval(allowance))
         let cancelled = ContinuousClock.now
         task.cancel()
         do { _ = try await task.value; XCTFail("Cancellation must surface") }
@@ -97,7 +103,7 @@ final class SFTPIntegrationTests: XCTestCase {
         let helper = try ServerFolderSearch.command(query: "Linked source", root: root, includeHidden: false,
                                                     limits: .init(), content: .init(), rootHandle: "/dev/fd/9")
         let output = try await SFTPRemoteFileService.executeSearchCommand(client: client,
-            command: "exec 9<" + ServerFolderSearch.quote(root) + "; " + helper, timeout: 5)
+            command: "exec 9<" + ServerFolderSearch.quote(root) + "; " + helper, timeout: allowance)
         let found = try ServerFolderSearch.decode(Data(output.readableBytesView), query: "Linked source", root: root,
                                                   includeHidden: false, limits: .init(), content: .init())
         XCTAssertEqual(found.contentMatches.map(\.entry.name), ["source.md"])
