@@ -105,9 +105,9 @@ Logs (including each fixture-backed lane's complete `<lane>-sshd.log`), source i
 success or failure. Failed method identifiers/assertions are printed immediately
 in the job log. Cleanup touches only each job's disposable Simulator and generated
 loopback fixture. New commits cancel superseded runs for the same PR or branch.
-The quick jobs have a 35-minute infrastructure ceiling and acceptance jobs 45
-minutes; these are failure bounds, not target durations. Each command retains
-its own 30-minute deadline.
+Quick and acceptance jobs have a 45-minute infrastructure ceiling (quick jobs had
+35 minutes before the post-boot settle wait below); these are failure bounds, not
+target durations. Each command retains its own 30-minute deadline.
 
 ## Local reproduction
 
@@ -524,6 +524,8 @@ that spike. After boot, CI now waits until the 1-minute load is at most 40 per
 logical CPU (120 on these runners), for at most 8 minutes, as the
 `simulator-settle` phase. The wait never fails a lane; the evidence records each
 sample and whether it settled. Local runs without `--ci-compilation-cache` skip it.
+Quick jobs' ceiling rose from 35 to 45 minutes so a five-minute boot, the eight-minute
+wait and the core lane's 30-minute command deadline still leave time for evidence upload.
 The VoiceOver lane boots before its build, so the spike overlaps compilation; its
 mean load was about half that of the other simulator lanes, and it is unchanged.
 
