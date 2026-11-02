@@ -17,7 +17,7 @@ does not block RemoteFiles; see [dependency maintenance](docs/CITADEL_UPSTREAM.m
 ## Improvements under consideration
 
 - More verified private-key protection formats and hardware-backed security-key identities. OpenSSH RSA/ECDSA imports and optional biometric unlock are already available; see [key support](docs/KEY_SUPPORT.md).
-- Extend reading history to standalone image previews and offline PDF copies. Layout-independent text/block anchors cover Markdown, Source (including plain text) and static HTML; remote PDFs save their page position; inactive reader-content eviction is implemented. Physical-device layout and memory acceptance remain outstanding. See [reader behavior](docs/READER.md).
+- Physical-device layout and memory acceptance of reading history. Layout-independent text/block anchors cover Markdown, Source (including plain text) and static HTML; remote and offline PDFs save their page position; offline copies share the connected reader's history; inactive reader-content eviction is implemented. Standalone images fit their view and have no position to save. See [reader behavior](docs/READER.md).
 - Automatic or incremental search-index refresh. [Folder search](docs/FOLDER_BROWSING.md) already supports explicit persistent local indexes, bounded PDF text and on-device OCR, plus case, whole-word and file-type filters. Saved indexes are snapshots and must be rebuilt to reflect remote changes.
 - Offline synchronization, File Provider, multiple jump hops, other protocols such as FTP/FTPS, optional terminal handoff, deeper Tailscale onboarding, and additional iPad keyboard and multiwindow workflows.
 - Byte-offset resume for interrupted SSH downloads, expanded transfer quotas, and physical-device background-transfer acceptance. Managed downloads restart interrupted files from the beginning.
@@ -25,6 +25,7 @@ does not block RemoteFiles; see [dependency maintenance](docs/CITADEL_UPSTREAM.m
 <a id="separate-write-capable-iteration"></a>
 ## Newly implemented
 
+- Offline copies have Find, Headings, the image zoom viewer and shared reading positions for text and PDFs. See [offline files](docs/OFFLINE_FILES.md#offline-reader).
 - PDF search results open at their matching page, and remote PDFs remember their page position. See [reader behavior](docs/READER.md) and [folder search](docs/FOLDER_BROWSING.md).
 - Private-key export through Files, with device authentication and a separate confirmation; imported encryption is preserved. See [key support](docs/KEY_SUPPORT.md).
 - Opt-in public-key installation while saving a direct connection, using the existing reviewed installer. See [public-key installation](docs/PUBLIC_KEY_INSTALLATION.md).

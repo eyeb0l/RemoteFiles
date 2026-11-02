@@ -160,6 +160,81 @@ final class RemoteFilesUITests: XCTestCase {
         missing.buttons["OK"].tap()
     }
 
+    func testOfflineCopyFindsTextAndListsHeadings() throws {
+        let app = openDemoOfflineNavigationGuide()
+        let reader = app.scrollViews["Rendered Markdown document"].firstMatch
+        app.buttons["Document actions"].tap()
+        let find = app.buttons["Find in Document"]
+        XCTAssertTrue(find.waitForExistence(timeout: 5)); find.tap()
+        let query = app.textFields["reader-find-query"]
+        XCTAssertTrue(query.waitForExistence(timeout: 5)); query.tap(); query.typeText("Reading marker 26")
+        let status = app.staticTexts["reader-find-status"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        wait(for: [expectation(for: NSPredicate(format: "label == %@", "1 of 1"), evaluatedWith: status)], timeout: 10)
+        app.buttons["Next result"].tap() // Dismiss keyboard and reveal the active match.
+        XCTAssertTrue(reader.staticTexts["Reading marker 26"].firstMatch.isHittable, app.debugDescription)
+        attachScreenshot("Find in an offline copy")
+        app.buttons["Done"].tap()
+        XCTAssertFalse(query.exists)
+
+        app.buttons["Document actions"].tap()
+        let headings = app.buttons["Headings"]
+        XCTAssertTrue(headings.waitForExistence(timeout: 5)); headings.tap()
+        // The Offline Files list stays behind the sheet; scroll the headings list itself.
+        let outline = app.collectionViews.containing(NSPredicate(format: "label ENDSWITH %@", ", heading level 2")).firstMatch
+        XCTAssertTrue(outline.waitForExistence(timeout: 5))
+        let last = outline.buttons["Navigation return marker, heading level 2"]
+        for _ in 0..<10 { if last.exists && last.isHittable { break }; outline.swipeUp() }
+        XCTAssertTrue(last.waitForExistence(timeout: 5) && last.isHittable, app.debugDescription)
+        attachScreenshot("Headings in an offline copy")
+        last.tap()
+        let marker = reader.staticTexts["Navigation return marker"].firstMatch
+        XCTAssertTrue(marker.waitForExistence(timeout: 10) && marker.isHittable, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["offline-copy-date"].exists, "Headings stay in the offline reader")
+    }
+
+    func testOfflineImageOpensZoomViewerAndReturnsToTheReader() throws {
+        continueAfterFailure = false
+        let app = launchDemoSearchSamples()
+        let image = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Image sample.png,")).firstMatch
+        revealFolderRow(image, in: app).press(forDuration: 1)
+        if app.buttons["Remove Offline Copy"].exists {
+            app.buttons["Remove Offline Copy"].tap()
+            image.press(forDuration: 1)
+        }
+        XCTAssertTrue(app.buttons["Keep Offline"].waitForExistence(timeout: 5)); app.buttons["Keep Offline"].tap()
+        let saved = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.otherElements["offline-save-progress"])
+        wait(for: [saved], timeout: 15)
+        app.buttons["Folder actions"].tap()
+        let disconnect = app.buttons["Disconnect"]
+        XCTAssertTrue(disconnect.waitForExistence(timeout: 5)); disconnect.tap()
+        let library = app.buttons["offline-library"]
+        XCTAssertTrue(library.waitForExistence(timeout: 10)); library.tap()
+        let file = app.buttons["offline-file-Image sample.png"]
+        XCTAssertTrue(file.waitForExistence(timeout: 10)); file.tap()
+        XCTAssertTrue(app.staticTexts["offline-copy-date"].waitForExistence(timeout: 10))
+        let open = app.buttons["Open image Image sample.png full screen"]
+        XCTAssertTrue(open.waitForExistence(timeout: 15), app.debugDescription)
+        for _ in 0..<2 {
+            open.tap()
+            let viewer = app.navigationBars["Image sample.png"]
+            XCTAssertTrue(viewer.buttons["Done"].waitForExistence(timeout: 10), app.debugDescription)
+            let zoomable = app.images["Image sample.png"]
+            XCTAssertTrue(zoomable.waitForExistence(timeout: 10), app.debugDescription)
+            XCTAssertTrue(viewer.buttons["Share"].isEnabled)
+            zoomable.pinch(withScale: 3, velocity: 3)
+            attachScreenshot("Offline image zoom viewer")
+            viewer.buttons["Done"].tap()
+            // Returning keeps the reader's preview and lease rather than reopening the copy.
+            XCTAssertTrue(open.waitForExistence(timeout: 10), app.debugDescription)
+            XCTAssertTrue(app.staticTexts["offline-copy-date"].exists)
+        }
+        app.navigationBars.buttons["Offline Files"].tap()
+        XCTAssertTrue(file.waitForExistence(timeout: 5)); file.press(forDuration: 1)
+        app.buttons["Remove Offline Copy"].tap()
+        XCTAssertTrue(file.waitForNonExistence(timeout: 5))
+    }
+
     func testOfflineCopyOpensAfterDisconnectAndRelaunchAndCanBeRemoved() throws {
         let app = openDemoOfflineNavigationGuide()
         let library = app.buttons["offline-library"]

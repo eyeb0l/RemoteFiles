@@ -310,6 +310,11 @@ final class AppModel {
         await position.preparePDF(fileURL: fileURL, store: demo ? nil : readingPositions, connectionID: profile.id, path: path)
     }
     func profile(_ id: UUID) -> ConnectionProfile? { metadata.connections.first { $0.id == id } }
+    /// Offline copies share the connected reader's history. A removed connection's history was
+    /// deleted with it; its surviving copies must not start writing new history under that id.
+    func offlineReadingPositions(for pin: OfflinePin) -> ReadingPositionStore? {
+        demo || profile(pin.connectionID) == nil ? nil : readingPositions
+    }
     /// Installation is direct: a bastion-only identity must not prefill the destination account.
     func installationConnection(for identity: IdentityMetadata) -> ConnectionProfile? {
         metadata.connections.first { $0.identityID == identity.id }
