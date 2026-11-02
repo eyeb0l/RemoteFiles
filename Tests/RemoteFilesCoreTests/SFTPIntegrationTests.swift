@@ -1276,6 +1276,8 @@ final class SFTPIntegrationTests: XCTestCase {
         } catch RemoteFileError.timedOut {}
         guardTask.cancel()
         proxy.resumeReplies()
+        // The transfers below must succeed: give them production's idle and close allowances.
+        await service.setTransferTimings(idle: .seconds(60), closeGrace: .seconds(5))
         let kept = try Data(contentsOf: destination)
         XCTAssertGreaterThan(kept.count, 0)
         XCTAssertLessThan(kept.count, original.count)
