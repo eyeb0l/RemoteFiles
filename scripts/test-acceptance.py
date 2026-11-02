@@ -72,6 +72,25 @@ def boot_selected_simulator(run, simulator):
     timed(run.metadata["phases"], "simulator-boot", boot)
     inventory = json.loads(capture(["xcrun", "simctl", "list", "devices", "available", "-j"]))
     write_json(run.output / "simulator-after-boot.json", inventory)
+    if run.measure_resources:
+        timed(run.metadata["phases"], "simulator-settle", lambda: run.metadata.setdefault("simulator_settle", settle_after_boot()))
+
+
+def settle_after_boot(threshold=None, limit=480, interval=15, load=os.getloadavg, sleep=time.sleep):
+    """A freshly booted simulator starts its widgets and system services for several minutes.
+    On a three-CPU hosted runner the 1-minute load then sits at 400-600 and falls to about
+    100 within 10-15 minutes. Tests launched into that start under several times the later
+    load, so wait (bounded) until it drops below 40 per logical CPU. Never fails the lane."""
+    threshold = threshold or 40 * (os.cpu_count() or 1)
+    samples, waited = [], 0
+    while True:
+        current = load()[0]
+        samples.append([waited, round(current, 1)])
+        if current <= threshold or waited >= limit:
+            return {"threshold": threshold, "limit_seconds": limit, "waited_seconds": waited,
+                    "settled": current <= threshold, "samples": samples}
+        sleep(interval)
+        waited += interval
 
 
 def selected_lanes(requested):

@@ -87,6 +87,41 @@ class HostLoadSamplerTests(unittest.TestCase):
             self.assertIn("SimRenderServer 80%", path.read_text())
 
 
+class SimulatorSettleTests(unittest.TestCase):
+    def test_waits_until_load_falls_below_threshold(self):
+        loads = iter([520.0, 300.0, 110.0, 90.0])
+        sleeps = []
+        result = acceptance.settle_after_boot(threshold=120, limit=480, interval=15,
+                                              load=lambda: (next(loads), 0, 0), sleep=sleeps.append)
+        self.assertTrue(result["settled"])
+        self.assertEqual(result["waited_seconds"], 30)
+        self.assertEqual(sleeps, [15, 15])
+        self.assertEqual(result["samples"], [[0, 520.0], [15, 300.0], [30, 110.0]])
+
+    def test_gives_up_at_the_limit_without_failing(self):
+        sleeps = []
+        result = acceptance.settle_after_boot(threshold=120, limit=45, interval=15,
+                                              load=lambda: (400.0, 0, 0), sleep=sleeps.append)
+        self.assertFalse(result["settled"])
+        self.assertEqual(result["waited_seconds"], 45)
+        self.assertEqual(len(sleeps), 3)
+
+    def test_settle_runs_only_for_measured_ci_boots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = acceptance.Run(Path(directory), Path(directory), {"phases": []})
+            calls = []
+            with patch.object(acceptance.subprocess, "run"), \
+                 patch.object(acceptance, "capture", return_value='{"devices": {}}'), \
+                 patch.object(acceptance, "settle_after_boot", side_effect=lambda: calls.append(1) or {"settled": True}):
+                acceptance.boot_selected_simulator(run, "UDID")
+                self.assertEqual(calls, [])
+                run.measure_resources = True
+                acceptance.boot_selected_simulator(run, "UDID")
+            self.assertEqual(calls, [1])
+            self.assertEqual([phase["name"] for phase in run.metadata["phases"]],
+                             ["simulator-boot", "simulator-boot", "simulator-settle"])
+
+
 class LogResultTests(unittest.TestCase):
     def test_xcresult_timeout_is_reported_when_the_log_has_no_completed_result(self):
         with tempfile.TemporaryDirectory() as directory:
