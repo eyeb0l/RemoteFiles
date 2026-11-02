@@ -11,7 +11,7 @@ struct DownloadsView: View {
         List {
             Section {
                 Text(model.backgroundDownloads.status).font(.footnote).foregroundStyle(.secondary)
-                Text("Up to 128 MiB per file and 512 MiB total. Downloads keep original bytes. Interrupted downloads restart from the beginning.")
+                Text("Up to 128 MiB per file and 512 MiB total. Downloads keep original bytes. Retry continues an interrupted download where it stopped, unless the file has changed on the server.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             if let manager = model.downloads {
@@ -27,6 +27,9 @@ struct DownloadsView: View {
                         } else if item.state == .pendingFinalization {
                             Text("Waiting for Unlock").font(.caption)
                         } else { Text(item.state.rawValue.capitalized).font(.caption) }
+                        if item.keepsPartialBytes {
+                            Text("\(item.progress.sizeLabel()) kept. Retry continues from there.").font(.caption.monospacedDigit())
+                        }
                         if let message = item.message { Text(message).font(.caption).foregroundStyle(.secondary) }
                         HStack {
                             if item.state == .completed {

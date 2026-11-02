@@ -30,7 +30,7 @@ private final class DownloadSceneRegistration {
         Task { @MainActor in
             manager.removeScene(id)
             if !manager.isForeground, !BackgroundDownloadCoordinator.shared(for: manager).canContinue {
-                await manager.interrupt(reason: "The download window closed. Retry to start again.")
+                await manager.interrupt(reason: "The download window closed. Retry to continue.")
             }
         }
     }
@@ -483,7 +483,7 @@ final class AppModel {
         if let disconnectWork { await disconnectWork.value; return }
         let task = Task {
             if !preservingDownloads {
-                await downloads?.interrupt(reason: "Transfer interrupted. Retry to download the file again.")
+                await downloads?.interrupt(reason: "Transfer interrupted. Retry to continue.")
                 backgroundDownloads.finish(success: false)
             }
             await closeSession()

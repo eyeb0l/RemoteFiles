@@ -67,7 +67,7 @@ final class BackgroundDownloadCoordinator {
         guard requestIdentifier == identifier else { return }
         status = "iOS stopped the background transfer. Retry the interrupted download when ready."
         finish(success: false)
-        await manager?.interrupt(reason: "iOS stopped this background transfer. Retry to start again.")
+        await manager?.interrupt(reason: "iOS stopped this background transfer. Retry to continue.")
     }
     func finish(success: Bool) {
         if let identifier = requestIdentifier { BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier) }

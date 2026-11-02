@@ -136,7 +136,7 @@ public indirect enum LinkResolution: Hashable, Sendable {
 
 /// Size and modification time observed when a file's bytes were read. SFTP v3 reports whole
 /// seconds, so a same-size rewrite within one second looks unchanged; explicit refreshes always read.
-public struct RemoteFileVersion: Hashable, Sendable {
+public struct RemoteFileVersion: Hashable, Codable, Sendable {
     public let size: UInt64
     public let modifiedAt: Date
     public init?(size: UInt64?, modifiedAt: Date?) {
