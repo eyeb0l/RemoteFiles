@@ -59,6 +59,69 @@ class AcceptanceRunnerTests(unittest.TestCase):
         self.check_skipped_result("LatencyBenchmarkTests/testRoundTripSensitiveOperations", (), "failed")
 
 
+class HostLoadSamplerTests(unittest.TestCase):
+    def test_ps_rows_are_parsed_and_summarized_by_average_process_share(self):
+        rows = acceptance.parse_ps_cpu(" 95.0 /usr/libexec/backboardd\n 40.5 RemoteFiles\nbad line\n 12.0 /a/b/testmanagerd\n")
+        self.assertEqual(rows, [(95.0, "backboardd"), (40.5, "RemoteFiles"), (12.0, "testmanagerd")])
+        summary = acceptance.summarize_load([rows, [(5.0, "backboardd"), (30.0, "SimRenderServer")]])
+        self.assertEqual(summary[0], ["backboardd", 50.0])
+        self.assertEqual([name for name, _ in summary], ["backboardd", "RemoteFiles", "SimRenderServer", "testmanagerd"])
+
+    def test_sampler_records_load_while_running_and_survives_ps_failures(self):
+        calls = []
+        def read_ps():
+            calls.append(1)
+            if len(calls) == 2:
+                raise OSError("ps unavailable")
+            return " 80.0 /System/SimRenderServer\n"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "lane-load.log"
+            with acceptance.LoadSampler(path, interval=0.01, read_ps=read_ps) as sampler:
+                while len(calls) < 3:
+                    pass
+            summary = sampler.summary()
+            self.assertGreaterEqual(summary["samples"], 3)
+            self.assertEqual(summary["busiest_processes"][0][0], "SimRenderServer")
+            self.assertIsNotNone(summary["load_1m_max"])
+            self.assertIn("load ", path.read_text())
+            self.assertIn("SimRenderServer 80%", path.read_text())
+
+
+class SimulatorSettleTests(unittest.TestCase):
+    def test_waits_until_load_falls_below_threshold(self):
+        loads = iter([520.0, 300.0, 110.0, 90.0])
+        sleeps = []
+        result = acceptance.settle_after_boot(threshold=120, limit=480, interval=15,
+                                              load=lambda: (next(loads), 0, 0), sleep=sleeps.append)
+        self.assertTrue(result["settled"])
+        self.assertEqual(result["waited_seconds"], 30)
+        self.assertEqual(sleeps, [15, 15])
+        self.assertEqual(result["samples"], [[0, 520.0], [15, 300.0], [30, 110.0]])
+
+    def test_gives_up_at_the_limit_without_failing(self):
+        sleeps = []
+        result = acceptance.settle_after_boot(threshold=120, limit=45, interval=15,
+                                              load=lambda: (400.0, 0, 0), sleep=sleeps.append)
+        self.assertFalse(result["settled"])
+        self.assertEqual(result["waited_seconds"], 45)
+        self.assertEqual(len(sleeps), 3)
+
+    def test_settle_runs_only_for_measured_ci_boots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = acceptance.Run(Path(directory), Path(directory), {"phases": []})
+            calls = []
+            with patch.object(acceptance.subprocess, "run"), \
+                 patch.object(acceptance, "capture", return_value='{"devices": {}}'), \
+                 patch.object(acceptance, "settle_after_boot", side_effect=lambda: calls.append(1) or {"settled": True}):
+                acceptance.boot_selected_simulator(run, "UDID")
+                self.assertEqual(calls, [])
+                run.measure_resources = True
+                acceptance.boot_selected_simulator(run, "UDID")
+            self.assertEqual(calls, [1])
+            self.assertEqual([phase["name"] for phase in run.metadata["phases"]],
+                             ["simulator-boot", "simulator-boot", "simulator-settle"])
+
+
 class LogResultTests(unittest.TestCase):
     def test_xcresult_timeout_is_reported_when_the_log_has_no_completed_result(self):
         with tempfile.TemporaryDirectory() as directory:

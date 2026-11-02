@@ -105,9 +105,9 @@ Logs (including each fixture-backed lane's complete `<lane>-sshd.log`), source i
 success or failure. Failed method identifiers/assertions are printed immediately
 in the job log. Cleanup touches only each job's disposable Simulator and generated
 loopback fixture. New commits cancel superseded runs for the same PR or branch.
-The quick jobs have a 35-minute infrastructure ceiling and acceptance jobs 45
-minutes; these are failure bounds, not target durations. Each command retains
-its own 30-minute deadline.
+Quick and acceptance jobs have a 45-minute infrastructure ceiling (quick jobs had
+35 minutes before the post-boot settle wait below); these are failure bounds, not
+target durations. Each command retains its own 30-minute deadline.
 
 ## Local reproduction
 
@@ -497,3 +497,37 @@ Neither wait change was reproduced locally: pausing the app or the simulator's s
 services with `SIGSTOP` made XCTest's queries block until they resumed, and then
 succeed, rather than letting the wait run out. Both changed methods pass locally. No lane
 budget, allowed skip or retry changed.
+
+## Runner load and post-boot settling
+
+Measured lanes now keep `<lane>-load.log`: every 15 seconds, the host's load averages
+and its busiest processes. Each lane's evidence also records a `host_load` summary,
+which the job log prints. The baseline in
+[run 41360147250](https://github.com/eyeb0l/RemoteFiles/actions/runs/41360147250)
+attempt 2 (three-vCPU `xcode-27-arm64` runners) showed:
+
+- **The simulator boot is the load spike.** The 1-minute load was 400–600 in the first
+  minutes after a lane's simulator booted. It fell to about 40–150 within 10–15 minutes
+  while tests kept running. The busiest processes early on were iOS widget
+  extensions and system daemons (`NewsToday2`, `PassbookLockedWidgetsExtension`,
+  `fitnesscoachingd`, `profiled`) together with both `diagnosticd` instances.
+- **Steady consumers.** Over whole lanes, `diagnosticd` averaged 43–53% of a CPU and
+  `apsd` 13–15%, next to the app under test (45–53%). Nothing in the repository streams
+  logs. Setting `TEST_RUNNER_OS_ACTIVITY_DT_MODE=NO` for the core test host did not
+  change `diagnosticd`'s CPU use locally.
+- **Screen recording was not a significant cost.** XCTest's automatic screen recording
+  for UI tests did not appear among the busiest processes: the simulator's render
+  services used 4–5%. The capture format is unchanged.
+
+Core and UI lanes boot their simulator just before testing, so tests started inside
+that spike. After boot, CI now waits until the 1-minute load is at most 40 per
+logical CPU (120 on these runners), for at most 8 minutes, as the
+`simulator-settle` phase. The wait never fails a lane; the evidence records each
+sample and whether it settled. Local runs without `--ci-compilation-cache` skip it.
+Quick jobs' ceiling rose from 35 to 45 minutes so a five-minute boot, the eight-minute
+wait and the core lane's 30-minute command deadline still leave time for evidence upload.
+The VoiceOver lane boots before its build, so the spike overlaps compilation; its
+mean load was about half that of the other simulator lanes, and it is unchanged.
+
+Larger runners with more CPUs and GPU acceleration would address the load itself.
+That is a billing choice outside this repository.
