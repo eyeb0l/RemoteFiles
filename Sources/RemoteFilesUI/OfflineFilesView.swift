@@ -175,6 +175,7 @@ struct OfflineFilesView: View {
                 .navigationDestination(for: OfflineDocumentRoute.self) { route in
                     if let store = model.offlineStore {
                         OfflineReaderView(pin: route.pin, store: store, initialFragment: route.fragment,
+                                          readingPositions: model.offlineReadingPositions(for: route.pin),
                                           openDocument: { path.append($0) })
                     }
                 }
@@ -253,6 +254,9 @@ struct OfflineReaderView: View {
     let pin: OfflinePin
     let store: OfflineFileStore
     let initialFragment: String?
+    /// The connected reader's history, keyed by the copy's connection, path and content hash,
+    /// so identical bytes share one position. Nil for Demo and removed connections.
+    var readingPositions: ReadingPositionStore? = nil
     let openDocument: (OfflineDocumentRoute) -> Void
     @Environment(\.scenePhase) private var scenePhase
     @State private var leaseState = OfflineReaderLeaseState()
@@ -261,6 +265,11 @@ struct OfflineReaderView: View {
     @State private var preview: DocumentPreview?
     @State private var image: DisplayImage?
     @State private var pdf: PDFDocument?
+    @State private var pdfRestoration: SavedReadingPosition.Anchor?
+    @State private var pdfPage = 0
+    @State private var viewer: OfflineImagePresentation?
+    @AccessibilityFocusState private var imageFocused: Bool
+    @State private var headingsPresented = false
     @State private var playback = RemotePlaybackController()
     @State private var source = false
     @State private var failure: String?
@@ -282,6 +291,13 @@ struct OfflineReaderView: View {
     private var savedCopy: OfflinePin { lease?.pin ?? pin }
     private var kind: DocumentKind { DocumentPolicy.kind(filename: savedCopy.documentFilename) }
     private var canRead: Bool { visible && scenePhase == .active }
+    private var showsSource: Bool { source || ![.markdown, .html, .svg].contains(kind) }
+    private struct FindWork: Equatable {
+        let query: String
+        let revision: UUID
+        let inSource: Bool
+        let active: Bool
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -290,16 +306,32 @@ struct OfflineReaderView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color(uiColor: .secondarySystemBackground))
                 .accessibilityIdentifier("offline-copy-date")
+            if navigation.isFinding { ReaderFindBar(navigation: navigation, inSource: showsSource) }
             Group {
                 if let failure = failure ?? playback.failure {
                     ContentUnavailableView("Couldn’t open saved copy", systemImage: "exclamationmark.doc", description: Text(failure))
                 } else if loading {
                     ProgressView("Opening saved copy…")
                 } else if let image {
-                    Image(decorative: image.image, scale: 1).resizable().scaledToFit().padding()
-                        .accessibilityHidden(false)
-                        .accessibilityLabel(savedCopy.filename)
-                } else if let pdf { PDFDocumentView(document: pdf) }
+                    Button {
+                        if let lease { viewer = OfflineImagePresentation(lease: lease) }
+                    } label: {
+                        Image(decorative: image.image, scale: 1).resizable().scaledToFit().padding()
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Open image \(savedCopy.filename) full screen")
+                    .accessibilityFocused($imageFocused)
+                } else if let pdf {
+                    VStack(spacing: 0) {
+                        Text("Page \(min(pdfPage, pdf.pageCount - 1) + 1) of \(pdf.pageCount)")
+                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
+                            .accessibilityIdentifier("PDF page indicator")
+                        PDFDocumentView(document: pdf, restoration: pdfRestoration, readingPosition: readingPosition,
+                                        onPageChange: { pdfPage = $0 })
+                            .accessibilityLabel("PDF \(savedCopy.filename), \(pdf.pageCount) \(pdf.pageCount == 1 ? "page" : "pages")")
+                    }
+                }
                 else if let player = playback.player {
                     VStack {
                         if kind == .video { NativePlaybackView(player: player).aspectRatio(16 / 9, contentMode: .fit) }
@@ -333,6 +365,20 @@ struct OfflineReaderView: View {
             if case .text = preview, [.markdown, .html, .svg].contains(kind) {
                 ToolbarItem(placement: .primaryAction) { Toggle("Source", isOn: $source) }
             }
+            if case .text = preview {
+                ToolbarItem(placement: .primaryAction) {
+                    Menu {
+                        Button([.html, .svg].contains(kind) ? "Find in Source" : "Find in Document", systemImage: "magnifyingglass") {
+                            // Static HTML/SVG keep their native preview; search their literal source.
+                            if [.html, .svg].contains(kind) { source = true }
+                            navigation.isFinding = true
+                        }
+                        if navigation.index?.headings.isEmpty == false {
+                            Button("Headings", systemImage: "list.bullet.indent") { headingsPresented = true }
+                        }
+                    } label: { Label("Document actions", systemImage: "ellipsis.circle") }
+                }
+            }
         }
         .background(alignment: .topTrailing) {
             // Native toolbar buttons can omit custom background views. Keep this
@@ -345,15 +391,34 @@ struct OfflineReaderView: View {
         .task(id: canRead) {
             if canRead, !loaded { await load() }
         }
+        .task(id: FindWork(query: navigation.query, revision: navigation.revision, inSource: showsSource, active: navigation.isFinding)) {
+            await navigation.search(inSource: showsSource)
+        }
         .onAppear { visible = true }
-        .onDisappear { visible = false; release() }
-        .onChange(of: scenePhase) { _, phase in if phase == .background { release() } }
+        // A full-screen image viewer covers this reader; it keeps the loaded preview for its return.
+        .onDisappear { visible = false; if viewer == nil { saveAndRelease() } }
+        .onChange(of: scenePhase) { _, phase in if phase == .background { saveAndRelease() } }
+        .sheet(isPresented: $headingsPresented) {
+            ReaderHeadingsView(headings: navigation.index?.headings ?? []) { heading in
+                source = false; navigation.show(heading)
+            }
+        }
+        .fullScreenCover(item: $viewer, onDismiss: { imageFocused = true }) { item in
+            OfflineImageViewer(item: item)
+        }
         .alert("Couldn’t open link", isPresented: Binding(get: { linkError != nil }, set: { if !$0 { linkError = nil } })) {
             Button("OK") { linkError = nil }
         } message: { Text(linkError ?? "") }
     }
     private func unavailable(_ message: String) -> some View {
         ContentUnavailableView("Preview not available", systemImage: "doc", description: Text(message))
+    }
+    /// Records where the reader is before its content goes, then writes it.
+    private func saveAndRelease() {
+        readingPosition.capturePDFPosition?()
+        let position = readingPosition
+        Task { await position.flush() }
+        release()
     }
     private func release() {
         cancelLink()
@@ -414,7 +479,15 @@ struct OfflineReaderView: View {
                 guard requestID == token else { return }
                 image = decoded
             case .pdf:
+                // Hash the leased bytes before PDFKit opens them: a changed copy starts at the top.
+                let restorable = await readingPosition.preparePDF(fileURL: local.url, store: readingPositions,
+                                                                  connectionID: local.pin.connectionID, path: local.pin.path)
+                try Task.checkCancellation()
+                guard requestID == token else { return }
                 guard let document = PDFDocument(url: local.url), document.pageCount > 0 else { throw OfflineFileError.damaged }
+                let restoration = RemoteMediaView.pdfRestoration(openingPage: nil, saved: restorable ? readingPosition.pdfAnchor : nil,
+                                                                 pageCount: document.pageCount)
+                pdfRestoration = restoration; pdfPage = restoration?.ordinal ?? 0
                 pdf = document
             case .video, .audio:
                 try await playback.prepare(local.url, filename: local.pin.documentFilename)
@@ -425,7 +498,7 @@ struct OfflineReaderView: View {
                 try Task.checkCancellation()
                 guard requestID == token else { return }
                 if case .text(let text, let markdown) = value {
-                    await readingPosition.prepare(text: text, store: nil, connectionID: local.pin.connectionID, path: local.pin.path)
+                    await readingPosition.prepare(text: text, store: readingPositions, connectionID: local.pin.connectionID, path: local.pin.path)
                     await navigation.prepare(text: text, markdown: markdown)
                     try Task.checkCancellation()
                     guard requestID == token else { return }
@@ -442,6 +515,52 @@ struct OfflineReaderView: View {
         }
         catch {
             if requestID == token, !Task.isCancelled { failure = error.localizedDescription }
+        }
+    }
+}
+
+struct OfflineImagePresentation: Identifiable {
+    let id = UUID()
+    /// The reader's own verified lease: the viewer reads the same private copy and takes no new one.
+    let lease: OfflineFileLease
+}
+
+/// Zoom and Share for a saved image, decoded from the reader's lease without any resolver.
+/// Backgrounding closes it, so the lease is released with the reader's.
+struct OfflineImageViewer: View {
+    let item: OfflineImagePresentation
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var image: DisplayImage?
+    @State private var failure: String?
+    @State private var sharing = false
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let image { ZoomableRemoteImage(image: UIImage(cgImage: image.image), description: item.lease.pin.filename) }
+                else if let failure {
+                    ContentUnavailableView(item.lease.pin.filename, systemImage: "photo", description: Text(failure))
+                } else { ProgressView("Loading image…") }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .navigationTitle(item.lease.pin.filename).navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Share", systemImage: "square.and.arrow.up") { sharing = true }.disabled(image == nil)
+                }
+            }
+            .task {
+                do {
+                    let result = try await RemoteImageDecoder.shared.decode(item.lease.url, maxPixel: 3072)
+                    try Task.checkCancellation(); image = result
+                } catch is CancellationError { }
+                catch { if !Task.isCancelled { failure = error.localizedDescription } }
+            }
+            .onChange(of: scenePhase) { _, phase in if phase == .background { sharing = false; image = nil; dismiss() } }
+            .sheet(isPresented: $sharing) {
+                if let image { ImageShareSheet(image: UIImage(cgImage: image.image)) }
+            }
         }
     }
 }

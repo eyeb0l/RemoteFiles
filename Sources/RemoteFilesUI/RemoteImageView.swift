@@ -161,7 +161,7 @@ struct RemoteImageViewer: View {
     }
 }
 
-private struct ImageShareSheet: UIViewControllerRepresentable {
+struct ImageShareSheet: UIViewControllerRepresentable {
     let image: UIImage
     func makeUIViewController(context: Context) -> UIActivityViewController {
         UIActivityViewController(activityItems: [image], applicationActivities: nil)
@@ -169,7 +169,7 @@ private struct ImageShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
-private struct ZoomableRemoteImage: UIViewRepresentable {
+struct ZoomableRemoteImage: UIViewRepresentable {
     let image: UIImage
     let description: String
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -192,7 +192,7 @@ private struct ZoomableRemoteImage: UIViewRepresentable {
         func viewForZooming(in scrollView: UIScrollView) -> UIView? { (scrollView as? ImageZoomScrollView)?.imageView }
     }
 }
-private final class ImageZoomScrollView: UIScrollView {
+final class ImageZoomScrollView: UIScrollView {
     let imageView = UIImageView()
     private var lastSize: CGSize = .zero
     override func layoutSubviews() {

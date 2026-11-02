@@ -32,7 +32,10 @@ Tapping a relative Markdown link opens an already saved document locally. Within
 
 Same-document heading links (`#details`) and Markdown file links with a heading fragment (`notes.md#details`) reveal the heading. Back restores the previous reader’s position during navigation. Missing headings, unsaved/hidden/skipped targets, unsupported types, query strings and paths outside a saved folder show an alert and keep the current document. Absolute paths and unsafe URL schemes remain blocked. If an open source copy is updated or removed, reopen it from Offline Files before following file links; an older reader does not silently navigate into a replacement snapshot. Opening another document uses the latest committed local copy and verifies it through the normal lease checks. Following a link never saves a missing file or starts SFTP.
 
-Markdown images remain readable placeholders. No SFTP resolver or remote image loader is given to the offline reader. Static HTML/SVG retain their resource blocking; media assets forbid external references. Explicitly tapped, policy-approved HTTP/HTTPS links may still open the browser. Offline copies do not yet have Find, a heading-list menu, the image zoom viewer or reading positions saved across launches.
+Markdown images remain readable placeholders. No SFTP resolver or remote image loader is given to the offline reader. Static HTML/SVG retain their resource blocking; media assets forbid external references. Explicitly tapped, policy-approved HTTP/HTTPS links may still open the browser. <a id="offline-reader"></a>
+Saved text copies offer **Document actions → Find in Document** (Find in Source for HTML and SVG) and **Headings**, as in the connected reader. Tapping a saved image opens the full-screen zoom viewer, decoded from the reader's own lease; its Share exports display pixels, and **Share Original** keeps the original bytes. Backgrounding closes the viewer with the reader's lease.
+
+Saved text and PDF copies use the connected reader's [reading history](READER.md), keyed by connection, path and a hash of the content. A copy whose bytes match the server version opens where you left either one, and a changed copy starts at the top. Positions save when you leave or background the reader. Demo copies write no history, and neither do copies whose connection was removed, since removing a connection deletes its history. Standalone images and media have no saved position.
 
 ## Storage and lifecycle
 
@@ -54,6 +57,8 @@ Markdown images remain readable placeholders. No SFTP resolver or remote image l
 Offline-link regressions cover saved-route isolation, snapshot membership, parent/nested/encoded paths, distinct Unicode byte names, missing/excluded targets, changed/removed sources, relaunch and cancellation. Demo UI journeys exercise local and linked headings, nested document navigation, Back and error recovery after disconnect.
 
 `OfflineReaderLifecycleTests` hosts a real navigation stack and resolves twelve alternating saved-folder Markdown links, appending the same routes as the reader callback. Navigation runs outside JavaScript evaluation because a successful link removes its WebKit container before that evaluation necessarily completes. It checks that covered routes release their leases, foregrounding opens only the visible reader, and Back obtains a new lease and restores the reading position. A same-length change to the committed original while covered must be rejected on Back, proving that reopening verifies the digest. The hosted share regression in `AppModelLifecycleTests` checks that the item provider delivers a separate copy after reader/pin removal and that even a cached provider/controller releases its lease after activity completion. Share Original remains an accessible toolbar button; UIKit presents the activity controller from the reader’s top trailing anchor with an explicit iPad popover source. Activity cancellation also clears the share lease. `testOfflineShareOriginalPresentsAndCancels` taps the real toolbar button and opens/dismisses the native activity UI twice.
+
+`OfflineReaderHistoryTests` hosts the same navigation stack with a reading-history store. A saved PDF opens at the page the connected reader recorded for the same bytes, records a new page on Back and on backgrounding, and a fresh route restores it from the file. A plain-text copy restores its Source position in a new reader. Without a store, Back still returns to the page in memory but nothing is written; Demo and removed connections receive no store. The demo UI journeys `testOfflineCopyFindsTextAndListsHeadings` and `testOfflineImageOpensZoomViewerAndReturnsToTheReader` use Find, Headings and the zoom viewer after disconnecting.
 
 Physical-device locked-file protection and real-server/network-loss acceptance remain separate from simulator results.
 
@@ -78,3 +83,11 @@ Following `Heading notes.md#details` from another saved document after disconnec
 | iPhone linked heading | iPad linked heading |
 | --- | --- |
 | <img src="screenshots/offline-folders/iphone-link.png" width="220" alt="Offline Heading notes reader revealing the linked Details heading on iPhone"> | <img src="screenshots/offline-folders/ipad-link.png" width="300" alt="Offline Details heading reached through a saved document link in the iPad sheet"> |
+
+### Find, Headings and image zoom
+
+From the demo UI journeys after disconnecting:
+
+| Find in a saved copy | Headings | Saved image zoomed |
+| --- | --- | --- |
+| <img src="screenshots/offline-reader/iphone-find.png" width="220" alt="Find bar in an offline Markdown copy highlighting Reading marker 26, 1 of 1"> | <img src="screenshots/offline-reader/iphone-headings.png" width="220" alt="Headings sheet listing the saved document's headings"> | <img src="screenshots/offline-reader/iphone-image-zoom.png" width="220" alt="Full-screen viewer zoomed into a saved image, with Done and Share"> |
