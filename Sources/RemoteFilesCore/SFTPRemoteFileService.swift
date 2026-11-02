@@ -9,7 +9,7 @@ import NIOSSH
 /// Read-only SFTP adapter. The SSH connection is reused, and listings, metadata and document
 /// reads share one SFTP channel per session. Streaming downloads own a child channel, so
 /// cancelling one also releases all of its remote file handles.
-public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching, RemoteFileSessionClosing, ManagedRemoteFileDownloading {
+public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching, RemoteFileSessionClosing, ResumableManagedDownloading {
     private let identityStore: IdentityStore
     private let trustStore: HostTrustStore
     private let metadataStore: MetadataStore
@@ -363,9 +363,24 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching, Re
         try await download(profile: profile, path: path, allowedRoot: canonicalRoot, destination: destination,
                            limit: limit, progress: progress, canonicalPaths: true, managed: true)
     }
+    public func downloadManagedFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int,
+                                    resumeVersion: RemoteFileVersion?, started: @escaping ManagedDownloadStartHandler,
+                                    progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        try await download(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination, limit: limit,
+                           progress: progress, canonicalPaths: false, managed: true, resumeVersion: resumeVersion, started: started)
+    }
+    public func downloadManagedSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL, limit: Int,
+                                            resumeVersion: RemoteFileVersion?, started: @escaping ManagedDownloadStartHandler,
+                                            progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        try await download(profile: profile, path: path, allowedRoot: canonicalRoot, destination: destination, limit: limit,
+                           progress: progress, canonicalPaths: true, managed: true, resumeVersion: resumeVersion, started: started)
+    }
+    /// Bytes just before a resume offset that must still match the server's copy.
+    static let resumeOverlapBytes = 64 * 1024
     private func download(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL,
                           limit: Int, progress: @escaping DownloadProgressHandler, canonicalPaths: Bool,
-                          managed: Bool = false) async throws -> RemoteEntry {
+                          managed: Bool = false, resumeVersion: RemoteFileVersion? = nil,
+                          started: @escaping ManagedDownloadStartHandler = { _, _ in }) async throws -> RemoteEntry {
         guard limit > 0, limit < Int.max else { throw RemoteFileError.tooLarge(limit) }
         let session = try await session(for: profile)
         let result = try await performOnDedicatedChannel(session: session, budget: managed ? .idle(managedTransferIdle) : .total(180)) { sftp, activity in
@@ -392,12 +407,31 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching, Re
                 let entry = Self.entry(name: RemotePath.name(of: canonical), path: canonical, attributes: attributes)
                 guard entry.kind == .file else { throw RemoteFileError.unsupportedFile }
                 if let size = attributes.size, size > UInt64(limit) { throw RemoteFileError.tooLarge(limit) }
-                FileManager.default.createFile(atPath: destination.path, contents: nil)
-                let handle = try FileHandle(forWritingTo: destination)
+                let version = RemoteFileVersion(size: attributes.size, modifiedAt: entry.modifiedAt)
+                var start = 0
+                if let resumeVersion, resumeVersion == version {
+                    start = try await Self.resumableOffset(destination: destination, size: resumeVersion.size, limit: limit) { offset, amount in
+                        let bytes = try await file.read(from: offset, length: amount)
+                        activity.receivedBytes(bytes.readableBytes)
+                        return bytes
+                    }
+                }
+                let handle: FileHandle
+                if start > 0 {
+                    handle = try FileHandle(forWritingTo: destination)
+                    try handle.truncate(atOffset: UInt64(start))
+                    try handle.seekToEnd()
+                } else {
+                    FileManager.default.createFile(atPath: destination.path, contents: nil)
+                    handle = try FileHandle(forWritingTo: destination)
+                }
                 defer { try? handle.close() }
-                var count = 0
-                await progress(.init(totalBytes: attributes.size))
-                _ = try await BoundedPreviewReader.stream(initialSize: attributes.size, limit: limit, window: 16, readChunk: { offset, amount in
+                // The caller records the version before any byte of it reaches the destination.
+                await started(version, UInt64(start))
+                try Task.checkCancellation()
+                var count = start
+                await progress(.init(receivedBytes: UInt64(start), totalBytes: attributes.size))
+                _ = try await BoundedPreviewReader.stream(initialSize: attributes.size, limit: limit, startOffset: start, window: 16, readChunk: { offset, amount in
                     let bytes = try await file.read(from: offset, length: amount)
                     activity.receivedBytes(bytes.readableBytes)
                     return bytes
@@ -409,7 +443,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching, Re
                 try await file.close()
                 try Task.checkCancellation()
                 await progress(.init(receivedBytes: UInt64(count), totalBytes: UInt64(count), isComplete: true))
-                return (entry, count)
+                return (entry, count - start)
             } catch {
                 try? await file.close()
                 throw error
@@ -417,6 +451,31 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching, Re
         }
         measurements.fileOperations += 1; measurements.bytesReceived += result.1
         return result.0
+    }
+
+    /// The local length a transfer may continue from, or zero. The partial file must be a
+    /// regular file no longer than the remote file or the limit, and its final bytes (up to
+    /// `resumeOverlapBytes`) must equal the server's bytes at the same offsets. Size and
+    /// modification time alone miss a same-length rewrite within one timestamp tick.
+    static func resumableOffset(destination: URL, size: UInt64, limit: Int,
+                                readChunk: (UInt64, UInt32) async throws -> ByteBuffer) async throws -> Int {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: destination.path),
+              attributes[.type] as? FileAttributeType == .typeRegular,
+              let length = (attributes[.size] as? NSNumber)?.uint64Value,
+              length > 0, length <= size, length <= UInt64(limit) else { return 0 }
+        let overlap = Int(min(length, UInt64(resumeOverlapBytes)))
+        let overlapStart = length - UInt64(overlap)
+        guard let reader = try? FileHandle(forReadingFrom: destination) else { return 0 }
+        defer { try? reader.close() }
+        guard (try? reader.seek(toOffset: overlapStart)) != nil,
+              let local = try? reader.read(upToCount: overlap), local.count == overlap else { return 0 }
+        var remote = Data()
+        while remote.count < overlap {
+            let bytes = try await readChunk(overlapStart + UInt64(remote.count), UInt32(overlap - remote.count))
+            guard bytes.readableBytes > 0, bytes.readableBytes <= overlap - remote.count else { return 0 }
+            remote.append(contentsOf: bytes.readableBytesView)
+        }
+        return remote == local ? Int(length) : 0
     }
 
     /// User-tapped document links are bounded by the connection's canonical starting folder.
@@ -979,10 +1038,13 @@ enum BoundedPreviewReader {
     /// is queued as soon as it arrives and takes the next free slots, and once a filled gap confirms
     /// the server's maximum read size, later requests use it. Requests never extend more than one
     /// probe byte past `limit`.
-    static func stream(initialSize: UInt64?, limit: Int, chunkSize: Int = 64 * 1024, window: Int = 8,
+    /// `startOffset` continues a transfer whose earlier bytes are already held; offsets, the
+    /// limit and the returned byte count are all absolute file positions.
+    static func stream(initialSize: UInt64?, limit: Int, startOffset: Int = 0, chunkSize: Int = 64 * 1024, window: Int = 8,
                        readChunk: @escaping @Sendable (UInt64, UInt32) async throws -> ByteBuffer,
                        consume: (ByteBuffer) async throws -> Void) async throws -> (bytes: Int, requests: Int) {
         guard limit >= 0, limit < Int.max else { throw RemoteFileError.tooLarge(max(0, limit)) }
+        guard startOffset >= 0, startOffset <= limit else { throw RemoteFileError.tooLarge(limit) }
         if let size = initialSize, size > UInt64(limit) { throw RemoteFileError.tooLarge(limit) }
         struct Request { let offset: Int; let amount: Int; let fillsShortRead: Int? }
         return try await withThrowingTaskGroup(of: (Int, ByteBuffer).self) { group in
@@ -990,7 +1052,7 @@ enum BoundedPreviewReader {
             var order: [Int] = []       // Unconsumed request IDs by ascending offset.
             var received: [Int: ByteBuffer] = [:]
             var waiting: [Int] = []     // Registered gap pieces not yet sent, by ascending offset.
-            var nextID = 0, sent = 0, nextOffset = 0, inFlight = 0, consumed = 0
+            var nextID = 0, sent = 0, nextOffset = startOffset, inFlight = 0, consumed = startOffset
             var endOfFile = Int.max     // Lowest offset already answered with EOF.
             var chunk = max(1, chunkSize)
             func register(_ request: Request, at position: Int) -> Int {

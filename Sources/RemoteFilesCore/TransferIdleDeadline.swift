@@ -18,6 +18,24 @@ public extension ManagedRemoteFileDownloading {
     }
 }
 
+/// Called once a managed transfer has opened the remote file, before any bytes are written:
+/// the remote file's version (nil when the server reports no size or modification time) and
+/// the byte offset the transfer continues from (zero for a fresh transfer).
+public typealias ManagedDownloadStartHandler = @Sendable (_ version: RemoteFileVersion?, _ offset: UInt64) async -> Void
+
+/// Managed transfers that can continue a partial local file. A transfer continues from the
+/// destination's current length only while the remote file still has `resumeVersion`'s size
+/// and modification time and the bytes just before that offset still match; otherwise the
+/// destination is truncated and the transfer starts at byte zero.
+public protocol ResumableManagedDownloading: ManagedRemoteFileDownloading {
+    func downloadManagedFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int,
+                             resumeVersion: RemoteFileVersion?, started: @escaping ManagedDownloadStartHandler,
+                             progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry
+    func downloadManagedSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL, limit: Int,
+                                     resumeVersion: RemoteFileVersion?, started: @escaping ManagedDownloadStartHandler,
+                                     progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry
+}
+
 struct TransferActivity: Sendable {
     let receivedBytes: @Sendable (Int) -> Void
     static let ignored = TransferActivity(receivedBytes: { _ in })

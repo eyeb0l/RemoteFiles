@@ -2,6 +2,10 @@
 
 This is a dated record of feature work and validation, not a live test dashboard. Each result applies to the build, environment and date described with it; an installation or Simulator pass does not establish later physical-device acceptance. For current behavior, start with the [documentation index](docs/README.md). For checks still to perform, see [manual acceptance](docs/MANUAL_ACCEPTANCE.md) and the [roadmap](ROADMAP.md).
 
+**2 November 2026: resuming interrupted downloads.**
+
+**Retry** now continues an interrupted managed download from the bytes already received, instead of starting from zero, when the server's file keeps its size and modification time and the last 64 KiB received still match. Otherwise it starts again. Kept bytes survive relaunch, count toward the 512 MiB budget and give way when a new download needs the space; Cancel and refusals discard them. See [downloads](docs/DOWNLOADS.md#resuming-interrupted-downloads). On macOS, the download queue tests and an OpenSSH fixture test that stalls a real transfer mid-file passed; the fixture test fails if resuming is disabled. Resuming on the physical iPhone has not been checked.
+
 **2 November 2026: offline reader parity.**
 
 Offline copies gained Find in Document, the Headings list, the full-screen image zoom viewer and saved reading positions for text and PDFs, closing the gap the 31 October session noted. Positions share the connected reader's history for identical bytes; Demo copies and copies of removed connections write none. Local verification on an iPhone 18 Pro Max Simulator (iOS 27.2): four new hosted history tests and the existing offline lifecycle, PDF position and image lifecycle tests passed, and disconnecting the history store made the persistence tests fail; two new demo UI journeys and the five existing offline UI journeys passed. Physical-device acceptance remains outstanding. See [offline files](docs/OFFLINE_FILES.md#offline-reader).

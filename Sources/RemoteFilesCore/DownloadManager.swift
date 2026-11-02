@@ -23,8 +23,16 @@ public struct ManagedDownload: Identifiable, Codable, Sendable {
     public var state: ManagedDownloadState
     public var receivedBytes: UInt64
     public var message: String?
+    /// The remote file's size and modification time when the kept partial bytes were
+    /// received. Nil means no partial bytes are kept and Retry starts at byte zero.
+    /// Missing in older manifests.
+    public var partialVersion: RemoteFileVersion?
     /// Fully received files retain their storage reservation while protection is pending.
     public var retainsDownloadedBytes: Bool { state == .completed || state == .pendingFinalization }
+    /// An interrupted or failed transfer whose received bytes are kept so Retry can continue.
+    public var keepsPartialBytes: Bool {
+        partialVersion != nil && receivedBytes > 0 && (state == .interrupted || state == .failed)
+    }
     public var progress: DownloadProgress {
         .init(receivedBytes: receivedBytes, totalBytes: expectedBytes, isComplete: state == .completed)
     }
@@ -104,10 +112,16 @@ public final class DownloadManager {
             for index in items.indices {
                 if items[index].state == .downloading || items[index].state == .queued {
                     items[index].state = .interrupted
-                    items[index].message = "The app stopped before this download finished. Retry to start again."
+                    items[index].message = "The app stopped before this download finished. Retry to continue."
                 }
-                if !items[index].retainsDownloadedBytes { try removeDirectory(jobDirectory(items[index].id)) }
-                else {
+                if !items[index].retainsDownloadedBytes {
+                    // The manifest's progress can lag the file, so the file's length is the measure.
+                    items[index].receivedBytes = partialLength(items[index]) ?? 0
+                    if !items[index].keepsPartialBytes {
+                        items[index].partialVersion = nil; items[index].receivedBytes = 0
+                        try removeDirectory(jobDirectory(items[index].id))
+                    }
+                } else {
                     let attributes = try? FileManager.default.attributesOfItem(atPath: fileURL(items[index]).path)
                     let size = (attributes?[.size] as? NSNumber)?.uint64Value
                     if attributes?[.type] as? FileAttributeType != .typeRegular || size != items[index].receivedBytes {
@@ -119,7 +133,13 @@ public final class DownloadManager {
         }
         let retainedBytes = items.filter { $0.retainsDownloadedBytes }.reduce(UInt64(0)) { $0 + $1.receivedBytes }
         guard retainedBytes <= UInt64(self.totalLimit) else { throw DownloadManagerError.storageFull }
-        let retained = Set(items.filter { $0.retainsDownloadedBytes }.map { $0.id.uuidString })
+        // Partial bytes are only a head start; never let them exceed the storage budget.
+        if retainedBytes + partialBytes(excluding: nil) > UInt64(self.totalLimit) {
+            for index in items.indices where items[index].keepsPartialBytes {
+                try discardPartialBytes(at: index)
+            }
+        }
+        let retained = Set(items.filter { $0.retainsDownloadedBytes || $0.keepsPartialBytes }.map { $0.id.uuidString })
         for child in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
             if UUID(uuidString: child.lastPathComponent) != nil, !retained.contains(child.lastPathComponent) {
                 try removeDirectory(child)
@@ -151,16 +171,29 @@ public final class DownloadManager {
         guard let index = index(id), activeID != id, !items[index].retainsDownloadedBytes else { return }
         guard items[index].profile == profile else { throw DownloadManagerError.unavailable }
         guard let transport = service ?? self.service else { throw DownloadManagerError.unavailable }
-        try removeDirectory(jobDirectory(id)); cleanupBlockedIDs.remove(id)
+        // Kept bytes stay for the transport to verify against the server before continuing.
+        if items[index].keepsPartialBytes, let length = partialLength(items[index]) {
+            items[index].receivedBytes = length
+        } else {
+            try removeDirectory(jobDirectory(id))
+            items[index].partialVersion = nil; items[index].receivedBytes = 0
+        }
+        cleanupBlockedIDs.remove(id)
         contexts[id] = .init(service: transport, onFailure: onFailure)
-        items[index].state = .queued; items[index].message = nil; items[index].receivedBytes = 0
+        items[index].state = .queued; items[index].message = nil
         stopped = false; publish(); startNext()
     }
 
     public func cancel(_ id: UUID) {
         guard let index = index(id), items[index].state == .queued || items[index].state == .downloading else { return }
         items[index].state = .cancelled; items[index].message = nil
-        if activeID == id { worker?.cancel() } else { contexts.removeValue(forKey: id) }
+        if activeID == id { worker?.cancel() } else {
+            contexts.removeValue(forKey: id)
+            // Cancelling a retry gives up its kept bytes, as cancelling a transfer does.
+            if items[index].partialVersion != nil {
+                do { try discardPartialBytes(at: index) } catch { cleanupBlockedIDs.insert(id) }
+            }
+        }
         publish()
     }
 
@@ -206,12 +239,40 @@ public final class DownloadManager {
     private func index(_ id: UUID) -> Int? { items.firstIndex { $0.id == id } }
     private func jobDirectory(_ id: UUID) -> URL { directory.appendingPathComponent(id.uuidString, isDirectory: true) }
     private func fileURL(_ item: ManagedDownload) -> URL { jobDirectory(item.id).appendingPathComponent(item.filename) }
+    /// The length of a job's kept partial file, or nil if it is missing, not a regular file or too large.
+    private func partialLength(_ item: ManagedDownload) -> UInt64? {
+        guard item.partialVersion != nil,
+              let attributes = try? FileManager.default.attributesOfItem(atPath: fileURL(item).path),
+              attributes[.type] as? FileAttributeType == .typeRegular,
+              let size = (attributes[.size] as? NSNumber)?.uint64Value, size <= UInt64(fileLimit) else { return nil }
+        return size
+    }
+    /// Kept partial bytes, including those of a retried job still waiting in the queue.
+    private func holdsPartialBytes(_ item: ManagedDownload) -> Bool {
+        item.keepsPartialBytes || (item.state == .queued && item.partialVersion != nil && item.receivedBytes > 0)
+    }
+    private func partialBytes(excluding id: UUID?) -> UInt64 {
+        items.filter { $0.id != id && holdsPartialBytes($0) }.reduce(UInt64(0)) { $0 + $1.receivedBytes }
+    }
+    private func discardPartialBytes(at index: Int) throws {
+        items[index].partialVersion = nil; items[index].receivedBytes = 0
+        try removeDirectory(jobDirectory(items[index].id))
+    }
     private func startNext() {
         guard worker == nil, isForeground, !stopped, cleanupBlockedIDs.isEmpty,
               let item = items.first(where: { $0.state == .queued }), let index = index(item.id) else { return }
-        let used = items.filter { $0.retainsDownloadedBytes }.reduce(UInt64(0)) { $0 + $1.receivedBytes }
-        let available = max(0, totalLimit - Int(min(UInt64(totalLimit), used)))
-        let limit = min(fileLimit, available)
+        let retained = items.filter { $0.retainsDownloadedBytes }.reduce(UInt64(0)) { $0 + $1.receivedBytes }
+        func available() -> Int {
+            let used = retained + partialBytes(excluding: item.id)
+            return max(0, totalLimit - Int(min(UInt64(totalLimit), used)))
+        }
+        // Other jobs' partial bytes give way before this job is refused for storage.
+        let needed = item.expectedBytes ?? UInt64(fileLimit)
+        for other in items.indices where items[other].id != item.id && holdsPartialBytes(items[other]) {
+            guard UInt64(min(fileLimit, available())) < needed else { break }
+            do { try discardPartialBytes(at: other) } catch { cleanupBlockedIDs.insert(items[other].id); publish(); return }
+        }
+        let limit = min(fileLimit, available())
         guard limit > 0, item.expectedBytes.map({ $0 <= UInt64(limit) }) ?? true else {
             items[index].state = .failed; items[index].message = DownloadManagerError.storageFull.localizedDescription
             contexts.removeValue(forKey: item.id)
@@ -219,6 +280,11 @@ public final class DownloadManager {
         }
         guard let context = contexts[item.id] else { return }
         let service = context.service
+        // A job without a resumable transport, or whose kept bytes vanished, starts from zero.
+        if item.partialVersion != nil, !(service is any ResumableManagedDownloading) || partialLength(item) == nil {
+            do { try discardPartialBytes(at: index) } catch { cleanupBlockedIDs.insert(item.id); publish(); return }
+        }
+        let resumeVersion = items[index].partialVersion
         activeID = item.id; items[index].state = .downloading
         worker = Task { [weak self, service] in
             guard let self else { return }
@@ -228,8 +294,21 @@ public final class DownloadManager {
                 let progress: DownloadProgressHandler = { [weak self] progress in
                     await self?.updateProgress(progress, id: item.id)
                 }
+                let started: ManagedDownloadStartHandler = { [weak self] version, offset in
+                    await self?.recordStart(version: version, offset: offset, id: item.id)
+                }
                 let remote: RemoteEntry
-                if let root = item.canonicalRoot {
+                if let resumable = service as? any ResumableManagedDownloading {
+                    if let root = item.canonicalRoot {
+                        remote = try await resumable.downloadManagedSnapshotFile(profile: item.profile, path: item.path,
+                            canonicalRoot: root, destination: target, limit: limit, resumeVersion: resumeVersion,
+                            started: started, progress: progress)
+                    } else {
+                        remote = try await resumable.downloadManagedFile(profile: item.profile, path: item.path,
+                            allowedRoot: RemotePath.parent(of: item.path), destination: target, limit: limit,
+                            resumeVersion: resumeVersion, started: started, progress: progress)
+                    }
+                } else if let root = item.canonicalRoot {
                     // A saved-index result stays within the index's exact canonical root,
                     // wherever that index was built.
                     if let managed = service as? any ManagedRemoteFileDownloading {
@@ -255,6 +334,7 @@ public final class DownloadManager {
                 }
                 if let index = self.index(item.id), self.items[index].state == .downloading {
                     self.items[index].receivedBytes = size.uint64Value
+                    self.items[index].partialVersion = nil
                     self.items[index].state = .pendingFinalization
                     try self.finalizeDownload(item.id)
                 }
@@ -271,8 +351,17 @@ public final class DownloadManager {
                     self.items[index].message = error is CancellationError ? nil : shown.localizedDescription
                     if !(error is CancellationError) { context.onFailure?(error, item.profile) }
                 }
+                // Only an interrupted transfer keeps its bytes: not a cancellation, and not a
+                // refusal about the file itself, which Retry would only repeat.
+                if let index = self.index(item.id), !Self.allowsResume(after: error) || self.items[index].state == .cancelled {
+                    self.items[index].partialVersion = nil
+                }
             }
-            if self.items.first(where: { $0.id == item.id })?.retainsDownloadedBytes != true {
+            if let index = self.index(item.id), !self.items[index].retainsDownloadedBytes {
+                self.items[index].receivedBytes = self.partialLength(self.items[index]) ?? 0
+            }
+            if let current = self.items.first(where: { $0.id == item.id }), !current.retainsDownloadedBytes, !current.keepsPartialBytes {
+                if let index = self.index(item.id) { self.items[index].partialVersion = nil; self.items[index].receivedBytes = 0 }
                 do { try self.removeDirectory(self.jobDirectory(item.id)) }
                 catch {
                     self.cleanupBlockedIDs.insert(item.id)
@@ -331,6 +420,21 @@ public final class DownloadManager {
         }
     }
 
+    /// Persist which remote version the destination now holds before any of its bytes arrive,
+    /// so bytes kept after an interruption are never attributed to a different version.
+    private func recordStart(version: RemoteFileVersion?, offset: UInt64, id: UUID) {
+        guard let index = index(id), items[index].state == .downloading else { return }
+        items[index].partialVersion = version; items[index].receivedBytes = offset
+        publish()
+    }
+    static func allowsResume(after error: Error) -> Bool {
+        switch error {
+        case is OriginalFileExportError, is DownloadManagerError, is RemoteDocumentLinkError, is RemoteResourceError: return false
+        case RemoteFileError.tooLarge, RemoteFileError.notFound, RemoteFileError.permissionDenied,
+             RemoteFileError.invalidPath, RemoteFileError.unsupportedFile: return false
+        default: return true
+        }
+    }
     private func updateProgress(_ progress: DownloadProgress, id: UUID) {
         guard let index = index(id), items[index].state == .downloading else { return }
         items[index].receivedBytes = progress.receivedBytes

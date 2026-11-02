@@ -1252,6 +1252,76 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertEqual(after.connections, before.connections + 1, "The closed socket is replaced by a new connection")
     }
 
+    /// Retried managed downloads restarted from byte zero after a dead network on the iPhone.
+    /// The kept bytes are continued only while the server's file keeps its size and modification
+    /// time and the kept bytes still end with the server's bytes; otherwise the transfer restarts.
+    func testInterruptedManagedDownloadContinuesOnlyWhileTheRemoteFileIsUnchanged() async throws {
+        let (fixture, proxy, service, profile) = try await connectedThroughProxy(name: "Resumed managed download")
+        await service.setTransferTimings(idle: .seconds(2), closeGrace: .seconds(1))
+        let source = try stallFixtureFile(fixture)
+        let original = try Data(contentsOf: URL(fileURLWithPath: source))
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("resumed-" + UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: destination) }
+        let starts = ResumeStartRecorder()
+        let record: ManagedDownloadStartHandler = { await starts.record(version: $0, offset: $1) }
+        func download(resuming version: RemoteFileVersion?, progress: @escaping DownloadProgressHandler = { _ in }) async throws {
+            _ = try await service.downloadManagedFile(profile: profile, path: source, allowedRoot: fixture.files, destination: destination,
+                limit: 16_777_216, resumeVersion: version, started: record, progress: progress)
+        }
+
+        let guardTask = watchdog(proxy)
+        do {
+            try await download(resuming: nil, progress: stallAfterFirstBytes(proxy))
+            XCTFail("A transfer whose replies stop must not succeed")
+        } catch RemoteFileError.timedOut {}
+        guardTask.cancel()
+        proxy.resumeReplies()
+        let kept = try Data(contentsOf: destination)
+        XCTAssertGreaterThan(kept.count, 0)
+        XCTAssertLessThan(kept.count, original.count)
+        XCTAssertEqual(kept, original.prefix(kept.count), "Kept bytes are a prefix of the server's file")
+        let recorded = await starts.values
+        let first = try XCTUnwrap(recorded.first)
+        let version = try XCTUnwrap(first.version)
+        XCTAssertEqual(first.offset, 0)
+        XCTAssertEqual(version.size, UInt64(original.count))
+
+        let before = await service.metrics()
+        try await download(resuming: version)
+        let after = await service.metrics()
+        var last = await starts.values.last
+        XCTAssertEqual(last?.offset, UInt64(kept.count), "An unchanged file continues from the kept bytes")
+        XCTAssertEqual(last?.version, version)
+        XCTAssertEqual(try Data(contentsOf: destination), original)
+        // The overlap check's read is separate; streamed file bytes are only the missing ones.
+        XCTAssertEqual(after.bytesReceived - before.bytesReceived, original.count - kept.count)
+
+        // Kept bytes that no longer end with the server's bytes are not trusted.
+        var altered = kept; altered[altered.count - 1] ^= 0xFF
+        try altered.write(to: destination)
+        try await download(resuming: version)
+        last = await starts.values.last
+        XCTAssertEqual(last?.offset, 0)
+        XCTAssertEqual(try Data(contentsOf: destination), original)
+
+        // A different modification time means a different file, even at the same size.
+        try kept.write(to: destination)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -3600)], ofItemAtPath: source)
+        try await download(resuming: version)
+        last = await starts.values.last
+        XCTAssertEqual(last?.offset, 0)
+        XCTAssertNotEqual(last?.version, version)
+        XCTAssertEqual(try Data(contentsOf: destination), original)
+
+        // Kept bytes longer than the server's file are never continued.
+        try (original + Data([1])).write(to: destination)
+        let current = try XCTUnwrap(last?.version)
+        try await download(resuming: current)
+        last = await starts.values.last
+        XCTAssertEqual(last?.offset, 0)
+        XCTAssertEqual(try Data(contentsOf: destination), original)
+    }
+
     /// Cancelling an offline update in Airplane Mode took about three minutes to take effect.
     /// A cancelled dedicated transfer must return once the close grace period has passed.
     func testCancellingAStalledTransferReturnsAfterTheCloseGrace() async throws {
@@ -1907,6 +1977,27 @@ final class BoundedPreviewReaderTests: XCTestCase {
         }
     }
 
+    func testStreamFromAnOffsetRequestsOnlyLaterBytesAndKeepsTheLimitAbsolute() async throws {
+        let bytes = (0..<300_000).map { UInt8(truncatingIfNeeded: $0 &* 7) }
+        let file = PipelinedPreviewFile(bytes)
+        var received: [UInt8] = []
+        let result = try await BoundedPreviewReader.stream(initialSize: 300_000, limit: 300_000, startOffset: 120_000, readChunk: { offset, amount in
+            await file.read(offset: offset, length: amount)
+        }) { received.append(contentsOf: $0.readableBytesView) }
+        XCTAssertEqual(received, Array(bytes[120_000...]))
+        XCTAssertEqual(result.bytes, 300_000, "The byte count is a file position")
+        let requests = await file.requests
+        XCTAssertTrue(requests.allSatisfy { $0.0 >= 120_000 && $0.0 + UInt64($0.1) <= 300_001 })
+
+        let growing = PipelinedPreviewFile(Array(repeating: 1, count: 400_000))
+        do {
+            _ = try await BoundedPreviewReader.stream(initialSize: nil, limit: 300_000, startOffset: 250_000, readChunk: { offset, amount in
+                await growing.read(offset: offset, length: amount)
+            }) { _ in }
+            XCTFail("Bytes past the limit must be rejected when continuing")
+        } catch RemoteFileError.tooLarge(let limit) { XCTAssertEqual(limit, 300_000) }
+    }
+
     func testPipelinedReadNeverRequestsPastProbeAndRejectsGrowth() async throws {
         let file = PipelinedPreviewFile(Array(repeating: 1, count: 500_000))
         do {
@@ -2091,4 +2182,10 @@ private final class LockedTestFlag: @unchecked Sendable {
     var isSet: Bool { lock.withLock { value } }
     /// Returns true only for the first caller.
     func setOnce() -> Bool { lock.withLock { defer { value = true }; return !value } }
+}
+
+private actor ResumeStartRecorder {
+    struct Start { let version: RemoteFileVersion?; let offset: UInt64 }
+    private(set) var values: [Start] = []
+    func record(version: RemoteFileVersion?, offset: UInt64) { values.append(.init(version: version, offset: offset)) }
 }

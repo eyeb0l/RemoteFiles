@@ -399,6 +399,102 @@ final class DownloadManagerTests: XCTestCase {
         let count = await service.requests.count
         XCTAssertEqual(count, 0)
     }
+
+    func testInterruptedDownloadKeepsItsBytesAcrossRelaunchAndRetryContinuesFromThem() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let content = Data((0..<10).map { UInt8($0 + 40) })
+        let service = ResumableDownloadFixture(content: content)
+        await service.failNext(after: 4)
+        let manager = try DownloadManager(service: service, directory: directory)
+        let id = try manager.enqueue(profile: profile, entry: entry(size: 10))
+        try await wait { manager.activeID == nil }
+        let version = await service.version
+        XCTAssertEqual(manager.items.first?.state, .failed)
+        XCTAssertEqual(manager.items.first?.keepsPartialBytes, true, "A dead network keeps the received bytes")
+        XCTAssertEqual(manager.items.first?.receivedBytes, 4)
+        XCTAssertEqual(manager.items.first?.partialVersion, version)
+
+        let restored = try DownloadManager(service: service, directory: directory)
+        XCTAssertEqual(restored.items.first?.keepsPartialBytes, true, "Kept bytes survive relaunch")
+        XCTAssertEqual(restored.items.first?.receivedBytes, 4)
+        try restored.retry(id, profile: profile)
+        try await wait { restored.activeID == nil }
+        XCTAssertEqual(restored.items.first?.state, .completed)
+        XCTAssertEqual(try Data(contentsOf: restored.completedURL(id)), content)
+        XCTAssertNil(restored.items.first?.partialVersion)
+        let starts = await service.starts, resumes = await service.resumeVersions
+        XCTAssertEqual(starts, [0, 4], "Retry continues from the kept bytes")
+        XCTAssertEqual(resumes, [nil, version])
+    }
+    func testRetryStartsAgainWhenTheRemoteFileChanged() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let service = ResumableDownloadFixture(content: Data(repeating: 1, count: 10))
+        await service.failNext(after: 4)
+        let manager = try DownloadManager(service: service, directory: directory)
+        let id = try manager.enqueue(profile: profile, entry: entry())
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.first?.keepsPartialBytes, true)
+        let changed = Data(repeating: 2, count: 12)
+        await service.replace(content: changed, modifiedAt: Date(timeIntervalSince1970: 1_800_000_000))
+        try manager.retry(id, profile: profile)
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(try Data(contentsOf: manager.completedURL(id)), changed)
+        let starts = await service.starts
+        XCTAssertEqual(starts, [0, 0], "A changed file is downloaded from the beginning")
+    }
+    func testCancellationAndRefusalsDiscardKeptBytesButInterruptionKeepsThem() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let service = ResumableDownloadFixture(content: Data(repeating: 3, count: 10))
+        await service.failNext(after: 4, with: RemoteFileError.permissionDenied)
+        let manager = try DownloadManager(service: service, directory: directory)
+        let refused = try manager.enqueue(profile: profile, entry: entry("refused.bin"))
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.first?.state, .failed)
+        XCTAssertEqual(manager.items.first?.keepsPartialBytes, false, "Retrying a refusal would only repeat it")
+        XCTAssertNil(manager.items.first?.partialVersion)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(refused.uuidString).path))
+
+        await service.failNext(after: 4)
+        let kept = try manager.enqueue(profile: profile, entry: entry("kept.bin"))
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.last?.keepsPartialBytes, true)
+        manager.setForeground(false)
+        try manager.retry(kept, profile: profile)
+        XCTAssertEqual(manager.items.last?.state, .queued)
+        await manager.interrupt(reason: "Disconnected")
+        XCTAssertEqual(manager.items.last?.state, .interrupted)
+        XCTAssertEqual(manager.items.last?.keepsPartialBytes, true, "An interrupted retry keeps its bytes")
+        XCTAssertEqual(manager.items.last?.receivedBytes, 4)
+
+        try manager.retry(kept, profile: profile)
+        manager.cancel(kept)
+        XCTAssertEqual(manager.items.last?.state, .cancelled)
+        XCTAssertNil(manager.items.last?.partialVersion)
+        XCTAssertEqual(manager.items.last?.receivedBytes, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(kept.uuidString).path),
+                       "Cancelling gives up the kept bytes")
+    }
+    func testKeptBytesCountTowardStorageAndGiveWayToANewDownload() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let service = ResumableDownloadFixture(content: Data(repeating: 4, count: 10))
+        await service.failNext(after: 6)
+        let manager = try DownloadManager(service: service, directory: directory, fileLimit: 10, totalLimit: 12)
+        let partial = try manager.enqueue(profile: profile, entry: entry("partial.bin", size: 10))
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.first?.receivedBytes, 6)
+        let fresh = try manager.enqueue(profile: profile, entry: entry("fresh.bin", size: 10))
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.last?.state, .completed, "Kept bytes must not block a new download")
+        XCTAssertEqual(try Data(contentsOf: manager.completedURL(fresh)).count, 10)
+        XCTAssertEqual(manager.items.first?.state, .failed)
+        XCTAssertNil(manager.items.first?.partialVersion)
+        XCTAssertEqual(manager.items.first?.receivedBytes, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(partial.uuidString).path))
+        try manager.retry(partial, profile: profile)
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.first?.state, .failed, "Without room, Retry still reports the storage limit")
+        XCTAssertEqual(manager.items.first?.message, DownloadManagerError.storageFull.localizedDescription)
+    }
 }
 
 private actor DownloadFixture: RemoteFileService, RemoteFileSessionClosing {
@@ -493,4 +589,52 @@ private struct OrdinaryManagedDownloadFixture: RemoteFileService, ManagedRemoteF
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
     func disconnect() async { await base.disconnect() }
+}
+
+/// Continues a destination only when it holds a prefix of the same version, as the SFTP transport does.
+private actor ResumableDownloadFixture: RemoteFileService, ResumableManagedDownloading, RemoteFileSessionClosing {
+    private var content: Data
+    private var modifiedAt = Date(timeIntervalSince1970: 1_700_000_000)
+    private var failure: (bytes: Int, error: Error)?
+    private(set) var starts: [UInt64] = []
+    private(set) var resumeVersions: [RemoteFileVersion?] = []
+    var version: RemoteFileVersion { RemoteFileVersion(size: UInt64(content.count), modifiedAt: modifiedAt)! }
+    init(content: Data) { self.content = content }
+    func failNext(after bytes: Int, with error: Error = RemoteFileError.timedOut) { failure = (bytes, error) }
+    func replace(content: Data, modifiedAt: Date) { self.content = content; self.modifiedAt = modifiedAt }
+    func downloadManagedFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int,
+                             resumeVersion: RemoteFileVersion?, started: @escaping ManagedDownloadStartHandler,
+                             progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        resumeVersions.append(resumeVersion)
+        guard content.count <= limit else { throw RemoteFileError.tooLarge(limit) }
+        var start = 0
+        if resumeVersion == version, let local = try? Data(contentsOf: destination),
+           local.count <= content.count, content.prefix(local.count) == local { start = local.count }
+        if start == 0 { try Data().write(to: destination) }
+        starts.append(UInt64(start))
+        await started(version, UInt64(start))
+        let handle = try FileHandle(forWritingTo: destination)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        let end = failure.map { min(content.count, start + $0.bytes) } ?? content.count
+        try handle.write(contentsOf: content.subdata(in: start..<end))
+        if let failure { self.failure = nil; throw failure.error }
+        return .init(name: RemotePath.name(of: path), path: path, kind: .file, size: UInt64(content.count))
+    }
+    func downloadManagedSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL, limit: Int,
+                                     resumeVersion: RemoteFileVersion?, started: @escaping ManagedDownloadStartHandler,
+                                     progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        try await downloadManagedFile(profile: profile, path: path, allowedRoot: canonicalRoot, destination: destination, limit: limit,
+                                      resumeVersion: resumeVersion, started: started, progress: progress)
+    }
+    func downloadManagedFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL,
+                             limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        try await downloadManagedFile(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination, limit: limit,
+                                      resumeVersion: nil, started: { _, _ in }, progress: progress)
+    }
+    func closeSessionPreservingUnlockedIdentities() {}
+    func disconnect() {}
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.unsupportedFile }
 }
