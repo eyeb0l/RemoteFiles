@@ -4,7 +4,7 @@ This is a dated record of feature work and validation, not a live test dashboard
 
 **2 November 2026: resuming interrupted downloads.**
 
-**Retry** now continues an interrupted managed download from the bytes already received, instead of starting from zero, when the server's file keeps its size and modification time and the last 64 KiB received still match. Otherwise it starts again. Kept bytes survive relaunch, count toward the 512 MiB budget and give way when a new download needs the space; Cancel and refusals discard them. See [downloads](docs/DOWNLOADS.md#resuming-interrupted-downloads). On macOS, the download queue tests and an OpenSSH fixture test that stalls a real transfer mid-file passed; the fixture test fails if resuming is disabled. Resuming on the physical iPhone has not been checked.
+**Retry** now continues an interrupted managed download from the bytes already received, instead of starting from zero, when the server's file keeps its size and modification time and the last 64 KiB received still match. Otherwise it starts again. Kept bytes survive relaunch, count toward the 512 MiB budget and give way when a new download needs the space; Cancel and refusals discard them. See [downloads](docs/DOWNLOADS.md#resuming-interrupted-downloads). On macOS, the download queue tests and an OpenSSH fixture test that stalls a real transfer mid-file passed; the fixture test fails if resuming is disabled. On the physical iPhone, resuming after Airplane Mode and after a force quit, and restarting a replaced file, passed with matching SHA-256 checksums; see [the session record](docs/REAL_SERVER_ACCEPTANCE.md#2-november-2026-download-resume). iOS ending a background transfer was not checked.
 
 **2 November 2026: offline reader parity.**
 

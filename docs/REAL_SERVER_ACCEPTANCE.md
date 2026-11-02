@@ -274,3 +274,30 @@ during network loss, and representative large report/directory performance. Stal
 rendering after an interrupted refresh, the encrypted-key lifecycle and the
 accessibility/selection matrix passed on [31 October](#31-october-2026-iphone-session). Read-only enforcement here is an OpenSSH command
 restriction; this UI test deliberately did not attempt remote writes.
+
+## 2 November 2026 download resume
+
+A hands-on check of resuming interrupted downloads ([PR #61](https://github.com/eyeb0l/RemoteFiles/pull/61))
+on the physical iPhone 17 Pro (iOS 27.2) against **My MacBook**. The build was a
+signed Release of `main` at `64495cf`, installed from the Mac mini. The network route
+was not recorded. The fixture was a 125,829,120-byte random file added to the
+MacBook's `Fixtures/` for the session and removed afterwards. Each finished download
+was saved to iCloud Drive and its SHA-256 compared on the Mac mini.
+
+- **Airplane Mode, file unchanged: passed.** About a minute after Airplane Mode went
+  on, the download failed and showed its kept amount. After the network returned,
+  Retry continued from that amount, and the result matched the server
+  (`697016bc…14c4`).
+- **Airplane Mode, file replaced: passed.** With a second download interrupted the same
+  way, the file was replaced on the server with new random bytes of the same size and
+  a later modification time. Retry started from zero, and the result matched the new
+  file (`ae9177cf…ac62fac`).
+- **Locked: completed.** A download started before locking finished in the background
+  while locked and matched the server. The transfer never stopped, so this did not
+  exercise resuming.
+- **Force quit: passed.** After RemoteFiles was swiped away mid-transfer and reopened,
+  the row showed **Interrupted** with 8.5 MB of 125.8 MB kept. Retry continued from
+  there, and the result matched the server.
+
+Not checked: iOS ending a background transfer (resource expiration), which could not be
+forced, and resuming over a recorded cellular route.

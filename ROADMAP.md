@@ -20,7 +20,7 @@ does not block RemoteFiles; see [dependency maintenance](docs/CITADEL_UPSTREAM.m
 - Physical-device layout and memory acceptance of reading history. Layout-independent text/block anchors cover Markdown, Source (including plain text) and static HTML; remote and offline PDFs save their page position; offline copies share the connected reader's history; inactive reader-content eviction is implemented. Standalone images fit their view and have no position to save. See [reader behavior](docs/READER.md).
 - Automatic or incremental search-index refresh. [Folder search](docs/FOLDER_BROWSING.md) already supports explicit persistent local indexes, bounded PDF text and on-device OCR, plus case, whole-word and file-type filters. Saved indexes are snapshots and must be rebuilt to reflect remote changes.
 - Offline synchronization, File Provider, multiple jump hops, other protocols such as FTP/FTPS, optional terminal handoff, deeper Tailscale onboarding, and additional iPad keyboard and multiwindow workflows.
-- Expanded transfer quotas and physical-device acceptance of background transfers and of resuming them. Managed downloads continue interrupted files from their received bytes while the remote file is unchanged; see [downloads](docs/DOWNLOADS.md#resuming-interrupted-downloads).
+- Expanded transfer quotas, and physical-device acceptance of resuming after iOS ends a background transfer. Managed downloads continue interrupted files from their received bytes while the remote file is unchanged; on the iPhone this [passed](docs/REAL_SERVER_ACCEPTANCE.md#2-november-2026-download-resume) after Airplane Mode and a force quit. See [downloads](docs/DOWNLOADS.md#resuming-interrupted-downloads).
 
 <a id="separate-write-capable-iteration"></a>
 ## Newly implemented
