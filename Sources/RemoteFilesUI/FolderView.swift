@@ -173,6 +173,17 @@ struct FolderListing: Sendable {
     }
 }
 
+/// Where Up and Down move a folder's keyboard selection.
+enum FolderKeyboardSelection {
+    /// Moves `delta` rows, stopping at either end. With nothing selected, or a selection no longer
+    /// listed, Down starts at the top and Up at the bottom.
+    static func moved(_ current: String?, by delta: Int, in ids: [String]) -> String? {
+        guard !ids.isEmpty else { return nil }
+        guard let current, let index = ids.firstIndex(of: current) else { return delta > 0 ? ids.first : ids.last }
+        return ids[min(max(index + delta, 0), ids.count - 1)]
+    }
+}
+
 struct FolderView: View {
     @Environment(\.workspaceNavigation) private var workspaceNavigate
     @Bindable var model: AppModel
@@ -205,6 +216,8 @@ struct FolderView: View {
     @State private var showingSearchIndex = false
     @State private var searchPresented = false
     @FocusState private var searchFocused: Bool
+    /// The row a hardware keyboard's arrow keys have selected; Return opens it.
+    @State private var keyboardSelection: String?
     init(model: AppModel, profile: ConnectionProfile, requestedPath: String) {
         self.model = model
         self.profile = profile
@@ -239,6 +252,7 @@ struct FolderView: View {
             } else if searchingSubfolders {
                 subfolderResults
             } else {
+                followingKeyboardSelection {
                 List {
                     if visible.isEmpty {
                         ContentUnavailableView(filter.isEmpty ? "This folder is empty" : "No matching names", systemImage: filter.isEmpty ? "folder" : "magnifyingglass", description: Text(filter.isEmpty ? "Pull down to check for new files." : "Filtering names in this folder only."))
@@ -248,6 +262,7 @@ struct FolderView: View {
                 }
                 .listStyle(.plain)
                 .refreshable { await reload() }
+                }
             }
         }
         .navigationTitle(RemotePath.name(of: path))
@@ -317,7 +332,9 @@ struct FolderView: View {
         return FolderCommandActions(
             context: "\(profile.id)|\(path)", refresh: { refreshID += 1 }, search: { searchPresented = true; searchFocused = true },
             toggleHidden: { showHidden.toggle() }, showsHidden: showHidden,
-            enclosingFolder: path == "/" || parent == path ? nil : { model.showFolder(profile.id, path: parent) })
+            enclosingFolder: path == "/" || parent == path ? nil : { model.showFolder(profile.id, path: parent) },
+            moveSelection: keyboardRows.isEmpty ? nil : { moveKeyboardSelection($0) },
+            openSelection: keyboardRows.contains(where: { $0.row.id == keyboardSelection }) ? { openKeyboardSelection() } : nil)
     }
     private var pathBar: some View {
         HStack {
@@ -352,6 +369,7 @@ struct FolderView: View {
     }
     private var searchingSubfolders: Bool { searchScope != .folder && !searchQuery.isEmpty }
     private var subfolderResults: some View {
+        followingKeyboardSelection {
         List {
             if search.rows.isEmpty, search.progress.isFinished, search.error == nil {
                 ContentUnavailableView(searchScope == .contents ? "No matching contents" : "No matching names", systemImage: "magnifyingglass", description: Text(search.summary))
@@ -377,8 +395,30 @@ struct FolderView: View {
             }
         }
         .listStyle(.plain)
+        }
     }
+    /// Scrolls `list` to keep the keyboard selection in view. The ScrollViewReader is added only once
+    /// a row is selected, so folders browsed by touch keep their list unchanged. Down and Up start at
+    /// the first and last row, so the scroll offset this resets doesn't matter.
+    @ViewBuilder private func followingKeyboardSelection(@ViewBuilder _ list: () -> some View) -> some View {
+        let list = list()
+        if keyboardSelection == nil { list } else {
+            ScrollViewReader { proxy in
+                list.onChange(of: keyboardSelection, initial: true) { _, id in if let id { proxy.scrollTo(id) } }
+            }
+        }
+    }
+    /// Only the selected row gets its own background and trait; the others are left exactly as before.
     @ViewBuilder private func link(for row: FolderRow, subtitle: String, snippet: String? = nil, page: Int? = nil) -> some View {
+        if keyboardSelection == row.id {
+            rowLink(for: row, subtitle: subtitle, snippet: snippet, page: page)
+                .listRowBackground(Color.accentColor.opacity(0.18))
+                .accessibilityAddTraits(.isSelected)
+        } else {
+            rowLink(for: row, subtitle: subtitle, snippet: snippet, page: page)
+        }
+    }
+    @ViewBuilder private func rowLink(for row: FolderRow, subtitle: String, snippet: String?, page: Int?) -> some View {
         let entry = row.entry
         if let destination = entry.followingLink()?.openingPage(page) {
             // Resolved while listing: open the target directly.
@@ -391,6 +431,30 @@ struct FolderView: View {
         } else {
             WorkspaceLink(route: route(entry.openingPage(page))) { entryRow(row, subtitle: subtitle, snippet: snippet) }
                 .contextMenu { OfflinePinActions(model: model, profile: profile, entry: entry, includeHidden: showHidden) }
+        }
+    }
+    /// What a row opens, or nil for a link that must be resolved first.
+    private func destination(of entry: RemoteEntry, page: Int?) -> RemoteEntry? {
+        // A link resolved while listing opens its target directly.
+        if let target = entry.followingLink() { return target.openingPage(page) }
+        return entry.kind == .symlink ? nil : entry.openingPage(page)
+    }
+    /// The rows on screen, in order, with the PDF page a content match opens.
+    private var keyboardRows: [(row: FolderRow, page: Int?)] {
+        guard listing != nil else { return [] }
+        return searchingSubfolders ? search.rows.map { ($0.row, $0.page) } : visible.map { ($0, nil) }
+    }
+    private func moveKeyboardSelection(_ delta: Int) {
+        keyboardSelection = FolderKeyboardSelection.moved(keyboardSelection, by: delta, in: keyboardRows.map(\.row.id))
+    }
+    private func openKeyboardSelection() {
+        guard let selected = keyboardRows.first(where: { $0.row.id == keyboardSelection }) else { return }
+        if let destination = destination(of: selected.row.entry, page: selected.page) {
+            let route = route(destination)
+            // A held Return repeats; the stack opens the row once.
+            if let workspaceNavigate { workspaceNavigate(route) } else if model.routes.last != route { model.routes.append(route) }
+        } else if resolving == nil {
+            resolve(selected.row.entry, page: selected.page)
         }
     }
     private func entryRow(_ row: FolderRow, subtitle: String, snippet: String?) -> some View {

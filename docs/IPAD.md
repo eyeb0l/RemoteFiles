@@ -38,5 +38,16 @@ With a hardware keyboard, hold ⌘ to list these shortcuts, or open the iPad men
 | ⇧⌘J | Headings | Go |
 | ⌥⌘L | Downloads | Go |
 | ⇧⌘O | Offline Files | Go |
+| ↓ / ↑ | Select Next / Select Previous row in the folder or its search results | ⌘ list only |
+| Return | Open Selection, as tapping the row would | ⌘ list only |
+| Escape | Close Find, whether or not its field has focus | ⌘ list only |
 
-Find, Find Next and Find Previous are the system's own Edit › Find items, which the app answers for the reader on screen; Find and Replace and Use Selection for Find stay unavailable. In the Find field, Return moves to the next result; Escape doesn't close Find yet, so use Done. Offline copies support every reader shortcut except Refresh Document, since updating a saved copy needs a connection and is chosen in Offline Files. While a sheet such as Downloads, Headings or a folder's search index is open, the reader and folder beneath it ignore shortcuts. Folder rows don't yet take arrow-key selection; use ⇧⌘F to filter the folder, then tap the row.
+Find, Find Next and Find Previous are the system's own Edit › Find items, which the app answers for the reader on screen; Find and Replace and Use Selection for Find stay unavailable. In the Find field, Return moves to the next result and Escape closes Find. Offline copies support every reader shortcut except Refresh Document, since updating a saved copy needs a connection and is chosen in Offline Files. In Offline Files, Escape closes an open Find and otherwise closes the sheet as before; on iPhone, ⌘F doesn't open Find there yet, so open it from the document's actions menu. While a sheet such as Downloads, Headings or a folder's search index is open, the reader and folder beneath it ignore shortcuts.
+
+### Selecting rows with the arrow keys
+
+Down selects the folder's first row and Up its last; each press then moves one row and the list scrolls to keep the selection visible. Return opens the selected folder or file, beside the folder in the workspace and pushed onto the stack on iPhone, and the selection stays when you come back. The keys also walk filtered rows and Subfolders or Contents search results, where Return opens a PDF match at its page as a tap does. The selection is a highlight with the VoiceOver Selected trait; taps and context menus are unchanged.
+
+A text field keeps its own keys: while the folder's search field or the reader's Find field has focus, the arrows and Return edit or submit there. Press Return to leave the search field, then use the arrows. An alert, menu or picker shown over the window keeps Escape, Return and the arrows too. On iPad, Tab still moves keyboard focus between the sidebar, search field and reader; once Tab has put focus in the sidebar, the arrows and Return move and open there, as elsewhere in iPadOS, until focus leaves it.
+
+These keys are UIKit key commands on the window's root view controller rather than menu items, so they appear in the ⌘ list but not the menu bar. They ask for priority over system behaviour, since the iPad focus engine otherwise takes the arrows to focus the sidebar, and decline as each key arrives while anything else is presented. XCTest types Return and Escape as text instead of sending hardware key presses, so UI tests cover the arrow keys, and opening and Escape were checked on iPhone and iPad simulators with hardware key events.

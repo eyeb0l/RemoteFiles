@@ -162,6 +162,7 @@ struct ReaderView: View {
                 actions.findNext = { navigation.move(1, inSource: showsSource) }
                 actions.findPrevious = { navigation.move(-1, inSource: showsSource) }
             }
+            if navigation.isFinding { actions.closeFind = { navigation.closeFind() } }
             if navigation.index?.headings.isEmpty == false { actions.headings = { headingsPresented = true } }
         }
         if hasRenderedMode { actions.toggleSource = { source.toggle() } }

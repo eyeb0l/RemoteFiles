@@ -182,6 +182,9 @@ struct OfflineFilesView: View {
         }
         // The library's own navigation replaces the app's while this sheet covers it.
         .focusedSceneValue(\.navigationCommands, NavigationCommandActions(context: "offline", back: path.isEmpty ? nil : { path.removeLast() }))
+        // Its readers take Escape for Find while nothing is presented over this sheet.
+        .onAppear { PlainKeyCommands.shared.offlineFilesShows = true }
+        .onDisappear { PlainKeyCommands.shared.offlineFilesShows = false }
     }
 
     private var library: some View {
@@ -409,6 +412,11 @@ struct OfflineReaderView: View {
             Button("OK") { linkError = nil }
         } message: { Text(linkError ?? "") }
         .focusedSceneValue(\.readerCommands, canRead ? commands : nil)
+        // Focused values from this sheet don't reach the scene's commands, so Escape is handed over here.
+        .onChange(of: navigation.isFinding, initial: true) { _, finding in
+            PlainKeyCommands.shared.offlineCloseFind = finding ? { navigation.closeFind() } : nil
+        }
+        .onDisappear { PlainKeyCommands.shared.offlineCloseFind = nil }
     }
     private var findTitle: String { [.html, .svg].contains(kind) ? "Find in Source" : "Find in Document" }
     private func startFind() {
