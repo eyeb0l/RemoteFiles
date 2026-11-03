@@ -27,6 +27,8 @@ final class AutomaticSearchIndexUpdater {
     /// When an update last started, so a failing index waits a full interval before trying again.
     @ObservationIgnored private var attempts: [String: Date] = [:]
     @ObservationIgnored private var checking: Set<String> = []
+    /// Advanced by every cancellation, so a check suspended across it cannot start an update afterwards.
+    @ObservationIgnored private var epoch = 0
 
     nonisolated static func key(_ profile: ConnectionProfile, root: String) -> String { profile.id.uuidString + "|" + root }
 
@@ -40,7 +42,7 @@ final class AutomaticSearchIndexUpdater {
         guard canRun(profile, model: model), tasks[key] == nil, !checking.contains(key) else { return false }
         if let attempt = attempts[key], now.timeIntervalSince(attempt) >= 0, now.timeIntervalSince(attempt) < interval { return false }
         checking.insert(key); defer { checking.remove(key) }
-        let revision = model.sessionRevision, service = model.searchService
+        let revision = model.sessionRevision, service = model.searchService, epoch = epoch
         let store = await model.searchIndexStore()
         let saved: SearchIndexSnapshot
         do {
@@ -49,7 +51,7 @@ final class AutomaticSearchIndexUpdater {
                   snapshot.isDueForAutomaticUpdate(at: now, interval: interval) else { return false }
             saved = snapshot
         } catch { return false }
-        guard canRun(profile, model: model), model.sessionRevision == revision, tasks[key] == nil else { return false }
+        guard canRun(profile, model: model), model.sessionRevision == revision, self.epoch == epoch, tasks[key] == nil else { return false }
         attempts[key] = now
         progress[key] = .init()
         let token = UUID()
@@ -66,6 +68,7 @@ final class AutomaticSearchIndexUpdater {
     /// The next opening of the folder may start a new one.
     func cancel(_ profile: ConnectionProfile, root: String) {
         let key = Self.key(profile, root: root)
+        epoch += 1
         tasks.removeValue(forKey: key)?.task.cancel()
         progress.removeValue(forKey: key); attempts.removeValue(forKey: key)
     }
@@ -73,6 +76,7 @@ final class AutomaticSearchIndexUpdater {
     /// Ends every update when the session closes. Cancelled updates save nothing and run again
     /// when their folder next opens.
     func cancelAll() {
+        epoch += 1
         for (_, entry) in tasks { entry.task.cancel() }
         tasks.removeAll(); progress.removeAll(); attempts.removeAll()
     }

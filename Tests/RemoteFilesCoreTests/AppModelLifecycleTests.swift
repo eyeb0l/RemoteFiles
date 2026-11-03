@@ -516,6 +516,14 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
         XCTAssertFalse(updates.isUpdating(profile, root: root))
         XCTAssertEqual(updates.savedRevision, 1)
 
+        // Cancelling while the check is still reading the store stops it from starting afterwards.
+        let suspended = Task { await updates.updateIfDue(profile, root: root, model: model) }
+        await Task.yield()
+        updates.cancel(profile, root: root)
+        let startedAfterCancel = await suspended.value
+        XCTAssertFalse(startedAfterCancel, "A manual build or deletion must not be superseded by a check it outran")
+        XCTAssertFalse(updates.isUpdating(profile, root: root))
+
         // Turning the setting off stops future updates.
         try await store.setUpdatesAutomatically(false, profile: profile, root: root)
         let turnedOff = await updates.updateIfDue(profile, root: root, model: model)
