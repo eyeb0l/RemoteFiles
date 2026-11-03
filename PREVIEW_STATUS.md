@@ -2,6 +2,10 @@
 
 This is a dated record of feature work and validation, not a live test dashboard. Each result applies to the build, environment and date described with it; an installation or Simulator pass does not establish later physical-device acceptance. For current behavior, start with the [documentation index](docs/README.md). For checks still to perform, see [manual acceptance](docs/MANUAL_ACCEPTANCE.md) and the [roadmap](ROADMAP.md).
 
+**3 November 2026: automatic search-index updates.**
+
+A saved search index can be set to **Update Automatically**. Opening its folder then runs **Update Index** in the background once the index is more than 15 minutes old, using the index's own choices, while the app is open and connected; leaving the app or disconnecting stops it without saving. Local verification on an iPhone 18 Pro Simulator (iOS 27.2): `SearchIndexStoreTests` and `AppModelLifecycleTests` passed in the signed iOS test host, and the new automatic-update UI test passed with the two existing saved-index UI tests. Physical-device acceptance is outstanding.
+
 **2 November 2026: resuming interrupted downloads.**
 
 **Retry** now continues an interrupted managed download from the bytes already received, instead of starting from zero, when the server's file keeps its size and modification time and the last 64 KiB received still match. Otherwise it starts again. Kept bytes survive relaunch, count toward the 512 MiB budget and give way when a new download needs the space; Cancel and refusals discard them. See [downloads](docs/DOWNLOADS.md#resuming-interrupted-downloads). On macOS, the download queue tests and an OpenSSH fixture test that stalls a real transfer mid-file passed; the fixture test fails if resuming is disabled. On the physical iPhone, resuming after Airplane Mode and after a force quit, and restarting a replaced file, passed with matching SHA-256 checksums; see [the session record](docs/REAL_SERVER_ACCEPTANCE.md#2-november-2026-download-resume). iOS ending a background transfer was not checked.

@@ -429,6 +429,99 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
         second = nil
         XCTAssertNil(released, "A store subscription must not retain its window model")
     }
+    func testAutomaticIndexUpdateRunsOnlyWhenEnabledAndDueAndStopsWithTheSession() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try AppModel(directory: directory, fileService: BackgroundExportService())
+        await model.load(); await model.setDemo(true)
+        let demo = try XCTUnwrap(model.searchService as? DemoRemoteFileService)
+        await demo.configure(delayNanoseconds: 0, failure: nil)
+        let profile = try XCTUnwrap(model.metadata.connections.first), root = "/Projects/Reports"
+        let store = await model.searchIndexStore(), updates = model.indexUpdates
+        let built = try await RemoteFolderSearch.buildIndex(below: root, profile: profile, service: demo, includeHidden: false)
+        let old = SearchIndexSnapshot(createdAt: Date().addingTimeInterval(-3_600), documents: built.documents,
+                                      includeHidden: built.includeHidden, extraction: built.extraction, isPartial: built.isPartial)
+        try await store.save(old, profile: profile, root: root)
+        func waitUntilIdle() async throws {
+            let deadline = ContinuousClock.now + .seconds(10)
+            while updates.isUpdating(profile, root: root), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertFalse(updates.isUpdating(profile, root: root), "The automatic update did not finish")
+        }
+
+        let whileOff = await updates.updateIfDue(profile, root: root, model: model)
+        XCTAssertFalse(whileOff, "An index updates automatically only when asked to")
+        try await store.setUpdatesAutomatically(true, profile: profile, root: root)
+        let otherFolder = await updates.updateIfDue(profile, root: "/Projects", model: model)
+        XCTAssertFalse(otherFolder, "Only the indexed folder itself starts an update")
+
+        // An index younger than the interval is left alone.
+        let fresh = await updates.updateIfDue(profile, root: root, model: model, now: old.createdAt.addingTimeInterval(60))
+        XCTAssertFalse(fresh)
+
+        // Leaving the app ends the update without saving, and it starts again on return.
+        await demo.configure(delayNanoseconds: 200_000_000, failure: nil)
+        let started = await updates.updateIfDue(profile, root: root, model: model)
+        XCTAssertTrue(started)
+        let duplicate = await updates.updateIfDue(profile, root: root, model: model)
+        XCTAssertFalse(duplicate, "One index has at most one automatic update")
+        model.isForeground = false; await model.background()
+        XCTAssertFalse(updates.isUpdating(profile, root: root))
+        let background = await updates.updateIfDue(profile, root: root, model: model)
+        XCTAssertFalse(background, "Nothing updates in the background")
+        let afterBackground = try await store.load(profile: profile, root: root)
+        XCTAssertEqual(afterBackground?.createdAt, old.createdAt)
+        XCTAssertEqual(updates.savedRevision, 0); XCTAssertNil(updates.outcome(profile, root: root))
+        model.isForeground = true
+        await demo.configure(delayNanoseconds: 0, failure: nil)
+
+        let resumed = await updates.updateIfDue(profile, root: root, model: model)
+        XCTAssertTrue(resumed, "A cancelled update does not wait out the interval")
+        try await waitUntilIdle()
+        XCTAssertEqual(updates.savedRevision, 1)
+        let outcome = try XCTUnwrap(updates.outcome(profile, root: root))
+        XCTAssertFalse(outcome.failed)
+        XCTAssertEqual(outcome.message, "Updated automatically. Read 3 new or changed files and kept 2 unchanged.")
+        let loaded = try await store.load(profile: profile, root: root)
+        let updated = try XCTUnwrap(loaded)
+        XCTAssertGreaterThan(updated.createdAt, old.createdAt)
+        XCTAssertEqual(updated.documents.count, old.documents.count)
+        let stillOn = try await store.updatesAutomatically(profile: profile, root: root)
+        XCTAssertTrue(stillOn)
+        let justUpdated = await updates.updateIfDue(profile, root: root, model: model)
+        XCTAssertFalse(justUpdated, "The new snapshot is not due yet")
+
+        // A failure is reported, keeps the saved index, and waits a full interval before retrying.
+        updates.interval = 0
+        await demo.configure(delayNanoseconds: 0, failure: "Server unavailable")
+        let failing = await updates.updateIfDue(profile, root: root, model: model)
+        XCTAssertTrue(failing)
+        try await waitUntilIdle()
+        XCTAssertEqual(updates.outcome(profile, root: root)?.failed, true)
+        XCTAssertEqual(updates.savedRevision, 1)
+        let kept = try await store.load(profile: profile, root: root)
+        XCTAssertEqual(kept?.createdAt, updated.createdAt)
+        updates.interval = 3_600
+        let retry = await updates.updateIfDue(profile, root: root, model: model, now: Date().addingTimeInterval(2_000))
+        XCTAssertFalse(retry, "A failed update waits a full interval")
+        let later = await updates.updateIfDue(profile, root: root, model: model, now: Date().addingTimeInterval(3_700))
+        XCTAssertTrue(later)
+        try await waitUntilIdle()
+
+        // A manual build replaces a running automatic update.
+        await demo.configure(delayNanoseconds: 200_000_000, failure: nil)
+        updates.interval = 0
+        let replaced = await updates.updateIfDue(profile, root: root, model: model)
+        XCTAssertTrue(replaced)
+        updates.cancel(profile, root: root)
+        XCTAssertFalse(updates.isUpdating(profile, root: root))
+        XCTAssertEqual(updates.savedRevision, 1)
+
+        // Turning the setting off stops future updates.
+        try await store.setUpdatesAutomatically(false, profile: profile, root: root)
+        let turnedOff = await updates.updateIfDue(profile, root: root, model: model)
+        XCTAssertFalse(turnedOff)
+    }
+
     private func waitForOfflineState(_ condition: () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
         while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }

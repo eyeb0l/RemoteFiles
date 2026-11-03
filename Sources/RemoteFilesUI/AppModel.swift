@@ -66,6 +66,8 @@ final class AppModel {
     func searchIndexStore() async -> SearchIndexStore {
         await SearchIndexStore.shared(directory: demo ? searchIndexDirectory.appendingPathComponent("Demo") : searchIndexDirectory)
     }
+    /// Saved indexes set to update automatically, updated while this window is connected.
+    let indexUpdates = AutomaticSearchIndexUpdater()
     let identities: IdentityStore
     let trust: HostTrustStore
     let publicKeyInstaller: any PublicKeyInstalling
@@ -505,6 +507,7 @@ final class AppModel {
     private func closeSession() async {
         let previousPin = pinTask
         cancelOfflinePin()
+        indexUpdates.cancelAll()
         let previousExporter = exportService
         await previousExporter?.cancelAll()
         await resourceService?.cancelAll(); resourceService = nil

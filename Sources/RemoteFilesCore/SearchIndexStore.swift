@@ -24,10 +24,20 @@ public struct SearchIndexSnapshot: Sendable {
         self.createdAt = createdAt; self.documents = documents; self.includeHidden = includeHidden
         self.extraction = extraction; self.isPartial = isPartial
     }
+
+    /// How old an index set to update automatically must be before opening its folder updates it.
+    public static let automaticUpdateInterval: TimeInterval = 15 * 60
+
+    /// Whether an automatic update is due. A creation date in the future means the device clock
+    /// moved backwards, so the age is unknown and the index is treated as due.
+    public func isDueForAutomaticUpdate(at now: Date = Date(), interval: TimeInterval = automaticUpdateInterval) -> Bool {
+        let age = now.timeIntervalSince(createdAt)
+        return age < 0 || age >= interval
+    }
 }
 
 public enum SearchIndexError: LocalizedError, Sendable {
-    case invalidSnapshot, tooLarge, damaged, invalidDirectory, superseded
+    case invalidSnapshot, tooLarge, damaged, invalidDirectory, superseded, notSaved
     public var errorDescription: String? {
         switch self {
         case .invalidSnapshot: return "The search index contains invalid file details. Rebuild it from the folder."
@@ -35,6 +45,7 @@ public enum SearchIndexError: LocalizedError, Sendable {
         case .damaged: return "The saved search index cannot be read. Remove it and build it again."
         case .invalidDirectory: return "Search index storage is unavailable."
         case .superseded: return "A newer build or deletion replaced this search index operation."
+        case .notSaved: return "Build the index before turning on automatic updates."
         }
     }
 }
@@ -50,6 +61,11 @@ public actor SearchIndexStore {
     private let directory: URL
     private struct Build { let generation: UUID; let connectionID: UUID }
     private var builds: [String: Build] = [:]
+    /// Index keys set to update automatically, with their connection so removal can find them.
+    /// Kept apart from the snapshots, so a save never changes the setting and changing the
+    /// setting never rewrites saved text.
+    private var automaticKeys: [String: UUID]?
+    private static let automaticFileName = "automatic-updates-v1.json"
 
     public init(directory: URL) { self.directory = directory.standardizedFileURL }
 
@@ -101,6 +117,7 @@ public actor SearchIndexStore {
             try Task.checkCancellation()
             try FileManager.default.removeItem(at: oldest.url)
             total -= oldest.size
+            try forgetAutomatic { $0.key == oldest.url.deletingPathExtension().lastPathComponent }
         }
         try Task.checkCancellation()
         guard Darwin.rename(temporary.path, destination.path) == 0 else {
@@ -135,6 +152,37 @@ public actor SearchIndexStore {
         guard try existingDirectory() else { return }
         let file = directory.appendingPathComponent(key + ".json")
         if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+        try forgetAutomatic { $0.key == key }
+    }
+
+    /// Whether the saved index for this connection and folder is set to update automatically.
+    /// False when no index is saved, including after it was evicted.
+    public func updatesAutomatically(profile: ConnectionProfile, root: String) throws -> Bool {
+        try Task.checkCancellation()
+        guard Self.validPath(root) else { throw SearchIndexError.invalidSnapshot }
+        guard try existingDirectory() else { return false }
+        let key = try Self.key(profile: profile, root: root)
+        guard try automatic()[key] == profile.id else { return false }
+        return FileManager.default.fileExists(atPath: directory.appendingPathComponent(key + ".json").path)
+    }
+
+    /// Turning the setting on requires a saved index; deleting or evicting the index turns it off.
+    public func setUpdatesAutomatically(_ enabled: Bool, profile: ConnectionProfile, root: String) throws {
+        try Task.checkCancellation()
+        guard Self.validPath(root) else { throw SearchIndexError.invalidSnapshot }
+        let key = try Self.key(profile: profile, root: root)
+        guard enabled else {
+            if try existingDirectory() { try forgetAutomatic { $0.key == key } }
+            return
+        }
+        guard try existingDirectory(),
+              FileManager.default.fileExists(atPath: directory.appendingPathComponent(key + ".json").path) else {
+            throw SearchIndexError.notSaved
+        }
+        var keys = try automatic()
+        guard keys[key] != profile.id else { return }
+        keys[key] = profile.id
+        try writeAutomatic(keys)
     }
 
     public func remove(connectionID: UUID) throws {
@@ -152,6 +200,7 @@ public actor SearchIndexStore {
                 try FileManager.default.removeItem(at: file.url)
             }
         }
+        try forgetAutomatic { $0.value == connectionID }
     }
 
     private struct Record: Codable {
@@ -245,6 +294,43 @@ public actor SearchIndexStore {
             }.sorted {
                 $0.modified == $1.modified ? $0.url.lastPathComponent < $1.url.lastPathComponent : $0.modified < $1.modified
             }
+    }
+    /// An unreadable settings file turns automatic updates off rather than failing index use.
+    private func automatic() throws -> [String: UUID] {
+        if let automaticKeys { return automaticKeys }
+        let file = directory.appendingPathComponent(Self.automaticFileName)
+        var keys: [String: UUID] = [:]
+        if let attributes = try? FileManager.default.attributesOfItem(atPath: file.path),
+           attributes[.type] as? FileAttributeType == .typeRegular,
+           let size = attributes[.size] as? NSNumber, size.intValue <= 65_536,
+           let bytes = try? Data(contentsOf: file),
+           let decoded = try? JSONDecoder().decode([String: UUID].self, from: bytes) {
+            keys = decoded.filter { $0.key.count == 64 && $0.key.allSatisfy(\.isHexDigit) }
+        }
+        automaticKeys = keys
+        return keys
+    }
+    private func forgetAutomatic(where shouldRemove: (Dictionary<String, UUID>.Element) -> Bool) throws {
+        let keys = try automatic()
+        let kept = keys.filter { !shouldRemove($0) }
+        if kept.count != keys.count { try writeAutomatic(kept) }
+    }
+    private func writeAutomatic(_ keys: [String: UUID]) throws {
+        try prepareDirectory()
+        let file = directory.appendingPathComponent(Self.automaticFileName)
+        if keys.isEmpty {
+            if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+        } else {
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            let bytes = try encoder.encode(keys)
+            #if os(iOS)
+            try bytes.write(to: file, options: [.atomic, .completeFileProtection])
+            #else
+            try bytes.write(to: file, options: .atomic)
+            #endif
+            try OfflineFileStore.protectFile(file)
+        }
+        automaticKeys = keys
     }
     private func read(_ file: URL) throws -> Envelope {
         let attributes = try FileManager.default.attributesOfItem(atPath: file.path)

@@ -40,6 +40,7 @@ struct SearchIndexView: View {
     @State private var indexRevision = 0
     @State private var buildSession = 0
     @State private var progress = RemoteFolderSearch.Update()
+    @State private var updatesAutomatically = false
 
     var body: some View {
         NavigationStack {
@@ -50,7 +51,9 @@ struct SearchIndexView: View {
                         Text("Saved \(snapshot.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(snapshot.documents.count) files")
                             .accessibilityIdentifier("saved-search-index-date")
                         Text(snapshot.isPartial ? "Partial index. Some files or pages were skipped or a limit was reached." : "Snapshot of supported files at build time.")
-                        Text("Remote files may have changed. Update to refresh. Opening a result reads the current remote file.")
+                        Text(updatesAutomatically
+                             ? "Remote files may have changed. This index updates automatically when you open this folder and it is more than \(Self.automaticMinutes) minutes old. Opening a result reads the current remote file."
+                             : "Remote files may have changed. Update to refresh. Opening a result reads the current remote file.")
                         Text("PDF text: \(snapshot.extraction.includePDF ? "included" : "off") · OCR: \(snapshot.extraction.includeOCR ? "included" : "off") · Hidden files: \(snapshot.includeHidden ? "included" : "excluded")")
                     } else {
                         Text("Build an index to search saved text without rereading remote files. Extracted text stays on this device until removed or evicted by storage limits.")
@@ -65,7 +68,13 @@ struct SearchIndexView: View {
                         ProgressView("Indexing… \(progress.filesSearched) files checked" +
                                      (progress.reusedFiles > 0 ? ", \(progress.reusedFiles) unchanged" : ""))
                         Button("Cancel Build", role: .cancel) { building = false; buildRevision += 1 }
-                    } else {
+                    } else if let automatic = model.indexUpdates.progress[updateKey] {
+                        ProgressView("Updating automatically… \(automatic.filesSearched) files checked" +
+                                     (automatic.reusedFiles > 0 ? ", \(automatic.reusedFiles) unchanged" : ""))
+                            .accessibilityIdentifier("saved-search-index-automatic-progress")
+                        Button("Stop Update", role: .cancel) { model.indexUpdates.cancel(profile, root: root) }
+                    }
+                    if !building {
                         if snapshot != nil {
                             Button("Update Index") { startBuild(rereadingEverything: false) }
                                 .disabled(!model.isForeground || model.isDisconnecting)
@@ -77,10 +86,20 @@ struct SearchIndexView: View {
                         if let buildSummary {
                             Text(buildSummary).font(.caption).foregroundStyle(.secondary)
                                 .accessibilityIdentifier("saved-search-index-summary")
+                        } else if let outcome = model.indexUpdates.outcome(profile, root: root) {
+                            Text(outcome.message).font(.caption).foregroundStyle(outcome.failed ? .red : .secondary)
+                                .accessibilityIdentifier("saved-search-index-automatic-summary")
                         }
                         if snapshot != nil || error != nil {
                             Button("Delete Index", role: .destructive) { Task { await removeIndex() } }
                         }
+                    }
+                }
+                if snapshot != nil {
+                    Section {
+                        Toggle("Update Automatically", isOn: automaticBinding).disabled(building)
+                    } footer: {
+                        Text("When you open this folder and the index is more than \(Self.automaticMinutes) minutes old, it updates in the background while the app is open and connected, using the index’s own options. Indexes don’t update while the app is closed.")
                     }
                 }
                 Section("Search Options") { SearchOptionsControls(options: $options) }
@@ -113,7 +132,7 @@ struct SearchIndexView: View {
             .onChange(of: model.sessionRevision) { _, _ in
                 building = false; results = []; snapshot = nil; dismiss()
             }
-            .task(id: model.isForeground) {
+            .task(id: "\(model.isForeground)-\(model.indexUpdates.savedRevision)") {
                 if model.isForeground { await loadIndex() }
                 else { snapshot = nil; results = [] }
             }
@@ -122,16 +141,42 @@ struct SearchIndexView: View {
         }
     }
 
+    private static let automaticMinutes = Int(SearchIndexSnapshot.automaticUpdateInterval / 60)
+    private var updateKey: String { AutomaticSearchIndexUpdater.key(profile, root: root) }
+
+    private var automaticBinding: Binding<Bool> {
+        Binding(get: { updatesAutomatically }, set: { enabled in
+            updatesAutomatically = enabled
+            if !enabled { model.indexUpdates.cancel(profile, root: root) }
+            Task { await setUpdatesAutomatically(enabled) }
+        })
+    }
+
+    private func setUpdatesAutomatically(_ enabled: Bool) async {
+        do {
+            try await model.searchIndexStore().setUpdatesAutomatically(enabled, profile: profile, root: root)
+            // Turning it on updates an index that is already old enough straight away.
+            if enabled { await model.indexUpdates.updateIfDue(profile, root: root, model: model) }
+        } catch {
+            updatesAutomatically = !enabled
+            self.error = error.localizedDescription
+        }
+    }
+
     private func startBuild(rereadingEverything: Bool) {
+        model.indexUpdates.cancel(profile, root: root); model.indexUpdates.clearOutcome(profile, root: root)
         rereadsEverything = rereadingEverything
         buildSession = model.sessionRevision; building = true; buildRevision += 1
     }
 
     private func loadIndex() async {
         do {
-            let saved = try await model.searchIndexStore().load(profile: profile, root: root)
+            let store = await model.searchIndexStore()
+            let saved = try await store.load(profile: profile, root: root)
             try Task.checkCancellation()
-            snapshot = saved; indexRevision += 1
+            let automatic = saved == nil ? false : try await store.updatesAutomatically(profile: profile, root: root)
+            try Task.checkCancellation()
+            snapshot = saved; updatesAutomatically = automatic; indexRevision += 1
             // Start from the saved index's choices so Update can keep its unchanged files.
             if let saved, !adoptedSavedOptions, !building { extraction = saved.extraction }
             adoptedSavedOptions = true
@@ -175,8 +220,9 @@ struct SearchIndexView: View {
 
     private func removeIndex() async {
         do {
+            model.indexUpdates.cancel(profile, root: root); model.indexUpdates.clearOutcome(profile, root: root)
             try await model.searchIndexStore().remove(profile: profile, root: root)
-            snapshot = nil; results = []; error = nil; buildSummary = nil; indexRevision += 1
+            updatesAutomatically = false; snapshot = nil; results = []; error = nil; buildSummary = nil; indexRevision += 1
         } catch { self.error = error.localizedDescription }
     }
 

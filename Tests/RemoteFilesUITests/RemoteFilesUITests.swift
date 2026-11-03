@@ -878,6 +878,92 @@ final class RemoteFilesUITests: XCTestCase {
         closeIndex()
     }
 
+    /// Demo-only `--index-update-interval 0` makes every saved index old enough to update.
+    func testSavedSearchIndexUpdatesAutomaticallyWhenItsFolderOpens() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo", "--index-update-interval", "0"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        let reports = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports, Folder")).firstMatch
+        func openReports() {
+            waitUntilHittable(projects); projects.tap()
+            revealFolderRow(reports, in: app).tap()
+        }
+        let list = app.collectionViews["saved-search-index-list"]
+        let date = app.staticTexts["saved-search-index-date"]
+        let build = app.buttons["Build Index"]
+        let rebuild = app.buttons["Rebuild Index"]
+        let delete = app.buttons["Delete Index"]
+        let automatic = app.switches["Update Automatically"]
+        let summary = app.staticTexts["saved-search-index-automatic-summary"]
+        let expected = "Updated automatically. Read 3 new or changed files and kept 2 unchanged."
+        func openIndex() {
+            let actions = app.buttons["Folder actions"]
+            waitUntilHittable(actions); actions.tap()
+            let saved = app.buttons["Saved Search Index"]
+            XCTAssertTrue(saved.waitForExistence(timeout: 5)); saved.tap()
+            XCTAssertTrue(app.navigationBars["Saved Search Index"].waitForExistence(timeout: 10))
+            XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+        }
+        func reveal(_ element: XCUIElement, down: Bool = true) {
+            for _ in 0..<16 {
+                if element.exists, element.isHittable,
+                   element.frame.minY >= list.frame.minY, element.frame.maxY <= list.frame.maxY { return }
+                let start = list.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: down ? 0.7 : 0.3))
+                let end = list.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: down ? 0.3 : 0.7))
+                start.press(forDuration: 0.05, thenDragTo: end)
+            }
+            XCTFail("Could not reveal saved-index control.\n" + app.debugDescription)
+        }
+        func toggleAutomatic(to value: String) {
+            reveal(automatic)
+            // SwiftUI exposes the entire labelled row as the switch; tap its actual thumb.
+            automatic.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+            wait(for: [expectation(for: NSPredicate(format: "value == %@", value), evaluatedWith: automatic)], timeout: 5)
+        }
+        func closeIndex() {
+            let done = app.navigationBars["Saved Search Index"].buttons["Done"]
+            XCTAssertTrue(done.waitForExistence(timeout: 5)); done.tap()
+        }
+
+        openReports()
+        openIndex()
+        // Demo storage is persistent; remove only this synthetic folder's previous run.
+        if date.waitForExistence(timeout: 3) {
+            reveal(delete); delete.tap()
+            XCTAssertTrue(build.waitForExistence(timeout: 5))
+        }
+        XCTAssertFalse(automatic.exists, "There is nothing to update before an index is built")
+        reveal(build); build.tap()
+        XCTAssertTrue(rebuild.waitForExistence(timeout: 45), "The build must finish.\n" + app.debugDescription)
+        reveal(automatic)
+        XCTAssertEqual(automatic.value as? String, "0", "Automatic updates are opt-in")
+        // Turning it on updates an index that is already old enough straight away.
+        toggleAutomatic(to: "1")
+        reveal(rebuild, down: false)
+        XCTAssertTrue(summary.waitForExistence(timeout: 45), "The automatic update must finish.\n" + app.debugDescription)
+        XCTAssertEqual(summary.label, expected)
+        closeIndex()
+
+        // After a relaunch, opening the folder alone updates the index in the background.
+        app.terminate(); app.launch()
+        openReports()
+        let actions = app.buttons["Folder actions"]
+        waitUntilHittable(actions)
+        openIndex()
+        reveal(rebuild)
+        XCTAssertTrue(summary.waitForExistence(timeout: 45),
+                      "Opening the folder must update the index without opening this sheet.\n" + app.debugDescription)
+        XCTAssertEqual(summary.label, expected)
+        attachScreenshot("Saved search index updated automatically when its folder opened")
+        reveal(automatic)
+        XCTAssertEqual(automatic.value as? String, "1", "The setting persists across launches")
+        toggleAutomatic(to: "0")
+        reveal(delete, down: false); delete.tap()
+        XCTAssertTrue(build.waitForExistence(timeout: 5))
+        XCTAssertFalse(automatic.exists)
+        closeIndex()
+    }
+
     func testLivePDFAndOCRSearchFindsPagesWithExplicitOptions() throws {
         continueAfterFailure = false
         let app = launchDemoSearchSamples()

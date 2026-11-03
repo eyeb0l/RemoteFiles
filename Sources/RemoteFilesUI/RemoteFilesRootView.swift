@@ -25,7 +25,15 @@ public struct RemoteFilesRootView: View {
                 let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("RemoteFiles", isDirectory: true)
                 let loaded = try AppModel(directory: directory)
                 await loaded.load()
-                if ProcessInfo.processInfo.arguments.contains("--demo") { await loaded.setDemo(true) }
+                let arguments = ProcessInfo.processInfo.arguments
+                if arguments.contains("--demo") {
+                    await loaded.setDemo(true)
+                    // Demo-only, for acceptance: let saved indexes update automatically without waiting.
+                    if let flag = arguments.firstIndex(of: "--index-update-interval"), flag + 1 < arguments.count,
+                       let seconds = TimeInterval(arguments[flag + 1]), seconds >= 0 {
+                        loaded.indexUpdates.interval = seconds
+                    }
+                }
                 model = loaded
             } catch { startupError = error.localizedDescription }
         }

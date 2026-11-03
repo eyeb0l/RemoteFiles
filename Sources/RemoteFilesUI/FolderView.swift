@@ -441,6 +441,9 @@ struct FolderView: View {
             appliedFilter = query; appliedShowHidden = hidden; appliedSortOrder = order; appliedSearchOptions = options
             model.cache(prepared, id: profile.id, requestedPath: requestedPath)
             model.connectionStates[profile.id] = "Connected"
+            // A saved index of this folder set to update automatically refreshes once it is old enough.
+            let updates = model.indexUpdates, model = model, profile = profile, root = prepared.path
+            Task { await updates.updateIfDue(profile, root: root, model: model) }
             if query != filter || hidden != showHidden || order != sortOrder || options != searchOptions { await updateVisible() }
         } catch {
             guard token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }

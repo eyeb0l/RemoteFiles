@@ -293,4 +293,99 @@ final class SearchIndexStoreTests: XCTestCase {
         let retained = try await store.load(profile: other, root: "/r")
         XCTAssertNotNil(retained)
     }
+
+    func testAutomaticUpdatesNeedASavedIndexPersistAcrossSavesAndEndWithTheIndex() async throws {
+        let store = SearchIndexStore(directory: directory)
+        do {
+            try await store.setUpdatesAutomatically(true, profile: profile, root: "/r")
+            XCTFail("Automatic updates turned on without a saved index")
+        } catch SearchIndexError.notSaved {}
+        try await store.save(snapshot([document("/r/a.txt")]), profile: profile, root: "/r")
+        try await store.save(snapshot([document("/s/a.txt")]), profile: profile, root: "/s")
+        let initiallyOff = try await store.updatesAutomatically(profile: profile, root: "/r")
+        XCTAssertFalse(initiallyOff)
+        try await store.setUpdatesAutomatically(true, profile: profile, root: "/r")
+        let reopened = SearchIndexStore(directory: directory)
+        let persisted = try await reopened.updatesAutomatically(profile: profile, root: "/r")
+        let otherRoot = try await reopened.updatesAutomatically(profile: profile, root: "/s")
+        var edited = profile; edited.port = 2222
+        let editedProfile = try await reopened.updatesAutomatically(profile: edited, root: "/r")
+        XCTAssertTrue(persisted); XCTAssertFalse(otherRoot); XCTAssertFalse(editedProfile)
+        // The settings name an index only by its hashed key, never by folder or host.
+        let settings = try JSONDecoder().decode([String: UUID].self,
+            from: Data(contentsOf: directory.appendingPathComponent("automatic-updates-v1.json")))
+        XCTAssertEqual(Array(settings.values), [profile.id])
+        XCTAssertEqual(settings.keys.first?.count, 64)
+        XCTAssertEqual(Set(try files().map { $0.deletingPathExtension().lastPathComponent }).intersection(settings.keys).count, 1)
+
+        // Updating or rebuilding an index keeps its setting.
+        try await reopened.save(snapshot([document("/r/b.txt")]), profile: profile, root: "/r")
+        let afterSave = try await reopened.updatesAutomatically(profile: profile, root: "/r")
+        XCTAssertTrue(afterSave)
+
+        // Deleting the index forgets the setting, so a new index starts with it off.
+        try await reopened.remove(profile: profile, root: "/r")
+        try await reopened.save(snapshot([document("/r/c.txt")]), profile: profile, root: "/r")
+        let afterDelete = try await SearchIndexStore(directory: directory).updatesAutomatically(profile: profile, root: "/r")
+        XCTAssertFalse(afterDelete)
+
+        try await reopened.setUpdatesAutomatically(true, profile: profile, root: "/r")
+        try await reopened.setUpdatesAutomatically(false, profile: profile, root: "/r")
+        let turnedOff = try await SearchIndexStore(directory: directory).updatesAutomatically(profile: profile, root: "/r")
+        XCTAssertFalse(turnedOff)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("automatic-updates-v1.json").path))
+    }
+
+    func testConnectionRemovalAndEvictionTurnOffAutomaticUpdates() async throws {
+        let store = SearchIndexStore(directory: directory)
+        var other = profile; other.id = UUID()
+        try await store.save(snapshot([document("/r/a.txt")]), profile: profile, root: "/r")
+        try await store.save(snapshot([document("/r/a.txt")]), profile: other, root: "/r")
+        try await store.setUpdatesAutomatically(true, profile: profile, root: "/r")
+        try await store.setUpdatesAutomatically(true, profile: other, root: "/r")
+        try await store.remove(connectionID: profile.id)
+        let removed = try await store.updatesAutomatically(profile: profile, root: "/r")
+        let kept = try await SearchIndexStore(directory: directory).updatesAutomatically(profile: other, root: "/r")
+        XCTAssertFalse(removed); XCTAssertTrue(kept)
+
+        for number in 1..<SearchIndexStore.maximumIndexes {
+            try await store.save(snapshot([document("/r\(number)/file.txt")]), profile: profile, root: "/r\(number)")
+        }
+        for file in try files() {
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+            let isOther = (json["connectionID"] as? String) == other.id.uuidString
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: isOther ? 0 : 100)], ofItemAtPath: file.path)
+        }
+        try await store.save(snapshot([document("/new/file.txt")]), profile: profile, root: "/new")
+        let evicted = try await store.load(profile: other, root: "/r")
+        XCTAssertNil(evicted)
+        try await store.save(snapshot([document("/r/a.txt")]), profile: other, root: "/r")
+        let afterEviction = try await SearchIndexStore(directory: directory).updatesAutomatically(profile: other, root: "/r")
+        XCTAssertFalse(afterEviction, "An evicted index's setting does not carry over to a new index")
+    }
+
+    func testUnreadableAutomaticSettingsTurnUpdatesOffWithoutBreakingTheIndex() async throws {
+        let store = SearchIndexStore(directory: directory)
+        try await store.save(snapshot([document("/r/a.txt")]), profile: profile, root: "/r")
+        try Data("not json".utf8).write(to: directory.appendingPathComponent("automatic-updates-v1.json"))
+        let reopened = SearchIndexStore(directory: directory)
+        let enabled = try await reopened.updatesAutomatically(profile: profile, root: "/r")
+        XCTAssertFalse(enabled)
+        let loaded = try await reopened.load(profile: profile, root: "/r")
+        XCTAssertNotNil(loaded)
+        try await reopened.setUpdatesAutomatically(true, profile: profile, root: "/r")
+        let repaired = try await SearchIndexStore(directory: directory).updatesAutomatically(profile: profile, root: "/r")
+        XCTAssertTrue(repaired)
+    }
+
+    func testAutomaticUpdateIsDueOnceTheIntervalPassesOrTheClockMovesBack() {
+        let created = Date(timeIntervalSince1970: 1_000_000)
+        let index = SearchIndexSnapshot(createdAt: created, documents: [], includeHidden: false, extraction: .init(), isPartial: false)
+        let interval = SearchIndexSnapshot.automaticUpdateInterval
+        XCTAssertEqual(interval, 15 * 60)
+        XCTAssertFalse(index.isDueForAutomaticUpdate(at: created))
+        XCTAssertFalse(index.isDueForAutomaticUpdate(at: created.addingTimeInterval(interval - 1)))
+        XCTAssertTrue(index.isDueForAutomaticUpdate(at: created.addingTimeInterval(interval)))
+        XCTAssertTrue(index.isDueForAutomaticUpdate(at: created.addingTimeInterval(-60)), "A clock set back cannot postpone updates")
+    }
 }
