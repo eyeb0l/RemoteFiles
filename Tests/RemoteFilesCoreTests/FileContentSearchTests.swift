@@ -289,6 +289,94 @@ final class FileContentSearchTests: XCTestCase {
             .contentMatches.map(\.entry.path), ["/r/changed.txt", "/r/new.txt"])
     }
 
+    private func dated(_ path: String, size: UInt64?, at seconds: TimeInterval?) -> RemoteEntry {
+        .init(name: RemotePath.name(of: path), path: path, kind: .file, size: size,
+              modifiedAt: seconds.map { Date(timeIntervalSince1970: $0) })
+    }
+
+    func testIndexUpdateKeepsUnchangedFilesAndRereadsChangedNewAndUndatedFiles() async throws {
+        let original = ContentTreeService(["/r": [dated("/r/same.txt", size: 3, at: 100), dated("/r/edited.txt", size: 3, at: 100),
+                                                  dated("/r/resized.txt", size: 3, at: 100), dated("/r/undated.txt", size: 3, at: nil),
+                                                  dated("/r/removed.txt", size: 3, at: 100), folder("/r/sub")],
+                                           "/r/sub": [dated("/r/sub/deep.txt", size: 3, at: 100)]],
+            contents: ["/r/same.txt": bytes("old"), "/r/edited.txt": bytes("old"), "/r/resized.txt": bytes("old"),
+                       "/r/undated.txt": bytes("old"), "/r/removed.txt": bytes("old"), "/r/sub/deep.txt": bytes("old")])
+        let old = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: original, includeHidden: false)
+        XCTAssertEqual(old.documents.map(\.isTruncated), Array(repeating: false, count: 6))
+        // Unchanged files hold different bytes here, so any read of them would show up in the index.
+        let current = ContentTreeService(["/r": [dated("/r/same.txt", size: 3, at: 100), dated("/r/edited.txt", size: 3, at: 200),
+                                                 dated("/r/resized.txt", size: 4, at: 100), dated("/r/undated.txt", size: 3, at: nil),
+                                                 dated("/r/added.txt", size: 3, at: 100), folder("/r/sub")],
+                                          "/r/sub": [dated("/r/sub/deep.txt", size: 3, at: 100)]],
+            contents: ["/r/same.txt": bytes("new"), "/r/edited.txt": bytes("new"), "/r/resized.txt": bytes("newer"),
+                       "/r/undated.txt": bytes("new"), "/r/added.txt": bytes("new"), "/r/sub/deep.txt": bytes("new")])
+        var final = RemoteFolderSearch.Update()
+        let updated = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: current,
+                                                              includeHidden: false, reusing: old) { final = $0 }
+        let reads = await current.reads
+        XCTAssertEqual(reads.map(\.path), ["/r/added.txt", "/r/edited.txt", "/r/resized.txt", "/r/undated.txt"])
+        XCTAssertEqual(updated.documents.map(\.entry.path),
+                       ["/r/added.txt", "/r/edited.txt", "/r/resized.txt", "/r/same.txt", "/r/undated.txt", "/r/sub/deep.txt"])
+        XCTAssertEqual(updated.documents.map { $0.segments.map(\.text).joined() }, ["new", "new", "newer", "old", "new", "old"])
+        XCTAssertEqual(updated.documents.first { $0.entry.path == "/r/edited.txt" }?.entry.modifiedAt, Date(timeIntervalSince1970: 200))
+        XCTAssertTrue(final.isFinished)
+        XCTAssertEqual(final.reusedFiles, 2); XCTAssertEqual(final.filesSearched, 6)
+        XCTAssertFalse(updated.isPartial)
+        XCTAssertTrue(try RemoteFolderSearch.indexedContents(matching: "old", snapshot: updated, includeHidden: false)
+            .contentMatches.allSatisfy { ["/r/same.txt", "/r/sub/deep.txt"].contains($0.entry.path) })
+        // Without a previous snapshot every file is read again.
+        let full = ContentTreeService(["/r": [dated("/r/same.txt", size: 3, at: 100)]], contents: ["/r/same.txt": bytes("new")])
+        let rebuilt = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: full, includeHidden: false)
+        XCTAssertEqual(rebuilt.documents.first?.segments.first?.text, "new")
+    }
+
+    func testIndexUpdateRereadsFilesWhenOptionsChangedOrTextMayBeIncomplete() async throws {
+        let tree = ["/r": [dated("/r/a.txt", size: 5, at: 100), dated("/r/b.txt", size: 5, at: 100)]]
+        let data = ["/r/a.txt": bytes("alpha"), "/r/b.txt": bytes("bravo")]
+        func update(_ previous: SearchIndexSnapshot, hidden: Bool = false,
+                    extraction: SearchExtractionOptions = .init(includePDF: true)) async throws -> [String] {
+            let service = ContentTreeService(tree, contents: data)
+            _ = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: service, includeHidden: hidden,
+                                                        extraction: extraction, reusing: previous)
+            return await service.reads.map(\.path)
+        }
+        let old = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile,
+            service: ContentTreeService(tree, contents: data), includeHidden: false)
+        let none = try await update(old)
+        XCTAssertEqual(none, [])
+        let hidden = try await update(old, hidden: true)
+        XCTAssertEqual(hidden, ["/r/a.txt", "/r/b.txt"], "Other hidden-file choices reread everything")
+        let ocr = try await update(old, extraction: .init(includePDF: true, includeOCR: true))
+        XCTAssertEqual(ocr, ["/r/a.txt", "/r/b.txt"], "Other extraction choices reread everything")
+
+        // A truncated document may have been cut by the build's overall text budget, so read it again.
+        let cut = SearchIndexSnapshot(documents: [.init(entry: tree["/r"]![0], segments: [.init(text: "alp")], isTruncated: true),
+                                                  .init(entry: tree["/r"]![1], segments: [.init(text: "bravo")], isTruncated: false)],
+                                      includeHidden: false, extraction: .init(includePDF: true), isPartial: true)
+        let truncated = try await update(cut)
+        XCTAssertEqual(truncated, ["/r/a.txt"])
+        // Indexes saved before truncation was recorded are trusted only when they were complete.
+        let legacy = old.documents.map { SearchIndexDocument(entry: $0.entry, segments: $0.segments) }
+        let complete = try await update(.init(documents: legacy, includeHidden: false, extraction: .init(includePDF: true), isPartial: false))
+        XCTAssertEqual(complete, [])
+        let partial = try await update(.init(documents: legacy, includeHidden: false, extraction: .init(includePDF: true), isPartial: true))
+        XCTAssertEqual(partial, ["/r/a.txt", "/r/b.txt"])
+    }
+
+    func testIndexUpdateKeepsReusedTextWithinTheFileAndTextLimits() async throws {
+        let tree = ["/r": [dated("/r/a.txt", size: 5, at: 100), dated("/r/b.txt", size: 5, at: 100), dated("/r/c.txt", size: 5, at: 100)]]
+        let data = ["/r/a.txt": bytes("alpha"), "/r/b.txt": bytes("bravo"), "/r/c.txt": bytes("delta")]
+        let old = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile,
+            service: ContentTreeService(tree, contents: data), includeHidden: false)
+        let service = ContentTreeService(tree, contents: data)
+        let limited = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: service,
+            includeHidden: false, contentLimits: .init(maxFiles: 2), reusing: old)
+        XCTAssertEqual(limited.documents.map(\.entry.path), ["/r/a.txt", "/r/b.txt"])
+        XCTAssertTrue(limited.isPartial, "Reused files still count towards the file limit")
+        let reads = await service.reads
+        XCTAssertTrue(reads.isEmpty)
+    }
+
     func testCancelledIndexBuildDoesNotReturnAPartialSnapshotOrStartAnotherRead() async throws {
         let service = ContentTreeService(["/r": [file("/r/a.txt"), file("/r/b.txt"), file("/r/c.txt")]],
             contents: ["/r/a.txt": bytes("alpha"), "/r/b.txt": bytes("bravo"), "/r/c.txt": bytes("charlie")],

@@ -18,13 +18,14 @@ does not block RemoteFiles; see [dependency maintenance](docs/CITADEL_UPSTREAM.m
 
 - More verified private-key protection formats and hardware-backed security-key identities. OpenSSH RSA/ECDSA imports and optional biometric unlock are already available; see [key support](docs/KEY_SUPPORT.md).
 - Physical-device layout and memory acceptance of reading history. Layout-independent text/block anchors cover Markdown, Source (including plain text) and static HTML; remote and offline PDFs save their page position; offline copies share the connected reader's history; inactive reader-content eviction is implemented. Standalone images fit their view and have no position to save. See [reader behavior](docs/READER.md).
-- Automatic or incremental search-index refresh. [Folder search](docs/FOLDER_BROWSING.md) already supports explicit persistent local indexes, bounded PDF text and on-device OCR, plus case, whole-word and file-type filters. Saved indexes are snapshots and must be rebuilt to reflect remote changes.
+- Automatic or background search-index refresh. Saved indexes are snapshots that update only when you choose **Update Index** or **Rebuild Index**; see [folder search](docs/FOLDER_BROWSING.md#updating-an-index).
 - Offline synchronization, File Provider, multiple jump hops, other protocols such as FTP/FTPS, optional terminal handoff, deeper Tailscale onboarding, and additional iPad keyboard and multiwindow workflows.
 - Expanded transfer quotas, and physical-device acceptance of resuming after iOS ends a background transfer. Managed downloads continue interrupted files from their received bytes while the remote file is unchanged; on the iPhone this [passed](docs/REAL_SERVER_ACCEPTANCE.md#2-november-2026-download-resume) after Airplane Mode and a force quit. See [downloads](docs/DOWNLOADS.md#resuming-interrupted-downloads).
 
 <a id="separate-write-capable-iteration"></a>
 ## Newly implemented
 
+- **Update Index** refreshes a saved search index by reading only new files and files whose size or modification date changed, and drops removed files. See [folder search](docs/FOLDER_BROWSING.md#updating-an-index).
 - Retry continues interrupted downloads from the bytes already received when the remote file's size, modification time and final received bytes are unchanged. See [downloads](docs/DOWNLOADS.md#resuming-interrupted-downloads).
 - Offline copies have Find, Headings, the image zoom viewer and shared reading positions for text and PDFs. See [offline files](docs/OFFLINE_FILES.md#offline-reader).
 - PDF search results open at their matching page, and remote PDFs remember their page position. See [reader behavior](docs/READER.md) and [folder search](docs/FOLDER_BROWSING.md).

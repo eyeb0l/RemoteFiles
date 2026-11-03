@@ -52,6 +52,27 @@ final class SearchIndexStoreTests: XCTestCase {
         #endif
     }
 
+    func testReloadPreservesTruncationAndTreatsOlderIndexesAsUnknown() async throws {
+        let store = SearchIndexStore(directory: directory)
+        func recorded(_ path: String, truncated: Bool?) -> SearchIndexDocument {
+            let base = document(path)
+            return .init(entry: base.entry, segments: base.segments, isTruncated: truncated)
+        }
+        try await store.save(snapshot([recorded("/r/complete.txt", truncated: false), recorded("/r/cut.txt", truncated: true)]),
+                             profile: profile, root: "/r")
+        let saved = try await store.load(profile: profile, root: "/r")
+        XCTAssertEqual(saved?.documents.map(\.isTruncated), [false, true])
+        // An index written before truncation was recorded has no such key and must still load.
+        let file = try XCTUnwrap(files().first)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        let documents = try XCTUnwrap(json["documents"] as? [[String: Any]])
+        json["documents"] = documents.map { $0.filter { $0.key != "isTruncated" } }
+        try JSONSerialization.data(withJSONObject: json).write(to: file)
+        let older = try await store.load(profile: profile, root: "/r")
+        XCTAssertEqual(older?.documents.map(\.entry.path), ["/r/complete.txt", "/r/cut.txt"])
+        XCTAssertEqual(older?.documents.map(\.isTruncated), [nil, nil])
+    }
+
     func testExactProfileAndRootIsolation() async throws {
         let store = SearchIndexStore(directory: directory)
         try await store.save(snapshot([document("/r/a.txt")]), profile: profile, root: "/r")

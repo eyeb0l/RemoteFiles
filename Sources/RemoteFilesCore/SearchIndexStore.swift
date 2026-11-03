@@ -5,8 +5,10 @@ import Darwin
 public struct SearchIndexDocument: Sendable {
     public let entry: RemoteEntry
     public let segments: [SearchTextSegment]
-    public init(entry: RemoteEntry, segments: [SearchTextSegment]) {
-        self.entry = entry; self.segments = segments
+    /// Whether extraction stopped at a text or page limit; nil for indexes saved before this was recorded.
+    public let isTruncated: Bool?
+    public init(entry: RemoteEntry, segments: [SearchTextSegment], isTruncated: Bool? = nil) {
+        self.entry = entry; self.segments = segments; self.isTruncated = isTruncated
     }
 }
 
@@ -38,7 +40,7 @@ public enum SearchIndexError: LocalizedError, Sendable {
 }
 
 /// Explicitly saved, protected local search snapshots. Refresh replaces the whole snapshot,
-/// so files removed remotely cannot survive a successful rebuild. A cancelled build never saves.
+/// so files removed remotely cannot survive a successful rebuild or update. A cancelled build never saves.
 public actor SearchIndexStore {
     static let maximumDocuments = 500
     static let maximumTextBytes = 16 * 1_024 * 1_024
@@ -157,12 +159,15 @@ public actor SearchIndexStore {
         let size: UInt64?
         let modifiedAt: Date?
         let segments: [SearchTextSegment]
+        // Optional so indexes saved before it was recorded still load.
+        let isTruncated: Bool?
         init(_ value: SearchIndexDocument) {
             name = value.entry.name; path = value.entry.path; size = value.entry.size
-            modifiedAt = value.entry.modifiedAt; segments = value.segments
+            modifiedAt = value.entry.modifiedAt; segments = value.segments; isTruncated = value.isTruncated
         }
         var document: SearchIndexDocument {
-            .init(entry: .init(name: name, path: path, kind: .file, size: size, modifiedAt: modifiedAt), segments: segments)
+            .init(entry: .init(name: name, path: path, kind: .file, size: size, modifiedAt: modifiedAt), segments: segments,
+                  isTruncated: isTruncated)
         }
     }
     private struct Envelope: Codable {
