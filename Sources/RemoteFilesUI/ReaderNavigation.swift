@@ -98,8 +98,7 @@ struct ReaderFindBar: View {
                     .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44).disabled(navigation.matches.isEmpty)
                 Button("Next result", systemImage: "chevron.down") { focused = false; navigation.move(1, inSource: inSource) }
                     .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44).disabled(navigation.matches.isEmpty)
-                // Escape closes Find. The text field doesn't report Escape to `onKeyPress`.
-                Button("Done") { focused = false; navigation.closeFind() }.keyboardShortcut(.cancelAction).frame(minHeight: 44)
+                Button("Done") { focused = false; navigation.closeFind() }.frame(minHeight: 44)
             }
             HStack {
                 Text(status).font(.caption).foregroundStyle(.secondary)
