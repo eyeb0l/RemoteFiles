@@ -999,6 +999,16 @@ final class RemoteFilesUITests: XCTestCase {
         }
         func toggleAutomatic(to value: String) {
             reveal(automatic)
+            // The rows above this one are still being inserted or scrolled into place right after
+            // a build, and a touch on a moving row is swallowed. Require two readings of the same
+            // frame a quarter of a second apart before tapping; the bound is a hang guard.
+            let still = expectation(for: NSPredicate { _, _ in
+                let before = automatic.frame
+                Thread.sleep(forTimeInterval: 0.25)
+                return automatic.exists && automatic.isHittable && automatic.frame == before
+            }, evaluatedWith: automatic)
+            still.expectationDescription = "Update Automatically row stops moving"
+            wait(for: [still], timeout: 15)
             // SwiftUI exposes the entire labelled row as the switch; tap its actual thumb.
             automatic.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
             // Long enough that a failure means the tap had no effect, not that the value was late on

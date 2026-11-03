@@ -408,3 +408,9 @@ it separates the two explanations: a failure at 30 seconds means the tap had no
 effect, and a longer bound will not help. No retry was added and every assertion
 remains. The OCR switch's five-second wait in the saved PDF and OCR journey is
 unchanged.
+
+The journey now also waits, before the tap, until the switch's frame reads the same
+twice a quarter of a second apart while hittable. Right after a build the list inserts
+the Rebuild and summary rows above the switch, and a touch synthesized on a row that is
+still moving is swallowed without an error; the stability wait is a precondition with a
+15-second hang guard, not a retry, and a tap that still has no effect fails the journey.
