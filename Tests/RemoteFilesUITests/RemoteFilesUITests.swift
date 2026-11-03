@@ -494,19 +494,29 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 30))
         let selected = NSPredicate(format: "selected == true")
 
-        // Down starts at the top and Up moves back; one row is selected at a time.
+        // A synthesized arrow can repeat on a loaded runner, so after the expected presses the
+        // test steers toward the row, pressing Down or Up by where the selected row is.
+        let rowSelected = app.collectionViews.firstMatch.buttons.matching(selected).firstMatch
+        func select(_ row: XCUIElement, pressing key: XCUIKeyboardKey = .downArrow, _ presses: Int = 1) {
+            for _ in 0..<presses { app.typeKey(key, modifierFlags: []) }
+            for _ in 0..<12 {
+                if row.waitForSelection(timeout: 2) { break }
+                let up = rowSelected.exists && row.exists && rowSelected.frame.minY > row.frame.minY
+                app.typeKey(up ? .upArrow : .downArrow, modifierFlags: [])
+            }
+            wait(for: [expectation(for: selected, evaluatedWith: row)], timeout: 20)
+            XCTAssertEqual(app.collectionViews.firstMatch.buttons.matching(selected).count, 1, "One row is selected at a time")
+        }
+
+        // Up and Down move one selection through the rows, and the list keeps it in view.
         let reports = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports, Folder")).firstMatch
         let empty = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Empty, Folder")).firstMatch
         XCTAssertTrue(reports.waitForExistence(timeout: 20))
-        for _ in 0..<3 { app.typeKey(.downArrow, modifierFlags: []) }
-        wait(for: [expectation(for: selected, evaluatedWith: reports)], timeout: 20)
-        app.typeKey(.upArrow, modifierFlags: [])
-        wait(for: [expectation(for: selected, evaluatedWith: empty)], timeout: 20)
+        select(reports, pressing: .downArrow, 3)
+        select(empty, pressing: .upArrow, 1)
         XCTAssertFalse(reports.isSelected, "One row is selected at a time")
-        // The list scrolls to keep the selection in view.
         let guide = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Navigation guide.md,")).firstMatch
-        for _ in 0..<13 { app.typeKey(.downArrow, modifierFlags: []) }
-        wait(for: [expectation(for: selected, evaluatedWith: guide)], timeout: 20)
+        select(guide, pressing: .downArrow, 13)
         let list = app.collectionViews.firstMatch
         XCTAssertTrue(guide.isHittable && list.frame.contains(guide.frame), "The selected row is scrolled into view")
 
@@ -515,15 +525,6 @@ final class RemoteFilesUITests: XCTestCase {
             // Return in the search field ends editing, so the arrows go to the rows again.
             if (search.value(forKey: "hasKeyboardFocus") as? Bool) == true { search.typeText("\n") }
             wait(for: [expectation(for: NSPredicate(format: "hasKeyboardFocus == false"), evaluatedWith: search)], timeout: 20)
-        }
-        /// The first key right after the search field ends editing is occasionally lost in local
-        /// runs, so Down is pressed again if the row isn't selected yet.
-        func pressDown(toSelect row: XCUIElement) {
-            for _ in 0..<3 {
-                app.typeKey(.downArrow, modifierFlags: [])
-                if row.waitForSelection(timeout: 3) { return }
-            }
-            wait(for: [expectation(for: selected, evaluatedWith: row)], timeout: 20)
         }
 
         // The arrows belong to the search field while it has focus. ⇧⌘F is pressed again if the
@@ -544,9 +545,8 @@ final class RemoteFilesUITests: XCTestCase {
 
         // Filtered rows, then subfolder search results.
         leaveSearchField()
-        pressDown(toSelect: heading)
-        app.typeKey(.downArrow, modifierFlags: [])
-        wait(for: [expectation(for: selected, evaluatedWith: linked)], timeout: 20)
+        select(heading)
+        select(linked)
         app.buttons["Subfolders"].tap()
         let nested = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@ AND label CONTAINS %@", "Linked notes.md,", "In Reports")).firstMatch
         XCTAssertTrue(nested.waitForExistence(timeout: 30), "Subfolder results list the nested note")
@@ -554,13 +554,7 @@ final class RemoteFilesUITests: XCTestCase {
         let finished = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Searched ")).firstMatch
         XCTAssertTrue(finished.waitForExistence(timeout: 60), "The subfolder search finishes")
         leaveSearchField()
-        let results = app.buttons.matching(NSPredicate(format: "label CONTAINS %@ AND selected == true", "notes"))
-        for _ in 0..<12 {
-            app.typeKey(.downArrow, modifierFlags: [])
-            if nested.waitForSelection(timeout: 2) { break }
-        }
-        wait(for: [expectation(for: selected, evaluatedWith: nested)], timeout: 20)
-        XCTAssertEqual(results.count, 1, "One result is selected at a time")
+        select(nested, pressing: .downArrow, 0)
         attachScreenshot("Subfolder search result selected with the arrow keys")
     }
 
