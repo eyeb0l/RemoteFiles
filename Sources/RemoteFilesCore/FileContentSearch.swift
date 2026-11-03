@@ -50,7 +50,8 @@ extension RemoteFolderSearch {
     static func scan(_ entries: [RemoteEntry], query: String, root: String, profile: ConnectionProfile,
                      service: any RemoteFileService, limits: ContentLimits, matchLimit: Int,
                      deadline: ContinuousClock.Instant, matched: inout Int, progress: inout Update, options: SearchQueryOptions, extraction: SearchExtractionOptions,
-                     collect: ((SearchIndexDocument) -> Void)?, report: (Update) -> Void) async throws {
+                     collect: ((SearchIndexDocument) -> Void)?, reusable: ((RemoteEntry) -> SearchIndexDocument?)? = nil,
+                     report: (Update) -> Void) async throws {
         for entry in entries {
             try Task.checkCancellation()
             if entry.kind == .directory || !options.accepts(entry) { continue }
@@ -61,6 +62,24 @@ extension RemoteFolderSearch {
             guard matched < matchLimit else { progress.stop = .matchLimit; break }
             guard progress.filesSearched < limits.maxFiles else { progress.stop = .fileLimit; break }
             guard ContinuousClock.now < deadline else { progress.stop = .timeLimit; break }
+            // An index update keeps the text of a file whose size and modification date are
+            // unchanged, without reading it. It still counts towards the file and text limits.
+            if let reused = reusable?(entry) {
+                let text = reused.segments.reduce(0) { $0 + $1.text.utf8.count }
+                if text <= 16 * 1_024 * 1_024 - progress.extractedBytes {
+                    progress.filesSearched += 1; progress.reusedFiles += 1; progress.extractedBytes += text
+                    var update = progress
+                    collect?(SearchIndexDocument(entry: entry, segments: reused.segments, isTruncated: false))
+                    for segment in reused.segments {
+                        if let match = firstMatch(in: segment.text, query: query, entry: entry, options: options, page: segment.page) {
+                            matched += 1; update.contentMatches = [match]; break
+                        }
+                    }
+                    update.copyContentProgress(from: progress)
+                    report(update)
+                    continue
+                }
+            }
             var retried = false
             while true {
                 try Task.checkCancellation()
@@ -105,7 +124,7 @@ extension RemoteFolderSearch {
                     try Task.checkCancellation()
                     progress.extractedBytes += extracted.segments.reduce(0) { $0 + $1.text.utf8.count }
                     if extracted.isTruncated { progress.truncatedFiles += 1 }
-                    collect?(SearchIndexDocument(entry: entry, segments: extracted.segments))
+                    collect?(SearchIndexDocument(entry: entry, segments: extracted.segments, isTruncated: extracted.isTruncated))
                     for segment in extracted.segments {
                         if let match = firstMatch(in: segment.text, query: query, entry: entry, options: options, page: segment.page) {
                             matched += 1; update.contentMatches = [match]; break
@@ -145,5 +164,6 @@ extension RemoteFolderSearch.Update {
         extractedBytes = other.extractedBytes; truncatedFiles = other.truncatedFiles
         filesSearched = other.filesSearched; skippedFiles = other.skippedFiles
         unreadableFiles = other.unreadableFiles; bytesRead = other.bytesRead; chargedBytes = other.chargedBytes
+        reusedFiles = other.reusedFiles
     }
 }

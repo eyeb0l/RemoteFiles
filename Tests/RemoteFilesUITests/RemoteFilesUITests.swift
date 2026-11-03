@@ -760,7 +760,20 @@ final class RemoteFilesUITests: XCTestCase {
         }
         let back = app.navigationBars.buttons["Reports"]
         XCTAssertTrue(back.waitForExistence(timeout: 5)); back.tap()
-        openIndex(); querySavedContents()
+        openIndex()
+        // Two demo reports list a size and modification date, so Update keeps them; three have no date.
+        let update = app.buttons["Update Index"]
+        let summary = app.staticTexts["saved-search-index-summary"]
+        // The list creates rows only near the screen: bring the build controls into view first.
+        reveal(rebuild); reveal(update); update.tap()
+        // Rebuild is replaced by Cancel Build until the update has been saved.
+        XCTAssertTrue(rebuild.waitForExistence(timeout: 45), "The update must finish.\n" + app.debugDescription)
+        reveal(summary)
+        XCTAssertEqual(summary.label, "Read 3 new or changed files and kept 2 unchanged.")
+        attachScreenshot("Updated search index keeping unchanged files")
+        reveal(date, down: false)
+        XCTAssertTrue(date.label.hasSuffix("5 files"), date.label)
+        querySavedContents()
         reveal(delete, down: false); delete.tap()
         XCTAssertTrue(build.waitForExistence(timeout: 5))
         XCTAssertFalse(result.exists, "Deleting the index clears its extracted matches")
@@ -898,7 +911,8 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(saved.waitForExistence(timeout: 5)); saved.tap()
         XCTAssertTrue(list.waitForExistence(timeout: 5))
         XCTAssertTrue(search.waitForExistence(timeout: 5)); search.tap(); search.typeText("INVOICE\n")
-        reveal(delete, down: false); delete.tap()
+        // The reopened sheet starts at the top; Delete sits below the build controls.
+        reveal(delete); delete.tap()
         XCTAssertTrue(build.waitForExistence(timeout: 5))
         for (filename, _) in expected {
             XCTAssertFalse(app.buttons["saved-search-result-/Projects/Search samples/" + filename].exists)

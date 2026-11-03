@@ -28,6 +28,8 @@ public enum RemoteFolderSearch {
         public var matches: [RemoteEntry] = []
         public var contentMatches: [ContentMatch] = []
         public var filesSearched = 0
+        /// Files an index update kept from the previous snapshot without reading; included in `filesSearched`.
+        public var reusedFiles = 0
         public var skippedFiles = 0
         public var unreadableFiles = 0
         public var bytesRead = 0
@@ -79,7 +81,8 @@ public enum RemoteFolderSearch {
     static func search(query: String, root: String, profile: ConnectionProfile, service: any RemoteFileService,
                                includeHidden: Bool, limits: Limits, content: ContentLimits?,
                                options: SearchQueryOptions = .init(), extraction: SearchExtractionOptions = .init(),
-                               collect: ((SearchIndexDocument) -> Void)? = nil, report: (Update) -> Void) async throws {
+                               collect: ((SearchIndexDocument) -> Void)? = nil,
+                               reusable: ((RemoteEntry) -> SearchIndexDocument?)? = nil, report: (Update) -> Void) async throws {
         try Task.checkCancellation()
         if options == SearchQueryOptions(), extraction == SearchExtractionOptions(), collect == nil,
            let server = service as? any ServerFolderSearching,
@@ -153,7 +156,8 @@ public enum RemoteFolderSearch {
                         if let content {
                             try await scan(visible, query: query, root: root, profile: profile,
                                 service: service, limits: content, matchLimit: limits.maxMatches, deadline: deadline,
-                                matched: &matched, progress: &progress, options: options, extraction: extraction, collect: collect, report: report)
+                                matched: &matched, progress: &progress, options: options, extraction: extraction, collect: collect,
+                                reusable: reusable, report: report)
                             if matched >= limits.maxMatches, reported < queue.count { progress.stop = .matchLimit }
                         } else {
                             let found = visible.filter { options.accepts($0) && options.range(in: $0.name, query: query) != nil }

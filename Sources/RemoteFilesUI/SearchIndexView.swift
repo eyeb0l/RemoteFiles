@@ -32,6 +32,10 @@ struct SearchIndexView: View {
     @State private var results: [RemoteFolderSearch.ContentMatch] = []
     @State private var error: String?
     @State private var building = false
+    /// Update keeps unchanged files; Rebuild reads every file again.
+    @State private var rereadsEverything = false
+    @State private var adoptedSavedOptions = false
+    @State private var buildSummary: String?
     @State private var buildRevision = 0
     @State private var indexRevision = 0
     @State private var buildSession = 0
@@ -46,7 +50,7 @@ struct SearchIndexView: View {
                         Text("Saved \(snapshot.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(snapshot.documents.count) files")
                             .accessibilityIdentifier("saved-search-index-date")
                         Text(snapshot.isPartial ? "Partial index. Some files or pages were skipped or a limit was reached." : "Snapshot of supported files at build time.")
-                        Text("Remote files may have changed. Rebuild to refresh. Opening a result reads the current remote file.")
+                        Text("Remote files may have changed. Update to refresh. Opening a result reads the current remote file.")
                         Text("PDF text: \(snapshot.extraction.includePDF ? "included" : "off") · OCR: \(snapshot.extraction.includeOCR ? "included" : "off") · Hidden files: \(snapshot.includeHidden ? "included" : "excluded")")
                     } else {
                         Text("Build an index to search saved text without rereading remote files. Extracted text stays on this device until removed or evicted by storage limits.")
@@ -58,11 +62,22 @@ struct SearchIndexView: View {
                     Text("Up to 500 files, 2 MB per file, 16 MB transferred, 20 pages per PDF and 30 seconds to schedule work. Hidden files follow the folder setting. OCR runs on this device.")
                         .font(.caption).foregroundStyle(.secondary)
                     if building {
-                        ProgressView("Indexing… \(progress.filesSearched) files checked")
+                        ProgressView("Indexing… \(progress.filesSearched) files checked" +
+                                     (progress.reusedFiles > 0 ? ", \(progress.reusedFiles) unchanged" : ""))
                         Button("Cancel Build", role: .cancel) { building = false; buildRevision += 1 }
                     } else {
-                        Button(snapshot == nil ? "Build Index" : "Rebuild Index") { buildSession = model.sessionRevision; building = true; buildRevision += 1 }
+                        if snapshot != nil {
+                            Button("Update Index") { startBuild(rereadingEverything: false) }
+                                .disabled(!model.isForeground || model.isDisconnecting)
+                            Text("Update reads only new files and files whose size or modification date changed, and drops removed files. Changing these options reads every file. Rebuild reads every file, including one changed without a new size or date.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Button(snapshot == nil ? "Build Index" : "Rebuild Index") { startBuild(rereadingEverything: true) }
                             .disabled(!model.isForeground || model.isDisconnecting)
+                        if let buildSummary {
+                            Text(buildSummary).font(.caption).foregroundStyle(.secondary)
+                                .accessibilityIdentifier("saved-search-index-summary")
+                        }
                         if snapshot != nil || error != nil {
                             Button("Delete Index", role: .destructive) { Task { await removeIndex() } }
                         }
@@ -107,11 +122,19 @@ struct SearchIndexView: View {
         }
     }
 
+    private func startBuild(rereadingEverything: Bool) {
+        rereadsEverything = rereadingEverything
+        buildSession = model.sessionRevision; building = true; buildRevision += 1
+    }
+
     private func loadIndex() async {
         do {
             let saved = try await model.searchIndexStore().load(profile: profile, root: root)
             try Task.checkCancellation()
             snapshot = saved; indexRevision += 1
+            // Start from the saved index's choices so Update can keep its unchanged files.
+            if let saved, !adoptedSavedOptions, !building { extraction = saved.extraction }
+            adoptedSavedOptions = true
         } catch { if !Task.isCancelled { self.error = error.localizedDescription } }
     }
 
@@ -119,12 +142,15 @@ struct SearchIndexView: View {
         guard building else { return }
         guard model.isForeground, !model.isDisconnecting, buildSession == model.sessionRevision else { building = false; return }
         let revision = model.sessionRevision, build = buildRevision
-        error = nil; progress = .init()
+        error = nil; buildSummary = nil; progress = .init()
+        let previous = rereadsEverything ? nil : self.snapshot
+        var final = RemoteFolderSearch.Update()
         do {
             let store = await model.searchIndexStore()
             let generation = try await store.beginBuild(profile: profile, root: root)
             let snapshot = try await RemoteFolderSearch.buildIndex(below: root, profile: profile,
-                service: model.searchService, includeHidden: includeHidden, extraction: extraction) { update in
+                service: model.searchService, includeHidden: includeHidden, extraction: extraction, reusing: previous) { update in
+                final = update
                 Task { @MainActor in
                     guard building, buildRevision == build, model.sessionRevision == revision else { return }
                     progress = update
@@ -135,6 +161,9 @@ struct SearchIndexView: View {
             try await store.save(snapshot, profile: profile, root: root, generation: generation)
             try Task.checkCancellation()
             self.snapshot = snapshot; indexRevision += 1
+            let read = final.filesSearched - final.reusedFiles
+            buildSummary = previous == nil ? nil
+                : "Read \(read) new or changed \(read == 1 ? "file" : "files") and kept \(final.reusedFiles) unchanged."
         } catch {
             if !Task.isCancelled && !(error is CancellationError) {
                 self.error = error.localizedDescription
@@ -147,7 +176,7 @@ struct SearchIndexView: View {
     private func removeIndex() async {
         do {
             try await model.searchIndexStore().remove(profile: profile, root: root)
-            snapshot = nil; results = []; error = nil; indexRevision += 1
+            snapshot = nil; results = []; error = nil; buildSummary = nil; indexRevision += 1
         } catch { self.error = error.localizedDescription }
     }
 
