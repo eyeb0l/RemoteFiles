@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  schedule:
+    # Nightly on main: every lane, including VoiceOver and Release compilation.
+    - cron: '30 2 * * *'
   workflow_dispatch:
     inputs:
       full_acceptance:
@@ -16,7 +19,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # The nightly run must neither cancel nor be cancelled by a merge to main.
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && 'nightly' || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 defaults:
@@ -30,7 +34,9 @@ jobs:
     timeout-minutes: 5
     outputs:
       quick: ${{ steps.scope.outputs.quick }}
-      acceptance: ${{ steps.scope.outputs.acceptance }}
+      ui: ${{ steps.scope.outputs.ui }}
+      voiceover: ${{ steps.scope.outputs.voiceover }}
+      release: ${{ steps.scope.outputs.release }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -47,8 +53,9 @@ jobs:
         env:
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
           CI_HEAD_SHA: ${{ github.sha }}
+          CI_MAIN_PUSH: ${{ github.event_name == 'push' }}
           CI_FORCE_QUICK: ${{ github.event_name == 'workflow_dispatch' }}
-          CI_FORCE_ACCEPTANCE: ${{ inputs.full_acceptance == true || contains(github.event.pull_request.labels.*.name, 'full-acceptance') }}
+          CI_FORCE_ACCEPTANCE: ${{ github.event_name == 'schedule' || inputs.full_acceptance == true || contains(github.event.pull_request.labels.*.name, 'full-acceptance') }}
         run: python3 -B scripts/ci_scope.py
       - name: Check changed whitespace
         env:
@@ -82,32 +89,10 @@ jobs:
         with:
           lane: ${{ matrix.lane }}
 
-  acceptance:
-    name: Acceptance / ${{ matrix.lane }}
-    needs: [repository-checks, quick]
-    if: needs.repository-checks.outputs.acceptance == 'true'
-    runs-on: xcode-27
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        lane: [voiceover, release-device-compile]
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
-      EVIDENCE: /private/tmp/remotefiles-validation
-      CI_CACHE: /private/tmp/remotefiles-ci-cache
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/validate
-        with:
-          lane: ${{ matrix.lane }}
-
   simulator-ui:
     name: Acceptance / simulator-ui-shard-${{ matrix.shard }}
     needs: [repository-checks, quick]
-    if: needs.repository-checks.outputs.acceptance == 'true'
+    if: needs.repository-checks.outputs.ui == 'true'
     runs-on: xcode-27
     timeout-minutes: 45
     strategy:
@@ -127,15 +112,38 @@ jobs:
           lane: simulator-ui
           ui-shard: ${{ matrix.shard }}
 
-  simulator-ui-check:
-    # Preserve the existing required check; a partial UI inventory cannot pass it.
-    name: Acceptance / simulator-ui
-    needs: [repository-checks, simulator-ui]
-    if: always() && needs.repository-checks.outputs.acceptance == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
+  voiceover:
+    name: Acceptance / voiceover
+    needs: [repository-checks, quick]
+    if: needs.repository-checks.outputs.voiceover == 'true'
+    runs-on: xcode-27
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+      EVIDENCE: /private/tmp/remotefiles-validation
+      CI_CACHE: /private/tmp/remotefiles-ci-cache
     steps:
-      - name: Require both UI shards to pass
-        env:
-          UI_RESULT: ${{ needs.simulator-ui.result }}
-        run: test "$UI_RESULT" = success
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/validate
+        with:
+          lane: voiceover
+
+  release-device-compile:
+    name: Acceptance / release-device-compile
+    needs: [repository-checks, quick]
+    if: needs.repository-checks.outputs.release == 'true'
+    runs-on: xcode-27
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+      EVIDENCE: /private/tmp/remotefiles-validation
+      CI_CACHE: /private/tmp/remotefiles-ci-cache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/validate
+        with:
+          lane: release-device-compile

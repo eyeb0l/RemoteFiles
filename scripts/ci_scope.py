@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Choose PR validation from the complete change list; unknown inputs get acceptance."""
+"""Choose CI lanes from the complete change list; unknown inputs get every lane."""
 import argparse
 from fnmatch import fnmatchcase
 import os
@@ -7,39 +7,54 @@ from pathlib import Path
 import re
 import subprocess
 
+# Documentation and repository metadata: Repository checks only, no Mac runner.
 REPOSITORY_ONLY = ("docs/*", "README.md", "AGENTS.md", "ROADMAP.md", "PREVIEW_STATUS.md",
-                   "LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING", ".gitignore")
-QUICK = ("Sources/*", "Tests/RemoteFilesCoreTests/*")
-ACCEPTANCE = (
-    "Vendor/*", "App/*", "Fixtures/*", "Package.*", "RemoteFiles.xcodeproj/*", ".github/*", "scripts/*",
-    "Tests/RemoteFilesUITests/*", "Tests/VoiceOverFixtures/*", "Tests/SmallFeatureFixtures/*",
-    "Sources/RemoteFilesUI/Reader*", "Sources/RemoteFilesUI/Document*",
-    "Sources/RemoteFilesUI/RemoteFilesRootView.swift", "Sources/RemoteFilesUI/FolderView.swift",
-    "Sources/RemoteFilesUI/*Image*", "Sources/RemoteFilesUI/*Playback*",
-    "Sources/RemoteFilesUI/*HTML*", "Sources/RemoteFilesUI/*SVG*", "Sources/RemoteFilesUI/Source*",
-    "Sources/RemoteFilesCore/Resources/*",
-    "Sources/RemoteFilesUI/*Key*", "Sources/RemoteFilesUI/*Connection*",
-    "Sources/RemoteFilesCore/SFTP*", "Sources/RemoteFilesCore/*Trust*",
-    "Sources/RemoteFilesCore/Identity*", "Sources/RemoteFilesCore/MetadataStore.swift",
-    "Sources/RemoteFilesCore/*Bound*", "Sources/RemoteFilesCore/DocumentPolicy.swift",
-    "Sources/RemoteFilesCore/*Resource*", "Sources/RemoteFilesCore/*Export*",
-    "Tests/RemoteFilesCoreTests/*Overflow*", "Tests/RemoteFilesCoreTests/*Reading*",
-    "Tests/RemoteFilesCoreTests/*Identity*", "Tests/RemoteFilesCoreTests/*SFTP*",
-)
+                   "LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING", ".gitignore",
+                   "Vendor/*/UPSTREAM.md", "Tests/LinuxSearchAcceptance/README.md", "design/*")
+# A change to the workflow, the runner or its launchers must prove every lane.
+INFRASTRUCTURE = (".github/*", "scripts/ci_scope.py", "scripts/test-acceptance.py", "scripts/runner_finalization.py",
+                  "scripts/test-openssh.sh", "scripts/generate-project.py")
+# Only the VoiceOver lane executes these.
+VOICEOVER = ("Tests/VoiceOverFixtures/*", "scripts/test-voiceover.sh")
+# Only the UI lane builds the app target, runs these journeys or exercises these inputs.
+UI = ("Tests/RemoteFilesUITests/*", "App/*", "Package.swift", "Package.resolved", "*/Package.resolved",
+      "Vendor/*", "Fixtures/*", "Sources/RemoteFilesCore/Resources/*")
+# Covered by the hosted core and macOS lanes, or not executed by CI at all.
+QUICK_ONLY = ("Sources/*", "Tests/RemoteFilesCoreTests/*", "RemoteFiles.xcodeproj/*", "scripts/*",
+              "Tests/SmallFeatureFixtures/*", "Tests/ImageOpenFixtures/*", "Tests/ReadingAnchorFixtures/*",
+              "Tests/LinuxSearchAcceptance/*")
+LANES = ("ui", "voiceover", "release")
 
 
-def classify(paths, force_acceptance=False, force_quick=False):
-    full = bool(force_acceptance)
-    quick = full or bool(force_quick)
-    reasons = []
+def matches(path, patterns):
+    return any(fnmatchcase(path, pattern) for pattern in patterns)
+
+
+def classify(paths, force_acceptance=False, force_quick=False, main_push=False):
+    quick = bool(force_acceptance or force_quick)
+    lanes = dict.fromkeys(LANES, bool(force_acceptance))
+    reasons = {}
+
+    def escalate(path, *names):
+        for name in names:
+            lanes[name] = True
+        reasons[path] = ", ".join(names)
+
     for path in paths:
-        if any(fnmatchcase(path, pattern) for pattern in REPOSITORY_ONLY):
+        if matches(path, REPOSITORY_ONLY):
             continue
         quick = True
-        if any(fnmatchcase(path, pattern) for pattern in ACCEPTANCE) or not any(fnmatchcase(path, pattern) for pattern in QUICK):
-            full = True
-            reasons.append(path)
-    return {"quick": quick, "acceptance": full, "reasons": sorted(reasons)}
+        if matches(path, INFRASTRUCTURE):
+            escalate(path, *LANES)
+        elif matches(path, VOICEOVER):
+            escalate(path, "voiceover")
+        elif matches(path, UI):
+            escalate(path, "ui")
+        elif not matches(path, QUICK_ONLY):
+            escalate(path, *LANES)  # Unknown input: fail closed.
+    if main_push and quick:
+        lanes["ui"] = True  # Merged code runs the UI journeys once; VoiceOver and Release follow the nightly run.
+    return {"quick": quick, **lanes, "reasons": reasons}
 
 
 def changed_paths(base, head):
@@ -56,18 +71,24 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default=os.environ.get("CI_BASE_SHA", ""))
     parser.add_argument("--head", default=os.environ.get("CI_HEAD_SHA", ""))
-    parser.add_argument("--full", action="store_true", default=os.environ.get("CI_FORCE_ACCEPTANCE") == "true")
+    parser.add_argument("--full", action="store_true", default=os.environ.get("CI_FORCE_ACCEPTANCE") == "true",
+                        help="Run every lane (label, nightly schedule or manual dispatch)")
     parser.add_argument("--quick", action="store_true", default=os.environ.get("CI_FORCE_QUICK") == "true")
+    parser.add_argument("--main-push", action="store_true", default=os.environ.get("CI_MAIN_PUSH") == "true",
+                        help="Classify a push to main: merged code also runs the UI journeys")
     args = parser.parse_args()
-    result = classify(changed_paths(args.base, args.head), args.full, args.quick)
-    print("Quick validation: " + str(result["quick"]) + "; full acceptance: " + str(result["acceptance"]))
+    result = classify(changed_paths(args.base, args.head), args.full, args.quick, args.main_push)
+    print("Quick validation: " + str(result["quick"]) + "; UI journeys: " + str(result["ui"]) +
+          "; VoiceOver: " + str(result["voiceover"]) + "; Release compilation: " + str(result["release"]))
     if args.full:
-        print("Full acceptance requested explicitly")
-    for reason in result["reasons"]:
-        print("Acceptance-sensitive change: " + reason)
+        print("Every lane requested explicitly")
+    if args.main_push and result["quick"]:
+        print("Push to main: UI journeys run for every merged code change")
+    for path, tier in sorted(result["reasons"].items()):
+        print("Escalating change: " + path + " -> " + tier)
     if os.environ.get("GITHUB_OUTPUT"):
         with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
-            for key in ("quick", "acceptance"):
+            for key in ("quick",) + LANES:
                 output.write(key + "=" + str(result[key]).lower() + "\n")
 
 

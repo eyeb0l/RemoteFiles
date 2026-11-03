@@ -80,7 +80,9 @@ def settle_after_boot(threshold=None, limit=480, interval=15, load=os.getloadavg
     """A freshly booted simulator starts its widgets and system services for several minutes.
     On a three-CPU hosted runner the 1-minute load then sits at 400-600 and falls to about
     100 within 10-15 minutes. Tests launched into that start under several times the later
-    load, so wait (bounded) until it drops below 40 per logical CPU. Never fails the lane."""
+    load, so wait (bounded) until it drops below 40 per logical CPU. A 90-second bound was
+    tried on 3 November: the load was still rising at 530 when the UI journeys started and
+    the first long journey exceeded its allowance (docs/CI_HISTORY.md). Never fails the lane."""
     threshold = threshold or 40 * (os.cpu_count() or 1)
     samples, waited = [], 0
     while True:

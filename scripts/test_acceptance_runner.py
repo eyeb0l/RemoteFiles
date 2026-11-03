@@ -444,23 +444,48 @@ class LaneSelectionTests(unittest.TestCase):
         self.assertEqual(run.commands[0][1][:3], ["scripts/test-openssh.sh", "swift", "test"])
 
 
-class UIWorkflowGateTests(unittest.TestCase):
-    def test_existing_gate_requires_success_of_both_uncancelled_shards(self):
-        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
-        shard_job = workflow.split("\n  simulator-ui:\n", 1)[1].split("\n  simulator-ui-check:\n", 1)[0]
-        self.assertIn("shard: [1, 2]", shard_job)
-        self.assertIn("fail-fast: false", shard_job)
-        self.assertNotIn("continue-on-error", shard_job)
-        self.assertIn("ui-shard: ${{ matrix.shard }}", shard_job)
-        gate = workflow.split("\n  simulator-ui-check:\n", 1)[1]
-        self.assertIn("name: Acceptance / simulator-ui\n", gate)
-        self.assertIn("needs: [repository-checks, simulator-ui]", gate)
-        self.assertIn("if: always() && needs.repository-checks.outputs.acceptance == 'true'", gate)
-        self.assertIn("UI_RESULT: ${{ needs.simulator-ui.result }}", gate)
-        command = next(line.strip().removeprefix("run: ") for line in gate.splitlines() if line.strip().startswith("run: "))
-        for result in ("success", "failure", "cancelled", "skipped", ""):
-            completed = subprocess.run(["bash", "-c", command], env=dict(os.environ, UI_RESULT=result))
-            self.assertEqual(completed.returncode == 0, result == "success", result)
+class WorkflowShapeTests(unittest.TestCase):
+    root = Path(__file__).resolve().parents[1]
+
+    def job(self, name):
+        workflow = (self.root / ".github/workflows/ci.yml").read_text()
+        return workflow.split("\n  " + name + ":\n", 1)[1].split("\n\n  ", 1)[0]
+
+    def test_ui_shards_voiceover_and_release_are_gated_on_their_own_selector_outputs(self):
+        workflow = (self.root / ".github/workflows/ci.yml").read_text()
+        shards = self.job("simulator-ui")
+        self.assertIn("shard: [1, 2]", shards)
+        self.assertIn("fail-fast: false", shards)
+        self.assertNotIn("continue-on-error", shards)
+        self.assertIn("ui-shard: ${{ matrix.shard }}", shards)
+        for name, lane in (("simulator-ui", "ui"), ("voiceover", "voiceover"), ("release-device-compile", "release")):
+            with self.subTest(job=name):
+                job = self.job(name)
+                self.assertIn("needs: [repository-checks, quick]", job)
+                self.assertIn("if: needs.repository-checks.outputs." + lane + " == 'true'", job)
+                self.assertIn("      " + lane + ": ${{ steps.scope.outputs." + lane + " }}", self.job("repository-checks"))
+        self.assertIn("lane: voiceover", self.job("voiceover"))
+        self.assertIn("lane: release-device-compile", self.job("release-device-compile"))
+        self.assertNotIn("simulator-ui-check", workflow)
+        self.assertNotIn("outputs.acceptance", workflow)
+
+    def test_nightly_schedule_runs_every_lane_in_its_own_concurrency_group(self):
+        workflow = (self.root / ".github/workflows/ci.yml").read_text()
+        self.assertIn("  schedule:\n", workflow)
+        self.assertIn("    - cron: ", workflow)
+        self.assertIn("github.event_name == 'schedule' && 'nightly' ||", workflow)
+        checks = self.job("repository-checks")
+        self.assertIn("CI_MAIN_PUSH: ${{ github.event_name == 'push' }}", checks)
+        self.assertIn("CI_FORCE_ACCEPTANCE: ${{ github.event_name == 'schedule' || inputs.full_acceptance == true ||", checks)
+
+    def test_build_caches_are_lane_scoped_and_saved_only_from_main(self):
+        action = (self.root / ".github/actions/validate/action.yml").read_text()
+        key = next(line for line in action.splitlines() if line.strip().startswith("key: "))
+        self.assertIn("steps.build.outputs.prefix", key)
+        self.assertNotIn("evidence-name", key)
+        self.assertIn('echo "prefix=v3-xcode-$toolchain-${{ runner.arch }}-$family-$LANE"', action)
+        save = action.split("- name: Save build progress", 1)[1]
+        self.assertIn("github.ref == 'refs/heads/main'", save.split("uses:", 1)[0])
 
 
 class DedicatedCheckoutTests(unittest.TestCase):
