@@ -955,6 +955,21 @@ final class RemoteFilesUITests: XCTestCase {
                       "Opening the folder must update the index without opening this sheet.\n" + app.debugDescription)
         XCTAssertEqual(summary.label, expected)
         attachScreenshot("Saved search index updated automatically when its folder opened")
+
+        // A manual update replaces the automatic result. Reopening the folder from the listing
+        // cache, without listing it again, must still update the index.
+        let update = app.buttons["Update Index"]
+        reveal(update, down: false); update.tap()
+        XCTAssertTrue(app.staticTexts["saved-search-index-summary"].waitForExistence(timeout: 45), app.debugDescription)
+        XCTAssertFalse(summary.exists)
+        closeIndex()
+        let back = app.navigationBars.buttons["Projects"]
+        if back.waitForExistence(timeout: 5) { back.tap() }
+        revealFolderRow(reports, in: app).tap()
+        openIndex()
+        reveal(rebuild)
+        XCTAssertTrue(summary.waitForExistence(timeout: 45),
+                      "Reopening a cached folder must update the index too.\n" + app.debugDescription)
         reveal(automatic)
         XCTAssertEqual(automatic.value as? String, "1", "The setting persists across launches")
         toggleAutomatic(to: "0")

@@ -287,6 +287,12 @@ struct FolderView: View {
         .task(id: "\(model.isForeground)-\(model.sessionRevision)-\(refreshID)") { await reloadIfNeeded() }
         .onDisappear { resolveTask?.cancel(); resolveTask = nil }
         .task(id: "\(filter)-\(showHidden)-\(sortOrder)-\(searchOptions)") { await updateVisible() }
+        // A saved index of this folder set to update automatically refreshes once it is old enough,
+        // whether the folder was listed again or shown from the cache.
+        .task(id: "\(listing?.path ?? "")-\(loading)-\(error == nil)-\(model.isForeground)-\(model.sessionRevision)") {
+            guard let root = listing?.path, !loading, error == nil else { return }
+            await model.indexUpdates.updateIfDue(profile, root: root, model: model)
+        }
         .sheet(isPresented: $showingSearchIndex) {
             SearchIndexView(model: model, profile: profile, root: path, includeHidden: showHidden).coversKeyboardCommands()
         }
@@ -441,9 +447,6 @@ struct FolderView: View {
             appliedFilter = query; appliedShowHidden = hidden; appliedSortOrder = order; appliedSearchOptions = options
             model.cache(prepared, id: profile.id, requestedPath: requestedPath)
             model.connectionStates[profile.id] = "Connected"
-            // A saved index of this folder set to update automatically refreshes once it is old enough.
-            let updates = model.indexUpdates, model = model, profile = profile, root = prepared.path
-            Task { await updates.updateIfDue(profile, root: root, model: model) }
             if query != filter || hidden != showHidden || order != sortOrder || options != searchOptions { await updateVisible() }
         } catch {
             guard token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }

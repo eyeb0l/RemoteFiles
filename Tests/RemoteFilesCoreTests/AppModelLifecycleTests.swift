@@ -443,7 +443,8 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
                                       includeHidden: built.includeHidden, extraction: built.extraction, isPartial: built.isPartial)
         try await store.save(old, profile: profile, root: root)
         func waitUntilIdle() async throws {
-            let deadline = ContinuousClock.now + .seconds(10)
+            // Outlast the update's own 30-second scheduling budget on loaded hosted runners.
+            let deadline = ContinuousClock.now + .seconds(60)
             while updates.isUpdating(profile, root: root), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
             XCTAssertFalse(updates.isUpdating(profile, root: root), "The automatic update did not finish")
         }
@@ -528,6 +529,35 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
         try await store.setUpdatesAutomatically(false, profile: profile, root: root)
         let turnedOff = await updates.updateIfDue(profile, root: root, model: model)
         XCTAssertFalse(turnedOff)
+    }
+
+    func testIndexDeletedInAnotherWindowBeforeAnAutomaticUpdateReservesItStaysDeleted() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let updating = try AppModel(directory: directory, fileService: BackgroundExportService())
+        let deleting = try AppModel(directory: directory, fileService: BackgroundExportService())
+        await updating.load(); await updating.setDemo(true)
+        await deleting.load(); await deleting.setDemo(true)
+        let demo = try XCTUnwrap(updating.searchService as? DemoRemoteFileService)
+        await demo.configure(delayNanoseconds: 0, failure: nil)
+        let profile = try XCTUnwrap(updating.metadata.connections.first), root = "/Projects/Reports"
+        let store = await updating.searchIndexStore()
+        let built = try await RemoteFolderSearch.buildIndex(below: root, profile: profile, service: demo, includeHidden: false)
+        try await store.save(.init(createdAt: Date().addingTimeInterval(-3_600), documents: built.documents, includeHidden: false,
+                                   extraction: built.extraction, isPartial: built.isPartial), profile: profile, root: root)
+        try await store.setUpdatesAutomatically(true, profile: profile, root: root)
+        let otherWindowStore = await deleting.searchIndexStore()
+        let started = await updating.indexUpdates.updateIfDue(profile, root: root, model: updating)
+        XCTAssertTrue(started)
+        // The other window deletes the index before the update task has run and reserved its build.
+        try await otherWindowStore.remove(profile: profile, root: root)
+        let deadline = ContinuousClock.now + .seconds(60)
+        while updating.indexUpdates.isUpdating(profile, root: root), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let resurrected = try await store.load(profile: profile, root: root)
+        XCTAssertNil(resurrected, "An automatic update must not save an index another window deleted")
+        XCTAssertEqual(updating.indexUpdates.savedRevision, 0)
     }
 
     private func waitForOfflineState(_ condition: () -> Bool) async throws {

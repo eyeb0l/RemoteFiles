@@ -93,6 +93,11 @@ final class AutomaticSearchIndexUpdater {
         var final = RemoteFolderSearch.Update()
         do {
             let generation = try await store.beginBuild(profile: profile, root: root)
+            // Another window may have deleted the index or turned the setting off since the check.
+            // A deletion after this point invalidates the reservation instead.
+            guard try await store.updatesAutomatically(profile: profile, root: root) else {
+                finish(key, token: token, outcome: nil); return
+            }
             let snapshot = try await RemoteFolderSearch.buildIndex(below: root, profile: profile, service: service,
                 includeHidden: saved.includeHidden, extraction: saved.extraction, reusing: saved) { update in
                 final = update
