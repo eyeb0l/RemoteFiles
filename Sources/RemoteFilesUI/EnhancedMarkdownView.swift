@@ -53,7 +53,7 @@ struct EnhancedMarkdownView: View {
             catch { self.error = error.localizedDescription }
         }
         .fullScreenCover(item: $imagePresentation) { item in
-            if let resolver { RemoteImageViewer(item: item, resolver: resolver) }
+            if let resolver { RemoteImageViewer(item: item, resolver: resolver).coversKeyboardCommands() }
         }
     }
 }

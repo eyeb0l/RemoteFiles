@@ -124,6 +124,7 @@ struct ReaderView: View {
             ReaderHeadingsView(headings: navigation.index?.headings ?? []) { heading in
                 source = false; navigation.show(heading)
             }
+            .coversKeyboardCommands()
         }
         .task(id: FindWork(query: navigation.query, revision: navigation.revision, inSource: showsSource, active: navigation.isFinding)) {
             await navigation.search(inSource: showsSource)
@@ -140,10 +141,10 @@ struct ReaderView: View {
         .onChange(of: model.sessionRevision) { _, _ in cancelLink() }
         .focusedSceneValue(\.readerCommands, isFrontmost ? commands : nil)
     }
-    /// The workspace shows one reader; a stack has only its top route on screen. A sheet,
-    /// including this reader's Headings, covers it.
+    /// The workspace shows one reader; a stack has only its top route on screen. A library sheet
+    /// covers it; sheets it presents itself use `coversKeyboardCommands()`.
     private var isFrontmost: Bool {
-        guard model.sheet == nil, !headingsPresented else { return false }
+        guard model.sheet == nil else { return false }
         return workspaceNavigate != nil || model.routes.last == .file(profile.id, entry)
     }
     private var hasRenderedMode: Bool { [.markdown, .html, .svg].contains(DocumentPolicy.kind(filename: entry.name)) }
@@ -151,7 +152,7 @@ struct ReaderView: View {
     private func startFind() {
         // Static HTML/SVG keep their native preview; search their literal source.
         if [.html, .svg].contains(DocumentPolicy.kind(filename: entry.name)) { source = true }
-        navigation.isFinding = true
+        navigation.startFind()
     }
     private var commands: ReaderCommandActions {
         var actions = ReaderCommandActions(context: "\(profile.id)|\(entry.path)", refresh: { refreshID += 1 }, showsSource: source)

@@ -400,20 +400,21 @@ struct OfflineReaderView: View {
             ReaderHeadingsView(headings: navigation.index?.headings ?? []) { heading in
                 source = false; navigation.show(heading)
             }
+            .coversKeyboardCommands()
         }
         .fullScreenCover(item: $viewer, onDismiss: { imageFocused = true }) { item in
-            OfflineImageViewer(item: item)
+            OfflineImageViewer(item: item).coversKeyboardCommands()
         }
         .alert("Couldn’t open link", isPresented: Binding(get: { linkError != nil }, set: { if !$0 { linkError = nil } })) {
             Button("OK") { linkError = nil }
         } message: { Text(linkError ?? "") }
-        .focusedSceneValue(\.readerCommands, canRead && !headingsPresented && viewer == nil ? commands : nil)
+        .focusedSceneValue(\.readerCommands, canRead ? commands : nil)
     }
     private var findTitle: String { [.html, .svg].contains(kind) ? "Find in Source" : "Find in Document" }
     private func startFind() {
         // Static HTML/SVG keep their native preview; search their literal source.
         if [.html, .svg].contains(kind) { source = true }
-        navigation.isFinding = true
+        navigation.startFind()
     }
     /// A saved copy has no Refresh: updating it needs a connection and is chosen in Offline Files.
     private var commands: ReaderCommandActions {

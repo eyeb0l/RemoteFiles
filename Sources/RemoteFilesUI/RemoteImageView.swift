@@ -78,7 +78,7 @@ struct RemoteInlineImage: View {
                                     ready: image != nil || failure != nil)
         .onDisappear { image = nil }
         .fullScreenCover(item: $viewer, onDismiss: { focusedAction = invokingAction }) { item in
-            RemoteImageViewer(item: item, resolver: resolver)
+            RemoteImageViewer(item: item, resolver: resolver).coversKeyboardCommands()
         }
     }
     private func open(from action: ImageAction) {

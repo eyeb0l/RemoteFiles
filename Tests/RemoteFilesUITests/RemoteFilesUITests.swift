@@ -439,7 +439,9 @@ final class RemoteFilesUITests: XCTestCase {
         app.typeKey("g", modifierFlags: [.command, .shift]); expectStatus("1 of 10")
         query.typeText("\n"); expectStatus("2 of 10")
         attachScreenshot("Find driven from the keyboard")
-        if !query.hasFocus { query.tap() }
+        // ⌘F returns focus to an open Find field.
+        app.typeKey("f", modifierFlags: .command)
+        wait(for: [expectation(for: NSPredicate(format: "hasKeyboardFocus == true"), evaluatedWith: query)], timeout: 5)
         query.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [])
         wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: query)], timeout: 5)
 
@@ -452,6 +454,9 @@ final class RemoteFilesUITests: XCTestCase {
         app.typeKey("j", modifierFlags: [.command, .shift])
         let headings = app.navigationBars["Headings"]
         XCTAssertTrue(headings.waitForExistence(timeout: 5))
+        // Shortcuts don't act on the reader or folder beneath a sheet they present.
+        app.typeKey("[", modifierFlags: .command)
+        XCTAssertTrue(headings.exists, "⌘[ is ignored while Headings is open")
         headings.buttons["Done"].tap()
         wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: headings)], timeout: 5)
 

@@ -288,7 +288,7 @@ struct FolderView: View {
         .onDisappear { resolveTask?.cancel(); resolveTask = nil }
         .task(id: "\(filter)-\(showHidden)-\(sortOrder)-\(searchOptions)") { await updateVisible() }
         .sheet(isPresented: $showingSearchIndex) {
-            SearchIndexView(model: model, profile: profile, root: path, includeHidden: showHidden)
+            SearchIndexView(model: model, profile: profile, root: path, includeHidden: showHidden).coversKeyboardCommands()
         }
         .task(id: "\(searchOptions)-\(extraction)-\(searchScope)-\(filter)-\(showHidden)-\(listing?.path ?? "")-\(model.isForeground)-\(model.sessionRevision)-\(lastRefreshID)") {
             await searchSubfolders()
@@ -301,9 +301,9 @@ struct FolderView: View {
         .focusedSceneValue(\.folderCommands, isFrontmost ? commands : nil)
     }
     /// The workspace always shows its folder column; a stack has only its top route on screen.
-    /// A sheet, including this folder's search index, covers it.
+    /// A library sheet covers it; sheets it presents itself use `coversKeyboardCommands()`.
     private var isFrontmost: Bool {
-        guard model.sheet == nil, !showingSearchIndex else { return false }
+        guard model.sheet == nil else { return false }
         return workspaceNavigate != nil || model.routes.last == .folder(profile.id, requestedPath)
     }
     private var commands: FolderCommandActions {

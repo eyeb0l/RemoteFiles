@@ -13,6 +13,8 @@ struct ReaderTextReveal: Equatable {
     private(set) var revision = UUID()
     var query = ""
     var isFinding = false
+    /// Bumped by each Find request, so an open Find field takes focus again.
+    private(set) var findFocusRequest = 0
     private(set) var matches: [DocumentTextTarget] = []
     private(set) var selected = 0
     private(set) var truncated = false
@@ -56,6 +58,7 @@ struct ReaderTextReveal: Equatable {
         isFinding = false; query = ""; matches = []
         reveal = .init(target: heading.target, inSource: false)
     }
+    func startFind() { isFinding = true; findFocusRequest += 1 }
     func closeFind() { isFinding = false; query = ""; reveal = nil; matches = [] }
     func didReveal(_ id: UUID) { if reveal?.id == id { completedReveal = id } }
     func clear() {
@@ -87,16 +90,16 @@ struct ReaderFindBar: View {
                 TextField("Find in document", text: $navigation.query)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .submitLabel(.search).focused($focused)
-                    // Return moves to the next result, like Find Next; Escape closes Find.
+                    // Return moves to the next result, like Find Next.
                     .onSubmit { navigation.move(1, inSource: inSource) }
-                    .onKeyPress(.escape) { focused = false; navigation.closeFind(); return .handled }
                     .accessibilityIdentifier("reader-find-query")
                     .frame(minHeight: 44)
                 Button("Previous result", systemImage: "chevron.up") { focused = false; navigation.move(-1, inSource: inSource) }
                     .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44).disabled(navigation.matches.isEmpty)
                 Button("Next result", systemImage: "chevron.down") { focused = false; navigation.move(1, inSource: inSource) }
                     .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44).disabled(navigation.matches.isEmpty)
-                Button("Done") { focused = false; navigation.closeFind() }.frame(minHeight: 44)
+                // Escape closes Find. The text field doesn't report Escape to `onKeyPress`.
+                Button("Done") { focused = false; navigation.closeFind() }.keyboardShortcut(.cancelAction).frame(minHeight: 44)
             }
             HStack {
                 Text(status).font(.caption).foregroundStyle(.secondary)
@@ -107,6 +110,7 @@ struct ReaderFindBar: View {
         }
         .padding(.horizontal).padding(.vertical, 8).background(.bar)
         .onAppear { focused = true }
+        .onChange(of: navigation.findFocusRequest) { _, _ in focused = true }
     }
     private var status: String {
         if navigation.query.isEmpty { return "Enter text to find" }

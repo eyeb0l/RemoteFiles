@@ -56,18 +56,33 @@ struct NavigationCommandActions: Equatable {
 }
 
 /// Each value is published by at most one view at a time: the reader, folder or navigation that
-/// is in front. Views covered by a stacked view, a sheet or a presented list publish nil.
+/// is in front. Views covered by a stacked view or a library sheet publish nil.
 extension FocusedValues {
     @Entry var readerCommands: ReaderCommandActions?
     @Entry var folderCommands: FolderCommandActions?
     @Entry var navigationCommands: NavigationCommandActions?
 }
 
+extension FocusedValues {
+    /// Set by sheets and full-screen covers a reader or folder presents itself.
+    @Entry var keyboardCommandsCovered: Bool?
+}
+
+extension View {
+    /// Marks a sheet or cover presented from a reader or folder. While it shows, the reader,
+    /// folder and navigation beneath ignore shortcuts, since they stay published behind it.
+    func coversKeyboardCommands() -> some View { focusedSceneValue(\.keyboardCommandsCovered, true) }
+}
+
 /// Hardware-keyboard shortcuts, listed in the iPad menu bar and the ⌘ shortcut overlay.
 public struct RemoteFilesCommands: Commands {
-    @FocusedValue(\.readerCommands) private var reader
-    @FocusedValue(\.folderCommands) private var folder
-    @FocusedValue(\.navigationCommands) private var navigation
+    @FocusedValue(\.readerCommands) private var publishedReader
+    @FocusedValue(\.folderCommands) private var publishedFolder
+    @FocusedValue(\.navigationCommands) private var publishedNavigation
+    @FocusedValue(\.keyboardCommandsCovered) private var covered
+    private var reader: ReaderCommandActions? { covered == true ? nil : publishedReader }
+    private var folder: FolderCommandActions? { covered == true ? nil : publishedFolder }
+    private var navigation: NavigationCommandActions? { covered == true ? nil : publishedNavigation }
     public init() {}
 
     public var body: some Commands {
