@@ -383,6 +383,92 @@ final class RemoteFilesUITests: XCTestCase {
         attachScreenshot("Linked document heading navigation")
     }
 
+    func testHardwareKeyboardShortcutsDriveFoldersReaderAndLibrary() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        waitUntilHittable(projects); projects.tap()
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
+
+        // ⇧⌘. shows and hides hidden files.
+        let hidden = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", ".config,")).firstMatch
+        XCTAssertFalse(hidden.exists)
+        app.typeKey(".", modifierFlags: [.command, .shift])
+        XCTAssertTrue(hidden.waitForExistence(timeout: 5), "⇧⌘. shows hidden files")
+        revealFolderRow(hidden, in: app)
+        app.typeKey(".", modifierFlags: [.command, .shift])
+        wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: hidden)], timeout: 5)
+
+        // ⌘[ goes back and ⌘↑ opens the enclosing folder, in the stack and the workspace alike.
+        let reports = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports, Folder")).firstMatch
+        let reportsBar = app.navigationBars["Reports"]
+        revealFolderRow(reports, in: app).tap()
+        XCTAssertTrue(reportsBar.waitForExistence(timeout: 10))
+        app.typeKey("[", modifierFlags: .command)
+        wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: reportsBar)], timeout: 5)
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 5))
+        revealFolderRow(reports, in: app).tap()
+        XCTAssertTrue(reportsBar.waitForExistence(timeout: 10))
+        app.typeKey(.upArrow, modifierFlags: .command)
+        wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: reportsBar)], timeout: 5)
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 5))
+
+        // ⇧⌘F focuses the folder's search field.
+        app.typeKey("f", modifierFlags: [.command, .shift])
+        let search = app.searchFields.firstMatch
+        wait(for: [expectation(for: NSPredicate(format: "hasKeyboardFocus == true"), evaluatedWith: search)], timeout: 5)
+        app.typeText("Navigation")
+        wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: reports)], timeout: 5)
+        let guide = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Navigation guide.md,")).firstMatch
+        revealFolderRow(guide, in: app).tap()
+        XCTAssertTrue(app.navigationBars["Navigation guide.md"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+
+        // ⌘F finds; ⌘G, ⇧⌘G and Return move between results; Escape closes Find.
+        app.typeKey("f", modifierFlags: .command)
+        let query = app.textFields["reader-find-query"]
+        XCTAssertTrue(query.waitForExistence(timeout: 5))
+        wait(for: [expectation(for: NSPredicate(format: "hasKeyboardFocus == true"), evaluatedWith: query)], timeout: 5)
+        query.typeText("Reading marker 2")
+        let status = app.staticTexts["reader-find-status"]
+        func expectStatus(_ label: String) {
+            wait(for: [expectation(for: NSPredicate(format: "label == %@", label), evaluatedWith: status)], timeout: 10)
+        }
+        expectStatus("1 of 10")
+        app.typeKey("g", modifierFlags: .command); expectStatus("2 of 10")
+        app.typeKey("g", modifierFlags: [.command, .shift]); expectStatus("1 of 10")
+        query.typeText("\n"); expectStatus("2 of 10")
+        attachScreenshot("Find driven from the keyboard")
+        if !query.hasFocus { query.tap() }
+        query.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [])
+        wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: query)], timeout: 5)
+
+        // ⌥⌘U switches between Rendered and Source; ⇧⌘J lists headings.
+        let sourceMode = app.buttons["Source"], renderedMode = app.buttons["Rendered"]
+        app.typeKey("u", modifierFlags: [.command, .option])
+        wait(for: [expectation(for: NSPredicate(format: "selected == true"), evaluatedWith: sourceMode)], timeout: 5)
+        app.typeKey("u", modifierFlags: [.command, .option])
+        wait(for: [expectation(for: NSPredicate(format: "selected == true"), evaluatedWith: renderedMode)], timeout: 5)
+        app.typeKey("j", modifierFlags: [.command, .shift])
+        let headings = app.navigationBars["Headings"]
+        XCTAssertTrue(headings.waitForExistence(timeout: 5))
+        headings.buttons["Done"].tap()
+        wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: headings)], timeout: 5)
+
+        // ⇧⌘O and ⌥⌘L open the library's Offline Files and Downloads.
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        let offline = app.navigationBars["Offline Files"]
+        XCTAssertTrue(offline.waitForExistence(timeout: 5))
+        offline.buttons["Done"].tap()
+        wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: offline)], timeout: 5)
+        app.typeKey("l", modifierFlags: [.command, .option])
+        let downloads = app.navigationBars["Downloads"]
+        XCTAssertTrue(downloads.waitForExistence(timeout: 5))
+        downloads.buttons["Done"].tap()
+        wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: downloads)], timeout: 5)
+        XCTAssertTrue(app.navigationBars["Navigation guide.md"].exists, "Closing a library sheet returns to the reader")
+    }
+
     func testWrapLinesToggleAndPreferenceSurviveReopeningSource() throws {
         continueAfterFailure = false
         let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()

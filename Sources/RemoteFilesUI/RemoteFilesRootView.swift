@@ -175,6 +175,8 @@ struct AppNavigation: View {
         }
         .tint(.indigo)
         .disabled(model.isDisconnecting)
+        // A sheet publishes its own navigation, if it has any.
+        .focusedSceneValue(\.navigationCommands, model.sheet == nil && !model.isDisconnecting ? navigationCommands : nil)
         .safeAreaInset(edge: .bottom) { if model.sheet == nil { OfflinePinProgress(model: model) } }
         .sheet(item: $model.sheet) { sheet in
             Group {
@@ -199,6 +201,17 @@ struct AppNavigation: View {
         .alert("RemoteFiles", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK") { model.errorMessage = nil }
         } message: { Text(model.errorMessage ?? "") }
+    }
+    /// Back matches the workspace's Previous Folder button, or pops the stack.
+    private var navigationCommands: NavigationCommandActions {
+        let back: (() -> Void)?
+        let workspace = Self.usesWorkspace(horizontal: horizontalSizeClass, vertical: verticalSizeClass)
+        if workspace {
+            back = model.canGoBackInWorkspace ? { model.goBackInWorkspace() } : nil
+        } else {
+            back = model.routes.isEmpty ? nil : { model.routes.removeLast() }
+        }
+        return NavigationCommandActions(context: workspace ? "workspace" : "stack", back: back, downloads: { model.sheet = .downloads }, offlineFiles: { model.sheet = .offlineFiles })
     }
 }
 

@@ -87,6 +87,9 @@ struct ReaderFindBar: View {
                 TextField("Find in document", text: $navigation.query)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .submitLabel(.search).focused($focused)
+                    // Return moves to the next result, like Find Next; Escape closes Find.
+                    .onSubmit { navigation.move(1, inSource: inSource) }
+                    .onKeyPress(.escape) { focused = false; navigation.closeFind(); return .handled }
                     .accessibilityIdentifier("reader-find-query")
                     .frame(minHeight: 44)
                 Button("Previous result", systemImage: "chevron.up") { focused = false; navigation.move(-1, inSource: inSource) }

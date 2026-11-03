@@ -203,6 +203,8 @@ struct FolderView: View {
     @State private var searchOptions = SearchQueryOptions()
     @State private var extraction = SearchExtractionOptions()
     @State private var showingSearchIndex = false
+    @State private var searchPresented = false
+    @FocusState private var searchFocused: Bool
     init(model: AppModel, profile: ConnectionProfile, requestedPath: String) {
         self.model = model
         self.profile = profile
@@ -252,7 +254,8 @@ struct FolderView: View {
         .navigationBarTitleDisplayMode(.inline)
         // iOS 27.2's floating search bar can intercept visible result rows after
         // keyboard dismissal. Keep search in the navigation bar.
-        .searchable(text: $filter, placement: .navigationBarDrawer(displayMode: .always), prompt: searchPrompt)
+        .searchable(text: $filter, isPresented: $searchPresented, placement: .navigationBarDrawer(displayMode: .always), prompt: searchPrompt)
+        .searchFocused($searchFocused)
         .searchScopes($searchScope) {
             Text("This Folder").tag(FolderSearchScope.folder)
             Text("Subfolders").tag(FolderSearchScope.subfolders)
@@ -295,6 +298,20 @@ struct FolderView: View {
             try? await Task.sleep(for: .seconds(1))
             if !Task.isCancelled { ReaderWarmUp.start() }
         }
+        .focusedSceneValue(\.folderCommands, isFrontmost ? commands : nil)
+    }
+    /// The workspace always shows its folder column; a stack has only its top route on screen.
+    /// A sheet, including this folder's search index, covers it.
+    private var isFrontmost: Bool {
+        guard model.sheet == nil, !showingSearchIndex else { return false }
+        return workspaceNavigate != nil || model.routes.last == .folder(profile.id, requestedPath)
+    }
+    private var commands: FolderCommandActions {
+        let parent = RemotePath.parent(of: path)
+        return FolderCommandActions(
+            context: "\(profile.id)|\(path)", refresh: { refreshID += 1 }, search: { searchPresented = true; searchFocused = true },
+            toggleHidden: { showHidden.toggle() }, showsHidden: showHidden,
+            enclosingFolder: path == "/" || parent == path ? nil : { model.showFolder(profile.id, path: parent) })
     }
     private var pathBar: some View {
         HStack {
