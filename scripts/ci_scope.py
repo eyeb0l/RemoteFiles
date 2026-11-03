@@ -2,6 +2,7 @@
 """Choose CI lanes from the complete change list; unknown inputs get every lane."""
 import argparse
 from fnmatch import fnmatchcase
+import json
 import os
 from pathlib import Path
 import re
@@ -24,6 +25,9 @@ QUICK_ONLY = ("Sources/*", "Tests/RemoteFilesCoreTests/*", "RemoteFiles.xcodepro
               "Tests/SmallFeatureFixtures/*", "Tests/ImageOpenFixtures/*", "Tests/ReadingAnchorFixtures/*",
               "Tests/LinuxSearchAcceptance/*")
 LANES = ("ui", "voiceover", "release")
+# The evidence that lets a push to main skip the UI journeys.
+CI_WORKFLOW = ".github/workflows/ci.yml"
+UI_SHARD_JOBS = ("Acceptance / simulator-ui-shard-1", "Acceptance / simulator-ui-shard-2")
 
 
 def matches(path, patterns):
@@ -67,6 +71,45 @@ def changed_paths(base, head):
     return subprocess.check_output(["git", "diff", "--no-renames", "--name-only", "-z", base, head]).decode().split("\0")[:-1]
 
 
+def gh_api(path):
+    return json.loads(subprocess.check_output(["gh", "api", path], timeout=30))
+
+
+def tree_of(commit):
+    return subprocess.check_output(["git", "rev-parse", "--verify", commit + "^{tree}"], text=True).strip()
+
+
+def shards_passed(jobs):
+    # A skipped, cancelled or missing shard is not evidence, and neither is one of two jobs sharing a name.
+    return all({job.get("conclusion") for job in jobs if job.get("name") == name} == {"success"} for name in UI_SHARD_JOBS)
+
+
+def find_ui_evidence(repository, base, head, api):
+    """Return the pull request run that already passed both UI shards on head's tree, or None.
+
+    A pull_request run tests a merge of the PR head into its base, whose commit the API does
+    not report. That merge has the head's tree only when the head contains the base. Every main
+    base the run can have used is at or before main's previous tip, so the head must contain it.
+    Any error, missing data or doubt returns None, which runs the journeys.
+    """
+    try:
+        if not repository:
+            raise ValueError("GITHUB_REPOSITORY is not set")
+        tree = tree_of(head)
+        root = "repos/" + repository + "/"
+        runs = api(root + "actions/workflows/" + Path(CI_WORKFLOW).name + "/runs?event=pull_request&status=success&per_page=50")
+        for run in runs["workflow_runs"]:
+            if ((run.get("head_commit") or {}).get("tree_id") == tree
+                    and run["event"] == "pull_request" and run["conclusion"] == "success" and run["path"] == CI_WORKFLOW
+                    and run["head_repository"]["full_name"] == repository  # A fork's run executes the fork's workflow.
+                    and shards_passed(api(root + "actions/runs/" + str(run["id"]) + "/jobs?filter=latest&per_page=100")["jobs"])
+                    and api(root + "compare/" + base + "..." + run["head_sha"] + "?per_page=1")["status"] in ("ahead", "identical")):
+                return run
+    except Exception as error:  # Deliberately broad: whatever went wrong, the journeys run.
+        print("UI evidence check failed, so the UI journeys run: " + repr(error))
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default=os.environ.get("CI_BASE_SHA", ""))
@@ -75,15 +118,23 @@ def main():
                         help="Run every lane (label, nightly schedule or manual dispatch)")
     parser.add_argument("--quick", action="store_true", default=os.environ.get("CI_FORCE_QUICK") == "true")
     parser.add_argument("--main-push", action="store_true", default=os.environ.get("CI_MAIN_PUSH") == "true",
-                        help="Classify a push to main: merged code also runs the UI journeys")
+                        help="Classify a push to main: merged code also runs the UI journeys, "
+                             "unless a pull request run already passed them on the same tree")
     args = parser.parse_args()
     result = classify(changed_paths(args.base, args.head), args.full, args.quick, args.main_push)
+    evidence = None
+    if args.main_push and result["ui"] and not args.full:
+        evidence = find_ui_evidence(os.environ.get("GITHUB_REPOSITORY", ""), args.base, args.head, gh_api)
+        result["ui"] = evidence is None
     print("Quick validation: " + str(result["quick"]) + "; UI journeys: " + str(result["ui"]) +
           "; VoiceOver: " + str(result["voiceover"]) + "; Release compilation: " + str(result["release"]))
     if args.full:
         print("Every lane requested explicitly")
-    if args.main_push and result["quick"]:
-        print("Push to main: UI journeys run for every merged code change")
+    if evidence:
+        print("Push to main: UI journeys already passed on this tree in run " + str(evidence["id"]) +
+              " at " + evidence["head_sha"])
+    elif args.main_push and result["quick"]:
+        print("Push to main: UI journeys run; no evidence that a pull request run already passed both shards on this tree")
     for path, tier in sorted(result["reasons"].items()):
         print("Escalating change: " + path + " -> " + tier)
     if os.environ.get("GITHUB_OUTPUT"):

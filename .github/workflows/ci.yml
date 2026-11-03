@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: read
+  actions: read  # Repository checks reads a PR run's UI shard results before a main push repeats them.
 
 concurrency:
   # The nightly run must neither cancel nor be cancelled by a merge to main.
@@ -56,6 +57,7 @@ jobs:
           CI_MAIN_PUSH: ${{ github.event_name == 'push' }}
           CI_FORCE_QUICK: ${{ github.event_name == 'workflow_dispatch' }}
           CI_FORCE_ACCEPTANCE: ${{ github.event_name == 'schedule' || inputs.full_acceptance == true || contains(github.event.pull_request.labels.*.name, 'full-acceptance') }}
+          GH_TOKEN: ${{ github.token }}
         run: python3 -B scripts/ci_scope.py
       - name: Check changed whitespace
         env:

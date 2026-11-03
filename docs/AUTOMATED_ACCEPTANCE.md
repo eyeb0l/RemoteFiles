@@ -68,10 +68,10 @@ allows its fixture cleanup trap to finish before escalation to termination.
 
 The default local command below still requires all four lanes. GitHub CI uses
 independently inventoried lanes: quick macOS/hosted-core validation on every code
-change, the UI journeys on every push to `main` and on PRs whose changes only the
-UI lane exercises, and VoiceOver and Release compilation nightly or on request. CI
-partitions the UI inventory across two independent runners, and both shards must
-pass. See [CI policy and timing](CI.md). `--lane` reports
+change, the UI journeys on pushes to `main` whose tree no PR run has already passed
+and on PRs whose changes only the UI lane exercises, and VoiceOver and Release
+compilation nightly or on request. CI partitions the UI inventory across two
+independent runners, and both shards must pass. See [CI policy and timing](CI.md). `--lane` reports
 its selected coverage explicitly; it does not count unrequested lanes as passed.
 
 Use `--lane simulator-ui --ui-shard 1` or `--ui-shard 2` to reproduce one CI
