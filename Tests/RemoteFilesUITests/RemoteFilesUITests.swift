@@ -911,7 +911,8 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(saved.waitForExistence(timeout: 5)); saved.tap()
         XCTAssertTrue(list.waitForExistence(timeout: 5))
         XCTAssertTrue(search.waitForExistence(timeout: 5)); search.tap(); search.typeText("INVOICE\n")
-        reveal(delete, down: false); delete.tap()
+        // The reopened sheet starts at the top; Delete sits below the build controls.
+        reveal(delete); delete.tap()
         XCTAssertTrue(build.waitForExistence(timeout: 5))
         for (filename, _) in expected {
             XCTAssertFalse(app.buttons["saved-search-result-/Projects/Search samples/" + filename].exists)
