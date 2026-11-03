@@ -495,6 +495,70 @@ final class DownloadManagerTests: XCTestCase {
         XCTAssertEqual(manager.items.first?.state, .failed, "Without room, Retry still reports the storage limit")
         XCTAssertEqual(manager.items.first?.message, DownloadManagerError.storageFull.localizedDescription)
     }
+    func testExpandedQuotasAdmitMultiGigabyteFiles() async throws {
+        XCTAssertEqual(DownloadManager.maximumFileBytes, 4 * 1024 * 1024 * 1024)
+        XCTAssertEqual(DownloadManager.maximumStoredBytes, 16 * 1024 * 1024 * 1024)
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let service = DownloadFixture(bytes: Data([1, 2, 3]))
+        let manager = try DownloadManager(service: service, directory: directory)
+        manager.availableDeviceBytes = { _ in Int64(64) * 1024 * 1024 * 1024 }
+        let large = UInt64(3) * 1024 * 1024 * 1024
+        XCTAssertThrowsError(try manager.enqueue(profile: profile, entry: entry("huge.bin", size: UInt64(DownloadManager.maximumFileBytes) + 1)))
+        _ = try manager.enqueue(profile: profile, entry: entry("video.mov", size: large))
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.map(\.state), [.completed])
+        let limits = await service.requests.map(\.limit)
+        XCTAssertEqual(limits, [DownloadManager.maximumFileBytes], "The transport may receive the whole per-file limit")
+    }
+    func testDownloadsLeaveReservedDeviceStorageFree() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let service = DownloadFixture(bytes: Data(repeating: 7, count: 10))
+        let manager = try DownloadManager(service: service, directory: directory)
+        var free = Int64(DownloadManager.reservedDeviceBytes + 5)
+        manager.availableDeviceBytes = { _ in free }
+        let id = try manager.enqueue(profile: profile, entry: entry("big.bin", size: 10))
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.first?.state, .failed)
+        XCTAssertEqual(manager.items.first?.message, DownloadManagerError.deviceStorageFull.localizedDescription)
+        let refused = await service.requests.count
+        XCTAssertEqual(refused, 0, "A known-size file that cannot fit never opens a transfer")
+        free = Int64(DownloadManager.reservedDeviceBytes + 10)
+        try manager.retry(id, profile: profile)
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.first?.state, .completed)
+        let limits = await service.requests.map(\.limit)
+        XCTAssertEqual(limits, [10])
+    }
+    func testUnknownSizeGrowthPastFreeDeviceStorageReportsDeviceStorage() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let service = DownloadFixture(bytes: Data(repeating: 7, count: 8), ignoreLimit: true)
+        let manager = try DownloadManager(service: service, directory: directory)
+        manager.availableDeviceBytes = { _ in Int64(DownloadManager.reservedDeviceBytes + 4) }
+        let id = try manager.enqueue(profile: profile, entry: entry())
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.first?.state, .failed)
+        XCTAssertEqual(manager.items.first?.message, DownloadManagerError.deviceStorageFull.localizedDescription)
+        let limits = await service.requests.map(\.limit)
+        XCTAssertEqual(limits, [4])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(id.uuidString).path))
+    }
+    func testKeptBytesNeedNoNewDeviceStorageWhenRetried() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let service = ResumableDownloadFixture(content: Data(repeating: 4, count: 10))
+        await service.failNext(after: 6)
+        let manager = try DownloadManager(service: service, directory: directory)
+        var free = Int64(DownloadManager.reservedDeviceBytes + 10)
+        manager.availableDeviceBytes = { _ in free }
+        let id = try manager.enqueue(profile: profile, entry: entry("partial.bin", size: 10))
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.first?.receivedBytes, 6)
+        free = Int64(DownloadManager.reservedDeviceBytes + 4)
+        try manager.retry(id, profile: profile)
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.first?.state, .completed, "Six kept bytes plus four free bytes hold the whole file")
+        let starts = await service.starts
+        XCTAssertEqual(starts, [0, 6])
+    }
 }
 
 private actor DownloadFixture: RemoteFileService, RemoteFileSessionClosing {

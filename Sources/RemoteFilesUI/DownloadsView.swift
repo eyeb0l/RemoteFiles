@@ -11,7 +11,7 @@ struct DownloadsView: View {
         List {
             Section {
                 Text(model.backgroundDownloads.status).font(.footnote).foregroundStyle(.secondary)
-                Text("Up to 128 MiB per file and 512 MiB total. Downloads keep original bytes. Retry continues an interrupted download where it stopped, unless the file has changed on the server.")
+                Text("Up to 4\u{00A0}GiB per file and 16\u{00A0}GiB total, always leaving 1\u{00A0}GiB of device storage free. Downloads keep original bytes. Retry continues an interrupted download where it stopped, unless the file has changed on the server.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             if let manager = model.downloads {
