@@ -41,7 +41,7 @@ struct ReaderView: View {
     }
     var body: some View {
         VStack(spacing: 0) {
-            if [.markdown, .html, .svg].contains(DocumentPolicy.kind(filename: entry.name)) {
+            if hasRenderedMode {
                 Picker("Reading mode", selection: $source) {
                     Text("Rendered").tag(false)
                     Text("Source").tag(true)
@@ -92,11 +92,7 @@ struct ReaderView: View {
                     Button("Refresh", systemImage: "arrow.clockwise") { refreshID += 1 }
                     OfflinePinActions(model: model, profile: profile, entry: entry)
                     if case .text(let text, _) = preview {
-                        Button([.html, .svg].contains(DocumentPolicy.kind(filename: entry.name)) ? "Find in Source" : "Find in Document", systemImage: "magnifyingglass") {
-                            // Static HTML/SVG keep their native preview; search their literal source.
-                            if [.html, .svg].contains(DocumentPolicy.kind(filename: entry.name)) { source = true }
-                            navigation.isFinding = true
-                        }
+                        Button(findTitle, systemImage: "magnifyingglass") { startFind() }
                         if navigation.index?.headings.isEmpty == false {
                             Button("Headings", systemImage: "list.bullet.indent") { headingsPresented = true }
                         }
@@ -128,6 +124,7 @@ struct ReaderView: View {
             ReaderHeadingsView(headings: navigation.index?.headings ?? []) { heading in
                 source = false; navigation.show(heading)
             }
+            .coversKeyboardCommands()
         }
         .task(id: FindWork(query: navigation.query, revision: navigation.revision, inSource: showsSource, active: navigation.isFinding)) {
             await navigation.search(inSource: showsSource)
@@ -142,6 +139,33 @@ struct ReaderView: View {
             if !active { releaseInactiveContent(keepPreview: true); Task { await readingPosition.flush() } }
         }
         .onChange(of: model.sessionRevision) { _, _ in cancelLink() }
+        .focusedSceneValue(\.readerCommands, isFrontmost ? commands : nil)
+    }
+    /// The workspace shows one reader; a stack has only its top route on screen. A library sheet
+    /// covers it; sheets it presents itself use `coversKeyboardCommands()`.
+    private var isFrontmost: Bool {
+        guard model.sheet == nil else { return false }
+        return workspaceNavigate != nil || model.routes.last == .file(profile.id, entry)
+    }
+    private var hasRenderedMode: Bool { [.markdown, .html, .svg].contains(DocumentPolicy.kind(filename: entry.name)) }
+    private var findTitle: String { [.html, .svg].contains(DocumentPolicy.kind(filename: entry.name)) ? "Find in Source" : "Find in Document" }
+    private func startFind() {
+        // Static HTML/SVG keep their native preview; search their literal source.
+        if [.html, .svg].contains(DocumentPolicy.kind(filename: entry.name)) { source = true }
+        navigation.startFind()
+    }
+    private var commands: ReaderCommandActions {
+        var actions = ReaderCommandActions(context: "\(profile.id)|\(entry.path)", refresh: { refreshID += 1 }, showsSource: source)
+        if case .text = preview {
+            actions.find = startFind
+            if navigation.isFinding, !navigation.matches.isEmpty {
+                actions.findNext = { navigation.move(1, inSource: showsSource) }
+                actions.findPrevious = { navigation.move(-1, inSource: showsSource) }
+            }
+            if navigation.index?.headings.isEmpty == false { actions.headings = { headingsPresented = true } }
+        }
+        if hasRenderedMode { actions.toggleSource = { source.toggle() } }
+        return actions
     }
     private func releaseInactiveContent(keepPreview: Bool = false) {
         cancelLink(); requestID = UUID()

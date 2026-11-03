@@ -134,7 +134,9 @@ struct RemoteMediaView: View {
         .onChange(of: scenePhase) { _, phase in if phase != .active { playback.stop() } }
         .onChange(of: model.isForeground) { _, active in if !active { playback.stop() } }
         .onChange(of: model.isDisconnecting) { _, disconnecting in if disconnecting { playback.stop() } }
-        .fullScreenCover(item: $viewer, onDismiss: { imageFocused = true }) { item in RemoteImageViewer(item: item, resolver: model.resources) }
+        .fullScreenCover(item: $viewer, onDismiss: { imageFocused = true }) { item in RemoteImageViewer(item: item, resolver: model.resources).coversKeyboardCommands() }
+        // Native fullscreen playback covers the reader too, though UIKit presents it.
+        .focusedSceneValue(\.keyboardCommandsCovered, fullScreenPlayback ? true : nil)
         .background {
             NativeVideoPlayerPresentation(player: playback.player, isPresented: $fullScreenPlayback)
                 .frame(width: 0, height: 0)

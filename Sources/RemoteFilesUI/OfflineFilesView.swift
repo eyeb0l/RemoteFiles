@@ -180,6 +180,8 @@ struct OfflineFilesView: View {
                     }
                 }
         }
+        // The library's own navigation replaces the app's while this sheet covers it.
+        .focusedSceneValue(\.navigationCommands, NavigationCommandActions(context: "offline", back: path.isEmpty ? nil : { path.removeLast() }))
     }
 
     private var library: some View {
@@ -368,11 +370,7 @@ struct OfflineReaderView: View {
             if case .text = preview {
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
-                        Button([.html, .svg].contains(kind) ? "Find in Source" : "Find in Document", systemImage: "magnifyingglass") {
-                            // Static HTML/SVG keep their native preview; search their literal source.
-                            if [.html, .svg].contains(kind) { source = true }
-                            navigation.isFinding = true
-                        }
+                        Button(findTitle, systemImage: "magnifyingglass") { startFind() }
                         if navigation.index?.headings.isEmpty == false {
                             Button("Headings", systemImage: "list.bullet.indent") { headingsPresented = true }
                         }
@@ -402,13 +400,34 @@ struct OfflineReaderView: View {
             ReaderHeadingsView(headings: navigation.index?.headings ?? []) { heading in
                 source = false; navigation.show(heading)
             }
+            .coversKeyboardCommands()
         }
         .fullScreenCover(item: $viewer, onDismiss: { imageFocused = true }) { item in
-            OfflineImageViewer(item: item)
+            OfflineImageViewer(item: item).coversKeyboardCommands()
         }
         .alert("Couldn’t open link", isPresented: Binding(get: { linkError != nil }, set: { if !$0 { linkError = nil } })) {
             Button("OK") { linkError = nil }
         } message: { Text(linkError ?? "") }
+        .focusedSceneValue(\.readerCommands, canRead ? commands : nil)
+    }
+    private var findTitle: String { [.html, .svg].contains(kind) ? "Find in Source" : "Find in Document" }
+    private func startFind() {
+        // Static HTML/SVG keep their native preview; search their literal source.
+        if [.html, .svg].contains(kind) { source = true }
+        navigation.startFind()
+    }
+    /// A saved copy has no Refresh: updating it needs a connection and is chosen in Offline Files.
+    private var commands: ReaderCommandActions {
+        var actions = ReaderCommandActions(context: "offline|\(pin.id)", showsSource: source)
+        guard case .text = preview else { return actions }
+        actions.find = startFind
+        if navigation.isFinding, !navigation.matches.isEmpty {
+            actions.findNext = { navigation.move(1, inSource: showsSource) }
+            actions.findPrevious = { navigation.move(-1, inSource: showsSource) }
+        }
+        if navigation.index?.headings.isEmpty == false { actions.headings = { headingsPresented = true } }
+        if [.markdown, .html, .svg].contains(kind) { actions.toggleSource = { source.toggle() } }
+        return actions
     }
     private func unavailable(_ message: String) -> some View {
         ContentUnavailableView("Preview not available", systemImage: "doc", description: Text(message))
