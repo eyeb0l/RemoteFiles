@@ -35,6 +35,18 @@ SIMULATOR_ALLOWED_SKIPS = {
 }
 DEFAULT_LANES = ("macos-openssh", "simulator", "voiceover", "release-device-compile")
 AVAILABLE_LANES = DEFAULT_LANES + ("simulator-core", "simulator-ui")
+# Each Xcode test lane's inventoried sources, scheme and XCTest selection, in execution order.
+SIMULATOR_LANES = {
+    "simulator": (["Tests/RemoteFilesCoreTests", "Tests/RemoteFilesUITests"], "RemoteFiles", []),
+    "simulator-core": (["Tests/RemoteFilesCoreTests"], "RemoteFilesCoreCI", ["-only-testing:RemoteFilesTests"]),
+    "simulator-ui": (["Tests/RemoteFilesUITests"], "RemoteFiles", ["-only-testing:RemoteFilesUITests"]),
+    "voiceover": (["Tests/VoiceOverFixtures"], "RemoteFilesAccessibility", ["-only-testing:RemoteFilesAccessibilityUITests"]),
+}
+# These lanes build first and may boot their disposable device between build and test execution.
+STAGED_LANES = ("simulator-core", "simulator-ui", "voiceover")
+DEFAULT_COMMAND_MINUTES = 30
+# Test execution that outgrows the default; an explicit --timeout-minutes still bounds every command.
+EXECUTION_DEADLINE_SECONDS = {"simulator-ui": 60 * 60}
 
 
 def timed(phases, name, operation):
@@ -74,6 +86,18 @@ def boot_selected_simulator(run, simulator):
     write_json(run.output / "simulator-after-boot.json", inventory)
     if run.measure_resources:
         timed(run.metadata["phases"], "simulator-settle", lambda: run.metadata.setdefault("simulator_settle", settle_after_boot()))
+
+
+def collect_svg_diagnostics(output, simulator):
+    """Only this preview category is public, content-free lifecycle state. Collection is
+    bounded and best-effort: the XCTest failure stays the lane's reported failure."""
+    command = ["xcrun", "simctl", "spawn", simulator, "log", "show", "--last", "30m", "--style", "compact", "--info",
+               "--predicate", 'subsystem == "dev.iris.RemoteFiles" AND category == "SVGPreview"']
+    try:
+        with (output / "svg-rendering.log").open("w") as handle:
+            subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT, timeout=120)
+    except (OSError, subprocess.SubprocessError) as error:
+        print("SVG lifecycle log collection failed: " + str(error), flush=True)
 
 
 def settle_after_boot(threshold=None, limit=480, interval=15, load=os.getloadavg, sleep=time.sleep):
@@ -353,7 +377,8 @@ class Run:
             self.env[key] = value
             self.env["TEST_RUNNER_" + key] = value
 
-    def command(self, name, command, cwd=None, log=None):
+    def command(self, name, command, cwd=None, log=None, timeout=None):
+        deadline = self.timeout if timeout is None else timeout
         path = log or self.output / (name + ".log")
         print("Starting " + name + ": " + shlex.join(map(str, command)), flush=True)
         started = time.monotonic()
@@ -369,9 +394,9 @@ class Run:
             process = subprocess.Popen(invocation, cwd=cwd or self.root,
                                        env=env, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
             try:
-                exit_code = process.wait(timeout=self.timeout)
+                exit_code = process.wait(timeout=deadline)
             except subprocess.TimeoutExpired:
-                errors.append("Command exceeded " + str(self.timeout) + " seconds; its process group was interrupted")
+                errors.append("Command exceeded " + str(deadline) + " seconds; its process group was interrupted")
                 # Only this stage's process group is affected. Give the fixture's
                 # EXIT/INT trap time to retire sshd and its generated keys/files.
                 for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
@@ -386,7 +411,7 @@ class Run:
                         continue
                 exit_code = process.wait()
         lane = {"name": name, "command": list(map(str, command)), "exit_code": exit_code,
-                "seconds": round(time.monotonic() - started, 3), "log": str(path),
+                "seconds": round(time.monotonic() - started, 3), "deadline_seconds": deadline, "log": str(path),
                 "status": "passed" if exit_code == 0 and not errors else "failed", "errors": errors}
         if resources.exists():
             lane["resource_log"] = str(resources)
@@ -492,7 +517,7 @@ class Run:
         (self.output / "SUMMARY.md").write_text("\n".join(lines) + "\n")
 
 
-def execute_lanes(run, lanes, packages, scratch, derived, simulator=None, boot_simulator=False, compilation_cache=None, ui_shard=None):
+def execute_lanes(run, lanes, packages, scratch, derived, simulator=None, boot_simulator=False, compilation_cache=None, ui_shard=None, execution_deadlines=EXECUTION_DEADLINE_SECONDS):
     if ui_shard is not None and tuple(lanes) != ("simulator-ui",):
         raise ValueError("--ui-shard requires exactly --lane simulator-ui")
     root, output = run.root, run.output
@@ -501,19 +526,9 @@ def execute_lanes(run, lanes, packages, scratch, derived, simulator=None, boot_s
     if "macos-openssh" in lanes:
         mac = run.command("macos-openssh", ["scripts/test-openssh.sh", "swift", "test", "-j", "2", "--scratch-path", scratch, "--force-resolved-versions"])
         run.tests(mac, expected_tests(root, "macOS", ["Tests/RemoteFilesCoreTests"]))
-    for lane in ("simulator", "simulator-core", "simulator-ui"):
+    for lane, (directories, scheme, selection) in SIMULATOR_LANES.items():
         if lane not in lanes:
             continue
-        directories = []
-        selection = []
-        if lane != "simulator-ui":
-            directories.append("Tests/RemoteFilesCoreTests")
-        if lane != "simulator-core":
-            directories.append("Tests/RemoteFilesUITests")
-        if lane == "simulator-core":
-            selection = ["-only-testing:RemoteFilesTests"]
-        elif lane == "simulator-ui":
-            selection = ["-only-testing:RemoteFilesUITests"]
         expected = expected_tests(root, "iOS", directories)
         execution_selection = selection
         execution_name = lane
@@ -521,14 +536,15 @@ def execute_lanes(run, lanes, packages, scratch, derived, simulator=None, boot_s
             expected = ui_shard_tests(expected, ui_shard)
             execution_selection = ["-only-testing:RemoteFilesUITests/" + identifier for identifier in sorted(expected)]
             execution_name += "-shard-" + str(ui_shard)
-        ordinary_skips = SIMULATOR_ALLOWED_SKIPS | {name for name in expected if name.startswith("RealServerUITests/")}
+        # VoiceOver journeys use only local fixtures: no server wrapper, and no method may skip.
+        wrapper = [] if lane == "voiceover" else ["scripts/test-openssh.sh"]
+        ordinary_skips = set() if lane == "voiceover" else SIMULATOR_ALLOWED_SKIPS | {name for name in expected if name.startswith("RealServerUITests/")}
         sim_result = output / (execution_name + ".xcresult")
         simulator_base = list(base)
+        simulator_base[simulator_base.index("-scheme") + 1] = scheme
         action = "test"
-        if lane == "simulator-core":
-            simulator_base[simulator_base.index("-scheme") + 1] = "RemoteFilesCoreCI"
-        if lane in ("simulator-core", "simulator-ui"):
-            # Compilation must not consume the UI journeys' execution deadline.
+        if lane in STAGED_LANES:
+            # Compilation must not consume the journeys' execution deadline.
             # CI keeps the disposable device shut down until these products exist.
             build = run.command(lane + "-build", simulator_base + ["-configuration", "Debug",
                 "-destination", "generic/platform=iOS Simulator", "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"] + selection + ["build-for-testing"])
@@ -537,24 +553,16 @@ def execute_lanes(run, lanes, packages, scratch, derived, simulator=None, boot_s
             if boot_simulator:
                 boot_selected_simulator(run, simulator)
             action = "test-without-building"
-        sim = run.command(execution_name, ["scripts/test-openssh.sh"] + simulator_base + ["-configuration", "Debug", "-destination", "platform=iOS Simulator,id=" + simulator,
+        sim = run.command(execution_name, wrapper + simulator_base + ["-configuration", "Debug", "-destination", "platform=iOS Simulator,id=" + simulator,
             "-resultBundlePath", sim_result, "-parallel-testing-enabled", "NO", "-collect-test-diagnostics", "never",
             "-test-timeouts-enabled", "YES", "-default-test-execution-time-allowance", "180", "-maximum-test-execution-time-allowance", "240",
-            "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"] + execution_selection + [action])
+            "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"] + execution_selection + [action], timeout=execution_deadlines.get(lane))
         if ui_shard is not None:
             sim["ui_shard"] = ui_shard
             sim["selected_tests"] = sorted(expected)
         run.tests(sim, expected, ordinary_skips, sim_result)
-    if "voiceover" in lanes:
-        # The disposable fixture substitutes only app entry point and UI checks.
-        run.env["REMOTEFILES_SOURCE_PACKAGES_DIR"] = str(packages)
-        if compilation_cache is not None:
-            run.env["REMOTEFILES_CI_COMPILATION_CACHE"] = str(compilation_cache)
-        voice_dir = output / "voiceover"
-        vo = run.command("voiceover", ["scripts/test-voiceover.sh", simulator, voice_dir, derived])
-        vo["launcher_log"] = vo["log"]
-        vo["log"] = str(voice_dir / "voiceover.log")
-        run.tests(vo, expected_tests(root, "iOS", ["Tests/VoiceOverFixtures"]), xcresult=voice_dir / "voiceover.xcresult")
+        if lane == "voiceover" and sim["status"] != "passed":
+            collect_svg_diagnostics(output, simulator)
     if "release-device-compile" in lanes:
         run.command("release-device-compile", base + ["-configuration", "Release", "-destination", "generic/platform=iOS", "CODE_SIGNING_ALLOWED=NO", "build"])
 
@@ -568,14 +576,14 @@ def main():
                         help="Run one of two disjoint UI inventories; requires exactly --lane simulator-ui")
     parser.add_argument("--output", required=True, type=Path, help="Fresh evidence directory outside the repository")
     parser.add_argument("--use-checkout", action="store_true", help="Validate a dedicated clean checkout directly (CI), with source hashes checked before/after")
-    parser.add_argument("--boot-simulator", action="store_true", help="Boot the selected disposable device after building; requires a single core or UI lane")
+    parser.add_argument("--boot-simulator", action="store_true", help="Boot the selected disposable device after building; requires a single core, UI or VoiceOver lane")
     parser.add_argument("--ci-compilation-cache", type=Path, help="Enable CI compiler caching at this external CAS directory, disable indexing, and record resource usage")
     parser.add_argument("--allow-dirty", action="store_true", help="Capture current files with exact manifest/patch hashes")
     parser.add_argument("--source-packages", type=Path, help="Optional reusable Xcode locked-dependency checkout directory")
     parser.add_argument("--swift-scratch", type=Path, help="Optional reusable Swift build directory")
     parser.add_argument("--derived-data", type=Path, help="Optional reusable Xcode DerivedData directory")
     parser.add_argument("--port", type=int, default=22222, help="Disposable loopback sshd port (default 22222)")
-    parser.add_argument("--timeout-minutes", type=int, default=30, help="Deadline per command, including build/test startup (default 30)")
+    parser.add_argument("--timeout-minutes", type=int, help="Deadline for every command, including build/test startup (default 30, and 60 for the UI lane's test execution)")
     args = parser.parse_args()
     try:
         lanes = selected_lanes(args.lane)
@@ -583,8 +591,8 @@ def main():
         parser.error(str(error))
     if args.ui_shard is not None and lanes != ("simulator-ui",):
         parser.error("--ui-shard requires exactly --lane simulator-ui")
-    if args.boot_simulator and lanes not in (("simulator-core",), ("simulator-ui",)):
-        parser.error("--boot-simulator requires exactly one of --lane simulator-core or --lane simulator-ui")
+    if args.boot_simulator and not (len(lanes) == 1 and lanes[0] in STAGED_LANES):
+        parser.error("--boot-simulator requires exactly one of --lane " + ", ".join(STAGED_LANES))
     needs_simulator = any(lane.startswith("simulator") or lane == "voiceover" for lane in lanes)
     if needs_simulator and not args.simulator:
         parser.error("--simulator is required for the selected lanes")
@@ -594,7 +602,7 @@ def main():
         parser.error("--output must be a fresh directory outside the repository")
     if not 1024 <= args.port <= 65535:
         parser.error("--port must be between 1024 and 65535")
-    if args.timeout_minutes < 1:
+    if args.timeout_minutes is not None and args.timeout_minutes < 1:
         parser.error("--timeout-minutes must be positive")
     output.mkdir(parents=True)
     run = None
@@ -624,7 +632,7 @@ def main():
             metadata["simulator_runtime"], metadata["simulator"] = device[0]
             write_json(output / "simulator-inventory.json", inventory)
             write_json(output / "simulator-runtimes.json", runtimes)
-        run = Run(root, output, metadata, timeout=args.timeout_minutes * 60)
+        run = Run(root, output, metadata, timeout=(args.timeout_minutes or DEFAULT_COMMAND_MINUTES) * 60)
         run.env["REMOTEFILES_TEST_PORT"] = str(args.port)
         run.measure_resources = args.ci_compilation_cache is not None
         compilation_cache = args.ci_compilation_cache.expanduser().resolve() if args.ci_compilation_cache else None
@@ -635,7 +643,8 @@ def main():
         packages = (args.source_packages or output / "SourcePackages").expanduser().resolve()
         scratch = (args.swift_scratch or output / "SwiftBuild").expanduser().resolve()
         derived = (args.derived_data or output / "DerivedData").expanduser().resolve()
-        execute_lanes(run, lanes, packages, scratch, derived, args.simulator, args.boot_simulator, compilation_cache, args.ui_shard)
+        execute_lanes(run, lanes, packages, scratch, derived, args.simulator, args.boot_simulator, compilation_cache, args.ui_shard,
+                      {} if args.timeout_minutes else EXECUTION_DEADLINE_SECONDS)
         verified_at = time.monotonic()
         frozen_manifest = json.loads((output / "source-manifest.json").read_text())
         verified_files = source_files(root) if args.use_checkout else [entry["path"] for entry in frozen_manifest]

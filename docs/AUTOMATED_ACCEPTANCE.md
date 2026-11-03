@@ -60,8 +60,9 @@ In a restricted agent environment, use
 the supported approved shell execution workflow for compiler caches,
 CoreSimulator and the loopback fixture. Do not change system permissions or
 disable sandbox/security checks to make a test pass. Each command has a 30-minute
-deadline, including test-host startup; use `--timeout-minutes 5` for a bounded
-infrastructure check. A timeout interrupts only that stage's process group and
+deadline, including test-host startup, except the UI lane's test execution, which has
+60 minutes for its whole journey inventory. `--timeout-minutes` replaces both; use
+`--timeout-minutes 5` for a bounded infrastructure check. A timeout interrupts only that stage's process group and
 allows its fixture cleanup trap to finish before escalation to termination.
 
 ## CI selection
@@ -70,19 +71,18 @@ The default local command below still requires all four lanes. GitHub CI uses
 independently inventoried lanes: quick macOS/hosted-core validation on every code
 change, the UI journeys on pushes to `main` whose tree no PR run has already passed
 and on PRs whose changes only the UI lane exercises, and VoiceOver and Release
-compilation nightly or on request. CI partitions the UI inventory across two
-independent runners, and both shards must pass. See [CI policy and timing](CI.md). `--lane` reports
-its selected coverage explicitly; it does not count unrequested lanes as passed.
+compilation nightly or on request. CI runs the whole UI inventory in one job. See
+[CI policy and timing](CI.md). `--lane` reports its selected coverage explicitly; it
+does not count unrequested lanes as passed.
 
-Use `--lane simulator-ui --ui-shard 1` or `--ui-shard 2` to reproduce one CI
-partition, with a fresh output directory for each. The sorted full UI inventory
-is split into alternating methods, including future methods automatically. Each
-shard still builds the complete UI target and fails for missing, extra, repeated,
+For a shorter local run, use `--lane simulator-ui --ui-shard 1` or `--ui-shard 2`
+with a fresh output directory for each; CI no longer shards. The sorted full UI
+inventory is split into alternating methods, including future methods automatically.
+Each shard still builds the complete UI target and fails for missing, extra, repeated,
 failed or unexpectedly skipped results. Its metadata and summary identify partial
 coverage; both shards are needed for full UI acceptance. Omit `--ui-shard` for the
-existing whole-UI local run. Sharding cannot be combined with other lanes, and
-command/per-method timeouts are unchanged. Run shards serially when sharing a
-simulator or build cache.
+whole-UI run. Sharding cannot be combined with other lanes, and command/per-method
+timeouts are unchanged. Run shards serially when sharing a simulator or build cache.
 
 ## Required lanes and failure rules
 
@@ -90,7 +90,7 @@ simulator or build cache.
 |---|---|---|
 | macOS + loopback OpenSSH | All host core tests, key import/trust, read/stream caps, cancellation and generated server fixtures; actual large-image decode | Every inventoried method runs, no failures or skips; benchmark operations run once on loopback |
 | Signed iOS Simulator | Hosted Keychain/UI lifecycle tests, loopback SFTP, generated large-image decode and ordinary demo UI journeys | Every inventoried method runs; only real-server opt-in methods, the physical-device Data Protection assertion and the opt-in Face ID checks may skip |
-| Actual VoiceOver service | `XCUIVoiceOverService` speech/focus checks against production reader/image views in a disposable fixture app | Every VoiceOver method passes; original VoiceOver enabled state is restored |
+| Actual VoiceOver service | `XCUIVoiceOverService` speech/focus checks against production reader/image views in the generated `RemoteFilesAccessibility` fixture app | Every VoiceOver method passes; original VoiceOver enabled state is restored |
 | Release generic iOS compile | Optimized device-target compilation | Build succeeds; this is not an installable/signed device run |
 
 The runner inventories XCTest methods in platform-specific source and compares
@@ -134,7 +134,9 @@ must pass. This replaces the baseline's macOS-only method body and removes its
 manual fixture prerequisite. Simulator speech/focus does not prove touch
 gestures, rotor or Braille behavior.
 
-The VoiceOver script can also be run independently. Set
+The VoiceOver checks can also be run independently, from the
+`RemoteFilesAccessibility` scheme in Xcode or with the script below, which takes an
+optional derived-data directory and test identifier. Set
 `REMOTEFILES_SOURCE_PACKAGES_DIR` to reuse a locked package checkout directory;
 otherwise it uses normal Xcode package resolution:
 

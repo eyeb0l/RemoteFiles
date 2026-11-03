@@ -16,7 +16,7 @@ REPOSITORY_ONLY = ("docs/*", "README.md", "AGENTS.md", "ROADMAP.md", "PREVIEW_ST
 INFRASTRUCTURE = (".github/*", "scripts/ci_scope.py", "scripts/test-acceptance.py", "scripts/runner_finalization.py",
                   "scripts/test-openssh.sh", "scripts/generate-project.py")
 # Only the VoiceOver lane executes these.
-VOICEOVER = ("Tests/VoiceOverFixtures/*", "scripts/test-voiceover.sh")
+VOICEOVER = ("Tests/VoiceOverFixtures/*",)
 # Only the UI lane builds the app target, runs these journeys or exercises these inputs.
 UI = ("Tests/RemoteFilesUITests/*", "App/*", "Package.swift", "Package.resolved", "*/Package.resolved",
       "Vendor/*", "Fixtures/*", "Sources/RemoteFilesCore/Resources/*")
@@ -27,7 +27,7 @@ QUICK_ONLY = ("Sources/*", "Tests/RemoteFilesCoreTests/*", "RemoteFiles.xcodepro
 LANES = ("ui", "voiceover", "release")
 # The evidence that lets a push to main skip the UI journeys.
 CI_WORKFLOW = ".github/workflows/ci.yml"
-UI_SHARD_JOBS = ("Acceptance / simulator-ui-shard-1", "Acceptance / simulator-ui-shard-2")
+UI_JOBS = ("Acceptance / simulator-ui",)
 
 
 def matches(path, patterns):
@@ -79,13 +79,13 @@ def tree_of(commit):
     return subprocess.check_output(["git", "rev-parse", "--verify", commit + "^{tree}"], text=True).strip()
 
 
-def shards_passed(jobs):
-    # A skipped, cancelled or missing shard is not evidence, and neither is one of two jobs sharing a name.
-    return all({job.get("conclusion") for job in jobs if job.get("name") == name} == {"success"} for name in UI_SHARD_JOBS)
+def ui_passed(jobs):
+    # A skipped, cancelled or missing UI job is not evidence, and neither is one of two jobs sharing a name.
+    return all({job.get("conclusion") for job in jobs if job.get("name") == name} == {"success"} for name in UI_JOBS)
 
 
 def find_ui_evidence(repository, base, head, api):
-    """Return the pull request run that already passed both UI shards on head's tree, or None.
+    """Return the pull request run that already passed the UI journeys on head's tree, or None.
 
     A pull_request run tests a merge of the PR head into its base, whose commit the API does
     not report. That merge has the head's tree only when the head contains the base. Every main
@@ -102,7 +102,7 @@ def find_ui_evidence(repository, base, head, api):
             if ((run.get("head_commit") or {}).get("tree_id") == tree
                     and run["event"] == "pull_request" and run["conclusion"] == "success" and run["path"] == CI_WORKFLOW
                     and run["head_repository"]["full_name"] == repository  # A fork's run executes the fork's workflow.
-                    and shards_passed(api(root + "actions/runs/" + str(run["id"]) + "/jobs?filter=latest&per_page=100")["jobs"])
+                    and ui_passed(api(root + "actions/runs/" + str(run["id"]) + "/jobs?filter=latest&per_page=100")["jobs"])
                     and api(root + "compare/" + base + "..." + run["head_sha"] + "?per_page=1")["status"] in ("ahead", "identical")):
                 return run
     except Exception as error:  # Deliberately broad: whatever went wrong, the journeys run.
@@ -134,7 +134,7 @@ def main():
         print("Push to main: UI journeys already passed on this tree in run " + str(evidence["id"]) +
               " at " + evidence["head_sha"])
     elif args.main_push and result["quick"]:
-        print("Push to main: UI journeys run; no evidence that a pull request run already passed both shards on this tree")
+        print("Push to main: UI journeys run; no evidence that a pull request run already passed the UI journeys on this tree")
     for path, tier in sorted(result["reasons"].items()):
         print("Escalating change: " + path + " -> " + tier)
     if os.environ.get("GITHUB_OUTPUT"):

@@ -15,8 +15,8 @@ failures and the original timing baselines are in [CI history](CI_HISTORY.md).
 |---|---|---|
 | Repository checks, Linux, about one minute | Generated-project consistency, the Python selector and runner regressions, change classification, `git diff --check` across the complete change | Every PR, push to `main`, nightly run and manual dispatch |
 | Quick, two Mac jobs in parallel, about 15 minutes | **Quick / macos-openssh**: every inventoried macOS core test with the loopback OpenSSH and bastion fixtures. **Quick / simulator-core**: every inventoried hosted iOS core test, with the fixture, on a disposable simulator | Every change outside documentation |
-| UI, two Mac jobs in parallel, about 30 minutes | **Acceptance / simulator-ui-shard-1** and **-2**: disjoint halves of the UI journey inventory, each on its own disposable simulator | Every push to `main` with code, unless its exact tree already passed both shards in a PR run; PRs that change UI journeys, `App/`, packages, vendored code, `Fixtures/` or demo resources; CI infrastructure; unknown paths; the `full-acceptance` label |
-| Extended, two Mac jobs, about 30 minutes | **Acceptance / voiceover**: eight `XCUIVoiceOverService` journeys against production views in a disposable fixture app. **Acceptance / release-device-compile**: unsigned optimized device build | Nightly at 02:30 UTC on `main`; the label or a manual dispatch; VoiceOver fixture or launcher changes (VoiceOver only); CI infrastructure; unknown paths |
+| UI, one Mac job, about 45 minutes | **Acceptance / simulator-ui**: the whole UI journey inventory on one disposable simulator | Every push to `main` with code, unless its exact tree already passed the UI journeys in a PR run; PRs that change UI journeys, `App/`, packages, vendored code, `Fixtures/` or demo resources; CI infrastructure; unknown paths; the `full-acceptance` label |
+| Extended, two Mac jobs, about 30 minutes | **Acceptance / voiceover**: eight `XCUIVoiceOverService` journeys against production views in the generated `RemoteFilesAccessibility` fixture app. **Acceptance / release-device-compile**: unsigned optimized device build | Nightly at 02:30 UTC on `main`; the label or a manual dispatch; VoiceOver fixture changes (VoiceOver only); CI infrastructure; unknown paths |
 
 The quick tier finds logic, transport, Keychain, persistence and reader regressions
 within about fifteen minutes and rarely fails for environmental reasons. The UI and
@@ -37,34 +37,35 @@ the change receives the broadest tier of any of its paths.
 - CI infrastructure runs every lane, so a change to it proves itself: `.github/`,
   `scripts/ci_scope.py`, `scripts/test-acceptance.py`, `scripts/runner_finalization.py`,
   `scripts/test-openssh.sh` and `scripts/generate-project.py`.
-- `Tests/VoiceOverFixtures/` and `scripts/test-voiceover.sh` add VoiceOver.
+- `Tests/VoiceOverFixtures/` adds VoiceOver.
 - `Tests/RemoteFilesUITests/`, `App/`, `Package.swift`, every `Package.resolved`,
   vendored code, `Fixtures/` and `Sources/RemoteFilesCore/Resources/` add the UI tier,
   because only the UI lane builds the app target or exercises them.
 - `Sources/`, `Tests/RemoteFilesCoreTests/`, the generated `RemoteFiles.xcodeproj`,
-  other scripts and the local-only fixture apps run the quick tier only.
+  other scripts (including the local `scripts/test-voiceover.sh`, which no lane
+  executes) and the local-only fixture apps run the quick tier only.
 - Any other path runs every lane.
 - A push to `main` adds the UI tier to any code change, unless a PR run already passed
-  both shards on the same tree, as described below.
+  the UI journeys on the same tree, as described below.
 - The `full-acceptance` label, the nightly schedule, and a manual dispatch with
   **full_acceptance** on run every lane for any change. A dispatch with it off runs
   the quick tier.
 
-A push to `main` skips the UI shards, and only those, when one of the 50 most recent
+A push to `main` skips the UI job, and only that, when one of the 50 most recent
 successful `pull_request` runs of `ci.yml` meets every condition below. The selector
 reads this from the GitHub API, using the workflow's `actions: read` permission.
 
 - The run's head commit has the same tree as the pushed commit.
 - The head branch belongs to this repository. A fork's run executes the fork's copy of
   the workflow, so it proves nothing.
-- The latest attempt's **Acceptance / simulator-ui-shard-1** and **-2** jobs both
-  concluded `success`. A PR that was not selected for the UI tier has skipped them, so
-  its merge still runs them.
+- The latest attempt's **Acceptance / simulator-ui** job
+  concluded `success`. A PR that was not selected for the UI tier skipped it, so its
+  merge still runs the journeys.
 - The head contains `main`'s previous tip. A `pull_request` run tests a merge of its head
   into its base, and that merge has the head's tree only when the head contains the base.
   Every `main` base the run can have used is at or before the previous tip.
 
-Any API error, timeout, rate limit or malformed response runs the shards, and the job log
+Any API error, timeout, rate limit or malformed response runs the UI job, and the job log
 names the cause. The log also names the run behind a skip. A head that was behind `main`
 at merge never qualifies, even if its test merge matched the merged tree, because the API
 does not report which merge commit a run tested. The nightly run still executes every
@@ -72,33 +73,37 @@ lane on `main`.
 
 Preview a decision with
 `python3 -B scripts/ci_scope.py --base "$(git merge-base origin/main HEAD)" --head "$(git rev-parse HEAD)"`;
-add `--main-push` to see what the merge will run. That preview assumes the UI shards run
+add `--main-push` to see what the merge will run. That preview assumes the UI job runs
 unless `GITHUB_REPOSITORY=eyeb0l/RemoteFiles` is set, which checks the real evidence with
 your `gh` login. `scripts/test_ci_scope.py` covers each rule.
 
 ## Lanes
 
 Each Mac job runs one `scripts/test-acceptance.py --lane` against its dedicated
-checkout, with a fresh evidence directory and shared build caches. The core and UI
-lanes record source identity and toolchain/device inventory while their disposable
-simulator is still shut down, run `build-for-testing` for
+checkout, with a fresh evidence directory and shared build caches. The core, UI and
+VoiceOver lanes record source identity and toolchain/device inventory while their
+disposable simulator is still shut down, run `build-for-testing` for
 `generic/platform=iOS Simulator`, boot the device only after the build succeeds,
 wait up to eight minutes for the 1-minute load average to fall below 40 per logical
 CPU, then run the same products with `test-without-building`. A failed build never
-boots the device or executes cached products. Build and test execution each receive
-a 30-minute command deadline inside the 45-minute job ceiling; UI methods receive
-180/240-second allowances. The OpenSSH fixture surrounds every test execution.
+boots the device or executes cached products. Each command receives a 30-minute
+deadline, except the UI lane's test execution, which receives 60 minutes for the whole
+journey inventory. Job ceilings are 45 minutes for the quick lanes and Release, 60 for
+VoiceOver and 120 for UI; methods receive 180/240-second allowances. The OpenSSH
+fixture surrounds core and UI test execution.
 
 Each lane inventories the XCTest methods in its platform-specific sources and fails
 on a missing, extra, repeated, failed or unexpectedly skipped result, or an
 xcresult/log count mismatch. Only `SIMULATOR_ALLOWED_SKIPS` in the runner and the
-explicit real-server opt-in methods may skip. UI shards alternate the sorted method
-identifiers, include new methods automatically, and each builds the complete UI
-target; a shard report is explicitly partial UI evidence, and both shards must pass.
-The macOS lane runs `swift test` with the fixture. The VoiceOver lane builds a
-disposable copy of the project whose entry point is a fixture app around the
-production reader and image views. The Release lane compiles the app for
-`generic/platform=iOS` without signing. There are no automatic retries anywhere.
+explicit real-server opt-in methods may skip. The macOS lane runs `swift test` with
+the fixture. The VoiceOver lane runs the `RemoteFilesAccessibility` scheme: a fixture
+app around the production reader and image views and the
+`RemoteFilesAccessibilityUITests` bundle it hosts, generated in the real project so
+they share DerivedData and the compilation cache with the app and UI targets. Its
+journeys use local fixtures only, so no OpenSSH fixture runs and no method may skip;
+when the lane fails it also retains `svg-rendering.log`, the SVG preview's lifecycle
+log. The Release lane compiles the app for `generic/platform=iOS` without signing.
+There are no automatic retries anywhere.
 
 ## Runner timing budgets
 
@@ -125,13 +130,13 @@ Budget every wait for that:
 Each job records its exact clean commit and source manifest, then verifies that
 builds leave source and lockfiles unchanged; dirty direct-checkout runs are rejected.
 Build caches live outside the evidence folder under one key per toolchain,
-architecture, platform, lane, dependency hash and source hash, so both UI shards
-share one entry. A restore falls back to the same lane's most recent entry, then to
-any lane of the platform. Only pushes to `main` and the nightly run save new entries,
-so PR branches build on top of the latest merged state and the repository's cache
-budget holds a recent entry for every lane. A push that skips the UI shards saves no UI
-entry, so the UI lane restores the nightly run's or an earlier merge's. Xcode's native compilation cache and its
-CAS are stored inside the cache root, and IDE indexing is disabled for CI builds.
+architecture, platform, lane, dependency hash and source hash. A restore falls back
+to the same lane's most recent entry, then to any lane of the platform. Only pushes to
+`main` and the nightly run save new entries, so PR branches build on top of the latest
+merged state and the repository's cache budget holds a recent entry for every lane. A push that skips the UI journeys saves no UI
+entry, so the UI lane restores the nightly run's or an earlier merge's.
+Xcode's native compilation cache and its CAS are stored inside the cache root, and IDE
+indexing is disabled for CI builds.
 
 Phase timings record source preparation, toolchain queries, device inventory, boot
 and settle separately with host load averages; `<lane>-load.log` samples the busiest
@@ -151,18 +156,21 @@ python3 -B scripts/test-acceptance.py --lane macos-openssh \
   --output /private/tmp/remotefiles-macos-NEW_RUN
 python3 -B scripts/test-acceptance.py --lane simulator-core \
   --simulator SIMULATOR_UDID --output /private/tmp/remotefiles-core-NEW_RUN
-python3 -B scripts/test-acceptance.py --lane simulator-ui --ui-shard 1 \
-  --simulator SIMULATOR_UDID --output /private/tmp/remotefiles-ui-1-NEW_RUN
+python3 -B scripts/test-acceptance.py --lane simulator-ui \
+  --simulator SIMULATOR_UDID --output /private/tmp/remotefiles-ui-NEW_RUN
 ```
 
-Other choices are `simulator-ui`, `voiceover`, `release-device-compile`, and the
-combined `simulator` lane. Repeat `--lane` to select disjoint inventories; the
+Other choices are `voiceover`, `release-device-compile`, and the combined
+`simulator` lane. Repeat `--lane` to select disjoint inventories; the
 combined Simulator lane cannot be mixed with its core/UI subsets. Omit `--lane`
 to retain the complete local acceptance run. Use `--allow-dirty` only when the
 report should identify a working-tree snapshot rather than an exact commit.
-`--ui-shard 1` or `--ui-shard 2` requires exactly `--lane simulator-ui`;
-omit it to run the whole UI lane locally. Run both shards for full UI evidence,
-using separate fresh output directories and never running two jobs on one device.
+`--ui-shard 1` or `--ui-shard 2` requires exactly `--lane simulator-ui` and runs a
+shorter local check: shards alternate the sorted method identifiers, include new
+methods automatically and each build the complete UI target, and a shard report is
+explicitly partial UI evidence. CI no longer shards. Run both shards for full UI
+evidence, using separate fresh output directories and never running two jobs on one
+device.
 
 ## Investigating a failure
 
@@ -201,13 +209,16 @@ share sheet it waits for Close to disappear before starting the existing backwar
 traversal to Done. The final automatic focus return to the invoking image is still
 asserted. Retain the speech and traversal assertions when diagnosing these setup failures.
 
-The VoiceOver launcher supports macOS’s stock Bash when optional package or
-compiler-cache settings are absent. Launcher regressions also check that argument
-paths with spaces survive and that collecting lifecycle logs cannot turn a failed
-Xcode run into success.
+The local `scripts/test-voiceover.sh` launcher runs the same scheme with one
+`xcodebuild test`, and the scheme also runs from Xcode. It supports macOS’s stock Bash
+when its optional package setting is absent. Launcher regressions also check that
+argument paths with spaces survive and that collecting lifecycle logs cannot turn a
+failed Xcode run into success.
 
-Disposable fixture projects rebase the app's `App/Info.plist` input to the source
-checkout, along with their package and source references. The project-preparation
-regression executes all four fixture launchers' preparation code and verifies both
-app configurations still resolve the original plist, including checkout paths
-with spaces. Test hosts retain their generated plists.
+The other local fixture launchers (`test-small-features.py`, `test-image-open.sh` and
+`test-reading-anchors.py`) still swap sources in a disposable project copy. Those
+copies rebase `App/Info.plist` to the source checkout, along with their package and
+source references. The project-preparation regression executes all three launchers'
+preparation code and verifies the app and accessibility fixture configurations still
+resolve the original plist, including checkout paths with spaces. Test hosts retain
+their generated plists.
