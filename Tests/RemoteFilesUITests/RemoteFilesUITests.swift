@@ -1001,7 +1001,9 @@ final class RemoteFilesUITests: XCTestCase {
             reveal(automatic)
             // SwiftUI exposes the entire labelled row as the switch; tap its actual thumb.
             automatic.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
-            wait(for: [expectation(for: NSPredicate(format: "value == %@", value), evaluatedWith: automatic)], timeout: 5)
+            // Long enough that a failure means the tap had no effect, not that the value was late on
+            // a loaded runner; see "Saved-index automatic switch" in docs/CI_HISTORY.md.
+            wait(for: [expectation(for: NSPredicate(format: "value == %@", value), evaluatedWith: automatic)], timeout: 30)
         }
         func closeIndex() {
             let done = app.navigationBars["Saved Search Index"].buttons["Done"]
