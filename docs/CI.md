@@ -61,7 +61,7 @@ checkout, with a fresh evidence directory and shared build caches. The core and 
 lanes record source identity and toolchain/device inventory while their disposable
 simulator is still shut down, run `build-for-testing` for
 `generic/platform=iOS Simulator`, boot the device only after the build succeeds,
-wait at most 90 seconds for the 1-minute load average to fall below 40 per logical
+wait up to eight minutes for the 1-minute load average to fall below 40 per logical
 CPU, then run the same products with `test-without-building`. A failed build never
 boots the device or executes cached products. Build and test execution each receive
 a 30-minute command deadline inside the 45-minute job ceiling; UI methods receive

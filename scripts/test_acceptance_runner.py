@@ -106,14 +106,6 @@ class SimulatorSettleTests(unittest.TestCase):
         self.assertEqual(result["waited_seconds"], 45)
         self.assertEqual(len(sleeps), 3)
 
-    def test_default_bound_is_ninety_seconds(self):
-        sleeps = []
-        result = acceptance.settle_after_boot(threshold=120, load=lambda: (400.0, 0, 0), sleep=sleeps.append)
-        self.assertFalse(result["settled"])
-        self.assertEqual(result["waited_seconds"], 90)
-        self.assertEqual(result["limit_seconds"], 90)
-        self.assertEqual(len(sleeps), 6)
-
     def test_settle_runs_only_for_measured_ci_boots(self):
         with tempfile.TemporaryDirectory() as directory:
             run = acceptance.Run(Path(directory), Path(directory), {"phases": []})

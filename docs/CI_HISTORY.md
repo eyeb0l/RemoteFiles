@@ -6,9 +6,8 @@ Dated investigations of CI failures and the timing baselines they produced, move
 here from the policy page on 3 November 2026. Each section describes the workflow
 as it was at the time it was written; the current selection rules, timing budgets
 and cache behaviour are in [CI policy and timing](CI.md). In particular, the UI,
-VoiceOver and Release lanes no longer run on every escalated PR, build caches are
-saved only from `main`, and the post-boot settle wait described in the last
-section is now bounded at 90 seconds.
+VoiceOver and Release lanes no longer run on every escalated PR, and build caches
+are saved only from `main`.
 
 ## UI lane deadline regression
 
@@ -372,3 +371,14 @@ mean load was about half that of the other simulator lanes, and it is unchanged.
 
 Larger runners with more CPUs and GPU acceleration would address the load itself.
 That is a billing choice outside this repository.
+
+On 3 November, [PR #68](https://github.com/eyeb0l/RemoteFiles/pull/68) tried a
+90-second bound, because the eight-minute wait had idled 4.5 to 8 minutes in each
+of 18 measured lanes and its effect could not be separated from the test fixes that
+landed with it. Its first run, [41699160577](https://github.com/eyeb0l/RemoteFiles/actions/runs/41699160577),
+started UI shard 1 while the load was still rising, 407 to 530 over the 90 seconds;
+the lane's mean load was 353 against 65 to 160 in the twelve preceding shard runs,
+and `testImportRSAAndECDSAKeysShowsTheirAlgorithmsAndPublicKeys` exceeded its
+three-minute allowance (it takes about 70 seconds on a settled runner). The bound
+returned to 480 seconds in the same PR. Revisit it only with a comparison of load
+at test start against failures across `main` and nightly runs.
