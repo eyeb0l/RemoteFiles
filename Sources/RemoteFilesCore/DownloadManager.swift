@@ -39,11 +39,12 @@ public struct ManagedDownload: Identifiable, Codable, Sendable {
 }
 
 public enum DownloadManagerError: LocalizedError {
-    case queueFull, storageFull, unavailable
+    case queueFull, storageFull, deviceStorageFull, unavailable
     public var errorDescription: String? {
         switch self {
         case .queueFull: return "The download list is full. Remove an item before adding another."
-        case .storageFull: return "Downloads use at most 512 MB. Remove a completed download to make room."
+        case .storageFull: return "Downloads use at most 16 GiB. Remove a completed download to make room."
+        case .deviceStorageFull: return "This device doesn't have enough free storage for this download. Downloads keep 1 GiB free. Free up storage, then Retry."
         case .unavailable: return "This download is not available. Download it again."
         }
     }
@@ -61,8 +62,10 @@ public final class DownloadManager {
         sharedManagers[key] = manager
         return manager
     }
-    public static let maximumFileBytes = 128 * 1024 * 1024
-    public static let maximumStoredBytes = 512 * 1024 * 1024
+    public static let maximumFileBytes = 4 * 1024 * 1024 * 1024
+    public static let maximumStoredBytes = 16 * 1024 * 1024 * 1024
+    /// Device storage a download never consumes, so a large transfer cannot fill the volume.
+    public static let reservedDeviceBytes = 1024 * 1024 * 1024
     public static let maximumItems = 100
     public private(set) var items: [ManagedDownload] = []
     public private(set) var persistenceError: String?
@@ -85,6 +88,11 @@ public final class DownloadManager {
     private var cleanupBlockedIDs: Set<UUID> = []
     /// Injectable failure seam for filesystem regression tests.
     var removeItem: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
+    /// Free bytes on the downloads volume, or nil when the system cannot say.
+    /// Injectable so fixtures can simulate a nearly full device.
+    var availableDeviceBytes: (URL) -> Int64? = { url in
+        (try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage
+    }
     /// The app supplies the protected-data state; deterministic fixtures can inject lock races.
     public var protectedDataAvailable: () -> Bool = { true }
     var protectCompletedFile: (URL) throws -> Void = { url in
@@ -272,9 +280,16 @@ public final class DownloadManager {
             guard UInt64(min(fileLimit, available())) < needed else { break }
             do { try discardPartialBytes(at: other) } catch { cleanupBlockedIDs.insert(items[other].id); publish(); return }
         }
-        let limit = min(fileLimit, available())
+        let storageLimit = min(fileLimit, available())
+        // Bytes this job already keeps on disk are reused or truncated, never added to.
+        let kept = Int(clamping: partialLength(item) ?? 0)
+        let deviceLimit = availableDeviceBytes(directory).map { kept + max(0, Int(clamping: $0) - Self.reservedDeviceBytes) } ?? Int.max
+        let limit = min(storageLimit, deviceLimit)
+        let deviceCapped = deviceLimit < storageLimit
         guard limit > 0, item.expectedBytes.map({ $0 <= UInt64(limit) }) ?? true else {
-            items[index].state = .failed; items[index].message = DownloadManagerError.storageFull.localizedDescription
+            let budgetExceeded = storageLimit <= 0 || item.expectedBytes.map({ $0 > UInt64(storageLimit) }) ?? false
+            let error: DownloadManagerError = budgetExceeded ? .storageFull : .deviceStorageFull
+            items[index].state = .failed; items[index].message = error.localizedDescription
             contexts.removeValue(forKey: item.id)
             publish(); startNext(); return
         }
@@ -343,6 +358,9 @@ public final class DownloadManager {
                 // original error still reaches onFailure, which treats it as a security event.
                 let shown: Error = switch error {
                 case RemoteDocumentLinkError.outsideConnection, RemoteResourceError.outsideDocument: OriginalFileExportError.outsideRoot
+                // An unknown-size file outgrew the device's free storage, not the per-file limit.
+                case RemoteFileError.tooLarge where deviceCapped, OriginalFileExportError.tooLarge where deviceCapped:
+                    DownloadManagerError.deviceStorageFull
                 default: error
                 }
                 if let index = self.index(item.id),
