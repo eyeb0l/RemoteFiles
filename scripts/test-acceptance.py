@@ -76,11 +76,12 @@ def boot_selected_simulator(run, simulator):
         timed(run.metadata["phases"], "simulator-settle", lambda: run.metadata.setdefault("simulator_settle", settle_after_boot()))
 
 
-def settle_after_boot(threshold=None, limit=480, interval=15, load=os.getloadavg, sleep=time.sleep):
+def settle_after_boot(threshold=None, limit=90, interval=15, load=os.getloadavg, sleep=time.sleep):
     """A freshly booted simulator starts its widgets and system services for several minutes.
     On a three-CPU hosted runner the 1-minute load then sits at 400-600 and falls to about
-    100 within 10-15 minutes. Tests launched into that start under several times the later
-    load, so wait (bounded) until it drops below 40 per logical CPU. Never fails the lane."""
+    100 within 10-15 minutes. Wait (bounded) until it drops below 40 per logical CPU. The
+    bound is short: an eight-minute cap idled 4.5 to 8 minutes per lane in early November
+    without a demonstrated change in failure rates. Never fails the lane."""
     threshold = threshold or 40 * (os.cpu_count() or 1)
     samples, waited = [], 0
     while True:

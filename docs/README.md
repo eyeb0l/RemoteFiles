@@ -24,6 +24,7 @@ For a closer look at specific behavior, see [rich Markdown](MARKDOWN_RENDERING.m
 - [Build and test](DEVELOPMENT.md): Xcode, signing, fixtures and local commands. Run shell examples from the repository root.
 - [Contributor guide](../AGENTS.md): project layout and repository conventions.
 - [CI policy](CI.md): which lanes run, timing and how to reproduce them.
+- [CI history](CI_HISTORY.md): dated investigations of past CI failures and timing baselines.
 - [Automated acceptance](AUTOMATED_ACCEPTANCE.md): runner usage, required results, allowed skips and evidence.
 - [Manual acceptance](MANUAL_ACCEPTANCE.md), [real-server acceptance](REAL_SERVER_ACCEPTANCE.md) and [device permissions and lifecycle](DEVICE_PERMISSIONS_LIFECYCLE.md): device and network checks that automated tests do not replace.
 - [App icon](APP_ICON.md): assets, appearance variants and export workflow.
