@@ -770,6 +770,7 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(rebuild.waitForExistence(timeout: 45), "The update must finish.\n" + app.debugDescription)
         reveal(summary)
         XCTAssertEqual(summary.label, "Read 3 new or changed files and kept 2 unchanged.")
+        attachScreenshot("Updated search index keeping unchanged files")
         reveal(date, down: false)
         XCTAssertTrue(date.label.hasSuffix("5 files"), date.label)
         querySavedContents()
