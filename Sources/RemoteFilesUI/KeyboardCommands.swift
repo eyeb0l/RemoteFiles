@@ -94,7 +94,7 @@ public struct RemoteFilesCommands: Commands {
 
     public var body: some Commands {
         // Find, Find Next and Find Previous are the system's own Edit › Find items (⌘F, ⌘G, ⇧⌘G);
-        // RemoteFilesAppDelegate answers them for this reader.
+        // RemoteFilesAppDelegate answers them for this reader, or for Offline Files' while its sheet is in front.
         let _ = SystemFindRouter.shared.reader = reader
         // Escape, Up, Down and Return are UIKit key commands instead; see PlainKeyCommands.
         let _ = PlainKeyCommands.shared.folder = folder
@@ -158,19 +158,57 @@ public struct RemoteFilesCommands: Commands {
 @MainActor final class PlainKeyCommands: NSObject {
     static let shared = PlainKeyCommands()
     private weak var root: UIViewController?
-    /// Set while the Offline Files sheet shows. Focused values from inside the sheet don't reach
-    /// the scene's commands, so its reader hands over closing Find directly while Find is open.
-    /// The sheet takes Escape to dismiss itself before the root sees it, so while that reader's
-    /// Find is open, Escape is installed on the sheet too; otherwise Escape still dismisses it.
+    /// Set while the Offline Files sheet shows. Focused values published inside that sheet never
+    /// reach the scene's commands, so the sheet and its reader hand their actions over directly,
+    /// and the keys are UIKit key commands on the sheet, installed while it shows and declined
+    /// while their action is unavailable: ⌘[ for Back, ⌘F, ⌘G, ⇧⌘G, ⌥⌘U and ⇧⌘J for the reader on
+    /// screen, and Escape while its Find is open. The system Find items act on the same reader
+    /// when they take the key instead. The sheet takes Escape to dismiss itself before the root
+    /// sees it, so with Find closed, Escape still dismisses it.
     var offlineFilesShows = false { didSet { installOnOfflineFiles() } }
-    var offlineCloseFind: (() -> Void)? { didSet { installOnOfflineFiles() } }
-    private let sheetEscape = command("Close Find", UIKeyCommand.inputEscape, [], #selector(RemoteFilesAppDelegate.closeReaderFind(_:)))
-    private weak var sheet: UIViewController?
-    private func installOnOfflineFiles() {
-        sheet?.removeKeyCommand(sheetEscape); sheet = nil
-        guard offlineFilesShows, offlineCloseFind != nil, let presented = root?.presentedViewController else { return }
-        presented.addKeyCommand(sheetEscape); sheet = presented
+    /// Pops the sheet's navigation, while it has somewhere to go back to.
+    var offlineBack: (() -> Void)?
+    /// The commands of the readers on screen in Offline Files, by reader. During a push or pop
+    /// two can be listed for a moment, since the one leaving may hand over nil after the one
+    /// arriving handed over its commands; otherwise at most one is.
+    private var offlineReaders: [UUID: ReaderCommandActions] = [:]
+    func setOfflineReader(_ reader: UUID, _ commands: ReaderCommandActions?) {
+        offlineReaders[reader] = commands
+        installOnOfflineFiles()
     }
+    var offlineReader: ReaderCommandActions? { offlineReaders.values.first }
+    var offlineCloseFind: (() -> Void)? { offlineReader?.closeFind }
+    private let sheetEscape = command("Close Find", UIKeyCommand.inputEscape, [], #selector(RemoteFilesAppDelegate.closeReaderFind(_:)))
+    let sheetBack = command("Back", "[", .command, #selector(RemoteFilesAppDelegate.goBackInOfflineFiles(_:)))
+    /// The reader shortcuts the sheet takes, each with the reader action it runs.
+    let sheetReader: [(key: UIKeyCommand, action: (ReaderCommandActions) -> (() -> Void)?)] = [
+        (command("Find", "f", .command, #selector(RemoteFilesAppDelegate.findInOfflineReader(_:))), \.find),
+        (command("Find Next", "g", .command, #selector(RemoteFilesAppDelegate.findNextInOfflineReader(_:))), \.findNext),
+        (command("Find Previous", "g", [.command, .shift], #selector(RemoteFilesAppDelegate.findPreviousInOfflineReader(_:))), \.findPrevious),
+        (command("Show Source", "u", [.command, .alternate], #selector(RemoteFilesAppDelegate.toggleOfflineReaderSource(_:))), \.toggleSource),
+        (command("Headings…", "j", [.command, .shift], #selector(RemoteFilesAppDelegate.showOfflineReaderHeadings(_:))), \.headings),
+    ]
+    private weak var sheet: UIViewController?
+    /// Installs the sheet's keys as soon as it shows; `canPerform` decides as each arrives.
+    private func installOnOfflineFiles() {
+        let keys = [sheetEscape, sheetBack] + sheetReader.map(\.key)
+        let presented = offlineFilesShows ? root?.presentedViewController : nil
+        if let sheet, sheet !== presented { for key in keys { sheet.removeKeyCommand(key) } }
+        sheet = presented
+        guard let presented else { return }
+        for (key, _) in sheetReader where key.input == "u" { key.title = offlineReader?.showsSource == true ? "Show Rendered" : "Show Source" }
+        for key in keys where presented.keyCommands?.contains(key) != true { presented.addKeyCommand(key) }
+    }
+    /// Whether the Offline Files sheet is in front, with nothing presented over it.
+    private var offlineFilesInFront: Bool {
+        guard offlineFilesShows, let presented = root?.presentedViewController else { return false }
+        return presented.presentedViewController == nil
+    }
+    /// The Offline Files reader its sheet's keys act on: the one on screen while the sheet is in front.
+    var frontmostOfflineReader: ReaderCommandActions? { offlineFilesInFront ? offlineReader : nil }
+    /// The reader the system Find items act on: Offline Files' while its sheet is in front, else the scene's.
+    var frontmostReader: ReaderCommandActions? { offlineFilesInFront ? offlineReader : SystemFindRouter.shared.reader }
+    var frontmostOfflineBack: (() -> Void)? { offlineFilesInFront ? offlineBack : nil }
     /// Set while the scene's commands update.
     var folder: FolderCommandActions?
     var closeFind: (() -> Void)?
@@ -226,6 +264,10 @@ public struct RemoteFilesCommands: Commands {
     /// Whether the key for `action` acts now, checked as it arrives.
     func canPerform(_ action: Selector) -> Bool {
         if action == escape.action || action == sheetEscape.action { return frontmostCloseFind != nil && !(editingField is UISearchTextField) }
+        if action == sheetBack.action { return frontmostOfflineBack != nil }
+        if let sheetKey = sheetReader.first(where: { $0.key.action == action }) {
+            return frontmostOfflineReader.flatMap(sheetKey.action) != nil
+        }
         guard let root, root.presentedViewController == nil else { return false }
         guard editingField == nil, !userMovedFocus else { return false }
         if action == next.action || action == previous.action { return folder?.moveSelection != nil }
@@ -263,19 +305,25 @@ public final class RemoteFilesAppDelegate: UIResponder, UIApplicationDelegate {
     @objc func selectPreviousFolderRow(_ sender: Any?) { PlainKeyCommands.shared.folder?.moveSelection?(-1) }
     @objc func openSelectedFolderRow(_ sender: Any?) { PlainKeyCommands.shared.folder?.openSelection?() }
     @objc func noticeTab(_ sender: Any?) {}
+    @objc func goBackInOfflineFiles(_ sender: Any?) { PlainKeyCommands.shared.frontmostOfflineBack?() }
+    @objc func findInOfflineReader(_ sender: Any?) { PlainKeyCommands.shared.frontmostOfflineReader?.find?() }
+    @objc func findNextInOfflineReader(_ sender: Any?) { PlainKeyCommands.shared.frontmostOfflineReader?.findNext?() }
+    @objc func findPreviousInOfflineReader(_ sender: Any?) { PlainKeyCommands.shared.frontmostOfflineReader?.findPrevious?() }
+    @objc func toggleOfflineReaderSource(_ sender: Any?) { PlainKeyCommands.shared.frontmostOfflineReader?.toggleSource?() }
+    @objc func showOfflineReaderHeadings(_ sender: Any?) { PlainKeyCommands.shared.frontmostOfflineReader?.headings?() }
     /// UIKit asks whether a key command's action has a target as its key arrives, and SwiftUI's
     /// delegate asks this adaptor. Answering no lets the key go on to the system: Tab moves focus,
     /// and an alert or menu over the window keeps Escape, Return and the arrows.
     override public func responds(to aSelector: Selector!) -> Bool {
         let keys = PlainKeyCommands.shared
         if aSelector == #selector(noticeTab(_:)) { keys.tabPressed(); return false }
-        if [keys.escape, keys.next, keys.previous, keys.open].contains(where: { $0.action == aSelector }) {
+        if ([keys.escape, keys.next, keys.previous, keys.open, keys.sheetBack] + keys.sheetReader.map(\.key)).contains(where: { $0.action == aSelector }) {
             return keys.canPerform(aSelector)
         }
         return super.responds(to: aSelector)
     }
-    override public func find(_ sender: Any?) { SystemFindRouter.shared.reader?.find?() }
-    override public func findNext(_ sender: Any?) { SystemFindRouter.shared.reader?.findNext?() }
-    override public func findPrevious(_ sender: Any?) { SystemFindRouter.shared.reader?.findPrevious?() }
+    override public func find(_ sender: Any?) { PlainKeyCommands.shared.frontmostReader?.find?() }
+    override public func findNext(_ sender: Any?) { PlainKeyCommands.shared.frontmostReader?.findNext?() }
+    override public func findPrevious(_ sender: Any?) { PlainKeyCommands.shared.frontmostReader?.findPrevious?() }
 }
 #endif
