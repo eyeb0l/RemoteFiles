@@ -32,7 +32,13 @@ struct ReaderView: View {
     @State private var headingsPresented = false
     @State private var appliedInitialFragment = false
     @State private var contentRevision = UUID()
+    @State private var openedAt = ContinuousClock.now
+    @State private var documentArrivedAt: ContinuousClock.Instant?
     private struct ContentIdentity: Hashable { let revision: UUID; let images: Int }
+    private struct VoiceOverArrival: Equatable {
+        let documentArrivedAt: ContinuousClock.Instant?
+        let highlights: Int
+    }
     private struct FindWork: Equatable {
         let query: String
         let revision: UUID
@@ -129,11 +135,12 @@ struct ReaderView: View {
         .task(id: FindWork(query: navigation.query, revision: navigation.revision, inSource: showsSource, active: navigation.isFinding)) {
             await navigation.search(inSource: showsSource)
         }
+        .onAppear { openedAt = .now }
         .onChange(of: showsLoadingPlaceholder) { wasShown, isShown in
-            guard wasShown, !isShown else { return }
-            // VoiceOver's focus goes with the placeholder and would otherwise land partway
-            // through the document. Post after this update so the content is on screen.
-            Task { @MainActor in UIAccessibility.post(notification: .screenChanged, argument: nil) }
+            if wasShown, !isShown { documentArrivedAt = .now }
+        }
+        .task(id: VoiceOverArrival(documentArrivedAt: documentArrivedAt, highlights: readingPosition.sourceHighlights)) {
+            await moveVoiceOverToArrivedDocument()
         }
         .task(id: "\(model.isForeground)-\(model.sessionRevision)-\(refreshID)") { await reloadIfNeeded() }
         .onDisappear {
@@ -173,6 +180,23 @@ struct ReaderView: View {
         }
         if hasRenderedMode { actions.toggleSource = { source.toggle() } }
         return actions
+    }
+    /// Left to choose for itself when the placeholder goes, VoiceOver can stay on the row that
+    /// opened this reader, or be drawn to a line tall enough to cover the screen, skipping the
+    /// document's start. So name where to start, once the content is mounted and after the
+    /// navigation push's own screen change, which would otherwise replace this one.
+    ///
+    /// Syntax colours arrive after the text and replace the elements VoiceOver is resolving, which
+    /// sends it to that same tall line. So colours arriving soon after the document name the
+    /// start again. Later ones leave focus alone, because the reader has started by then.
+    /// See "Reader loading focus" in docs/CI_HISTORY.md.
+    private func moveVoiceOverToArrivedDocument() async {
+        guard let documentArrivedAt, ContinuousClock.now < documentArrivedAt + .seconds(10),
+              UIAccessibility.isVoiceOverRunning else { return }
+        let settled = max(openedAt + .milliseconds(1500), .now + .milliseconds(250))
+        try? await Task.sleep(until: settled, clock: .continuous)
+        guard !Task.isCancelled, !showsLoadingPlaceholder else { return }
+        UIAccessibility.post(notification: .screenChanged, argument: readingPosition.sourceVoiceOverStart?())
     }
     private func releaseInactiveContent(keepPreview: Bool = false) {
         cancelLink(); requestID = UUID()
