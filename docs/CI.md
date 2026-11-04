@@ -14,6 +14,7 @@ failures and the original timing baselines are in [CI history](CI_HISTORY.md).
 | Tier | Jobs | Runs for |
 |---|---|---|
 | Repository checks, Linux, about one minute | Generated-project consistency, the Python selector and runner regressions, change classification, `git diff --check` across the complete change | Every PR, push to `main`, nightly run and manual dispatch |
+| CI gate, Linux, no builds or test reruns | Requires successful repository checks and successful selected lanes; accepts unselected lanes only if successful or skipped | Every run, even after a dependency fails or skips |
 | Quick, two Mac jobs in parallel, about 15 minutes | **Quick / macos-openssh**: every inventoried macOS core test with the loopback OpenSSH and bastion fixtures. **Quick / simulator-core**: every inventoried hosted iOS core test, with the fixture, on a disposable simulator | Every change outside documentation |
 | UI, one Mac job, about 45 minutes | **Acceptance / simulator-ui**: the whole UI journey inventory on one disposable simulator | Every push to `main` with code, unless its exact tree already passed the UI journeys in a PR run; PRs that change UI journeys, `App/`, packages, vendored code, `Fixtures/` or demo resources; CI infrastructure; unknown paths; the `full-acceptance` label |
 | Extended, two Mac jobs, about 30 minutes | **Acceptance / voiceover**: eight `XCUIVoiceOverService` journeys against production views in the generated `RemoteFilesAccessibility` fixture app. **Acceptance / release-device-compile**: unsigned optimized device build | Nightly at 02:30 UTC on `main`; the label or a manual dispatch; VoiceOver fixture changes (VoiceOver only); CI infrastructure; unknown paths |
@@ -35,7 +36,7 @@ the change receives the broadest tier of any of its paths.
   `AGENTS.md`, `ROADMAP.md`, `PREVIEW_STATUS.md`, licences, `.gitignore`,
   `Vendor/*/UPSTREAM.md` and `design/`.
 - CI infrastructure runs every lane, so a change to it proves itself: `.github/`,
-  `scripts/ci_scope.py`, `scripts/test-acceptance.py`, `scripts/runner_finalization.py`,
+  `scripts/ci_scope.py`, `scripts/ci_gate.py`, `scripts/test-acceptance.py`, `scripts/runner_finalization.py`,
   `scripts/test-openssh.sh` and `scripts/generate-project.py`.
 - `Tests/VoiceOverFixtures/` adds VoiceOver.
 - `Tests/RemoteFilesUITests/`, `App/`, `Package.swift`, every `Package.resolved`,
@@ -76,6 +77,72 @@ Preview a decision with
 add `--main-push` to see what the merge will run. That preview assumes the UI job runs
 unless `GITHUB_REPOSITORY=eyeb0l/RemoteFiles` is set, which checks the real evidence with
 your `gh` login. `scripts/test_ci_scope.py` covers each rule.
+
+## Required merge checks
+
+Require **Repository checks** and **CI gate** on `main`, bound to the **GitHub
+Actions** app (ID `15368`). Do not require individual Mac jobs: they intentionally
+skip for changes outside their tier. GitHub accepts skipped required jobs, so
+requiring those names alone would not prove that a selected lane actually ran.
+
+The gate uses `always()` and directly depends on every other job. It reads the
+repository job's explicit `true`/`false` scope outputs and the dependency results:
+
+| Selection | Accepted result | Rejected result |
+|---|---|---|
+| Repository checks, always required | `success` | Anything else |
+| Selected lane, including the aggregate quick matrix | `success` | `failure`, `cancelled`, `skipped`, missing or unknown |
+| Unselected lane | `skipped` or `success` | `failure`, `cancelled`, missing or unknown |
+
+Missing or malformed scope outputs fail the gate. A failed quick matrix child
+fails the matrix job; `fail-fast: false` lets both quick lanes finish, and no job
+uses `continue-on-error`. If quick checks fail and acceptance is skipped as a
+consequence, the gate fails. Documentation-only PRs pass after repository checks
+with all Mac jobs skipped. Nightly and full-acceptance runs still require every
+selected lane. No test is executed again by the gate.
+
+Protection must apply to administrators, block force pushes and deletions, and
+require PRs with zero mandatory approvals. Keep **Require branches to be up to
+date before merging** off: the gate requires the current PR's selected checks
+without forcing another run after each unrelated merge. This does not guarantee
+that a PR tested against an older base still works with newer changes; the push
+and nightly runs continue to validate `main`. Repository administrators can still
+edit the protection settings.
+
+On 4 November 2026, the live branch API reported `protected: false`, both the
+ruleset and effective branch-rule APIs returned empty collections, and GraphQL
+reported no branch-protection rules. The protection below was then installed
+with administration access and verified by reading the API back. Existing PRs
+must incorporate the gate workflow before they can merge; the gate's own PR
+provides it during this transition. The initial setup command was:
+
+```sh
+gh api --method PUT repos/eyeb0l/RemoteFiles/branches/main/protection --input - <<'JSON'
+{
+  "required_status_checks": {
+    "strict": false,
+    "checks": [
+      {"context": "Repository checks", "app_id": 15368},
+      {"context": "CI gate", "app_id": 15368}
+    ]
+  },
+  "enforce_admins": true,
+  "required_pull_request_reviews": {"required_approving_review_count": 0},
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+JSON
+```
+
+For repositories with existing protection, preserve their other requirements
+instead of replacing them with this initial setup. Verify the result with
+`gh api repos/eyeb0l/RemoteFiles/branches/main/protection`: both checks must appear
+with the expected app ID, `enforce_admins.enabled` must be `true`, and
+`required_status_checks.strict` must be `false`. Without administration access,
+use Settings → Branches → Add branch protection rule, pattern `main`, and apply
+the requirements above. Run `python3 -B -m unittest discover -s scripts -p 'test_ci_gate.py' -v`
+for the focused gate and workflow-wiring regressions.
 
 ## Lanes
 

@@ -10,6 +10,32 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 4 November 2026: require the selected CI jobs before merging
+
+After the tier redesign in PR #68, a live audit found `main` unprotected: the
+branch API returned `protected: false`, the branch-protection endpoint returned
+404 `Branch not protected`, rulesets and effective branch rules were empty, and
+GraphQL returned no branch-protection rules. The authenticated account had
+administration access. This resolves the earlier audit's ambiguous 403 response.
+
+The new Linux **CI gate** runs with `always()` after all other jobs. It requires
+repository checks and every explicitly selected lane to succeed; only unselected
+lanes may skip. Failures, cancellations, missing results and malformed scope
+outputs fail closed. The gate does not build or rerun tests, change the 02:30 UTC
+nightly schedule, or expand ordinary PR selection. Changes to its implementation
+are CI infrastructure and exercise all lanes under the existing policy.
+
+The installed branch protection requires **Repository checks** and **CI
+gate** from GitHub Actions, enforces the requirements for administrators, requires
+a PR with zero mandatory approvals, and blocks force pushes and deletions. It
+does not require branches to be up to date, avoiding extra runs after unrelated
+merges. A fresh API read confirmed both checks bound to app ID `15368`, admin
+enforcement, zero mandatory approvals, and disabled force pushes and deletions.
+The exact setup and verification commands are in [CI policy](CI.md).
+Focused gate regressions cover selected success, failure, cancellation and skips,
+documentation-only skips, absent or malformed data, CLI exit status, and the
+workflow's unconditional gate wiring.
+
 ## UI lane deadline regression
 
 [PR #36](https://github.com/eyeb0l/RemoteFiles/pull/36) passed only on its second
