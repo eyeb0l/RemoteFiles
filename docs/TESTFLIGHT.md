@@ -78,14 +78,43 @@ Xcode 27.2 does not follow Apple's documented first-run order, so check these po
 
 ## Export compliance
 
-The app does its own encryption through SSH and `swift-crypto`, not only through the operating
-system, so it does not automatically qualify for Apple's simple exemption. The project therefore
-leaves `ITSAppUsesNonExemptEncryption` unset, and a build shows **Missing Compliance** in TestFlight
-until you answer App Store Connect's questionnaire for it.
+Until `ITSAppUsesNonExemptEncryption` is set, a build shows **Missing Compliance** in TestFlight and
+testers cannot install it until App Store Connect's questionnaire is answered. Answer it like this,
+matching by meaning because Apple does not publish the exact wording:
 
-This is your legal decision. Follow [Apple's export compliance guidance](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations).
-Once you know the answer, add the key to `App/Info.plist` to stop being asked. Do not set it to
-`NO` just to clear the prompt.
+| Question | Answer |
+|---|---|
+| Does the app use encryption? | **Yes** |
+| What type of algorithms? | **Standard encryption algorithms, instead of or in addition to Apple's operating system encryption** |
+| Available on the App Store in France? | **No**, while the app is not released there |
+
+The app bundles its SSH encryption through `swift-nio-ssh`, Citadel and `swift-crypto`, so it does not
+use only the operating system's. Those algorithms are published standards such as AES, RSA, ECDSA,
+Ed25519 and bcrypt, not proprietary ones. For standard algorithms,
+[Apple's table](https://developer.apple.com/help/app-store-connect/reference/app-information/export-compliance-documentation-for-encryption/)
+requires a document only for the App Store in France. This is our reading, not legal advice, and Apple
+leaves responsibility for it with the developer. Change the answers if any of these facts change.
+
+### Stop answering for every build
+
+When App Store Connect reports that no documentation is required, add this to `App/Info.plist`:
+
+```xml
+<key>ITSAppUsesNonExemptEncryption</key>
+<false/>
+```
+
+[Apple says](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations)
+`NO` covers encryption exempt from documentation requirements, and its overview says to update the
+plist when none is required. Third-party guides disagree for bundled libraries, so confirm that result
+in App Store Connect first; the key then declares it for every later build.
+
+Before releasing on the App Store, check this again:
+
+- **In France:** upload the French encryption declaration and replace `NO` with `YES` plus the
+  `ITSEncryptionExportComplianceCode` that Apple issues.
+- **US annual report:** the sources conflict on whether a finished mass-market app needs a BIS
+  self-classification report, due by 1 February. Ask an export lawyer or BIS.
 
 ## Privacy manifest
 
