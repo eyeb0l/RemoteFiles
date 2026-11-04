@@ -143,21 +143,35 @@ extension XCUIApplication {
     }
     private func open(_ row: XCUIElement, _ app: XCUIApplication) throws {
         let label = row.label.components(separatedBy: ",").first ?? row.label
+        // A tap before VoiceOver answers is an ordinary tap, which opens the row too soon.
+        _ = try startingSpeech()
         row.tap()
-        let activated = try focus(label, name: "open \(label)", limit: 3)
+        // Speech keeps the previous phrase until VoiceOver handles the tap.
+        var activated = ""
+        let focused = Date().addingTimeInterval(30)
+        while !activated.localizedCaseInsensitiveContains(label) {
+            guard Date() < focused else {
+                throw NSError(domain: "VoiceOverTargetNotReached", code: 1, userInfo: [NSLocalizedDescriptionKey: "Tapping \(label) left VoiceOver on \(activated)"])
+            }
+            if let value = try? service.currentSpeech().utterance { activated = value }
+            if !activated.localizedCaseInsensitiveContains(label) { Thread.sleep(forTimeInterval: 0.25) }
+        }
+        print("VO FOCUS open \(label): \(activated)")
         row.doubleTap()
         // The destination's elements can exist before VoiceOver handles its screen change.
         // Until then focus stays on the activated control, and traversal from there skips
         // the destination's first elements, so wait for the focus to move before speaking.
-        let deadline = Date().addingTimeInterval(10)
+        // The loading placeholder is not the destination: traversal from there starts wherever
+        // VoiceOver lands when the placeholder goes, so also wait for the focus to leave it.
+        let deadline = Date().addingTimeInterval(30)
         var current = activated
         while Date() < deadline {
             // Speech is briefly unavailable while VoiceOver moves focus between screens.
             if let value = try? service.currentSpeech().utterance { current = value }
-            if current != activated { print("VO FOCUS moved from \(label): \(current)"); return }
+            if current != activated && current != "Reading document…" { print("VO FOCUS moved from \(label): \(current)"); return }
             Thread.sleep(forTimeInterval: 0.25)
         }
-        throw NSError(domain: "VoiceOverFocusNotMoved", code: 1, userInfo: [NSLocalizedDescriptionKey: "VoiceOver focus stayed on \(activated) after opening it"])
+        throw NSError(domain: "VoiceOverFocusNotMoved", code: 1, userInfo: [NSLocalizedDescriptionKey: "VoiceOver focus stayed on \(current) after opening \(label)"])
     }
     private func capture(_ name: String, _ app: XCUIApplication) {
         print("VO HIERARCHY \(name)\n\(app.debugDescription)")
@@ -273,6 +287,19 @@ extension XCUIApplication {
             XCTAssertTrue(read.contains { $0.contains("Local cell link") && $0.contains("Link") },
                           "A cell description must preserve the link trait")
             XCTAssertTrue(read.contains { $0.contains("After table link") && $0.contains("Link") })
+        }
+    }
+    func testFocusStartsAtTheTopOfADocumentThatLoadsSlowly() throws {
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--voiceover-slow-reader-fixture"]; app.launch()
+        let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Long lines.json")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 15))
+        try withVoiceOver {
+            try open(row, app)
+            XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 15))
+            let utterances = try speech("SLOW JSON", limit: 10)
+            capture("VoiceOver document after slow load", app)
+            XCTAssertTrue(utterances.contains { $0.contains("version") }, "VoiceOver must not skip the start of the document")
+            XCTAssertTrue(utterances.contains { $0.contains("Local preview sample") })
         }
     }
     func testCachedRefreshingAndFailureSpeech() throws {
