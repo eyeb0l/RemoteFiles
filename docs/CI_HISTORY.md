@@ -10,6 +10,46 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 4 November 2026: playback preparation cancellation
+
+[Run 41837893351](https://github.com/eyeb0l/RemoteFiles/actions/runs/41837893351)
+failed `PlaybackTests/testStopDuringPreparationCannotPublishAPlayer` at its
+error-type assertion, after 2.876 seconds; the player remained nil. The older
+[run 40965184249](https://github.com/eyeb0l/RemoteFiles/actions/runs/40965184249)
+failed the same assertion. Neither artifact/log records the thrown error itself.
+A native macOS AVFoundation probe using the bundled MP4 waited for the playable
+property to enter `.loading`, then cancelled its task. `asset.cancelLoading()`
+caused `asset.load(.isPlayable)` to throw `AVError.operationCancelled` (-11878),
+not Swift's `CancellationError`. Preparation mapped this to `.unplayable`.
+
+Preparation now checks task cancellation before reporting playable-load failure,
+including a load that returns false. It also checks cancellation when detached
+file setup throws; that task runs independently of its caller. Deterministic
+regressions hold the playable load at a continuation until stop/cancellation,
+then return a framework error or false, and exercise a cancelled missing-file
+request. The production loader remains AVFoundation. No timeout is shortened.
+Both `RemoteMediaView` and the offline reader suppress errors from cancelled
+load tasks, so this investigation did not establish a user-visible codec banner
+from cancellation.
+
+Native before/after probes confirmed that the new checks return
+`CancellationError` for both the AVFoundation loading error and a detached
+filesystem failure. Original and fixed iOS test bundles compiled with Xcode
+27.2 for arm64 and x86_64. Local XCTest execution produced no method results:
+the dedicated simulator initially lacked process capacity, then its screen hub
+failed and Xcode remained in test-host startup until interruption after 537.7
+seconds. The shared process limit stayed unchanged and other simulators were
+left alone. No local XCTest pass is claimed.
+
+[Run 41853063475](https://github.com/eyeb0l/RemoteFiles/actions/runs/41853063475)
+failed `testMediaViewStopsWhenAppBackgrounds`: the current item was removed,
+but the retained player's rate was 1 rather than 0. The production background
+path calls `stop()`, which pauses the player before removing its item. A native
+macOS probe of 100 play/pause/remove-item cycles did not reproduce a nonzero
+rate. The CI activities contain only the assertion, without rate-transition
+timings. This remains a separate, unconfirmed iOS/AVKit issue; neither its
+production behavior nor its test wait is changed by the cancellation fix.
+
 ## 4 November 2026: require the selected CI jobs before merging
 
 After the tier redesign in PR #68, a live audit found `main` unprotected: the

@@ -33,7 +33,9 @@ movies and references to web resources. There is no web player or transcoding
 service. Playback and its temporary file are released when leaving the preview,
 disconnecting or backgrounding. Picture in Picture and background playback are
 disabled. The underlying bounded resource cache follows its existing retention
-policy.
+policy. Cancelled preparation reports cancellation even if AVFoundation returns
+its own loading error or marks the asset unplayable; it cannot publish a player.
+The online and offline preview callers suppress errors from cancelled tasks.
 
 Explore Demo includes four-second synthetic MP4/H.264/AAC and M4A/AAC examples.
 They were generated locally with FFmpeg (solid purple video, white rectangle,
