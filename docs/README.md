@@ -27,6 +27,7 @@ For a closer look at specific behavior, see [rich Markdown](MARKDOWN_RENDERING.m
 - [CI history](CI_HISTORY.md): dated investigations of past CI failures and timing baselines.
 - [Automated acceptance](AUTOMATED_ACCEPTANCE.md): runner usage, required results, allowed skips and evidence.
 - [Manual acceptance](MANUAL_ACCEPTANCE.md), [real-server acceptance](REAL_SERVER_ACCEPTANCE.md) and [device permissions and lifecycle](DEVICE_PERMISSIONS_LIFECYCLE.md): device and network checks that automated tests do not replace.
+- [Release to TestFlight](TESTFLIGHT.md): the explicit release command, Xcode Cloud configuration, build numbers and export compliance.
 - [App icon](APP_ICON.md): assets, appearance variants and export workflow.
 
 ## Understand decisions and history

@@ -304,3 +304,11 @@ source references. The project-preparation regression executes all three launche
 preparation code and verifies the app and accessibility fixture configurations still
 resolve the original plist, including checkout paths with spaces. Test hosts retain
 their generated plists.
+
+## Release builds
+
+TestFlight builds run in Xcode Cloud only from a `testflight/*` tag, as
+[Release to TestFlight](TESTFLIGHT.md) describes. They add no job to this workflow, use no
+GitHub secrets and consume no Mac runner time. `ci_scripts/` is in the repository-only tier
+because no Mac lane executes it; Repository checks run its regressions in
+`scripts/test_testflight_release.py`.
