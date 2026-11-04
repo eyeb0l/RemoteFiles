@@ -87,9 +87,17 @@ public struct RemoteFilesCommands: Commands {
     @FocusedValue(\.folderCommands) private var publishedFolder
     @FocusedValue(\.navigationCommands) private var publishedNavigation
     @FocusedValue(\.keyboardCommandsCovered) private var covered
-    private var reader: ReaderCommandActions? { covered == true ? nil : publishedReader }
-    private var folder: FolderCommandActions? { covered == true ? nil : publishedFolder }
-    private var navigation: NavigationCommandActions? { covered == true ? nil : publishedNavigation }
+    @ObservedObject private var keys = PlainKeyCommands.shared
+    private var reader: ReaderCommandActions? {
+        covered == true ? nil : keys.offlineFilesShows ? keys.frontmostOfflineReader : publishedReader
+    }
+    private var folder: FolderCommandActions? { covered == true || keys.offlineFilesShows ? nil : publishedFolder }
+    private var navigation: NavigationCommandActions? {
+        guard covered != true else { return nil }
+        return keys.offlineFilesShows
+            ? NavigationCommandActions(context: "offline", back: keys.frontmostOfflineBack)
+            : publishedNavigation
+    }
     public init() {}
 
     public var body: some Commands {
@@ -155,23 +163,23 @@ public struct RemoteFilesCommands: Commands {
 /// declining passes the key on, so text fields being edited, items focused with Tab, and alerts,
 /// menus, pickers or sheets presented over the content keep their keys. Their titles list them in
 /// the ⌘ overlay.
-@MainActor final class PlainKeyCommands: NSObject {
+@MainActor final class PlainKeyCommands: NSObject, ObservableObject {
     static let shared = PlainKeyCommands()
     private weak var root: UIViewController?
     /// Set while the Offline Files sheet shows. Focused values published inside that sheet never
     /// reach the scene's commands, so the sheet and its reader hand their actions over directly,
-    /// and the keys are UIKit key commands on the sheet, installed while it shows and declined
-    /// while their action is unavailable: ⌘[ for Back, ⌘F, ⌘G, ⇧⌘G, ⌥⌘U and ⇧⌘J for the reader on
+    /// and the menu observes those same actions. The keys are UIKit key commands on the sheet,
+    /// installed while it shows and declined while their action is unavailable: ⌘[ for Back, ⌘F, ⌘G, ⇧⌘G, ⌥⌘U and ⇧⌘J for the reader on
     /// screen, and Escape while its Find is open. The system Find items act on the same reader
     /// when they take the key instead. The sheet takes Escape to dismiss itself before the root
     /// sees it, so with Find closed, Escape still dismisses it.
-    var offlineFilesShows = false { didSet { installOnOfflineFiles() } }
+    @Published var offlineFilesShows = false { didSet { installOnOfflineFiles() } }
     /// Pops the sheet's navigation, while it has somewhere to go back to.
-    var offlineBack: (() -> Void)?
+    @Published var offlineBack: (() -> Void)?
     /// The commands of the readers on screen in Offline Files, by reader. During a push or pop
     /// two can be listed for a moment, since the one leaving may hand over nil after the one
     /// arriving handed over its commands; otherwise at most one is.
-    private var offlineReaders: [UUID: ReaderCommandActions] = [:]
+    @Published private var offlineReaders: [UUID: ReaderCommandActions] = [:]
     func setOfflineReader(_ reader: UUID, _ commands: ReaderCommandActions?) {
         offlineReaders[reader] = commands
         installOnOfflineFiles()
@@ -207,7 +215,7 @@ public struct RemoteFilesCommands: Commands {
     /// The Offline Files reader its sheet's keys act on: the one on screen while the sheet is in front.
     var frontmostOfflineReader: ReaderCommandActions? { offlineFilesInFront ? offlineReader : nil }
     /// The reader the system Find items act on: Offline Files' while its sheet is in front, else the scene's.
-    var frontmostReader: ReaderCommandActions? { offlineFilesInFront ? offlineReader : SystemFindRouter.shared.reader }
+    var frontmostReader: ReaderCommandActions? { offlineFilesShows ? frontmostOfflineReader : SystemFindRouter.shared.reader }
     var frontmostOfflineBack: (() -> Void)? { offlineFilesInFront ? offlineBack : nil }
     /// Set while the scene's commands update.
     var folder: FolderCommandActions?
