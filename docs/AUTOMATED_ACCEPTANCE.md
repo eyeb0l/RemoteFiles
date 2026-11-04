@@ -105,17 +105,17 @@ directory; retain and disclose the first failure. Summary status stays `running`
 until all required lanes finish, or `failed` as soon as a lane fails.
 
 The demo reader VoiceOver journey enables the service before launching the app
-so the initial screen change establishes focus. PR #23's first VoiceOver run
-failed at its first Home speech query with `No speech available` after enabling
-the service on an already idle screen; seven other journeys passed. The startup
-ordering change retains every speech, navigation and state-restoration assertion
-and does not retry or skip service failures. For the same reason the long JSON
-and SVG journey enables VoiceOver before opening each preview, then focuses and
+so the initial screen change establishes focus. The long JSON and SVG journey
+likewise enables VoiceOver before opening each preview, then focuses and
 double-taps the touch-staged row, and stays in VoiceOver to switch the SVG to
 Source. After the double-tap it waits for VoiceOver focus to leave the row: a
-preview's elements can exist before VoiceOver handles the screen change. CI run 40241708814 failed with `No speech available` after re-enabling
-the service on the settled SVG Source view (the same tree had passed), and an
-Xcode 27.2 Simulator failed the same way on every settled-preview enable.
+preview's elements can exist before VoiceOver handles the screen change.
+
+The first speech read after each enable waits up to 30 seconds for VoiceOver to
+answer, because `enable()` returns before it can; see
+[First VoiceOver speech](CI_HISTORY.md#first-voiceover-speech). That wait accepts
+any phrase and is not evidence for an assertion. Every later read fails at once, and
+every speech, navigation and state-restoration assertion is unchanged.
 
 `RealServerUITests` are explicitly skipped in the Simulator run. The single
 `IdentityTests/testTrustStoreWritesUseCompleteFileProtection` method may also skip

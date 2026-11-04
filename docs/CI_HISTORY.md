@@ -472,3 +472,73 @@ ceiling; the 180/240-second method allowances, inventory checks and no-retry pol
 unchanged. Expect about 45 minutes in place of two jobs of about 25. `--ui-shard` stays
 for local use. One job also means one failure point: a stalled journey now holds up the
 whole inventory rather than half of it, within the same per-method allowances.
+
+## First VoiceOver speech
+
+Investigated on 4 November. Of the 156 VoiceOver jobs that passed or failed between 18
+October and 4 November, 16 failed, and 7 of those failed with `No speech available`.
+All 7 failed at the first speech read after VoiceOver started, none later in a journey:
+
+| Run | Journey | Started VoiceOver |
+|---|---|---|
+| [41728614227](https://github.com/eyeb0l/RemoteFiles/actions/runs/41728614227) | Demo reader | Before launch |
+| [41727264350](https://github.com/eyeb0l/RemoteFiles/actions/runs/41727264350) | Table links | On a settled screen |
+| [41348807002](https://github.com/eyeb0l/RemoteFiles/actions/runs/41348807002) | Demo reader | Before launch |
+| [40972458529](https://github.com/eyeb0l/RemoteFiles/actions/runs/40972458529) | Image viewer | Before launch |
+| [40967154869](https://github.com/eyeb0l/RemoteFiles/actions/runs/40967154869) | Image viewer | On a settled screen |
+| [40241708814](https://github.com/eyeb0l/RemoteFiles/actions/runs/40241708814) | JSON and SVG | On a settled screen |
+| [39609125193](https://github.com/eyeb0l/RemoteFiles/actions/runs/39609125193) | Demo reader | On a settled screen |
+
+The other nine are different failures, which this does not address. Six were in the JSON
+and SVG journey: five assertions that an expected phrase was missing and one row not
+found. One was `VoiceOverFocusNotMoved`, one `VoiceOverTargetNotReached`, and one a lane
+with missing results. Earlier tallies counted all eight JSON and SVG failures as this
+error, but only one was.
+
+**Cause.** The headers and disassembly of Xcode 27.2's XCUIAutomation show
+`currentSpeech()` asks testmanagerd for VoiceOver's last spoken phrase. It does not wait
+for speech, and it does not ask VoiceOver to speak. `enable()` returned while the
+simulator's `vot` process was paused, so its return says nothing about `vot` being able
+to answer. Reading speech straight after it is a race, and on 3 November `vot` was at 99 to
+100% CPU around the demo failure. Moving the enable before launch changed the timing
+without closing the window, which is why PR #34 and PR #52 reduced the failure but did
+not remove it. Load does not separate the failures: the two most recent came at 1-minute
+loads of about 350 and about 70.
+
+**Evidence from the failed runs.** In the recordings of runs 41728614227, 41727264350
+and 41348807002, VoiceOver's cursor lands on the screen's first element shortly before it
+disappears, which the recordings' timing fits with the journey's `disable()` after the
+failed read. VoiceOver was working and had a focus, so these reads raced its speech rather
+than meeting a VoiceOver that would stay silent. In 41728614227 and 40972458529 the time from the last XCTest step to teardown,
+less `disable()`'s 5.2 seconds, is about a second, so the read failed quickly.
+
+**Reproduction.** On an iOS 27.2 simulator on a lightly loaded Mac, a read on a settled
+screen with no intervention failed for 5.7 seconds after `enable()` in one of three
+cycles. Pausing `vot` with `SIGSTOP` made it deterministic:
+
+- `enable()` still returned, and reads failed in about a second with code 3 for as long
+  as the pause lasted. When `vot` resumed, the phrase arrived with no action by the test.
+- A read also failed while `vot` was paused after it had already spoken, so the error
+  means `vot` did not answer, not only that nothing has been said yet. The failed runs
+  cannot tell these two apart.
+- The unchanged table journey and demo journey then failed at the same first read, with
+  the same message and no `VO FOCUS` line, as in CI.
+- `moveForward()` is not a usable wait, although it takes a timeout. With `vot` paused it
+  failed in about 3.3 seconds with `Failed to send moveForward command`, so it would fail
+  inside a stall the first read now outlasts. Without a pause it could return the pending
+  `VoiceOver on` instead of an element. That message appears in none of this window's failed
+  job logs or retained artifacts.
+
+**Fix.** The service has no wait or notification, so the first read after each enable now
+waits up to 30 seconds for `vot` to answer, and rethrows any other error. This is a
+readiness precondition on the session, not a retry of an expected utterance: it accepts any
+phrase and no assertion relies on it, every expected phrase is still asserted during
+traversal, and each later read fails at once. With the fix, the same pauses passed the table
+journey after 12.0 seconds and the demo journey after 7.0. A 70-second pause failed in
+`VoiceOverNeverSpoke` at 30 seconds, so a silent VoiceOver still fails.
+
+**Limits.** CI runs iOS 27.0, and only 27.2 was available locally. The `VoiceOver on`
+phrase seen locally appears in no CI log, so startup speech differs between them, and the
+reproduction does not by itself prove the CI window. The 30 seconds is a budget, not a
+measured CI bound; each nightly run now records the real wait in its `VO FIRST SPEECH`
+lines. Read those before changing it.

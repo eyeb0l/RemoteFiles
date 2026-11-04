@@ -268,13 +268,28 @@ output directory alone does not reset that simulator state. Diagnose these failu
 rerunning the affected methods on a fresh device; retain both the original failure and rerun evidence.
 
 The demo reader and image-viewer speech journeys launch their fixture with VoiceOver
-already enabled. Enabling it after the screen has settled can leave the first
-`currentSpeech()` call with `No speech available`. Launch alone also does not guarantee
-focus on an asynchronously loaded image: the image journey uses the same tap, speech
-verification and double-tap helper as JSON/SVG navigation. After closing the system
-share sheet it waits for Close to disappear before starting the existing backward
-traversal to Done. The final automatic focus return to the invoking image is still
-asserted. Retain the speech and traversal assertions when diagnosing these setup failures.
+already enabled. Launch alone does not guarantee focus on an asynchronously loaded
+image: the image journey uses the same tap, speech verification and double-tap helper
+as JSON/SVG navigation. After closing the system share sheet it waits for Close to
+disappear before starting the existing backward traversal to Done. The final automatic
+focus return to the invoking image is still asserted. Retain the speech and traversal
+assertions when diagnosing these setup failures.
+
+`XCUIVoiceOverService` has no wait or notification. `enable()` returns before the
+simulator's `vot` process can answer, and `currentSpeech()` reads its last phrase and
+fails with `No speech available` within about a second if `vot` has not spoken or is too
+busy to reply. So the first read after each enable waits up to 30 seconds and prints
+`VO FIRST SPEECH after N s`. Classify a failure by its message:
+
+- `VoiceOverNeverSpoke`: `vot` stayed silent for 30 seconds. Check `vot` in
+  `voiceover-load.log` and the method's screen recording. Treat it as runner
+  infrastructure only if they show `vot` stalled or missing.
+- `No speech available`, or `Failed to send moveForward command` (the same error code
+  from `moveForward()`), after a `VO FIRST SPEECH` line: not this startup race. Investigate
+  it as a mid-journey failure.
+
+To reproduce one, pause `vot` with `SIGSTOP`; see
+[First VoiceOver speech](CI_HISTORY.md#first-voiceover-speech).
 
 The local `scripts/test-voiceover.sh` launcher runs the same scheme with one
 `xcodebuild test`, and the scheme also runs from Xcode. It supports macOS’s stock Bash
