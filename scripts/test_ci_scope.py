@@ -57,7 +57,7 @@ class CIScopeTests(unittest.TestCase):
                 self.assertEqual(result["reasons"], {path: "voiceover"})
 
     def test_ci_infrastructure_and_unknown_paths_run_every_lane(self):
-        for path in (".github/workflows/ci.yml", ".github/actions/validate/action.yml", "scripts/ci_scope.py",
+        for path in (".github/workflows/ci.yml", ".github/actions/validate/action.yml", "scripts/ci_scope.py", "scripts/ci_gate.py",
                      "scripts/test-acceptance.py", "scripts/test-openssh.sh", "scripts/generate-project.py",
                      "NewModule/entry.swift", "LICENSE.swift", ".gitattributes"):
             with self.subTest(path=path):

@@ -146,3 +146,19 @@ jobs:
       - uses: ./.github/actions/validate
         with:
           lane: release-device-compile
+
+  ci-gate:
+    # Require this stable check, rather than conditionally skipped Mac jobs.
+    name: CI gate
+    needs: [repository-checks, quick, simulator-ui, voiceover, release-device-compile]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Require successful selected jobs
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: python3 -B scripts/ci_gate.py
