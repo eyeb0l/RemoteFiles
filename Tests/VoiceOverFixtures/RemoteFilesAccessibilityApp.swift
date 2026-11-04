@@ -155,7 +155,28 @@ private struct SlowReaderFixture: View {
     }
 }
 
+/// Records what VoiceOver focuses, which its speech can lag behind, for the tests to read.
+/// The path is shared because both the app and its test runner see the host's file system.
+private enum VoiceOverFocusLog {
+    @MainActor static func start() {
+        guard let path = ProcessInfo.processInfo.environment["VOICEOVER_FOCUS_LOG"] else { return }
+        FileManager.default.createFile(atPath: path, contents: nil)
+        NotificationCenter.default.addObserver(forName: UIAccessibility.elementFocusedNotification, object: nil, queue: .main) { notification in
+            guard let element = notification.userInfo?[UIAccessibility.focusedElementUserInfoKey] as? NSObject,
+                  let file = FileHandle(forWritingAtPath: path) else { return }
+            MainActor.assumeIsolated {
+                let value = (element.accessibilityValue ?? "").prefix(24).replacingOccurrences(of: "\n", with: " ")
+                let label = (element.accessibilityLabel ?? "").prefix(24).replacingOccurrences(of: "\n", with: " ")
+                let line = String(format: "%.3f ", Date().timeIntervalSince1970)
+                    + "\(type(of: element)) value='\(value)' label='\(label)' frame=\(element.accessibilityFrame)\n"
+                file.seekToEndOfFile(); file.write(Data(line.utf8)); try? file.close()
+            }
+        }
+    }
+}
+
 @main struct RemoteFilesApp: App {
+    init() { VoiceOverFocusLog.start() }
     var body: some Scene {
         WindowGroup {
             if ProcessInfo.processInfo.arguments.contains("--small-features-fixture") { SmallFeatureFixture() }

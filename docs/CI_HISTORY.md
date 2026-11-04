@@ -612,14 +612,10 @@ restarts from the top of the screen with the document at its start.
 `testFocusStartsAtTheTopOfADocumentThatLoadsSlowly` covers this with a 3-second read, and the
 helper no longer treats the placeholder as the destination.
 
-**Still open.** This is a partial fix: VoiceOver can still skip the start of a document on a fast
-load. In the fix's VoiceOver job,
-[41829303481](https://github.com/eyeb0l/RemoteFiles/actions/runs/41829303481) on iOS 27.0, the JSON
-journey landed on `"prompt"` with the scroll bar at 100%, skipping `{` and `"version"`. It passed
-because that journey only looks for the sample text. Hiding the placeholder from VoiceOver and
-announcing it did not settle this: on iOS 27.2, focus started on `{` and the next move still went
-to `"prompt"`. That could be an app bug or the test reading speech too early; `currentSpeech()`
-returns the last phrase, not the current focus.
+**Still open at the time.** This was a partial fix: a fast load could still skip the start. In the
+fix's VoiceOver job, [41829303481](https://github.com/eyeb0l/RemoteFiles/actions/runs/41829303481)
+on iOS 27.0, the JSON journey landed on `"prompt"`, skipping `{` and `"version"`, and passed because
+it only looked for the sample text. "Fast-load focus" below follows this up.
 
 **Limits.** VoiceOver now often starts on the Back button, about five swipes before the content.
 That can also happen on a fast load: with the fix, the JSON journey started on `{` on an iPhone
@@ -628,3 +624,65 @@ evidence covers one failure; the earlier JSON and SVG failures listed under
 [First VoiceOver speech](#first-voiceover-speech) were not rechecked. On an iPhone 17e,
 `testPublicKeyConfirmationVoiceOverAccountKeyCancelAndResult` could not tap `Review Installation`
 after typing, before VoiceOver started. It passed on an iPhone 18 Pro and was not investigated.
+
+### Fast-load focus
+
+Investigated on 4 November. **All local results here are iOS 27.2 on a dedicated iPhone 18 Pro
+simulator; they are not iOS 27.0 evidence.** The landing on `"prompt"` had only been seen on 27.0.
+Runs used a temporary fixture and a log of `UIAccessibility.elementFocusedNotification`, because
+speech cannot answer this: `moveForward()` returned the old row's phrase while focus had moved on,
+and in one run focus passed through `"prompt"` without that phrase being returned.
+
+**Cause.** An app bug, with a test that could not see it. Two things hand VoiceOver a choice, and a
+line tall enough to cover the screen wins it:
+
+1. *The focused element goes away.* With the placeholder or row gone and no target named, VoiceOver
+   relocates by itself. Destroying a focused button in place, with no notification, sent it to the
+   tall `"prompt"` line from a height of 248 and of 628 points (one run each). With 120 short lines
+   the same action went to the title and then `line 1` (four runs), so a document needs such a line
+   to be affected.
+2. *Syntax colours arrive while VoiceOver resolves its target.* `SourceCodeView` highlights after
+   the text is on screen. If the update lands in the second or so VoiceOver takes to act, it speaks
+   the stale `{` and focus goes to `"prompt"`, with no focus notification for `{` or `"version"`.
+   Forcing colours 300 ms after the screen change gave this in 2 of 7 runs, and in 3 of 7 when
+   colours were applied in place on `textStorage`; the other runs had already moved on. With no
+   colour update it never appeared in 7 runs. Colours arriving 5 s later, after VoiceOver had
+   settled, did not cause it (10 runs).
+
+This explains the unmerged attempt to hide the placeholder and announce it: it removes the first
+trigger only, so a natural landing on `{` can still lose the race. That attempt in the real journey
+did not reproduce the skip in four launches, which fits a race that depends on highlight timing.
+Highlighting took 0.3 to 0.7 s locally in the three runs that timed it. It would plausibly finish later on a loaded runner, which
+could explain why CI landed there more often, but no CI timing was measured.
+
+**Ruled out.** The scroll bar at 100% is not where focus landed: VoiceOver scrolls to 3070 points
+when it reaches `"prompt"`, and the hierarchy was captured after traversal. Traversal itself does
+not skip: in all 84 runs that reached `{`, focus then went to `"version"` and `"prompt"`. #77's screen change did not cause the stale-row stall, because it also happened with
+no post (1 of 12, against 2 of 16 with it). Naming the text view as the target is unsafe: VoiceOver
+once chose `"prompt"` that way.
+
+**Fix.** The reader names the document's first line in its screen change, at least 1.5 s after
+opening and 250 ms after the placeholder goes, so the push's own screen change does not replace it.
+Colours arriving within 10 s of the document name it again, since they replace the elements. It
+posts no target when the reader is away from the top, because focusing line 1 would scroll a
+returning reader away from their saved position, or for documents other than bounded source.
+
+| Read, in the fixture | Reached `{` and read on | Stale-row stall |
+|---|---|---|
+| Colours forced 300 ms after the post | 8 of 8 | 0 |
+| 180 ms | 8 of 8 | 0 |
+| 0 ms | 8 of 8 | 0 |
+| 3 s | 8 of 8 | 0 |
+
+The real JSON and slow journeys also went straight from the row to `{`. Without the fix, the JSON
+journey's first open went to Back in all eight runs that opened the row through VoiceOver. Sending focus to `"prompt"` on purpose makes
+the journeys fail, so their assertion can catch this. They now read the focus log and wait for focus
+to settle first, because a swipe during the reader's move can be lost.
+
+**Limits.** In 2 of those 32 runs VoiceOver focused the placeholder, went to `"prompt"` by itself,
+then returned to `{` under a second later, so a reader can hear the start of that line first. A swipe
+in the moments after opening can be interrupted by the move to line 1. A rendered Markdown, HTML or
+SVG document gets a screen change with no target, and was not measured for this. Only the JSON
+sample was tested. Reopening at a saved position has only the unit test: demo mode does not persist
+positions. No physical device or real server was tested. This section's local runs predate the fix's
+own CI job, which is the first iOS 27.0 evidence for it.

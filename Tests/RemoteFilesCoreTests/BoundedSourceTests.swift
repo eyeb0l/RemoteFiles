@@ -48,6 +48,29 @@ import RemoteFilesCore
         XCTAssertGreaterThan(unwrapped.contentOffset.x, 100)
     }
 
+    func testVoiceOverIsSentToTheFirstLineOnlyWhileTheReaderIsAtTheTop() throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        defer { window.isHidden = true }
+        let view = SourceTextView(usingTextLayoutManager: true)
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 480)
+        view.text = (1...200).map { "line \($0)" }.joined(separator: "\n")
+        window.addSubview(view); window.isHidden = false
+        view.layoutIfNeeded()
+        let top = CGPoint(x: 0, y: -view.adjustedContentInset.top)
+        view.contentOffset = top
+        XCTAssertTrue(view.readerIsAtTheTop)
+        view.contentOffset = CGPoint(x: 0, y: 600)
+        XCTAssertFalse(view.readerIsAtTheTop, "The reader has scrolled")
+        XCTAssertNil(view.voiceOverStart)
+        view.contentOffset = top
+        view.anchor = .init(kind: "source", character: 500, viewportY: 40)
+        XCTAssertFalse(view.readerIsAtTheTop, "A saved anchor is about to be restored")
+        view.anchor = nil
+        view.pendingOffset = CGPoint(x: 0, y: 600)
+        XCTAssertFalse(view.readerIsAtTheTop, "A saved offset is about to be restored")
+    }
+
     func testLongJSONActuallyDrawsAndKeepsExactSelectableText() async throws {
         let source = "{\n  \"prompt\": \"" + String(repeating: "safe sample 東京 🌍 e\u{301} ", count: 180) + "\",\r\n  \"ready\": true\n}\n"
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)

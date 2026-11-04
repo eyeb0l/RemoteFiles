@@ -291,6 +291,11 @@ busy to reply. So the first read after each enable waits up to 30 seconds and pr
 To reproduce one, pause `vot` with `SIGSTOP`; see
 [First VoiceOver speech](CI_HISTORY.md#first-voiceover-speech).
 
+Speech can lag focus, so do not use it to decide where VoiceOver went. The JSON and slow-load
+journeys print `VO FOCUS LOG`, each element VoiceOver focused, from
+`UIAccessibility.elementFocusedNotification`, and assert on that. See
+[Fast-load focus](CI_HISTORY.md#fast-load-focus).
+
 The local `scripts/test-voiceover.sh` launcher runs the same scheme with one
 `xcodebuild test`, and the scheme also runs from Xcode. It supports macOS’s stock Bash
 when its optional package setting is absent. Launcher regressions also check that

@@ -150,6 +150,7 @@ struct SourceCodeView: View {
                 let result = try await SourceHighlighting.shared.highlight(input.text, language: input.language, dark: input.dark)
                 try Task.checkCancellation()
                 highlighted = result; highlightedRequest = input
+                readingPosition?.sourceHighlights += 1
             } catch is CancellationError { }
             catch { highlighted = nil }
         }

@@ -15,6 +15,10 @@ import UIKit
     public var pdfAnchor: SavedReadingPosition.Anchor? { didSet { if pdfAnchor != oldValue { scheduleSave() } } }
     /// Set by a live PDF view so a lifecycle flush records its latest scroll position.
     @ObservationIgnored var capturePDFPosition: (() -> Void)?
+    /// Set by a live source view: where VoiceOver should start when the document appears.
+    @ObservationIgnored var sourceVoiceOverStart: (() -> Any?)?
+    /// Counts syntax colours reaching the source view, which replaces its accessibility elements.
+    var sourceHighlights = 0
     // Weak renderer callbacks let a lifecycle flush await the final DOM capture without
     // retaining the WebKit view or document in the route's reading history.
     @ObservationIgnored var captureHTMLPosition: (() async -> Void)?

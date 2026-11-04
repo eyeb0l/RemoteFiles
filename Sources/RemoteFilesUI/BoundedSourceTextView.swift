@@ -45,6 +45,7 @@ struct BoundedSourceTextView: UIViewRepresentable {
         view.pendingOffset = readingPosition?.source ?? .zero
         view.anchor = readingPosition?.sourceAnchor
         view.restoreAnchor = view.anchor != nil
+        readingPosition?.sourceVoiceOverStart = { [weak view] in view?.voiceOverStart }
         return view
     }
     func updateUIView(_ view: SourceTextView, context: Context) {
@@ -160,6 +161,11 @@ final class SourceTextView: UITextView {
         }
         onPosition?(CGPoint(x: max(0, contentOffset.x), y: max(0, contentOffset.y)), anchor)
     }
+    /// Focusing the first line would scroll away from a reader's position elsewhere.
+    var readerIsAtTheTop: Bool {
+        anchor == nil && pendingOffset == nil && contentOffset.y + adjustedContentInset.top <= 1
+    }
+    var voiceOverStart: Any? { readerIsAtTheTop ? accessibilityElement(at: 0) : nil }
     var pendingOffset: CGPoint?
     var unwrappedWidth: CGFloat?
     override var contentSize: CGSize {

@@ -12,7 +12,9 @@ extension XCUIApplication {
 
 @MainActor final class VoiceOverChecks: XCTestCase {
     func testLongJSONAndSVGHaveReadOnlyVoiceOverPreviews() throws {
-        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]
+        let focusLog = recordFocus(of: app)
+        app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         let json = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Long lines.json,")).firstMatch
@@ -25,10 +27,12 @@ extension XCUIApplication {
         try withVoiceOver {
             try open(json, app)
             XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 15))
+            waitForFocusToSettle(focusLog)
             let utterances = try speech("LONG JSON", limit: 15)
             XCTAssertTrue(utterances.contains { $0.contains("Local preview sample") || $0.contains("Source text") })
             XCTAssertFalse(utterances.contains { $0.localizedCaseInsensitiveContains("double-tap to edit") })
             capture("VoiceOver bounded JSON", app)
+            assertFocusReadTheStartOfLongJSON(focusLog)
         }
         app.navigationBars.buttons["Projects"].tap()
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10), app.debugDescription)
@@ -74,6 +78,38 @@ extension XCUIApplication {
             XCTAssertEqual(service.isEnabled, originalVoiceOver)
             print("VO TEARDOWN RESTORED enabled=\(service.isEnabled), original=\(originalVoiceOver)")
         }
+    }
+    /// VoiceOver's speech can lag its focus, so a traversal that matters reads this as well.
+    private func recordFocus(of app: XCUIApplication) -> String {
+        let path = "/private/tmp/remotefiles-voiceover-focus-\(UUID().uuidString).log"
+        app.launchEnvironment["VOICEOVER_FOCUS_LOG"] = path
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: path) }
+        return path
+    }
+    /// A reader moves slower than this test can. Traversing while the reader still names where
+    /// to start races that move, and a swipe during it can be lost; see "Reader loading focus".
+    private func waitForFocusToSettle(_ path: String) {
+        let quiet: TimeInterval = 4, deadline = Date().addingTimeInterval(45)
+        var log = "", changed = Date()
+        while Date() < deadline, Date().timeIntervalSince(changed) < quiet {
+            let current = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+            if current != log { log = current; changed = Date() }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+    }
+    private func assertFocusReadTheStartOfLongJSON(_ path: String, file: StaticString = #filePath, line: UInt = #line) {
+        let log = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        print("VO FOCUS LOG\n\(log)VO FOCUS LOG END")
+        // The document's lines, in the order VoiceOver focused them. A line's text is its value.
+        let lines = log.split(separator: "\n").compactMap { entry -> String? in
+            guard entry.contains("Paragraph"), let value = entry.range(of: "value='"),
+                  let end = entry.range(of: "' label=") else { return nil }
+            return String(entry[value.upperBound..<end.lowerBound]).trimmingCharacters(in: .whitespaces)
+        }
+        let start = lines.indices.dropLast(2).contains {
+            lines[$0] == "{" && lines[$0 + 1].hasPrefix("\"version\"") && lines[$0 + 2].hasPrefix("\"prompt\"")
+        }
+        XCTAssertTrue(start, "VoiceOver must read the document from its first line: \(lines)", file: file, line: line)
     }
     private func withVoiceOver(_ body: () throws -> Void) throws {
         let original = service.isEnabled
@@ -290,16 +326,19 @@ extension XCUIApplication {
         }
     }
     func testFocusStartsAtTheTopOfADocumentThatLoadsSlowly() throws {
-        let app = XCUIApplication.underTest(); app.launchArguments = ["--voiceover-slow-reader-fixture"]; app.launch()
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--voiceover-slow-reader-fixture"]
+        let focusLog = recordFocus(of: app)
+        app.launch()
         let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Long lines.json")).firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 15))
         try withVoiceOver {
             try open(row, app)
             XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 15))
+            waitForFocusToSettle(focusLog)
             let utterances = try speech("SLOW JSON", limit: 10)
             capture("VoiceOver document after slow load", app)
-            XCTAssertTrue(utterances.contains { $0.contains("version") }, "VoiceOver must not skip the start of the document")
             XCTAssertTrue(utterances.contains { $0.contains("Local preview sample") })
+            assertFocusReadTheStartOfLongJSON(focusLog)
         }
     }
     func testCachedRefreshingAndFailureSpeech() throws {
