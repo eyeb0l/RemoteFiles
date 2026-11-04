@@ -3,6 +3,7 @@ import SwiftUI
 import PDFKit
 import UniformTypeIdentifiers
 import RemoteFilesCore
+import Textual
 
 /// Created only after Share Original is tapped. Cached toolbar/provider values must not
 /// retain an idle reader's lease; an actual share owns it until the activity completes.
@@ -135,26 +136,35 @@ struct OfflinePinActions: View {
 
 struct OfflinePinProgress: View {
     let model: AppModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
         if let name = model.pinningName {
             VStack(alignment: .leading, spacing: 6) {
-                HStack {
+                HStack(spacing: 10) {
                     Text(model.cancellingPin ? "Cancelling save…" : "Saving \(name) offline…")
-                        .font(.callout).lineLimit(2)
-                    Spacer()
-                    Button("Cancel") { model.cancelOfflinePin() }.disabled(model.cancellingPin)
+                        .font(.footnote.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 4)
+                    Button("Cancel") { model.cancelOfflinePin() }.font(.footnote).disabled(model.cancellingPin)
                 }
-                if let fraction = model.pinProgress.fraction { ProgressView(value: fraction) }
-                else { ProgressView().frame(maxWidth: .infinity) }
-                Text(model.pinProgress.sizeLabel()).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                if let folder = model.folderPinProgress {
-                    Text("\(folder.files) files saved · \(folder.folders) folders read")
-                        .font(.caption).foregroundStyle(.secondary)
-                    if let file = folder.currentFile { Text(file).font(.caption).lineLimit(1) }
-                    if folder.skippedLinks > 0 { Text("\(folder.skippedLinks) symbolic links skipped").font(.caption).foregroundStyle(.secondary) }
+                ThinProgress(fraction: model.pinProgress.fraction)
+                HStack(spacing: 4) {
+                    Text(model.pinProgress.sizeLabel()).monospacedDigit()
+                    if let folder = model.folderPinProgress {
+                        Text("· \(folder.files) files · \(folder.folders) folders")
+                        if folder.skippedLinks > 0 { Text("· \(folder.skippedLinks) links skipped") }
+                    }
+                }
+                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                .contentTransition(.numericText())
+                if let file = model.folderPinProgress?.currentFile {
+                    Text(file).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 }
             }
-            .padding().background(.bar)
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            .glassEffect(.regular, in: .rect(cornerRadius: 20))
+            .padding(.horizontal, 12).padding(.bottom, 4)
+            .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .bottom)))
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier("offline-save-progress")
         }
     }
@@ -168,6 +178,7 @@ struct OfflineFilesView: View {
         NavigationStack(path: $path) {
             library
                 .navigationTitle("Offline Files")
+                .navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
                 .navigationDestination(for: OfflineFolderRoute.self) { route in
                     OfflineFolderView(model: model, route: route)
@@ -189,64 +200,83 @@ struct OfflineFilesView: View {
         .onDisappear { PlainKeyCommands.shared.offlineFilesShows = false; PlainKeyCommands.shared.offlineBack = nil }
     }
 
+    /// Names that appear more than once, whose rows also say where each copy came from.
+    private var repeatedNames: Set<String> {
+        let names = model.offlineFolders.map(\.name) + model.standaloneOfflinePins.map(\.filename)
+        return Set(Dictionary(grouping: names, by: { $0 }).filter { $0.value.count > 1 }.keys)
+    }
+    private func source(_ connection: String, parent path: String) -> String {
+        Set(model.offlinePins.map(\.connectionName)).count > 1 ? "\(connection) · \(path)" : path
+    }
+    private var storedBytes: Int64 { Int64(model.offlinePins.reduce(0) { $0 + $1.byteCount }) }
+    private static let storageLimit: Int64 = 512 * 1024 * 1024
     private var library: some View {
-        List {
-            Section {
-                Text("Saved copies on this device. Updates happen only when you choose Update; they need a connection.")
-                    .font(.footnote).foregroundStyle(.secondary)
-                if model.demo { Label("Demo copies are separate from your files.", systemImage: "sparkles").font(.footnote) }
-                Text("\(model.offlinePins.count) of 100 files · \(ByteCountFormatter.string(fromByteCount: Int64(model.offlinePins.reduce(0) { $0 + $1.byteCount }), countStyle: .file)) of 512 MiB")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
+        let repeated = repeatedNames
+        return List {
             if let error = model.offlineError {
                 ContentUnavailableView("Offline library unavailable", systemImage: "exclamationmark.folder", description: Text(error))
+                    .listRowSeparator(.hidden)
             } else if model.offlinePins.isEmpty && model.offlineFolders.isEmpty {
                 ContentUnavailableView("No offline files", systemImage: "pin", description: Text("Choose Keep Offline in a file’s actions menu, or Keep Folder Offline in Folder actions."))
                     .accessibilityIdentifier("offline-empty")
-            }
-            ForEach(model.offlineFolders) { folder in
-                NavigationLink(value: OfflineFolderRoute(folderID: folder.id, path: folder.path)) {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Label(folder.name, systemImage: "folder.fill")
-                        Text(folder.connectionName + " · " + folder.path).font(.caption).foregroundStyle(.secondary)
-                        Text("\(folder.fileIDs.count) files · saved \(folder.savedAt.formatted(date: .abbreviated, time: .shortened))")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }.padding(.vertical, 4)
-                }
-                .accessibilityIdentifier("offline-folder-" + folder.name)
-                .contextMenu { OfflineFolderLibraryActions(model: model, folder: folder) }
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button("Remove", systemImage: "trash", role: .destructive) { Task { await model.removeOfflineFolder(folder) } }
-                    Button("Update", systemImage: "arrow.clockwise") { model.refreshOfflineFolder(folder) }
-                        .disabled(model.pinningName != nil || !model.isForeground)
-                }
-            }
-            ForEach(model.standaloneOfflinePins) { pin in
-                NavigationLink(value: OfflineDocumentRoute(pin: pin)) {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Label(pin.filename, systemImage: "doc.fill").foregroundStyle(.primary)
-                        Text(pin.connectionName + " · " + pin.path).font(.caption).foregroundStyle(.secondary)
-                        Text("Saved \(pin.savedAt.formatted(date: .abbreviated, time: .shortened)) · \(ByteCountFormatter.string(fromByteCount: Int64(pin.byteCount), countStyle: .file))")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }.padding(.vertical, 4)
-                }
-                .accessibilityIdentifier("offline-file-" + pin.filename)
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button("Remove", systemImage: "trash", role: .destructive) { Task { await model.removeOfflinePin(pin) } }
-                    Button("Update", systemImage: "arrow.clockwise") { model.refreshOfflinePin(pin) }
-                        .disabled(model.pinningName != nil || !model.isForeground)
-                }
-                .contextMenu {
-                    Button("Update Offline Copy", systemImage: "arrow.clockwise") { model.refreshOfflinePin(pin) }
-                        .disabled(model.pinningName != nil || !model.isForeground)
-                    Button("Remove Offline Copy", systemImage: "trash", role: .destructive) { Task { await model.removeOfflinePin(pin) } }
-                }
+                    .listRowSeparator(.hidden)
             }
             Section {
-                Text("128 MiB per file. Removing a saved copy never deletes the remote file. Document links open copies already saved here. Markdown images aren’t loaded.")
-                    .font(.footnote).foregroundStyle(.secondary)
+                ForEach(model.offlineFolders) { folder in
+                    NavigationLink(value: OfflineFolderRoute(folderID: folder.id, path: folder.path)) {
+                        LocationRow(name: folder.name,
+                                    subtitle: "\(folder.connectionName) · \(folder.path). \(folder.fileIDs.count) files, saved \(folder.savedAt.formatted(date: .abbreviated, time: .shortened))",
+                                    symbol: "folder.fill", color: RemoteFilesStyle.accent,
+                                    visibleSubtitle: repeated.contains(folder.name) ? source(folder.connectionName, parent: folder.path)
+                                        : "\(folder.fileIDs.count) files · saved \(QuietDate.saved(folder.savedAt))")
+                    }
+                    .accessibilityIdentifier("offline-folder-" + folder.name)
+                    .contextMenu { OfflineFolderLibraryActions(model: model, folder: folder) }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button("Remove", systemImage: "trash", role: .destructive) { Task { await model.removeOfflineFolder(folder) } }
+                        Button("Update", systemImage: "arrow.clockwise") { model.refreshOfflineFolder(folder) }
+                            .disabled(model.pinningName != nil || !model.isForeground)
+                    }
+                }
+                ForEach(model.standaloneOfflinePins) { pin in
+                    let size = ByteCountFormatter.string(fromByteCount: Int64(pin.byteCount), countStyle: .file)
+                    NavigationLink(value: OfflineDocumentRoute(pin: pin)) {
+                        LocationRow(name: pin.filename,
+                                    subtitle: "\(pin.connectionName) · \(pin.path). Saved \(pin.savedAt.formatted(date: .abbreviated, time: .shortened)), \(size)",
+                                    symbol: FileSymbol.name(forFilename: pin.documentFilename),
+                                    visibleSubtitle: repeated.contains(pin.filename) ? source(pin.connectionName, parent: RemotePath.parent(of: pin.path))
+                                        : "\(size) · saved \(QuietDate.saved(pin.savedAt))")
+                    }
+                    .navigationLinkIndicatorVisibility(.hidden)
+                    .accessibilityIdentifier("offline-file-" + pin.filename)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button("Remove", systemImage: "trash", role: .destructive) { Task { await model.removeOfflinePin(pin) } }
+                        Button("Update", systemImage: "arrow.clockwise") { model.refreshOfflinePin(pin) }
+                            .disabled(model.pinningName != nil || !model.isForeground)
+                    }
+                    .contextMenu {
+                        Button("Update Offline Copy", systemImage: "arrow.clockwise") { model.refreshOfflinePin(pin) }
+                            .disabled(model.pinningName != nil || !model.isForeground)
+                        Button("Remove Offline Copy", systemImage: "trash", role: .destructive) { Task { await model.removeOfflinePin(pin) } }
+                    }
+                }
+            } footer: {
+                VStack(alignment: .leading, spacing: 8) {
+                    if !model.offlinePins.isEmpty {
+                        VStack(alignment: .leading, spacing: 5) {
+                            ThinProgress(fraction: Double(storedBytes) / Double(Self.storageLimit))
+                            Text("\(model.offlinePins.count) of 100 files · \(ByteCountFormatter.string(fromByteCount: storedBytes, countStyle: .file)) of 512 MiB")
+                                .monospacedDigit()
+                        }
+                    }
+                    if model.demo { Text("Demo copies are separate from your files.") }
+                    Text("Copies update only when you choose Update, which needs a connection. Up to 128 MiB per file. Removing a copy never touches the server. Document links open copies saved here; Markdown images aren’t loaded.")
+                }
+                .font(.footnote).foregroundStyle(.secondary)
+                .padding(.top, 8)
             }
         }
+        .listStyle(.plain)
     }
 }
 
@@ -309,18 +339,12 @@ struct OfflineReaderView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Text("Offline copy · saved \(savedCopy.savedAt.formatted(date: .abbreviated, time: .shortened))")
-                .font(.caption).foregroundStyle(.secondary).padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(uiColor: .secondarySystemBackground))
-                .accessibilityIdentifier("offline-copy-date")
-            if navigation.isFinding { ReaderFindBar(navigation: navigation, inSource: showsSource) }
+        Group {
             Group {
                 if let failure = failure ?? playback.failure {
                     ContentUnavailableView("Couldn’t open saved copy", systemImage: "exclamationmark.doc", description: Text(failure))
                 } else if loading {
-                    ProgressView("Opening saved copy…")
+                    LoadingPlaceholder(label: "Opening saved copy…", shape: .document)
                 } else if let image {
                     Button {
                         if let lease { viewer = OfflineImagePresentation(lease: lease) }
@@ -331,15 +355,10 @@ struct OfflineReaderView: View {
                     .accessibilityLabel("Open image \(savedCopy.filename) full screen")
                     .accessibilityFocused($imageFocused)
                 } else if let pdf {
-                    VStack(spacing: 0) {
-                        Text("Page \(min(pdfPage, pdf.pageCount - 1) + 1) of \(pdf.pageCount)")
-                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
-                            .accessibilityIdentifier("PDF page indicator")
-                        PDFDocumentView(document: pdf, restoration: pdfRestoration, readingPosition: readingPosition,
-                                        onPageChange: { pdfPage = $0 })
-                            .accessibilityLabel("PDF \(savedCopy.filename), \(pdf.pageCount) \(pdf.pageCount == 1 ? "page" : "pages")")
-                    }
+                    PDFDocumentView(document: pdf, restoration: pdfRestoration, readingPosition: readingPosition,
+                                    onPageChange: { pdfPage = $0 })
+                        .accessibilityLabel("PDF \(savedCopy.filename), \(pdf.pageCount) \(pdf.pageCount == 1 ? "page" : "pages")")
+                        .overlay(alignment: .bottomLeading) { PDFPageBadge(page: min(pdfPage, pdf.pageCount - 1) + 1, count: pdf.pageCount) }
                 }
                 else if let player = playback.player {
                     VStack {
@@ -352,6 +371,7 @@ struct OfflineReaderView: View {
                     case .text(let text, let markdown):
                         DocumentContentView(text: text, markdown: markdown, source: source, filename: savedCopy.documentFilename,
                                             readingPosition: readingPosition, openDocumentLink: openLink, navigation: navigation)
+                            .textual.structuredTextStyle(.reader)
                     case .empty: ContentUnavailableView("This file is empty", systemImage: "doc")
                     case .tooLarge: unavailable("The file exceeds the 2 MiB text preview limit. You can share its original bytes.")
                     case .unsupportedEncodingOrBinary: unavailable("This file contains binary data or text that is not UTF-8. You can share the original.")
@@ -360,8 +380,20 @@ struct OfflineReaderView: View {
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .safeAreaBar(edge: .top, spacing: 0) {
+            if navigation.isFinding { ReaderFindBar(navigation: navigation, inSource: showsSource) }
+        }
         .navigationTitle(savedCopy.filename).navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 0) {
+                    Text(savedCopy.filename).font(.subheadline.weight(.semibold)).lineLimit(1).truncationMode(.middle)
+                    Text("Saved \(QuietDate.saved(savedCopy.savedAt))")
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        .accessibilityLabel("Offline copy, saved \(savedCopy.savedAt.formatted(date: .abbreviated, time: .shortened))")
+                        .accessibilityIdentifier("offline-copy-date")
+                }
+            }
             if lease != nil || share != nil {
                 ToolbarItem(placement: .primaryAction) {
                     Button("Share Original", systemImage: "square.and.arrow.up") {
@@ -371,18 +403,10 @@ struct OfflineReaderView: View {
                     .accessibilityHint("Shares the saved file’s original bytes")
                 }
             }
-            if case .text = preview, [.markdown, .html, .svg].contains(kind) {
-                ToolbarItem(placement: .primaryAction) { Toggle("Source", isOn: $source) }
-            }
             if case .text = preview {
-                ToolbarItem(placement: .primaryAction) {
-                    Menu {
-                        Button(findTitle, systemImage: "magnifyingglass") { startFind() }
-                        if navigation.index?.headings.isEmpty == false {
-                            Button("Headings", systemImage: "list.bullet.indent") { headingsPresented = true }
-                        }
-                    } label: { Label("Document actions", systemImage: "ellipsis.circle") }
-                }
+                ReaderBottomBar(findTitle: findTitle, find: startFind,
+                                headings: navigation.index?.headings.isEmpty == false ? { headingsPresented = true } : nil,
+                                source: [.markdown, .html, .svg].contains(kind) ? $source : nil)
             }
         }
         .background(alignment: .topTrailing) {

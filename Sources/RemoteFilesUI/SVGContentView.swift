@@ -25,7 +25,7 @@ struct SVGContentView: View {
                 if !loaded { ProgressView("Preparing image…") }
             } else { ProgressView("Preparing image…") }
         }
-        .task(id: Data(text.utf8)) {
+        .task(id: ExactText(text: text)) {
             prepared = nil; rules = nil; error = nil; loaded = false
             do {
                 let svg = try await SVGPreparation.shared.prepare(text)

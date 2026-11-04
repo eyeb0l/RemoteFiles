@@ -16,7 +16,7 @@ public struct RemoteFilesRootView: View {
             if let model { AppNavigation(model: model) }
             else if let startupError {
                 ContentUnavailableView("Library unavailable", systemImage: "exclamationmark.folder", description: Text(startupError))
-            } else { ProgressView("Opening library…") }
+            } else { LoadingPlaceholder(label: "Opening library…") }
         }
         .privacySensitive()
         .task {
@@ -98,13 +98,14 @@ struct RootWindowPrivacyInstaller: UIViewRepresentable {
             shield.accessibilityViewIsModal = true
 
             let image = UIImageView(image: UIImage(systemName: "lock.fill"))
-            image.tintColor = .systemIndigo
+            image.tintColor = .tertiaryLabel
             image.contentMode = .scaleAspectFit
-            image.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 36, weight: .semibold)
+            image.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 28, weight: .regular)
             let label = UILabel()
             label.text = "RemoteFiles Locked"
-            label.textColor = .systemIndigo
-            label.font = .preferredFont(forTextStyle: .headline)
+            label.textColor = .secondaryLabel
+            label.font = .preferredFont(forTextStyle: .subheadline)
+            label.adjustsFontForContentSizeCategory = true
             let stack = UIStackView(arrangedSubviews: [image, label])
             stack.axis = .vertical; stack.alignment = .center; stack.spacing = 12
             stack.translatesAutoresizingMaskIntoConstraints = false
@@ -175,13 +176,14 @@ struct AppNavigation: View {
             } else {
                 NavigationStack(path: $model.routes) {
                     HomeView(model: model)
+                        .listStyle(.plain)
                         .navigationDestination(for: AppModel.Route.self) { route in
                             RouteDestination(model: model, route: route)
                         }
                 }
             }
         }
-        .tint(.indigo)
+        .tint(RemoteFilesStyle.accent)
         .disabled(model.isDisconnecting)
         // A sheet publishes its own navigation, if it has any.
         .focusedSceneValue(\.navigationCommands, model.sheet == nil && !model.isDisconnecting ? navigationCommands : nil)
@@ -205,8 +207,9 @@ struct AppNavigation: View {
                 }
             }
             .safeAreaInset(edge: .bottom) { OfflinePinProgress(model: model) }
+            .tint(RemoteFilesStyle.accent)
         }
-        .alert("RemoteFiles", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
+        .alert("Something went wrong", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK") { model.errorMessage = nil }
         } message: { Text(model.errorMessage ?? "") }
     }
@@ -323,7 +326,7 @@ private struct IPadWorkspace: View {
                             }
                         }
                 } else {
-                    ContentUnavailableView("Choose a folder", systemImage: "folder", description: Text("Select a connection or favourite from the library."))
+                    ContentUnavailableView("Choose a folder", systemImage: "folder", description: Text("Pick a connection or favourite."))
                 }
             }
             .environment(\.workspaceNavigation, openFromFolder)
@@ -335,8 +338,8 @@ private struct IPadWorkspace: View {
                 if let file = model.workspaceFile {
                     RouteDestination(model: model, route: file).id(file)
                 } else {
-                    ContentUnavailableView("Choose a file", systemImage: "doc.text", description: Text("Open a file to read it alongside its folder."))
-                        .navigationTitle("Preview")
+                    ContentUnavailableView("Choose a file", systemImage: "doc.text", description: Text("It opens here, beside its folder."))
+                        .navigationTitle("")
                 }
             }
             .environment(\.workspaceNavigation, { model.openInWorkspace($0) })
@@ -363,88 +366,97 @@ private struct IPadWorkspace: View {
     }
 }
 
+/// Kept small and apart from Home, so a download's progress redraws only this.
+private struct DownloadsBarButton: View {
+    let model: AppModel
+    private var active: Int {
+        model.downloads?.items.filter { $0.state == .queued || $0.state == .downloading }.count ?? 0
+    }
+    var body: some View {
+        Button { model.sheet = .downloads } label: {
+            BarLabel(title: active > 0 ? "Downloads · \(active)" : "Downloads", symbol: "arrow.down.circle")
+        }
+        .accessibilityLabel(active > 0 ? "Downloads, \(active) in progress" : "Downloads")
+        .accessibilityIdentifier("download-manager")
+    }
+}
+
 struct HomeView: View {
     @Bindable var model: AppModel
-    private var demoIndicator: some View {
-        Label("Demo workspace · sample files", systemImage: "sparkles")
-            .font(.caption).foregroundStyle(.indigo)
-            .textCase(nil)
+    /// Connection names only help tell servers apart when there's more than one.
+    private var showsConnectionNames: Bool { model.metadata.connections.count > 1 }
+    private func state(_ profile: ConnectionProfile) -> (label: String, color: Color?) {
+        switch model.connectionStates[profile.id] {
+        case "Connected": return ("Connected", .green)
+        case "Connecting…": return ("Connecting…", .orange)
+        default: return ("Disconnected", nil)
+        }
     }
     var body: some View {
         List {
-            Section {
-                Button { model.sheet = .offlineFiles } label: {
-                    LocationRow(name: "Offline Files", subtitle: "\(model.offlinePins.count) files · \(model.offlineFolders.count) folders saved", symbol: "pin.fill", color: .indigo)
-                }
-                .accessibilityIdentifier("offline-library")
-                Button { model.sheet = .downloads } label: {
-                    LocationRow(name: "Downloads", subtitle: "Original files and transfer progress", symbol: "arrow.down.circle", color: .indigo)
-                }.accessibilityIdentifier("download-manager")
-            }
             if model.metadata.connections.isEmpty {
                 Section {
-                    VStack(spacing: 16) {
-                        Image(systemName: "folder.badge.plus")
-                            .font(.system(size: 44)).foregroundStyle(.secondary)
+                    VStack(spacing: 14) {
+                        Image(systemName: "externaldrive.connected.to.line.below")
+                            .font(.system(size: 36, weight: .light)).foregroundStyle(.secondary)
                             .accessibilityHidden(true)
-                        Text("Browse your remote files").font(.title2.bold())
-                        Text("Add an SFTP connection to browse folders and open files.")
-                            .foregroundStyle(.secondary)
+                        VStack(spacing: 6) {
+                            Text("Browse your remote files").font(.title3.weight(.semibold))
+                            Text("Connect to a server you control. Read-only over SFTP.")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        }
                         Button("Add Connection", systemImage: "plus") { model.sheet = .connection(nil) }
                             .buttonStyle(.borderedProminent)
                             .fixedSize(horizontal: false, vertical: true)
+                            .padding(.top, 4)
                     }
                     .multilineTextAlignment(.center)
-                    .padding(.vertical, 24)
+                    .padding(.vertical, 40)
                     .frame(maxWidth: .infinity)
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
                 }
             }
             if !model.metadata.favourites.isEmpty {
-                Section {
+                Section("Favourites") {
                     ForEach(model.metadata.favourites) { location in
+                        let server = model.profile(location.connectionID)?.name ?? "Server"
                         WorkspaceLink(route: AppModel.Route.folder(location.connectionID, location.path)) {
-                            LocationRow(name: location.name, subtitle: "\(model.profile(location.connectionID)?.name ?? "Server") · \(location.path)", symbol: "folder.fill", color: .indigo)
+                            LocationRow(name: location.name, subtitle: "\(server) · \(location.path)", symbol: "folder.fill",
+                                        color: RemoteFilesStyle.accent,
+                                        visibleSubtitle: showsConnectionNames ? "\(server) · \(location.path)" : location.path)
                         }
-                    }
-                } header: {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if model.demo {
-                            demoIndicator
-                        }
-                        Text("Favourites")
                     }
                 }
             }
-            Section {
-                ForEach(model.metadata.connections) { profile in
-                    WorkspaceLink(route: AppModel.Route.folder(profile.id, profile.startingDirectory)) {
-                        LocationRow(name: profile.name, subtitle: "\(profile.host) · \(model.connectionStates[profile.id] ?? "Disconnected")", symbol: "server.rack", color: .secondary)
-                    }
-                    .contextMenu {
-                        if !model.demo {
-                            Button("Edit Connection", systemImage: "pencil") { model.sheet = .connection(profile.id) }
-                            Button("Delete Connection", systemImage: "trash", role: .destructive) { Task { await model.removeConnection(profile) } }
+            if !model.metadata.connections.isEmpty {
+                Section("Connections") {
+                    ForEach(model.metadata.connections) { profile in
+                        let state = state(profile)
+                        WorkspaceLink(route: AppModel.Route.folder(profile.id, profile.startingDirectory)) {
+                            LocationRow(name: profile.name, subtitle: "\(profile.host) · \(state.label)", symbol: "server.rack",
+                                        visibleSubtitle: state.color == nil ? profile.host : "\(profile.host) · \(state.label)",
+                                        statusColor: state.color)
                         }
-                        Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnectAndGoHome() } }
+                        .contextMenu {
+                            if !model.demo {
+                                Button("Edit Connection", systemImage: "pencil") { model.sheet = .connection(profile.id) }
+                                Button("Delete Connection", systemImage: "trash", role: .destructive) { Task { await model.removeConnection(profile) } }
+                            }
+                            Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnectAndGoHome() } }
+                        }
                     }
-                }
-                if !model.metadata.connections.isEmpty && !model.demo {
-                    Button("Add Connection", systemImage: "plus") { model.sheet = .connection(nil) }
-                }
-            } header: {
-                VStack(alignment: .leading, spacing: 8) {
-                    if model.demo && model.metadata.favourites.isEmpty {
-                        demoIndicator
-                    }
-                    Text("Connections")
                 }
             }
             if !model.metadata.recents.isEmpty {
                 Section("Recently opened") {
                     ForEach(model.metadata.recents) { location in
+                        let server = model.profile(location.connectionID)?.name ?? "Server"
                         WorkspaceLink(route: AppModel.Route.file(location.connectionID, .init(name: location.name, path: location.path, kind: .file))) {
-                            LocationRow(name: location.name, subtitle: model.profile(location.connectionID)?.name ?? "Server", symbol: "doc.text", color: .secondary)
+                            LocationRow(name: location.name, subtitle: server, symbol: FileSymbol.name(forFilename: location.name),
+                                        visibleSubtitle: showsConnectionNames ? server : .some(nil))
                         }
+                        .navigationLinkIndicatorVisibility(.hidden)
                         .accessibilityIdentifier("recent-\(location.id.uuidString)")
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button("Remove from Recents", systemImage: "clock.badge.xmark", role: .destructive) {
@@ -457,51 +469,38 @@ struct HomeView: View {
                     }
                 }
             }
-            Section {
-                Label("Read-only access over SFTP.", systemImage: "lock.shield").font(.footnote).foregroundStyle(.secondary)
-            }.listRowBackground(Color.clear)
+        }
+        // First navigation resolves many types at once; do what can be done ahead, away from
+        // the main thread, as soon as the library has had its own first layout.
+        .task {
+            try? await Task.sleep(for: .milliseconds(400))
+            if !Task.isCancelled { ReaderWarmUp.start() }
         }
         .navigationTitle("RemoteFiles")
+        .navigationSubtitle(model.demo ? "Demo workspace · sample files" : "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if !model.demo && !model.metadata.connections.isEmpty {
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Add Connection", systemImage: "plus") { model.sheet = .connection(nil) }
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     if !model.demo { Button("SSH Keys", systemImage: "key") { model.sheet = .keys } }
                     Button(model.demo ? "Leave Demo" : "Explore Demo", systemImage: "sparkles") { Task { await model.setDemo(!model.demo) } }
-                } label: { Label("Settings", systemImage: "ellipsis.circle") }
+                } label: { Label("Settings", systemImage: "ellipsis") }
+            }
+            ToolbarItem(placement: .bottomBar) {
+                Button { model.sheet = .offlineFiles } label: { BarLabel(title: "Offline", symbol: "pin") }
+                    .accessibilityLabel("Offline Files, \(model.offlinePins.count) files, \(model.offlineFolders.count) folders saved")
+                    .accessibilityIdentifier("offline-library")
+            }
+            ToolbarSpacer(.flexible, placement: .bottomBar)
+            ToolbarItem(placement: .bottomBar) {
+                DownloadsBarButton(model: model)
             }
         }
-    }
-}
-
-struct LocationRow: View {
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    let name: String
-    let subtitle: String
-    let symbol: String
-    var color: Color = .indigo
-    var body: some View {
-        HStack(spacing: 14) {
-            Image(systemName: symbol).font(.system(size: 20)).foregroundStyle(color).frame(width: 28)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 5) {
-                Text(name).font(.body.weight(.medium)).foregroundStyle(.primary)
-                Text(subtitle).font(.caption).foregroundStyle(.secondary)
-                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
-            }
-        }.padding(.vertical, 6).accessibilityElement(children: .combine)
-    }
-}
-
-struct StatusBanner: View {
-    let message: String
-    var error = false
-    var body: some View {
-        Label(message, systemImage: error ? "exclamationmark.circle" : "clock.arrow.circlepath")
-            .font(.footnote).foregroundStyle(error ? Color.orange : .secondary)
-            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal).padding(.vertical, 9)
-            .background(.bar)
-            .accessibilityAddTraits(.updatesFrequently)
     }
 }
 

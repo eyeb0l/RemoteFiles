@@ -4,7 +4,7 @@
 
 *Empty-account setup on the iPad simulator; no credentials or live server details are shown.*
 
-A connection can use one SSH jump host (bastion) to reach a destination that is not directly reachable from the device. In **Add/Edit Connection**, turn on **Use Jump Host**, then enter the bastion hostname, SSH port, account and identity. The server fields above it always describe the final SFTP destination. Either endpoint may use any supported imported identity, and they may use different identities or the same one.
+A connection can use one SSH jump host (bastion) to reach a destination that is not directly reachable from the device. In **Add/Edit Connection**, open **Advanced** and turn on **Use Jump Host**, then enter the bastion hostname, SSH port, account and identity. The server fields above it always describe the final SFTP destination. Either endpoint may use any supported imported identity, and they may use different identities or the same one.
 
 RemoteFiles authenticates the bastion, opens an SSH `direct-tcpip` channel, then performs a separate SSH handshake with the destination inside that channel. The destination hostname is resolved by the bastion. There is no local listening port, shell command, SSH-agent forwarding or private-key upload. The destination must provide SFTP; the bastion only needs SSH TCP forwarding (`AllowTcpForwarding local` or `yes`, with `PermitOpen` allowing the destination).
 

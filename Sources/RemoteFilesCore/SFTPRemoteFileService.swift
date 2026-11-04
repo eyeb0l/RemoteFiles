@@ -9,7 +9,7 @@ import NIOSSH
 /// Read-only SFTP adapter. The SSH connection is reused, and listings, metadata and document
 /// reads share one SFTP channel per session. Streaming downloads own a child channel, so
 /// cancelling one also releases all of its remote file handles.
-public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching, RemoteFileSessionClosing, ResumableManagedDownloading {
+public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, ServerFolderSearching, RemoteFileSessionClosing, ResumableManagedDownloading {
     private let identityStore: IdentityStore
     private let trustStore: HostTrustStore
     private let metadataStore: MetadataStore
@@ -195,28 +195,42 @@ public actor SFTPRemoteFileService: RemoteFileService, ServerFolderSearching, Re
     public func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
         let started = Date()
         let session = try await session(for: profile)
-        let result = try await perform(session: session) { sftp in
-            // REALPATH and OPENDIR go out together, saving a round trip; the server resolves both from the
-            // same path. If REALPATH fails, the cancelled listing still drains and closes its handle.
-            let requested = try Self.validated(path)
-            async let resolved = sftp.getRealPath(atPath: requested)
-            async let listed = sftp.listDirectory(atPath: requested, resolvingPath: false,
-                                                  concurrentReads: Self.directoryReadWindow)
-            let canonical = try await resolved
-            let groups = try await listed
-            let entries = groups.flatMap(\.components).filter {
-                $0.filename != "." && $0.filename != ".."
-            }.map { component in
-                Self.entry(name: component.filename,
-                           path: RemotePath.appending(component.filename, to: canonical),
-                           attributes: component.attributes)
-            }
-            let linked = try await Self.resolvingLinks(in: entries) { await Self.linkResolution(for: $0, sftp: sftp) }
-            return DirectorySnapshot(path: canonical, entries: linked)
-        }
+        let result = try await perform(session: session) { sftp in try await Self.snapshot(path, sftp: sftp) }
         measurements.directoryOperations += 1
         measurements.lastDirectorySeconds = Date().timeIntervalSince(started)
         return result
+    }
+
+    /// Lists a folder on its own SFTP channel, only over a session already open for this exact
+    /// profile. It never connects, unlocks a key or replaces another server's session, and a failure
+    /// or slow disk on the server can't retire or queue behind the channel foreground browsing uses.
+    public func listDirectoryInBackground(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot? {
+        try Task.checkCancellation()
+        guard let session = active, session.profile == profile, !session.control.isCancelled, session.client.isConnected else { return nil }
+        return try await performOnDedicatedChannel(session: session, timeout: Self.backgroundListingSeconds) { sftp in
+            try await Self.snapshot(path, sftp: sftp)
+        }
+    }
+    private static let backgroundListingSeconds: UInt64 = 10
+
+    private nonisolated static func snapshot(_ path: String, sftp: SFTPClient) async throws -> DirectorySnapshot {
+        // REALPATH and OPENDIR go out together, saving a round trip; the server resolves both from the
+        // same path. If REALPATH fails, the cancelled listing still drains and closes its handle.
+        let requested = try validated(path)
+        async let resolved = sftp.getRealPath(atPath: requested)
+        async let listed = sftp.listDirectory(atPath: requested, resolvingPath: false,
+                                              concurrentReads: directoryReadWindow)
+        let canonical = try await resolved
+        let groups = try await listed
+        let entries = groups.flatMap(\.components).filter {
+            $0.filename != "." && $0.filename != ".."
+        }.map { component in
+            entry(name: component.filename,
+                  path: RemotePath.appending(component.filename, to: canonical),
+                  attributes: component.attributes)
+        }
+        let linked = try await resolvingLinks(in: entries) { await linkResolution(for: $0, sftp: sftp) }
+        return DirectorySnapshot(path: canonical, entries: linked)
     }
 
     /// Resolves symbolic links so their rows can show and open the target directly. Each link sends

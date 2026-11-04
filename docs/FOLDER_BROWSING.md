@@ -2,7 +2,7 @@
 
 [Documentation](README.md) · [RemoteFiles](../README.md)
 
-Folders list their contents with folders first. Use **Folder actions** to refresh, show hidden files, add a favourite, or choose how the folder is sorted. The search field filters this folder, searches names in its subfolders, or searches file contents. **Search Options** adds matching filters, PDF text and on-device OCR; **Saved Search Index** builds a local text snapshot for repeated searches.
+Folders list their contents with folders first. Use **Folder actions** to refresh, show hidden files, add a favourite, or choose how the folder is sorted. The title menu lists the folder's ancestors and copies its path. The search field filters this folder, searches names in its subfolders, or searches file contents. **Search Options** adds matching filters, PDF text and on-device OCR; **Saved Search Index** builds a local text snapshot for repeated searches.
 
 A folder can contain up to 10,000 entries and 16 MiB of decoded name and attribute metadata. If it exceeds either limit, the app shows an error rather than a silently incomplete listing. Individual SFTP frames are capped at 1 MiB before their declared body is buffered.
 
@@ -11,6 +11,14 @@ A folder can contain up to 10,000 entries and 16 MiB of decoded name and attribu
 | <img src="screenshots/folder-browsing/linked-folder.jpg" width="240" alt="Current reports, a link to a folder, listed with the other folders"> | <img src="screenshots/folder-browsing/file-and-broken-links.jpg" width="240" alt="Latest report described as a link to a file, and Old notes as a broken link"> | <img src="screenshots/folder-browsing/sorted-by-size.jpg" width="240" alt="Files sorted from largest to smallest after the folders"> |
 
 *Screenshots from the demo workspace.*
+
+## Opening folders quickly
+
+While a folder is on screen, RemoteFiles lists up to six of its subfolders it doesn't already remember, one at a time, so opening one shows its rows straight away. This work uses its own SFTP channel over the session already open: it never connects, unlocks a key or replaces another server's session, and a slow or unreadable folder can't delay what you tapped. Links and hidden folders are not listed ahead. It stops at the first failure, when you open another server, and in Low Power Mode or on a network with Low Data Mode on.
+
+Up to 48 folders (40,000 names in total) are remembered in memory. A remembered folder appears immediately and is checked quietly if it was listed more than 20 seconds ago, including when you return to it: rows change only if the listing did, and a failed check changes nothing until you choose **Refresh**. An explicit **Refresh** or a reconnect shows **Updating…** if it takes more than a moment.
+
+Going to the background keeps remembered names in memory while the connection closes, so returning shows them at once while the app reconnects, and each is checked again when next shown. Names read with a passphrase-protected key are forgotten, since that key locks again. **Disconnect**, editing or deleting a connection, a memory warning, and a connection failing a host-key or key check forget them.
 
 ## Symbolic links
 
@@ -21,7 +29,7 @@ While listing a folder, RemoteFiles looks up where its symbolic links point. It 
 - **Broken link:** the target is missing or the link is part of a loop. Tapping it checks the server again, so a repaired link still opens.
 - **Unresolved link:** shown as **Symbolic link** and resolved when tapped. This covers permission errors, transport failures, and links after the first 256 in one folder.
 
-Links open their canonical target, so the path bar shows where you actually are. Like the listing itself, a resolved target can become stale; **Refresh** lists the folder and its links again. Browsing is not confined to the starting folder, and neither are files and folders you choose to download, keep offline or save: each stays within its own canonical folder. Relative document links and Markdown images, which a document chooses rather than you, keep the starting-folder check.
+Links open their canonical target, so the folder's title menu shows where you actually are. Like the listing itself, a resolved target can become stale; **Refresh** lists the folder and its links again. Browsing is not confined to the starting folder, and neither are files and folders you choose to download, keep offline or save: each stays within its own canonical folder. Relative document links and Markdown images, which a document chooses rather than you, keep the starting-folder check.
 
 ## Sorting
 

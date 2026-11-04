@@ -101,7 +101,8 @@
       while (used.has(id)) { suffix++; id = base + '-' + suffix; }
       used.add(id); suffixes.set(base,suffix+1); heading.id = id;
     }
-    mermaid.initialize({startOnLoad:false, securityLevel:'strict', suppressErrorRendering:true,
+    // Mermaid is injected only for documents that might have a diagram.
+    if (typeof mermaid !== 'undefined') mermaid.initialize({startOnLoad:false, securityLevel:'strict', suppressErrorRendering:true,
       maxTextSize:32768, maxEdges:250, htmlLabels:false, flowchart:{htmlLabels:false},
       theme:matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default'});
     let diagramCount = 0, mathCount = 0;

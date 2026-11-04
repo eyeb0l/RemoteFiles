@@ -13,6 +13,8 @@ struct EnhancedMarkdownView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @State private var scripts: [String]?
+    /// Whether `scripts` has Mermaid, decided once away from the main actor.
+    @State private var diagrams = false
     @State private var rules: WKContentRuleList?
     @State private var error: String?
     @State private var loaded = false
@@ -35,16 +37,19 @@ struct EnhancedMarkdownView: View {
                             filename: URLComponents(string: reference)?.path.split(separator: "/").last.map(String.init) ?? reference,
                             location: location, alt: alt)
                     })
+                    // Scripts are fixed when a web view is made. New text that needs others gets a new one.
+                    .id(diagrams)
                     // Run the page to the bottom edge; the web view's automatic content
                     // inset keeps the last line clear of the home indicator.
                     .ignoresSafeArea(.container, edges: .bottom)
-                if !loaded { ProgressView("Rendering Markdown…") }
-            } else { ProgressView("Preparing Markdown…") }
+                if !loaded { LoadingPlaceholder(label: "Rendering Markdown…", shape: .document) }
+            } else { LoadingPlaceholder(label: "Preparing Markdown…", shape: .document) }
         }
-        .task(id: Data(text.utf8)) {
+        .task(id: ExactText(text: text)) {
             error = nil; loaded = false
             do {
-                scripts = try await MarkdownRendererAssets.shared.load()
+                let assets = try await MarkdownRendererAssets.shared.load(for: text)
+                scripts = assets.scripts; diagrams = assets.diagrams
                 rules = try await SVGResourceBlocker.rules()
                 try Task.checkCancellation()
                 try await Task.sleep(for: .seconds(20))
@@ -60,12 +65,13 @@ struct EnhancedMarkdownView: View {
 
 private actor MarkdownRendererAssets {
     static let shared = MarkdownRendererAssets()
-    private var scripts: [String]?
-    func load() throws -> [String] {
-        if let scripts { return scripts }
-        let result = try EnhancedMarkdownPolicy.rendererScripts()
-        scripts = result
-        return result
+    private var scripts: [Bool: [String]] = [:]
+    func load(for text: String) throws -> (diagrams: Bool, scripts: [String]) {
+        let diagrams = EnhancedMarkdownPolicy.mayContainDiagram(text)
+        if let cached = scripts[diagrams] { return (diagrams, cached) }
+        let result = try EnhancedMarkdownPolicy.rendererScripts(includingDiagrams: diagrams)
+        scripts[diagrams] = result
+        return (diagrams, result)
     }
 }
 
@@ -88,7 +94,7 @@ struct EnhancedMarkdownWebView: UIViewRepresentable {
     <!doctype html><html><head><meta charset="utf-8">
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>:root{color-scheme:light dark}body{font:var(--rf-body-size,17px) -apple-system,sans-serif;-webkit-text-size-adjust:100%;margin:20px;overflow-wrap:break-word;line-height:1.5}h1,h2,h3{line-height:1.2}pre{overflow:auto;padding:12px;background:rgba(128,128,128,.12);border-radius:8px}code{font-family:ui-monospace,monospace}table{display:block;overflow:auto;border-collapse:collapse}td,th{border:1px solid gray;padding:6px 10px}blockquote{margin-inline:0;padding-inline:16px;border-inline-start:3px solid gray}img,svg{max-width:100%;height:auto}.rf-diagram,.rf-math-display{display:block;overflow:auto;margin-block:16px}.rf-error{display:block;color:GrayText}.rf-image{display:block;border:0;border-radius:8px;padding:8px;width:100%;min-height:80px;background:rgba(128,128,128,.1);color:inherit;font:inherit}math{font-size:1.15em}a{color:LinkText}</style>
+    <style>:root{color-scheme:light dark}body{font:var(--rf-body-size,17px) -apple-system,sans-serif;-webkit-text-size-adjust:100%;margin:20px;overflow-wrap:break-word;line-height:1.5}main{max-width:720px;margin-inline:auto}h1,h2,h3{line-height:1.2;margin-block:1.3em .5em;font-weight:700}h1{font-size:1.65em;margin-block-start:.6em}h2{font-size:1.38em}h3{font-size:1.18em;font-weight:600}pre{overflow:auto;padding:12px 14px;background:rgba(128,128,128,.12);border-radius:12px;font-size:.86em}code{font-family:ui-monospace,monospace}table{display:block;overflow:auto;border-collapse:collapse}td,th{border:1px solid rgba(128,128,128,.35);padding:6px 10px}blockquote{margin-inline:0;padding-inline:14px;border-inline-start:3px solid rgba(128,128,128,.35);opacity:.72}img,svg{max-width:100%;height:auto}.rf-diagram,.rf-math-display{display:block;overflow:auto;margin-block:16px}.rf-error{display:block;color:GrayText}.rf-image{display:block;border:0;border-radius:8px;padding:8px;width:100%;min-height:80px;background:rgba(128,128,128,.1);color:inherit;font:inherit}math{font-size:1.15em}a{color:LinkText}</style>
     </head><body><main id="rf-content"></main></body></html>
     """
 
@@ -144,7 +150,7 @@ struct EnhancedMarkdownWebView: UIViewRepresentable {
             view.evaluateJavaScript("RemoteFilesMarkdown.resumeImages()", in: nil, in: .defaultClient) { _ in }
         }
         if !active { coordinator.cancelImages() }
-        if coordinator.source?.utf8.elementsEqual(text.utf8) != true {
+        if coordinator.source.map({ sameBytes($0, text) }) != true {
             coordinator.cancelImages(); coordinator.cancelGeometryWait(); coordinator.source = text
             coordinator.finished = false; coordinator.initialNavigation = true
             coordinator.load = view.loadHTMLString(Self.html, baseURL: nil)

@@ -1,5 +1,11 @@
 import Foundation
 
+/// Lists folders ahead of need. Returns nil when no session is open for this profile; it must never
+/// open one, because connecting to one server closes the session of another.
+public protocol BackgroundFolderListing: Sendable {
+    func listDirectoryInBackground(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot?
+}
+
 /// Shares an in-flight request for the same resource. Cancellation retires the shared request;
 /// all its waiters observe cancellation, and the next explicit request starts fresh work.
 public actor CoalescingFileService: RemoteFileService {

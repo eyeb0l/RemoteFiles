@@ -56,7 +56,8 @@ extension XCUIApplication {
             XCTAssertTrue(utterances.contains { $0.contains("Source") && $0.contains("Button") })
             capture("VoiceOver SVG rendered preview", app)
             // Stay in VoiceOver so switching modes keeps an established focus.
-            try focus("Source Button", name: "svg source", limit: 20, backward: true)
+            // The reading modes sit in the bottom bar, after the document.
+            try focus("Source Button", name: "svg source", limit: 20)
             app.buttons["Source"].doubleTap()
             XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 10))
             let source = try speech("SVG SOURCE", limit: 15)
@@ -250,7 +251,7 @@ extension XCUIApplication {
             XCTAssertFalse(source.contains { $0.localizedCaseInsensitiveContains("double-tap to edit") })
             try focus("Rendered", name: "rendered", limit: 20, backward: true)
             app.buttons["Rendered"].doubleTap()
-            try focus("Document actions", name: "actions", limit: 20, backward: true)
+            try focus("Document actions", name: "actions", limit: 90, backward: true)
             app.buttons["Document actions"].doubleTap()
             _ = try speech("ACTIONS", limit: 12)
             capture("VoiceOver document actions", app)
@@ -349,7 +350,7 @@ extension XCUIApplication {
             XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 10))
             let refreshing = try speech("REFRESHING", limit: 7)
             capture("VoiceOver cached reader refreshing", app)
-            XCTAssertTrue(refreshing.contains { $0.contains("Previously loaded copy") && $0.contains("refreshing") })
+            XCTAssertTrue(refreshing.contains { $0.contains("Updating") })
             let banner = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Too Large to Preview")).firstMatch
             XCTAssertTrue(banner.waitForExistence(timeout: 18))
             for _ in 0..<8 { _ = try service.moveBackward() }

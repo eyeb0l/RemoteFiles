@@ -117,6 +117,14 @@ Local changes:
   release, staying active while a selection moves between regions, and ending
   on cancellation.
 
+- `OverflowGeometryCache.swift`: reading-anchor corrections measure from the top of
+  the document's content rather than offset zero, so an anchor near the top keeps
+  its position when the scroll view runs under the navigation bar, and is no
+  longer clamped below its inset.
+- `WithInlineStyle.swift`: link colour no longer overrides a revealed match's colour.
+- `NavigationTarget.swift`: revealing a target keeps it clear of the scroll view's
+  adjusted content insets, so a heading or Find match doesn't land under a bar.
+
 Before/after evidence and limitations are recorded in
 `../../docs/READER_PERFORMANCE.md`. Keep this fork small and return to the pinned
 upstream package when an equivalent verified fix is available.

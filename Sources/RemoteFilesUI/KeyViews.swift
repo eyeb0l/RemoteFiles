@@ -27,16 +27,15 @@ struct KeyManagerView: View {
                     NavigationLink {
                         IdentityDetailsView(model: model, identity: identity)
                     } label: {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(identity.name).font(.headline)
-                            Text("\(identity.algorithmName) · \(identity.requiresPassphrase ? "Passphrase protected" : "Device Keychain")")
-                                .font(.subheadline).foregroundStyle(.secondary)
-                        }.padding(.vertical, 3)
+                        LocationRow(name: identity.name,
+                                    subtitle: "\(identity.algorithmName) · \(identity.requiresPassphrase ? "Passphrase protected" : "Device Keychain")",
+                                    symbol: "key")
                     }
                 }
             }
         }
         .navigationTitle("SSH Keys")
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if case .keys = model.sheet {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { model.sheet = nil } }

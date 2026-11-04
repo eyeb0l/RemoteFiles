@@ -2,6 +2,7 @@
 import SwiftUI
 import RemoteFilesCore
 import UIKit
+import Textual
 
 struct ReaderView: View {
     @Environment(\.workspaceNavigation) private var workspaceNavigate
@@ -13,7 +14,9 @@ struct ReaderView: View {
     @AppStorage("readerWrapLines") private var wrapLines = true
     @State private var imageVersion = 0
     @State private var lastImageRefresh = 0
-    @State private var loading = false
+    /// Starts true so the first frame is the placeholder, not the failure view.
+    @State private var loading = true
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @State private var error: String?
     @State private var refreshID = 0
     @State private var requestID = UUID()
@@ -46,77 +49,91 @@ struct ReaderView: View {
         let active: Bool
     }
     var body: some View {
-        VStack(spacing: 0) {
-            if hasRenderedMode {
-                Picker("Reading mode", selection: $source) {
-                    Text("Rendered").tag(false)
-                    Text("Source").tag(true)
-                }.pickerStyle(.segmented).padding(.horizontal).padding(.vertical, 8)
-            }
-            if navigation.isFinding { ReaderFindBar(navigation: navigation, inSource: showsSource) }
-            if openingLink {
-                HStack {
-                    ProgressView()
-                    Text("Opening linked file…").font(.callout)
-                    Spacer()
-                    Button("Cancel") { cancelLink() }
-                }.padding(.horizontal).padding(.vertical, 8)
-            }
-            if !isMedia {
-                if let error { StatusBanner(message: preview == nil ? error : "Previously loaded copy · \(error)", error: true) }
-                else if loading && preview != nil { StatusBanner(message: "Previously loaded copy · refreshing…") }
-            }
-            Group {
-                if isMedia {
-                    RemoteMediaView(model: model, profile: profile, entry: entry,
-                                    kind: DocumentPolicy.kind(filename: entry.name), refreshID: refreshID,
-                                    readingPosition: readingPosition)
-                } else if let preview, model.isForeground {
-                    switch preview {
-                    case .text(let text, let markdown): DocumentContentView(text: text, markdown: markdown, source: source, filename: entry.name, location: .init(profile: profile, path: entry.path, canonicalRoot: entry.canonicalRoot), resolver: model.resources, readingPosition: readingPosition, openDocumentLink: openLink, wrapLines: wrapLines, navigation: navigation).id(ContentIdentity(revision: contentRevision, images: imageVersion))
-                    case .empty: ContentUnavailableView("This file is empty", systemImage: "doc", description: Text("Refresh after it has been updated on the server."))
-                    case .unsupportedFileType: infoView("Preview not available", detail: "This file type is not supported for preview.")
-                    case .unsupportedEncodingOrBinary: infoView("Can’t display this file", detail: "This file contains binary data or text that is not UTF-8.")
-                    case .tooLarge: infoView("Too Large to Preview", detail: "The document exceeds the 2 MiB preview limit.")
-                    }
-                } else if loading {
-                    ProgressView("Reading document…").frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    ContentUnavailableView {
-                        Label("Couldn’t read document", systemImage: "doc.badge.ellipsis")
-                    } description: { Text("You can return to the folder or try again.") }
-                    actions: { Button("Try Again") { refreshID += 1 }.buttonStyle(.bordered) }
+        Group {
+            if isMedia {
+                RemoteMediaView(model: model, profile: profile, entry: entry,
+                                kind: DocumentPolicy.kind(filename: entry.name), refreshID: refreshID,
+                                readingPosition: readingPosition)
+            } else if let preview, model.isForeground {
+                switch preview {
+                case .text(let text, let markdown): DocumentContentView(text: text, markdown: markdown, source: source, filename: entry.name, location: .init(profile: profile, path: entry.path, canonicalRoot: entry.canonicalRoot), resolver: model.resources, readingPosition: readingPosition, openDocumentLink: openLink, wrapLines: wrapLines, navigation: navigation).id(ContentIdentity(revision: contentRevision, images: imageVersion))
+                    .textual.structuredTextStyle(.reader)
+                    .transition(.opacity)
+                case .empty: ContentUnavailableView("This file is empty", systemImage: "doc", description: Text("Refresh after it has been updated on the server."))
+                case .unsupportedFileType: infoView("Preview not available", detail: "This file type is not supported for preview.")
+                case .unsupportedEncodingOrBinary: infoView("Can’t display this file", detail: "This file contains binary data or text that is not UTF-8.")
+                case .tooLarge: infoView("Too Large to Preview", detail: "The document exceeds the 2 MiB preview limit.")
                 }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if loading {
+                LoadingPlaceholder(label: "Reading document…", shape: .document)
+            } else {
+                ContentUnavailableView {
+                    Label("Couldn’t read document", systemImage: "doc.badge.ellipsis")
+                } description: { Text(error ?? "You can return to the folder or try again.") }
+                actions: { Button("Try Again") { refreshID += 1 }.buttonStyle(.bordered) }
+            }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(RemoteFilesStyle.contentFade, value: preview == nil)
+        .safeAreaBar(edge: .top, spacing: 0) {
+            VStack(spacing: 0) {
+                if navigation.isFinding { ReaderFindBar(navigation: navigation, inSource: showsSource) }
+                if openingLink {
+                    HStack {
+                        ProgressView().controlSize(.small)
+                        Text("Opening linked file…").font(.footnote).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Cancel") { cancelLink() }.font(.footnote)
+                    }.padding(.horizontal, 20).padding(.vertical, 8)
+                }
+            }
+        }
+        .contentStatus(progress: !isMedia && preview != nil && loading ? "Updating…" : nil,
+                       failure: !isMedia && preview != nil ? error.map { "Previously loaded copy · \($0)" } : nil,
+                       retry: { refreshID += 1 })
         .background(Color(uiColor: .systemBackground))
         .navigationTitle(entry.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Button("Refresh", systemImage: "arrow.clockwise") { refreshID += 1 }
-                    OfflinePinActions(model: model, profile: profile, entry: entry)
+                    Section {
+                        Button("Refresh", systemImage: "arrow.clockwise") { refreshID += 1 }
+                        OfflinePinActions(model: model, profile: profile, entry: entry)
+                    }
                     if case .text(let text, _) = preview {
-                        Button(findTitle, systemImage: "magnifyingglass") { startFind() }
-                        if navigation.index?.headings.isEmpty == false {
-                            Button("Headings", systemImage: "list.bullet.indent") { headingsPresented = true }
-                        }
-                        if showsSource {
-                            if SourceLayout.needsBoundedLayout(text) {
-                                Label("Long documents always wrap", systemImage: "arrow.turn.down.left")
-                            } else {
-                                Toggle("Wrap Lines", systemImage: "arrow.turn.down.left", isOn: $wrapLines)
+                        // VoiceOver reaches the bottom bar after the whole document; these are a shortcut.
+                        if voiceOverEnabled {
+                            Section {
+                                Button(findTitle, systemImage: "magnifyingglass") { startFind() }
+                                if navigation.index?.headings.isEmpty == false {
+                                    Button("Headings", systemImage: "list.bullet.indent") { headingsPresented = true }
+                                }
                             }
                         }
-                        Button(copied ? "Source Copied" : "Copy Source", systemImage: "doc.on.doc") { SourceClipboard.copy(text); copied = true }
+                        Section {
+                            if showsSource {
+                                if SourceLayout.needsBoundedLayout(text) {
+                                    Label("Long documents always wrap", systemImage: "arrow.turn.down.left")
+                                } else {
+                                    Toggle("Wrap Lines", systemImage: "arrow.turn.down.left", isOn: $wrapLines)
+                                }
+                            }
+                            Button(copied ? "Source Copied" : "Copy Source", systemImage: copied ? "checkmark" : "doc.on.doc") { SourceClipboard.copy(text); copied = true }
+                        }
                     }
-                    if let loadedAt { Text("Loaded \(loadedAt.formatted(date: .omitted, time: .shortened))") }
-                    Text(profile.name)
-                    Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnectAndGoHome() } }
-                } label: { Label("Document actions", systemImage: "ellipsis.circle") }
+                    Section(loadedAt.map { "Loaded \($0.formatted(date: .omitted, time: .shortened)) · \(profile.name)" } ?? profile.name) {
+                        Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnectAndGoHome() } }
+                    }
+                } label: { Label("Document actions", systemImage: "ellipsis") }
+            }
+            if case .text = preview {
+                ReaderBottomBar(findTitle: findTitle, find: startFind,
+                                headings: navigation.index?.headings.isEmpty == false ? { headingsPresented = true } : nil,
+                                source: hasRenderedMode ? $source : nil)
             }
         }
+        .sensoryFeedback(.success, trigger: copied) { _, now in now }
         .modifier(OriginalFileExportControl(profile: profile, entry: entry.selectedForTransfer, allowedRoot: entry.selectionRoot,
                                             exporter: model.originalExporter, isEnabled: model.isForeground && !model.isDisconnecting,
                                             onError: { error in
@@ -289,10 +306,11 @@ struct ReaderView: View {
         await reload()
     }
     private func reload() async {
-        guard !model.isDisconnecting else { return }
+        guard !model.isDisconnecting else { loading = false; return }
         guard !isMedia else { return }
         guard model.isForeground else { loading = false; error = "Connection paused while the app is in the background."; return }
-        guard DocumentPolicy.kind(filename: entry.name) != .unsupported else { preview = .unsupportedFileType; return }
+        guard DocumentPolicy.kind(filename: entry.name) != .unsupported else { preview = .unsupportedFileType; loading = false; return }
+        model.noteForegroundConnection(profile.id)
         // Opening, returning to the foreground and unlocking revalidate; an explicit Refresh always reads.
         let explicitRefresh = lastRefreshID >= 0 && lastRefreshID != refreshID
         let token = UUID(); requestID = token

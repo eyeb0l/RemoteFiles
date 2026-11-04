@@ -168,7 +168,11 @@ struct NavigationRevealBridge: UIViewRepresentable {
       geometryCache?.cancelAnchor()
       // Work from the innermost horizontal viewport to the outer document.
       for scroll in ancestors {
-        let rect = convert(target, to: scroll).insetBy(dx: -12, dy: -20)
+        // The document can run under translucent bars; keep the target clear of them, too.
+        let inset = scroll.adjustedContentInset
+        var rect = convert(target, to: scroll).insetBy(dx: -12, dy: -20)
+        rect.origin.y -= inset.top
+        rect.size.height += inset.top + inset.bottom
         scroll.scrollRectToVisible(rect, animated: false)
       }
       if stageOnly { coordinator.stage(id) } else { coordinator.finish(id) }

@@ -62,7 +62,7 @@ public struct DocumentContentView: View {
             position.overflowGeometry.clearLayoutCache()
         }
         #endif
-        .task(id: markdown ? text : "") {
+        .task(id: ExactText(text: markdown ? text : "")) {
             await prepareMarkdownIfNeeded()
         }
         .onChange(of: dynamicTypeSize) { _, _ in
@@ -141,9 +141,15 @@ public struct DocumentContentView: View {
                             ContentUnavailableView("Rendered Preview Unavailable", systemImage: "doc.text",
                                                    description: Text("Use Source to read or copy this document."))
                         } else {
+                            #if os(iOS)
+                            LoadingPlaceholder(label: "Preparing document…", shape: .document)
+                                .padding(-20)
+                                .frame(minHeight: 280, alignment: .top)
+                            #else
                             ProgressView("Preparing document…")
                                 .frame(maxWidth: .infinity)
                                 .padding(.top, 32)
+                            #endif
                         }
                     }
                     #if os(iOS)
@@ -151,7 +157,9 @@ public struct DocumentContentView: View {
                         deferInitialOffscreenContent: deferInitialOverflow, geometryCache: position.overflowGeometry)
                     #endif
                     .padding(20)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    // A wide iPad window keeps lines at a comfortable length.
+                    .frame(maxWidth: 760, alignment: .leading)
+                    .frame(maxWidth: .infinity)
                 }
                 .modifier(DocumentScrollPreservation(saved: $position.rendered, ready: prepared != nil,
                                                      overflowGeometry: position.overflowGeometry,

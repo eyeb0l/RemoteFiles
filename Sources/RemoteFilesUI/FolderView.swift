@@ -2,11 +2,37 @@
 import SwiftUI
 import RemoteFilesCore
 
+/// One symbol per kind of file, shared by folders, recents and the offline library.
+enum FileSymbol {
+    private static let code: Set<String> = [
+        "swift", "js", "jsx", "ts", "tsx", "py", "rb", "sh", "bash", "zsh", "c", "h", "cc", "cpp", "hpp", "m", "mm",
+        "rs", "go", "java", "kt", "kts", "php", "sql", "lua", "dart", "css", "scss", "less", "json", "jsonl", "yaml",
+        "yml", "toml", "xml", "diff", "patch", "graphql", "gql", "vue", "svelte",
+    ]
+    private static let archives: Set<String> = ["zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "dmg"]
+    static func name(forFilename filename: String) -> String {
+        switch DocumentPolicy.kind(filename: filename) {
+        case .markdown, .html, .pdf, .svg: return "doc.richtext"
+        case .image: return "photo"
+        case .video: return "film"
+        case .audio: return "waveform"
+        case .plainText, .unsupported:
+            let suffix = (filename as NSString).pathExtension.lowercased()
+            if code.contains(suffix) { return "chevron.left.forwardslash.chevron.right" }
+            if archives.contains(suffix) { return "archivebox" }
+            return "doc.text"
+        }
+    }
+}
+
 struct FolderRow: Identifiable, Sendable {
     let entry: RemoteEntry
+    /// What VoiceOver and search results say about the row.
     let subtitle: String
     let symbol: String
     var id: String { entry.path }
+    /// A plain folder's icon already says "Folder", so its row shows only the name.
+    var visibleSubtitle: String? { subtitle == "Folder" ? nil : subtitle }
 
     init(_ entry: RemoteEntry) {
         self.entry = entry
@@ -34,14 +60,7 @@ struct FolderRow: Identifiable, Sendable {
         case .directory: return ("folder.fill", [])
         case .symlink: return ("link", [])
         case .file, .other:
-            let symbol: String
-            switch DocumentPolicy.kind(filename: entry.name) {
-            case .markdown, .html, .pdf, .svg: symbol = "doc.richtext"
-            case .image: symbol = "photo"
-            case .video: symbol = "film"
-            case .audio: symbol = "waveform"
-            case .plainText, .unsupported: symbol = "doc.text"
-            }
+            let symbol = FileSymbol.name(forFilename: entry.name)
             var details: [String] = []
             if let size = entry.size { details.append(ByteCountFormatter.string(fromByteCount: Int64(clamping: size), countStyle: .file)) }
             if let date = entry.modifiedAt { details.append(date.formatted(date: .abbreviated, time: .omitted)) }
@@ -191,8 +210,12 @@ struct FolderView: View {
     let requestedPath: String
     @State private var listing: FolderListing?
     @State private var visible: [FolderRow]
+    /// Changes with `visible`, so its list compares in constant time.
+    @State private var visibleRevision = 0
+    @State private var favouriteToggles = 0
     @State private var error: String?
-    @State private var loading = false
+    /// Starts true without a remembered listing, so the first frame isn't the failure view.
+    @State private var loading: Bool
     @State private var showHidden = false
     @State private var filter = ""
     @State private var sortOrder: FolderSortOrder
@@ -225,48 +248,57 @@ struct FolderView: View {
         let cached = model.cachedListing(profile.id, path: requestedPath)
         let order = cached.map { model.folderSortOrder(profile.id, path: $0.path) } ?? .name
         _listing = State(initialValue: cached)
-        _visible = State(initialValue: cached?.visible(query: "", showHidden: false, order: order) ?? [])
+        _loading = State(initialValue: cached == nil)
+        // Views are made often, so this stays constant time. Another sort follows away from the main actor.
+        _visible = State(initialValue: cached?.defaultRows ?? [])
         _sortOrder = State(initialValue: order)
-        _appliedSortOrder = State(initialValue: order)
+        _appliedSortOrder = State(initialValue: .name)
         _lastSessionRevision = State(initialValue: model.sessionRevision)
     }
     var path: String { listing?.path ?? requestedPath }
+    private var folderEmpty: (title: String, symbol: String, detail: String) {
+        filter.isEmpty ? ("This folder is empty", "folder", "Pull down to check for new files.")
+            : ("No matching names", "magnifyingglass", "Filtering names in this folder only.")
+    }
     var body: some View {
-        VStack(spacing: 0) {
-            pathBar
-            if searchScope == .contents {
-                Text(extraction.includePDF || extraction.includeOCR
-                     ? "Search text, selected PDFs and images locally. Up to 2 MB per file, 20 PDF pages and 16 MB per search."
-                     : "Search text in this folder and subfolders. Up to 256 KB per file and 16 MB per search.")
-                    .font(.caption).foregroundStyle(.secondary).padding(.horizontal).padding(.vertical, 6)
-            }
-            if let error { StatusBanner(message: listing == nil ? error : "Previously loaded folder · \(error)", error: true) }
-            else if loading && listing != nil { StatusBanner(message: "Showing cached folder · refreshing…") }
+        Group {
             if loading && listing == nil {
-                ProgressView("Connecting and opening folder…").frame(maxWidth: .infinity, maxHeight: .infinity)
+                LoadingPlaceholder(label: "Connecting and opening folder…")
             } else if listing == nil {
                 ContentUnavailableView {
                     Label("Couldn’t open folder", systemImage: "folder.badge.questionmark")
-                } description: { Text("Check the connection, then try again.") }
+                } description: { Text(error ?? "Check the connection, then try again.") }
                 actions: { Button("Try Again") { refreshID += 1 }.buttonStyle(.bordered) }
             } else if searchingSubfolders {
                 subfolderResults
             } else {
-                followingKeyboardSelection {
-                List {
-                    if visible.isEmpty {
-                        ContentUnavailableView(filter.isEmpty ? "This folder is empty" : "No matching names", systemImage: filter.isEmpty ? "folder" : "magnifyingglass", description: Text(filter.isEmpty ? "Pull down to check for new files." : "Filtering names in this folder only."))
-                            .listRowSeparator(.hidden)
-                    }
-                    ForEach(visible) { row in link(for: row, subtitle: row.subtitle) }
+                FolderRowList(rows: visible, revision: visibleRevision, selection: keyboardSelection, resolving: resolving,
+                              empty: visible.isEmpty ? folderEmpty : nil, refresh: { await reload() }) { row in
+                    link(for: row, subtitle: row.subtitle, visibleSubtitle: row.visibleSubtitle)
                 }
-                .listStyle(.plain)
-                .refreshable { await reload() }
-                }
+                .equatable()
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(RemoteFilesStyle.contentFade, value: listing == nil)
+        .safeAreaBar(edge: .top, spacing: 0) {
+            if searchPresented, searchScope == .contents, searchQuery.isEmpty {
+                Text(extraction.includePDF || extraction.includeOCR
+                     ? "Searches text, selected PDFs and images on this device. Up to 2 MB per file, 20 PDF pages and 16 MB per search."
+                     : "Searches text in this folder and subfolders. Up to 256 KB per file and 16 MB per search.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20).padding(.vertical, 6)
+            }
+        }
+        // A failed first load explains itself in place.
+        .contentStatus(progress: listing != nil && loading ? "Updating…" : nil,
+                       failure: listing == nil ? nil : error.map { "Couldn’t update this folder · \($0)" },
+                       retry: { refreshID += 1 })
         .navigationTitle(RemotePath.name(of: path))
+        .navigationSubtitle(profile.name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarTitleMenu { ancestorsMenu }
         // iOS 27.2's floating search bar can intercept visible result rows after
         // keyboard dismissal. Keep search in the navigation bar.
         .searchable(text: $filter, isPresented: $searchPresented, placement: .navigationBarDrawer(displayMode: .always), prompt: searchPrompt)
@@ -279,39 +311,51 @@ struct FolderView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Button(model.isFavourite(profile.id, path: path) ? "Remove Favourite" : "Add Favourite", systemImage: model.isFavourite(profile.id, path: path) ? "star.slash" : "star") { Task { await model.favourite(profile: profile, path: path) } }.disabled(listing == nil)
-                    Button("Refresh", systemImage: "arrow.clockwise") { refreshID += 1 }
-                    Toggle("Show Hidden Files", isOn: $showHidden)
-                    Menu("Search Options", systemImage: "line.3.horizontal.decrease") {
-                        SearchOptionsControls(options: $searchOptions)
-                        Toggle("Include PDF Text", isOn: $extraction.includePDF)
-                        Toggle("Recognize Text in Images and Scans", isOn: $extraction.includeOCR)
+                    Section {
+                        Button(model.isFavourite(profile.id, path: path) ? "Remove Favourite" : "Add Favourite", systemImage: model.isFavourite(profile.id, path: path) ? "star.slash" : "star") {
+                            favouriteToggles += 1
+                            Task { await model.favourite(profile: profile, path: path) }
+                        }.disabled(listing == nil)
+                        Button("Refresh", systemImage: "arrow.clockwise") { refreshID += 1 }
                     }
-                    Button("Saved Search Index", systemImage: "doc.text.magnifyingglass") { showingSearchIndex = true }
-                        .disabled(listing == nil)
-                    if let listing {
-                        OfflineFolderPinActions(model: model, profile: profile, path: listing.path, includeHidden: showHidden)
+                    Section {
+                        Picker("Sort By", systemImage: "arrow.up.arrow.down", selection: sortSelection) {
+                            ForEach(FolderSortOrder.allCases, id: \.self) { Text($0.title).tag($0) }
+                        }.pickerStyle(.menu)
+                        Toggle("Show Hidden Files", systemImage: "eye", isOn: $showHidden)
                     }
-                    Picker("Sort By", systemImage: "arrow.up.arrow.down", selection: sortSelection) {
-                        ForEach(FolderSortOrder.allCases, id: \.self) { Text($0.title).tag($0) }
-                    }.pickerStyle(.menu)
-                    Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnectAndGoHome() } }
-                } label: { Label("Folder actions", systemImage: "ellipsis.circle") }
+                    Section {
+                        Menu("Search Options", systemImage: "line.3.horizontal.decrease") {
+                            SearchOptionsControls(options: $searchOptions)
+                            Toggle("Include PDF Text", isOn: $extraction.includePDF)
+                            Toggle("Recognize Text in Images and Scans", isOn: $extraction.includeOCR)
+                        }
+                        Button("Saved Search Index", systemImage: "doc.text.magnifyingglass") { showingSearchIndex = true }
+                            .disabled(listing == nil)
+                        if let listing {
+                            OfflineFolderPinActions(model: model, profile: profile, path: listing.path, includeHidden: showHidden)
+                        }
+                    }
+                    Section {
+                        Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnectAndGoHome() } }
+                    }
+                } label: { Label("Folder actions", systemImage: "ellipsis") }
             }
         }
-        .task(id: "\(model.isForeground)-\(model.sessionRevision)-\(refreshID)") { await reloadIfNeeded() }
+        .task(id: ReloadWork(foreground: model.isForeground, session: model.sessionRevision, refresh: refreshID)) { await reloadIfNeeded() }
         .onDisappear { resolveTask?.cancel(); resolveTask = nil }
-        .task(id: "\(filter)-\(showHidden)-\(sortOrder)-\(searchOptions)") { await updateVisible() }
+        .task(id: VisibleWork(filter: filter, showHidden: showHidden, order: sortOrder, options: searchOptions)) { await updateVisible() }
         // A saved index of this folder set to update automatically refreshes once it is old enough,
         // whether the folder was listed again or shown from the cache.
-        .task(id: "\(listing?.path ?? "")-\(loading)-\(error == nil)-\(model.isForeground)-\(model.sessionRevision)") {
-            guard let root = listing?.path, !loading, error == nil else { return }
-            await model.indexUpdates.updateIfDue(profile, root: root, model: model)
+        .task(id: SettledWork(path: listing?.path, loading: loading, failed: error != nil, foreground: model.isForeground, session: model.sessionRevision)) {
+            guard let listing, !loading, error == nil else { return }
+            if isFrontmost { model.prefetchFolders(in: listing, profile: profile) }
+            await model.indexUpdates.updateIfDue(profile, root: listing.path, model: model)
         }
         .sheet(isPresented: $showingSearchIndex) {
             SearchIndexView(model: model, profile: profile, root: path, includeHidden: showHidden).coversKeyboardCommands()
         }
-        .task(id: "\(searchOptions)-\(extraction)-\(searchScope)-\(filter)-\(showHidden)-\(listing?.path ?? "")-\(model.isForeground)-\(model.sessionRevision)-\(lastRefreshID)") {
+        .task(id: SearchWork(options: searchOptions, extraction: extraction, scope: searchScope, filter: filter, showHidden: showHidden, path: listing?.path, foreground: model.isForeground, session: model.sessionRevision, refresh: lastRefreshID)) {
             await searchSubfolders()
         }
         .task {
@@ -320,6 +364,18 @@ struct FolderView: View {
             if !Task.isCancelled { ReaderWarmUp.start() }
         }
         .focusedSceneValue(\.folderCommands, isFrontmost ? commands : nil)
+        .sensoryFeedback(.selection, trigger: favouriteToggles)
+        // A search left empty returns to this folder, rather than keeping a wider scope in reserve.
+        .onChange(of: searchPresented) { _, presented in
+            if !presented, filter.isEmpty { searchScope = .folder }
+        }
+    }
+    private struct ReloadWork: Equatable { let foreground: Bool, session: Int, refresh: Int }
+    private struct VisibleWork: Equatable { let filter: String, showHidden: Bool, order: FolderSortOrder, options: SearchQueryOptions }
+    private struct SettledWork: Equatable { let path: String?, loading: Bool, failed: Bool, foreground: Bool, session: Int }
+    private struct SearchWork: Equatable {
+        let options: SearchQueryOptions, extraction: SearchExtractionOptions, scope: FolderSearchScope, filter: String
+        let showHidden: Bool, path: String?, foreground: Bool, session: Int, refresh: Int
     }
     /// The workspace always shows its folder column; a stack has only its top route on screen.
     /// A library sheet covers it; sheets it presents itself use `coversKeyboardCommands()`.
@@ -333,24 +389,22 @@ struct FolderView: View {
             context: "\(profile.id)|\(path)", refresh: { refreshID += 1 }, search: { searchPresented = true; searchFocused = true },
             toggleHidden: { showHidden.toggle() }, showsHidden: showHidden,
             enclosingFolder: path == "/" || parent == path ? nil : { model.showFolder(profile.id, path: parent) },
-            moveSelection: keyboardRows.isEmpty ? nil : { moveKeyboardSelection($0) },
-            openSelection: keyboardRows.contains(where: { $0.row.id == keyboardSelection }) ? { openKeyboardSelection() } : nil)
+            moveSelection: hasKeyboardRows ? { moveKeyboardSelection($0) } : nil,
+            openSelection: keyboardSelectionIsListed ? { openKeyboardSelection() } : nil)
     }
-    private var pathBar: some View {
-        HStack {
-            Menu {
-                let components = path.split(separator: "/")
+    /// The path's ancestors, nearest first, from the folder's title.
+    @ViewBuilder private var ancestorsMenu: some View {
+        let components = path.split(separator: "/")
+        Section(path) {
+            ForEach(Array(components.indices.dropLast().reversed()), id: \.self) { index in
+                let ancestor = "/" + components.prefix(index + 1).joined(separator: "/")
+                Button(String(components[index]), systemImage: "folder") { model.showFolder(profile.id, path: ancestor) }
+            }
+            if path != "/" {
                 Button("/", systemImage: "externaldrive") { model.showFolder(profile.id, path: "/") }
-                ForEach(0..<components.count, id: \.self) { index in
-                    let ancestor = "/" + components.prefix(index + 1).joined(separator: "/")
-                    Button(ancestor) { model.showFolder(profile.id, path: ancestor) }
-                }
-            } label: {
-                Label(path, systemImage: "folder").font(.caption).lineLimit(1).truncationMode(.middle)
-                    .frame(maxWidth: .infinity, alignment: .leading).frame(minHeight: 44)
-            }.accessibilityLabel("Remote path \(path). Browse ancestors")
-            Text(profile.name).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-        }.padding(.horizontal).background(.bar)
+            }
+        }
+        Button("Copy Path", systemImage: "doc.on.doc") { UIPasteboard.general.string = path }
     }
     /// A user's choice is remembered for this folder once its canonical path is known.
     private var sortSelection: Binding<FolderSortOrder> {
@@ -369,7 +423,7 @@ struct FolderView: View {
     }
     private var searchingSubfolders: Bool { searchScope != .folder && !searchQuery.isEmpty }
     private var subfolderResults: some View {
-        followingKeyboardSelection {
+        followingKeyboardSelection(keyboardSelection) {
         List {
             if search.rows.isEmpty, search.progress.isFinished, search.error == nil {
                 ContentUnavailableView(searchScope == .contents ? "No matching contents" : "No matching names", systemImage: "magnifyingglass", description: Text(search.summary))
@@ -381,10 +435,11 @@ struct FolderView: View {
                         Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
                     } else if !search.progress.isFinished {
                         HStack(spacing: 8) {
-                            ProgressView()
+                            ProgressView().controlSize(.small)
                             Text(searchScope == .contents ? "Searching… \(search.progress.filesSearched.formatted()) files checked"
                                  : search.progress.foldersSearched == 0 ? "Searching subfolders…"
                                  : "Searching… \(search.progress.foldersSearched.formatted()) folders")
+                                .contentTransition(.numericText())
                         }
                     } else {
                         Text(search.summary)
@@ -395,41 +450,38 @@ struct FolderView: View {
             }
         }
         .listStyle(.plain)
-        }
-    }
-    /// Scrolls `list` to keep the keyboard selection in view. The ScrollViewReader is added only once
-    /// a row is selected, so folders browsed by touch keep their list unchanged. Down and Up start at
-    /// the first and last row, so the scroll offset this resets doesn't matter.
-    @ViewBuilder private func followingKeyboardSelection(@ViewBuilder _ list: () -> some View) -> some View {
-        let list = list()
-        if keyboardSelection == nil { list } else {
-            ScrollViewReader { proxy in
-                list.onChange(of: keyboardSelection, initial: true) { _, id in if let id { proxy.scrollTo(id) } }
-            }
+        .scrollDismissesKeyboard(.immediately)
         }
     }
     /// Only the selected row gets its own background and trait; the others are left exactly as before.
-    @ViewBuilder private func link(for row: FolderRow, subtitle: String, snippet: String? = nil, page: Int? = nil) -> some View {
+    @ViewBuilder private func link(for row: FolderRow, subtitle: String, visibleSubtitle: String?? = nil, snippet: String? = nil, page: Int? = nil) -> some View {
         if keyboardSelection == row.id {
-            rowLink(for: row, subtitle: subtitle, snippet: snippet, page: page)
+            rowLink(for: row, subtitle: subtitle, visibleSubtitle: visibleSubtitle, snippet: snippet, page: page)
                 .listRowBackground(Color.accentColor.opacity(0.18))
                 .accessibilityAddTraits(.isSelected)
         } else {
-            rowLink(for: row, subtitle: subtitle, snippet: snippet, page: page)
+            rowLink(for: row, subtitle: subtitle, visibleSubtitle: visibleSubtitle, snippet: snippet, page: page)
         }
     }
-    @ViewBuilder private func rowLink(for row: FolderRow, subtitle: String, snippet: String?, page: Int?) -> some View {
+    @ViewBuilder private func rowLink(for row: FolderRow, subtitle: String, visibleSubtitle: String??, snippet: String?, page: Int?) -> some View {
         let entry = row.entry
         if let destination = entry.followingLink()?.openingPage(page) {
             // Resolved while listing: open the target directly.
-            WorkspaceLink(route: route(destination)) { entryRow(row, subtitle: subtitle, snippet: snippet) }
+            WorkspaceLink(route: route(destination)) { entryRow(row, subtitle: subtitle, visibleSubtitle: visibleSubtitle, snippet: snippet) }
+                .navigationLinkIndicatorVisibility(destination.kind == .directory ? .automatic : .hidden)
                 .contextMenu { OfflinePinActions(model: model, profile: profile, entry: destination, includeHidden: showHidden) }
         } else if entry.kind == .symlink {
             Button { resolve(entry, page: page) } label: {
-                entryRow(row, subtitle: subtitle, snippet: snippet).overlay(alignment: .trailing) { if resolving == entry.path { ProgressView() } }
-            }.disabled(resolving != nil)
+                entryRow(row, subtitle: subtitle, visibleSubtitle: visibleSubtitle, snippet: snippet)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .overlay(alignment: .trailing) { if resolving == entry.path { ProgressView() } }
+            }
+            .buttonStyle(.plain)
+            .disabled(resolving != nil)
         } else {
-            WorkspaceLink(route: route(entry.openingPage(page))) { entryRow(row, subtitle: subtitle, snippet: snippet) }
+            WorkspaceLink(route: route(entry.openingPage(page))) { entryRow(row, subtitle: subtitle, visibleSubtitle: visibleSubtitle, snippet: snippet) }
+                .navigationLinkIndicatorVisibility(entry.kind == .directory ? .automatic : .hidden)
                 .contextMenu { OfflinePinActions(model: model, profile: profile, entry: entry, includeHidden: showHidden) }
         }
     }
@@ -438,6 +490,16 @@ struct FolderView: View {
         // A link resolved while listing opens its target directly.
         if let target = entry.followingLink() { return target.openingPage(page) }
         return entry.kind == .symlink ? nil : entry.openingPage(page)
+    }
+    /// Asked on every update, so it costs nothing until a keyboard has selected a row.
+    private var keyboardSelectionIsListed: Bool {
+        guard let keyboardSelection, listing != nil else { return false }
+        return searchingSubfolders ? search.rows.contains { $0.row.id == keyboardSelection } : visible.contains { $0.id == keyboardSelection }
+    }
+    /// Whether the arrow keys have anything to move through, without building the rows.
+    private var hasKeyboardRows: Bool {
+        guard listing != nil else { return false }
+        return searchingSubfolders ? !search.rows.isEmpty : !visible.isEmpty
     }
     /// The rows on screen, in order, with the PDF page a content match opens.
     private var keyboardRows: [(row: FolderRow, page: Int?)] {
@@ -457,11 +519,15 @@ struct FolderView: View {
             resolve(selected.row.entry, page: selected.page)
         }
     }
-    private func entryRow(_ row: FolderRow, subtitle: String, snippet: String?) -> some View {
+    private func entryRow(_ row: FolderRow, subtitle: String, visibleSubtitle: String??, snippet: String?) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             LocationRow(name: row.entry.name, subtitle: subtitle, symbol: row.symbol,
-                        color: row.entry.effectiveKind == .directory ? .indigo : .secondary)
-            if let snippet { Text(snippet).font(.caption).foregroundStyle(.secondary).lineLimit(3) }
+                        color: row.entry.effectiveKind == .directory ? RemoteFilesStyle.accent : .secondary,
+                        visibleSubtitle: visibleSubtitle)
+            if let snippet {
+                Text(snippet).font(.footnote).foregroundStyle(.secondary).lineLimit(3)
+                    .padding(.leading, RemoteFilesStyle.iconColumn + 12)
+            }
         }.accessibilityElement(children: .combine)
     }
     private func route(_ entry: RemoteEntry) -> AppModel.Route {
@@ -481,21 +547,63 @@ struct FolderView: View {
                                          size: target.size, modifiedAt: target.modifiedAt,
                                          navigationRoot: target.navigationRoot, exportFilename: entry.name).openingPage(page)
                 if let workspaceNavigate { workspaceNavigate(route(routed)) } else { model.routes.append(route(routed)) }
-            } catch { if !Task.isCancelled, !model.isDisconnecting, model.sessionRevision == revision { self.error = error.localizedDescription; model.handle(error, profile: profile) } }
+            } catch {
+                guard !Task.isCancelled, !model.isDisconnecting, model.sessionRevision == revision else { return }
+                model.errorMessage = error.localizedDescription
+                model.handle(error, profile: profile)
+            }
         }
     }
     private func reloadIfNeeded() async {
-        guard listing == nil || lastSessionRevision != model.sessionRevision || lastRefreshID != refreshID else { return }
-        await reload()
+        if listing == nil || lastSessionRevision != model.sessionRevision || lastRefreshID != refreshID {
+            await reload()
+        } else if model.isForeground, !model.isListingFresh(profile.id, path: requestedPath) {
+            await revalidateQuietly()
+        }
+    }
+    /// Checks a folder that's already on screen. Nothing shows unless its rows actually changed, and
+    /// failing changes nothing; Refresh or the next connection reports what's wrong.
+    private func revalidateQuietly() async {
+        let token = requestID, revision = model.sessionRevision
+        guard !model.isDisconnecting else { return }
+        model.noteForegroundConnection(profile.id)
+        let found: DirectorySnapshot?
+        do { found = try await model.quietListing(profile, path: requestedPath) }
+        catch { return }
+        guard !Task.isCancelled, token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
+        // No session to check it over yet, so this is the moment to connect.
+        guard let found else { await reload(); return }
+        let current = listing
+        let prepared = await Task.detached(priority: .utility) { () -> FolderListing? in
+            let value = FolderListing(found)
+            return value.path == current?.path && value.rows.map(\.entry) == current?.rows.map(\.entry) ? nil : value
+        }.value
+        guard !Task.isCancelled, token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
+        guard let prepared else {
+            if let current { model.cache(current, id: profile.id, requestedPath: requestedPath) }
+            return
+        }
+        let query = filter, hidden = showHidden, order = sortOrder, options = searchOptions
+        let rows = await Task.detached(priority: .userInitiated) {
+            prepared.visible(query: query, showHidden: hidden, order: order, options: options)
+        }.value
+        guard !Task.isCancelled, token == requestID, !model.isDisconnecting, model.sessionRevision == revision,
+              query == filter, hidden == showHidden, order == sortOrder, options == searchOptions else { return }
+        sortID = UUID()
+        listing = prepared; setVisible(rows)
+        appliedFilter = query; appliedShowHidden = hidden; appliedSortOrder = order; appliedSearchOptions = options
+        model.cache(prepared, id: profile.id, requestedPath: requestedPath)
     }
     private func reload() async {
-        guard !model.isDisconnecting else { return }
+        guard !model.isDisconnecting else { loading = false; return }
         guard model.isForeground else { loading = false; error = "Connection paused while the app is in the background."; return }
         let token = UUID(); requestID = token
         let revision = model.sessionRevision
         lastSessionRevision = model.sessionRevision; lastRefreshID = refreshID
         loading = true; error = nil
-        model.connectionStates[profile.id] = "Connecting…"
+        model.noteForegroundConnection(profile.id)
+        // A check over a live connection isn't connecting again; don't flash the state on Home.
+        if model.connectionStates[profile.id] != "Connected" { model.connectionStates[profile.id] = "Connecting…" }
         do {
             let value = try await model.service.listDirectory(profile: profile, path: requestedPath)
             let prepared = await Task.detached(priority: .userInitiated) { FolderListing(value) }.value
@@ -507,7 +615,7 @@ struct FolderView: View {
             try Task.checkCancellation()
             guard token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
             sortID = UUID() // Supersede a filter task based on the previous listing.
-            listing = prepared; visible = rows
+            listing = prepared; setVisible(rows)
             appliedFilter = query; appliedShowHidden = hidden; appliedSortOrder = order; appliedSearchOptions = options
             model.cache(prepared, id: profile.id, requestedPath: requestedPath)
             model.connectionStates[profile.id] = "Connected"
@@ -516,7 +624,7 @@ struct FolderView: View {
             guard token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
             if !Task.isCancelled && !(error is CancellationError) {
                 self.error = error.localizedDescription
-                if model.isSecurityError(error) { listing = nil; visible = [] }
+                if model.isSecurityError(error) { listing = nil; setVisible([]) }
                 model.handle(error, profile: profile)
             }
         }
@@ -551,19 +659,68 @@ struct FolderView: View {
             model.handle(error, profile: profile)
         }
     }
+    private func setVisible(_ rows: [FolderRow]) {
+        visible = rows; visibleRevision &+= 1
+    }
     private func updateVisible() async {
         guard let listing else { return }
         guard filter != appliedFilter || showHidden != appliedShowHidden || sortOrder != appliedSortOrder || searchOptions != appliedSearchOptions else { return }
         let token = UUID()
         sortID = token
+        // Large folders wait for typing to pause, rather than filter on every keystroke.
+        if listing.rows.count > 2_000 {
+            do { try await Task.sleep(for: .milliseconds(70)) } catch { return }
+        }
         let query = filter, hidden = showHidden, order = sortOrder, options = searchOptions
         let results = await Task.detached(priority: .userInitiated) {
             listing.visible(query: query, showHidden: hidden, order: order, options: options)
         }.value
         guard !Task.isCancelled, token == sortID, query == filter, hidden == showHidden, order == sortOrder, options == searchOptions else { return }
-        visible = results
+        setVisible(results)
         appliedSearchOptions = options
         appliedFilter = query; appliedShowHidden = hidden; appliedSortOrder = order
+    }
+}
+
+/// A folder's rows, kept apart from `FolderView` so typing, loading and status updates don't diff
+/// every row. It redraws only when its rows, keyboard selection or a link being resolved change.
+private struct FolderRowList<Row: View>: View, Equatable {
+    let rows: [FolderRow]
+    let revision: Int
+    let selection: String?
+    let resolving: String?
+    let empty: (title: String, symbol: String, detail: String)?
+    let refresh: () async -> Void
+    @ViewBuilder let row: (FolderRow) -> Row
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.revision == rhs.revision && lhs.selection == rhs.selection && lhs.resolving == rhs.resolving
+            && lhs.empty?.title == rhs.empty?.title
+    }
+    var body: some View {
+        followingKeyboardSelection(selection) {
+            List {
+                if let empty {
+                    ContentUnavailableView(empty.title, systemImage: empty.symbol, description: Text(empty.detail))
+                        .listRowSeparator(.hidden)
+                }
+                ForEach(rows) { row($0).listRowInsets(.vertical, 7) }
+            }
+            .listStyle(.plain)
+            .scrollDismissesKeyboard(.immediately)
+            .refreshable { await refresh() }
+        }
+    }
+}
+
+/// Scrolls `list` to keep the keyboard selection in view. The ScrollViewReader is added only once
+/// a row is selected, so folders browsed by touch keep their list unchanged. Down and Up start at
+/// the first and last row, so the scroll offset this resets doesn't matter.
+@MainActor @ViewBuilder private func followingKeyboardSelection(_ selection: String?, @ViewBuilder _ list: () -> some View) -> some View {
+    let list = list()
+    if selection == nil { list } else {
+        ScrollViewReader { proxy in
+            list.onChange(of: selection, initial: true) { _, id in if let id { proxy.scrollTo(id) } }
+        }
     }
 }
 

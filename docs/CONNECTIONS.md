@@ -6,6 +6,8 @@ Connect to an existing SSH/SFTP server, verify its identity, and understand how 
 
 ## Before you connect
 
+The connection form shows what every connection needs. **Advanced** holds the SSH port, Tailscale tips and jump host; it opens by itself when editing a connection that uses them.
+
 You'll need:
 
 - An SSH server with SFTP enabled and an account that can read the files you want.
@@ -51,7 +53,7 @@ Generated Ed25519 keys and verified OpenSSH Ed25519, RSA and ECDSA import format
 
 Unknown hosts require explicit trust. Changed host keys block before account authentication. The reset flow removes trust and requires another verification; it does not silently accept the new key. A key used by a saved connection cannot be deleted.
 
-Profiles, favourites, recent references, and public identity metadata are stored atomically in Application Support. Private material stays in Keychain unless you explicitly [export a private key](KEY_SUPPORT.md#export-a-private-key). Recent files are references, not persistent offline copies. Swipe a recent entry and choose **Remove from Recents** to remove its saved reference; the remote file and favourites remain. The same action is available to VoiceOver. **Disconnect** returns Home, clears the navigation stack and cancels pending session work. In-memory cache is bounded to ten prepared directory listings and at most four documents / 6 MiB, and cleared on memory warnings or disconnect. Returning to a cached folder preserves its scroll position without a new listing; use pull-to-refresh or **Refresh** to check for remote changes. Browsing networking and unlocked-key caches are retired on backgrounding. A separately requested managed download may keep its already-authenticated SSH transport while iOS grants continued processing; it disconnects when finished, interrupted or explicitly disconnected. See [downloads](DOWNLOADS.md).
+Profiles, favourites, recent references, and public identity metadata are stored atomically in Application Support. Private material stays in Keychain unless you explicitly [export a private key](KEY_SUPPORT.md#export-a-private-key). Recent files are references, not persistent offline copies. Swipe a recent entry and choose **Remove from Recents** to remove its saved reference; the remote file and favourites remain. The same action is available to VoiceOver. **Disconnect** returns Home, clears the navigation stack and cancels pending session work. In-memory cache is bounded to 48 prepared directory listings (40,000 names) and at most four documents / 6 MiB. Everything is cleared on memory warnings or disconnect, and a connection failing a host-key or key check forgets its listings. Backgrounding releases documents and any listings read with a passphrase-protected key; the rest are checked with the server when next shown. Returning to a cached folder preserves its scroll position without a new listing; use pull-to-refresh or **Refresh** to check for remote changes. Browsing networking and unlocked-key caches are retired on backgrounding. A separately requested managed download may keep its already-authenticated SSH transport while iOS grants continued processing; it disconnects when finished, interrupted or explicitly disconnected. See [downloads](DOWNLOADS.md).
 
 ## Jump hosts
 

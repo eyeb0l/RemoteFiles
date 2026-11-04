@@ -28,10 +28,10 @@ struct HTMLContentView: View {
                 if needsScripts {
                     ContentUnavailableView("This page needs JavaScript", systemImage: "globe",
                         description: Text("This file has no content to show without running its scripts. Open the running website to view the app, or choose Source to inspect the HTML."))
-                } else if !loaded { ProgressView("Rendering HTML…") }
-            } else { ProgressView("Rendering HTML…") }
+                } else if !loaded { LoadingPlaceholder(label: "Rendering HTML…", shape: .document) }
+            } else { LoadingPlaceholder(label: "Rendering HTML…", shape: .document) }
         }
-        .task(id: Data(text.utf8)) {
+        .task(id: ExactText(text: text)) {
             rules = nil; error = nil; loaded = false; needsScripts = false
             do {
                 // The shared blocker denies every automatic resource request.
@@ -110,7 +110,7 @@ struct StaticHTMLWebView: UIViewRepresentable {
     }
     func updateUIView(_ view: WKWebView, context: Context) {
         let coordinator = context.coordinator
-        if coordinator.text.map({ $0.utf8.elementsEqual(text.utf8) }) != true {
+        if coordinator.text.map({ sameBytes($0, text) }) != true {
             coordinator.beginLoading(text)
             coordinator.textScale = fontScale; coordinator.loadedTextScale = fontScale
             coordinator.navigation = view.loadHTMLString(Self.html(text, textScale: fontScale), baseURL: nil)

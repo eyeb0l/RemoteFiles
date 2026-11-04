@@ -127,10 +127,16 @@ final class AppModel {
     private(set) var isDisconnecting = false
     private var disconnectWork: Task<Void, Never>?
     private var realMetadata = AppMetadata()
-    private var directories: [String: FolderListing] = [:]
-    private var documents: [String: (bytes: Data, version: RemoteFileVersion?)] = [:]
-    private var directoryOrder: [String] = []
-    private var documentOrder: [String] = []
+    // Read while a view is being made, and written from the background. Observing them would remake
+    // every mounted folder each time one more listing is remembered.
+    @ObservationIgnored private var directories: [String: (listing: FolderListing, storedAt: ContinuousClock.Instant?)] = [:]
+    @ObservationIgnored private var folderPrefetchQueue: [(profile: ConnectionProfile, path: String)] = []
+    @ObservationIgnored private var folderPrefetch: Task<Void, Never>?
+    @ObservationIgnored private var folderPrefetchToken: UUID?
+    @ObservationIgnored private var foregroundConnectionID: UUID?
+    @ObservationIgnored private var documents: [String: (bytes: Data, version: RemoteFileVersion?)] = [:]
+    @ObservationIgnored private var directoryOrder: [String] = []
+    @ObservationIgnored private var documentOrder: [String] = []
 
     let preferences: UserDefaults
     init(directory: URL, fileService: (any RemoteFileService)? = nil, publicKeyInstaller: (any PublicKeyInstalling)? = nil,
@@ -445,6 +451,7 @@ final class AppModel {
     func handle(_ error: Error, profile: ConnectionProfile) {
         guard !isDisconnecting else { return }
         connectionStates[profile.id] = "Disconnected"
+        if isSecurityError(error) { forgetListings(of: profile.id) }
         if let trustError = error as? HostTrustError {
             switch trustError {
             case .unknown(let endpoint, let key): sheet = .trust(endpoint, key)
@@ -481,14 +488,14 @@ final class AppModel {
         if case RemoteResourceError.outsideDocument = error { return true }
         return false
     }
-    func disconnect(preservingDownloads: Bool = false) async {
+    func disconnect(preservingDownloads: Bool = false, keepingListings: Bool = false) async {
         if let disconnectWork { await disconnectWork.value; return }
         let task = Task {
             if !preservingDownloads {
                 await downloads?.interrupt(reason: "Transfer interrupted. Retry to continue.")
                 backgroundDownloads.finish(success: false)
             }
-            await closeSession()
+            await closeSession(keepingListings: keepingListings)
         }
         disconnectWork = task
         await task.value
@@ -504,8 +511,9 @@ final class AppModel {
         await disconnect()
         isDisconnecting = false
     }
-    private func closeSession() async {
+    private func closeSession(keepingListings: Bool = false) async {
         let previousPin = pinTask
+        cancelPrefetch()
         cancelOfflinePin()
         indexUpdates.cancelAll()
         let previousExporter = exportService
@@ -519,14 +527,24 @@ final class AppModel {
         await previousExporter?.cancelAndDrain()
         exportService = nil
         await identities.clearSession()
-        connectionStates = [:]; clearCaches()
+        connectionStates = [:]
+        // Names already seen stay in memory for an instant return from the background, unless they
+        // were read with a key that locks again now. All are checked with the server when next
+        // shown; an explicit disconnect forgets them.
+        if keepingListings {
+            documents.removeAll(); documentOrder.removeAll()
+            for profile in metadata.connections where profile.identityIDs.contains(where: { id in
+                metadata.identities.contains { $0.id == id && $0.requiresPassphrase }
+            }) { forgetListings(of: profile.id) }
+            for key in directories.keys { directories[key]?.storedAt = nil }
+        } else { clearCaches() }
     }
     func background() async {
         // Offline navigation owns no connection or credentials. Keep its stack while the reader
         // releases protected local resources; transient trust/key/edit sheets still disappear.
         if case .offlineFiles = sheet { } else if case .downloads = sheet { } else { sheet = nil }
         downloads?.setForeground(false, sceneID: downloadSceneRegistration?.id)
-        await disconnect(preservingDownloads: downloads?.isForeground == true || backgroundDownloads.canContinue)
+        await disconnect(preservingDownloads: downloads?.isForeground == true || backgroundDownloads.canContinue, keepingListings: true)
     }
     /// Breadcrumb navigation: pop back to a folder already in the stack instead of pushing a
     /// duplicate. A route may hold a non-canonical request such as ".", so its cached listing's
@@ -578,13 +596,90 @@ final class AppModel {
         routes.removeLast()
         removeTrailingPreviews()
     }
-    func clearCaches() { directories.removeAll(); documents.removeAll(); directoryOrder.removeAll(); documentOrder.removeAll() }
+    func clearCaches() {
+        clearListings()
+        documents.removeAll(); documentOrder.removeAll()
+    }
+    private func clearListings() {
+        directories.removeAll(); directoryOrder.removeAll()
+        cancelPrefetch()
+    }
     private func key(_ id: UUID, _ path: String) -> String { "\(id.uuidString):\(path)" }
-    func cachedListing(_ id: UUID, path: String) -> FolderListing? { directories[key(id, path)] }
+    func cachedListing(_ id: UUID, path: String) -> FolderListing? { directories[key(id, path)]?.listing }
+    /// Whether a remembered listing is recent enough to show without asking the server again.
+    func isListingFresh(_ id: UUID, path: String, within window: Duration = AppModel.listingFreshness) -> Bool {
+        guard let stored = directories[key(id, path)]?.storedAt else { return false }
+        return ContinuousClock.now - stored < window
+    }
+    /// A listing younger than this was very likely prefetched moments ago.
+    static let listingFreshness: Duration = .seconds(20)
+    static let listingLimit = 48
     func cache(_ value: FolderListing, id: UUID, requestedPath: String) {
         let k = key(id, requestedPath)
-        directories[k] = value; directoryOrder.removeAll { $0 == k }; directoryOrder.append(k)
-        while directoryOrder.count > 10 { directories.removeValue(forKey: directoryOrder.removeFirst()) }
+        directories[k] = (value, .now); directoryOrder.removeAll { $0 == k }; directoryOrder.append(k)
+        // Bound the names kept in memory as well as the folders: a few huge listings can't pile up.
+        while directoryOrder.count > Self.listingLimit
+                || (directoryOrder.count > 1 && directories.values.reduce(0, { $0 + $1.listing.rows.count }) > 40_000) {
+            directories.removeValue(forKey: directoryOrder.removeFirst())
+        }
+    }
+    /// Lists the first few subfolders of a folder on screen, one at a time, so opening one shows its
+    /// rows straight away. A newer folder replaces the waiting ones without cancelling the one in
+    /// flight. It stops at the first failure and leaves anything already remembered to be checked
+    /// when opened, so an unreadable or slow server sees almost nothing from this.
+    func prefetchFolders(in listing: FolderListing, profile: ConnectionProfile, limit: Int = 6) {
+        guard isForeground, !isDisconnecting, foregroundConnectionID == profile.id, !PrefetchConditions.shared.discouraged else { return }
+        folderPrefetchQueue = listing.defaultRows.lazy
+            .compactMap { row -> String? in
+                guard row.entry.link == nil, row.entry.kind == .directory else { return nil }
+                return row.entry.path
+            }
+            .filter { self.cachedListing(profile.id, path: $0) == nil }
+            .prefix(limit)
+            .map { (profile, $0) }
+        guard folderPrefetch == nil, !folderPrefetchQueue.isEmpty else { return }
+        let revision = sessionRevision, token = UUID()
+        folderPrefetchToken = token
+        folderPrefetch = Task { [weak self] in
+            while let self, !Task.isCancelled, !self.folderPrefetchQueue.isEmpty,
+                  self.sessionRevision == revision, self.isForeground, !self.isDisconnecting {
+                let next = self.folderPrefetchQueue.removeFirst()
+                guard next.profile.id == self.foregroundConnectionID else { break }
+                guard self.cachedListing(next.profile.id, path: next.path) == nil else { continue }
+                guard let found = try? await self.quietListing(next.profile, path: next.path), !Task.isCancelled, next.profile.id == self.foregroundConnectionID else {
+                    self.folderPrefetchQueue.removeAll(); break
+                }
+                let prepared = await Task.detached(priority: .utility) { FolderListing(found) }.value
+                guard !Task.isCancelled, self.sessionRevision == revision, self.isForeground, !self.isDisconnecting else { break }
+                self.cache(prepared, id: next.profile.id, requestedPath: next.path)
+            }
+            if self?.folderPrefetchToken == token { self?.folderPrefetch = nil; self?.folderPrefetchToken = nil }
+        }
+    }
+    /// A listing that won't connect, cancel or queue behind foreground work when the transport can
+    /// offer that. Nil means there's no session to ask over.
+    func quietListing(_ profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot? {
+        if let background = searchService as? BackgroundFolderListing {
+            return try await background.listDirectoryInBackground(profile: profile, path: path)
+        }
+        return try await service.listDirectory(profile: profile, path: path)
+    }
+    /// Which connection the screen is using. Work prepared ahead for another one stops here.
+    func noteForegroundConnection(_ id: UUID) {
+        guard foregroundConnectionID != id else { return }
+        foregroundConnectionID = id
+        folderPrefetchQueue.removeAll()
+    }
+    private func cancelPrefetch() {
+        folderPrefetchQueue.removeAll()
+        folderPrefetch?.cancel(); folderPrefetch = nil; folderPrefetchToken = nil
+    }
+    /// A key or host that fails verification takes what was seen through it off the screen and out
+    /// of memory, so reopening a folder can't show its names without getting past that check.
+    private func forgetListings(of id: UUID) {
+        let prefix = id.uuidString + ":"
+        for key in directoryOrder where key.hasPrefix(prefix) { directories.removeValue(forKey: key) }
+        directoryOrder.removeAll { $0.hasPrefix(prefix) }
     }
     func cachedDocument(_ id: UUID, path: String) -> Data? { documents[key(id, path)]?.bytes }
     /// The remote version the cached bytes were read at, when the transport reports one.

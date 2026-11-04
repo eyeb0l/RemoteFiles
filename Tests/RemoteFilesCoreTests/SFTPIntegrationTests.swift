@@ -1533,6 +1533,35 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertEqual(metrics.connections, 1)
     }
 
+    func testBackgroundListingNeverConnectsAndNeverReplacesAnotherSession() async throws {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Background listing")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        let folder = fixture.files + "/thousand"
+        let idle = try await service.listDirectoryInBackground(profile: profile, path: folder)
+        XCTAssertNil(idle, "Without a session there's nothing to list over, and none may be opened")
+        var connections = await service.metrics().connections
+        XCTAssertEqual(connections, 0)
+        let shown = try await service.listDirectory(profile: profile, path: fixture.files)
+        let background = try await service.listDirectoryInBackground(profile: profile, path: folder)
+        XCTAssertEqual(background?.entries.count, 1000)
+        let other = ConnectionProfile(name: "Other", host: profile.host, port: profile.port, username: profile.username + "-other",
+                                      identityID: profile.identityID, startingDirectory: "/")
+        let elsewhere = try await service.listDirectoryInBackground(profile: other, path: folder)
+        XCTAssertNil(elsewhere, "Connecting elsewhere would close the session on screen")
+        connections = await service.metrics().connections
+        XCTAssertEqual(connections, 1, "The open session survives both")
+        let again = try await service.listDirectory(profile: profile, path: fixture.files)
+        XCTAssertEqual(again.entries.map(\.name), shown.entries.map(\.name))
+        connections = await service.metrics().connections
+        XCTAssertEqual(connections, 1)
+    }
+
     func testPipelinedListingIsCompleteInServerOrderAndAlwaysClosesItsHandle() async throws {
         let fixture = try Fixture()
         let stores = try Stores(fixture: fixture)

@@ -23,6 +23,7 @@ struct ConnectionEditor: View {
     @State private var resetJumpTrust = false
     @State private var installWhenSaving = false
     @State private var installation: ConnectionKeySetup?
+    @State private var advancedExpanded = false
 
     private struct ConnectionKeySetup: Identifiable {
         let profile: ConnectionProfile
@@ -52,10 +53,13 @@ struct ConnectionEditor: View {
                 TextField("Display name", text: $name).textContentType(.nickname)
                 TextField("Hostname or IP address", text: $host).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
                 TextField("Account username", text: $username).textInputAutocapitalization(.never).autocorrectionDisabled()
-            } header: { Text("Server") } footer: { Text("Connect to a Unix system over SFTP. Browsing and previews are read only.") }
+                TextField("Starting directory (optional)", text: $directory).textInputAutocapitalization(.never).autocorrectionDisabled()
+            } header: { Text("Server") } footer: {
+                Text("Read-only browsing over SFTP. Leave the directory blank for the server’s default; ~ is not expanded.")
+            }
             Section("SSH identity") {
                 if model.metadata.identities.isEmpty {
-                    Text("Generate a dedicated key or import an OpenSSH Ed25519, RSA or ECDSA private key.").foregroundStyle(.secondary)
+                    Text("Generate a dedicated key or import an OpenSSH Ed25519, RSA or ECDSA private key.").font(.footnote).foregroundStyle(.secondary)
                 } else {
                     Picker("Choose Existing Key", selection: $identityID) {
                         Text("Choose a key").tag(nil as UUID?)
@@ -66,53 +70,53 @@ struct ConnectionEditor: View {
                 if !useJumpHost {
                     Toggle("Install Public Key When Saving", isOn: $installWhenSaving)
                     if installWhenSaving {
-                        Text("Review and confirm installation using the server account’s password. The connection is saved automatically after the key is installed; cancelling leaves it unsaved.")
+                        Text("Review and confirm installation using the server account’s password. The connection saves after the key is installed; cancelling leaves it unsaved.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
             }
             Section {
-                TextField("Starting directory (optional)", text: $directory).textInputAutocapitalization(.never).autocorrectionDisabled()
-                Toggle("Show Tailscale Setup Tips", isOn: $tailscale)
-            } footer: {
-                Text("Leave blank to use the server’s default directory, or enter an absolute path. Paths starting with ~ are not expanded. Tailscale tips do not change how the app connects.")
+                DisclosureGroup("Advanced", isExpanded: $advancedExpanded) {
+                    LabeledContent("SSH port") {
+                        TextField("22", text: $port).keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing).frame(maxWidth: 80).accessibilityLabel("SSH port")
+                    }
+                    Toggle("Show Tailscale Setup Tips", isOn: $tailscale)
+                    Toggle("Use Jump Host", isOn: $useJumpHost)
+                    if useJumpHost {
+                        TextField("Jump hostname or IP address", text: $jumpHost).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                        TextField("Jump account username", text: $jumpUsername).textInputAutocapitalization(.never).autocorrectionDisabled()
+                        LabeledContent("Jump SSH port") {
+                            TextField("22", text: $jumpPort).keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing).frame(maxWidth: 80).accessibilityLabel("Jump SSH port")
+                        }
+                        Picker("Jump Host Identity", selection: $jumpIdentityID) {
+                            Text("Choose a key").tag(nil as UUID?)
+                            ForEach(model.metadata.identities) { key in Text(key.name).tag(Optional(key.id)) }
+                        }
+                        Text("Connects through one SSH server, which must allow TCP forwarding. Each server’s fingerprint is verified separately; private keys stay on this device. The destination hostname is resolved from the jump host.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                        if existing?.jumpHost != nil {
+                            Button("Reset Trusted Jump Host Key", role: .destructive) { resetJumpTrust = true }
+                        }
+                    }
+                    if existing != nil { Button("Reset Trusted Host Key", role: .destructive) { resetTrust = true } }
+                }
             }
             Section {
-                Toggle("Use Jump Host", isOn: $useJumpHost)
-                if useJumpHost {
-                    TextField("Jump hostname or IP address", text: $jumpHost).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                    TextField("Jump account username", text: $jumpUsername).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    LabeledContent("Jump SSH port") {
-                        TextField("22", text: $jumpPort).keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing).accessibilityLabel("Jump SSH port")
+                DisclosureGroup("Before you connect") {
+                    Group {
+                        Text("The server must be reachable, with SSH and SFTP enabled for this account. Add the identity’s public key to the account’s ~/.ssh/authorized_keys file.")
+                        if tailscale {
+                            Text("Enable Tailscale on both devices and use the server’s MagicDNS name or Tailscale IP. Your tailnet must permit the SSH connection. Tailscale SSH is not required. These tips don’t change how the app connects.")
+                        }
+                        Text(useJumpHost
+                             ? "Install keys on each server separately using SSH Keys → Install Public Key on Server. Automatic setup requires a directly reachable server."
+                             : "Choose Install Public Key When Saving to set up key login using the account’s password. The server must already allow password login. Verify its fingerprint when connecting for the first time.")
                     }
-                    Picker("Jump Host Identity", selection: $jumpIdentityID) {
-                        Text("Choose a key").tag(nil as UUID?)
-                        ForEach(model.metadata.identities) { key in Text(key.name).tag(Optional(key.id)) }
-                    }
-                    if existing?.jumpHost != nil {
-                        Button("Reset Trusted Jump Host Key", role: .destructive) { resetJumpTrust = true }
-                    }
+                    .font(.footnote).foregroundStyle(.secondary)
                 }
-            } header: { Text("Jump host") } footer: {
-                Text("Connect through one SSH server to reach the destination. The jump host must allow TCP forwarding. Each server’s fingerprint is verified separately; private keys stay on this device. The destination hostname is resolved from the jump host.")
             }
-            Section("Advanced") {
-                LabeledContent("Destination SSH port") {
-                    TextField("22", text: $port).keyboardType(.numberPad)
-                        .multilineTextAlignment(.trailing).accessibilityLabel("SSH port")
-                }
-                if existing != nil { Button("Reset Trusted Host Key", role: .destructive) { resetTrust = true } }
-            }
-            Section("Before you connect") {
-                Text("The server must be reachable, with SSH and SFTP enabled for this account. Add the identity’s public key to the account’s ~/.ssh/authorized_keys file.")
-                if tailscale {
-                    Text("Enable Tailscale on both devices and use the server’s MagicDNS name or Tailscale IP. Your tailnet must permit the SSH connection. Tailscale SSH is not required.")
-                }
-                Text(useJumpHost
-                     ? "Install keys on each server separately using SSH Keys → Install Public Key on Server. Automatic setup requires a directly reachable server."
-                     : "Choose Install Public Key When Saving to set up key login using the account’s password. The server must already allow password login. Verify its fingerprint when connecting for the first time.")
-            }.font(.footnote).foregroundStyle(.secondary)
         }
         .navigationTitle(existing == nil ? "Add Connection" : "Edit Connection")
         .navigationBarTitleDisplayMode(.inline)
@@ -146,6 +150,8 @@ struct ConnectionEditor: View {
                     jumpUsername = jump.username; jumpIdentityID = jump.identityID
                 }
                 port = String(existing.port); directory = existing.startingDirectory; tailscale = existing.usesTailscale; identityID = existing.identityID
+                // Anything set here shouldn't be hidden from whoever is editing it.
+                advancedExpanded = existing.port != 22 || existing.usesTailscale || existing.jumpHost != nil
             }
             if identityID == nil { identityID = model.metadata.identities.first?.id }
             if jumpIdentityID == nil { jumpIdentityID = identityID }

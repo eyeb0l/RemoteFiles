@@ -35,10 +35,11 @@ struct OfflineFolderSetupView: View {
     var body: some View {
         Form {
             Section {
-                Label(RemotePath.name(of: path).isEmpty ? "Root" : RemotePath.name(of: path), systemImage: "folder.fill")
-                Text(profile.name + " · " + path).font(.caption).foregroundStyle(.secondary)
-                Text("Save this folder and its subfolders on this device. Updates happen only when you choose Update.")
+                LocationRow(name: RemotePath.name(of: path).isEmpty ? "Root" : RemotePath.name(of: path),
+                            subtitle: profile.name + " · " + path, symbol: "folder.fill", color: RemoteFilesStyle.accent)
                 Toggle("Include Hidden Files", isOn: $includeHidden)
+            } footer: {
+                Text("Saves this folder and its subfolders on this device. Copies update only when you choose Update.")
             }
             Section {
                 Text("Symbolic links and special files are skipped. If any regular file can’t be read, a limit is reached, or you cancel, the previous saved folder stays available.")
@@ -98,31 +99,43 @@ struct OfflineFolderView: View {
                 let files = model.offlinePins.filter { folder.fileIDs.contains($0.id) && isChild($0.path) }
                 List {
                     Section {
-                        Text("Offline folder · saved \(folder.savedAt.formatted(date: .abbreviated, time: .shortened))")
-                            .font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("offline-folder-date")
-                        Text(folder.includeHidden ? "Hidden files included" : "Hidden files excluded").font(.caption).foregroundStyle(.secondary)
-                        if folder.skippedLinks + folder.skippedOtherEntries > 0 {
-                            Text("\(folder.skippedLinks) symbolic links and \(folder.skippedOtherEntries) special files skipped")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                    ForEach(directories.sorted(by: { $0.path.localizedStandardCompare($1.path) == .orderedAscending }), id: \.self) { child in
-                        NavigationLink(value: child) { Label(RemotePath.name(of: child.path), systemImage: "folder.fill") }
+                        ForEach(directories.sorted(by: { $0.path.localizedStandardCompare($1.path) == .orderedAscending }), id: \.self) { child in
+                            NavigationLink(value: child) {
+                                LocationRow(name: RemotePath.name(of: child.path), subtitle: "Folder", symbol: "folder.fill",
+                                            color: RemoteFilesStyle.accent, visibleSubtitle: .some(nil))
+                            }
                             .accessibilityIdentifier("offline-subfolder-" + RemotePath.name(of: child.path))
-                    }
-                    ForEach(files.sorted(by: { $0.filename.localizedStandardCompare($1.filename) == .orderedAscending })) { pin in
-                        NavigationLink(value: OfflineDocumentRoute(pin: pin)) { Label(pin.filename, systemImage: "doc.fill") }
-                        .accessibilityIdentifier("offline-file-" + pin.filename)
-                    }
-                    if directories.isEmpty && files.isEmpty {
-                        ContentUnavailableView("Empty saved folder", systemImage: "folder", description: Text("There are no saved files in this folder."))
+                        }
+                        ForEach(files.sorted(by: { $0.filename.localizedStandardCompare($1.filename) == .orderedAscending })) { pin in
+                            let size = ByteCountFormatter.string(fromByteCount: Int64(pin.byteCount), countStyle: .file)
+                            NavigationLink(value: OfflineDocumentRoute(pin: pin)) {
+                                LocationRow(name: pin.filename, subtitle: size, symbol: FileSymbol.name(forFilename: pin.documentFilename))
+                            }
+                            .navigationLinkIndicatorVisibility(.hidden)
+                            .accessibilityIdentifier("offline-file-" + pin.filename)
+                        }
+                        if directories.isEmpty && files.isEmpty {
+                            ContentUnavailableView("Empty saved folder", systemImage: "folder", description: Text("There are no saved files in this folder."))
+                                .listRowSeparator(.hidden)
+                        }
+                    } footer: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Saved \(folder.savedAt.formatted(date: .abbreviated, time: .shortened)). \(folder.includeHidden ? "Hidden files included." : "Hidden files excluded.")")
+                                .accessibilityIdentifier("offline-folder-date")
+                            if folder.skippedLinks + folder.skippedOtherEntries > 0 {
+                                Text("\(folder.skippedLinks) symbolic links and \(folder.skippedOtherEntries) special files skipped.")
+                            }
+                        }
+                        .font(.footnote).foregroundStyle(.secondary)
+                        .padding(.top, 8)
                     }
                 }
+                .listStyle(.plain)
                 .navigationTitle(route.path.utf8.elementsEqual(folder.path.utf8) ? folder.name : RemotePath.name(of: route.path))
                 .toolbar {
                     ToolbarItem(placement: .primaryAction) {
                         Menu { OfflineFolderLibraryActions(model: model, folder: folder) }
-                        label: { Label("Saved folder actions", systemImage: "ellipsis.circle") }
+                        label: { Label("Saved folder actions", systemImage: "ellipsis") }
                     }
                 }
             } else {

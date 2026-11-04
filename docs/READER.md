@@ -35,9 +35,9 @@ Rich previews allow up to 32 diagrams (32 KiB and 250 edges each) and 128 equati
 <a id="document-navigation-and-original-export"></a>
 ## Find your place
 
-- **Find:** Choose **Document actions → Find in Document** to search rendered Markdown or plain text and move between matches. In Source mode it searches the literal source; HTML and SVG offer **Find in Source**. Search is local, case- and diacritic-insensitive, and limited to 1,000 results.
+- **Find:** Choose **Find** in the reader's bottom bar to search rendered Markdown or plain text and move between matches. In Source mode it searches the literal source; HTML and SVG offer **Find in Source**. Search is local, case- and diacritic-insensitive, and limited to 1,000 results.
 
-- **Headings and links:** **Headings** lists parsed Markdown headings. You can also follow same-document and relative-file heading links. Repeated headings have suffixes such as `details-1`. Native Back returns to the previous reader. Missing headings and unsupported query links show an explanation and leave the current document open.
+- **Headings and links:** **Headings** in the bottom bar lists parsed Markdown headings. You can also follow same-document and relative-file heading links. Repeated headings have suffixes such as `details-1`. Native Back returns to the previous reader. Missing headings and unsupported query links show an explanation and leave the current document open.
 
 - **Reading position:** Text readers remember separate Rendered and Source positions across launches. History contains text locations, block positions, fallback coordinates and a content fingerprint, not document contents, for up to 200 connection/path pairs. Native Markdown prose, Source and static HTML restore the same text location after width or text-size changes; Markdown images/overflow blocks and HTML visual blocks restore a proportional position within the block. A changed document starts at the top. Older coordinate-only history and positions without an available text/block anchor retain approximate coordinate restoration. HTML uses bounded DOM inspection in an isolated app content world; document scripts and automatic resources stay blocked. Unavailable/hidden locations and HTML beyond the inspection limit retain coordinate fallback. Rich Markdown retains coordinate restoration. PDFs save the page and the vertical position within it, keyed to a hash of the downloaded bytes, so a changed PDF starts at the top; zoom is not saved. A PDF opened from a search result starts at the matching page. Offline text and PDF copies share this history; see [offline files](OFFLINE_FILES.md#offline-reader). Standalone image and media previews do not save reading history; rendered SVG fits its viewport. Positions save after scrolling pauses and when leaving or backgrounding. Demo does not write reading history.
 
@@ -46,6 +46,8 @@ offset. This keeps Back navigation from shifting the page when the visible ancho
 falls at a paragraph boundary.
 
 ## Read source
+
+The bottom bar switches Markdown, HTML and SVG between **Rendered** and **Source**.
 
 <img src="screenshots/reader-source-anchors-iphone.png" width="240" alt="Native selectable Swift source with syntax colors and wrapped lines on an iPhone simulator">
 
