@@ -542,3 +542,40 @@ phrase seen locally appears in no CI log, so startup speech differs between them
 reproduction does not by itself prove the CI window. The 30 seconds is a budget, not a
 measured CI bound; each nightly run now records the real wait in its `VO FIRST SPEECH`
 lines. Read those before changing it.
+
+## Reader loading focus
+
+Investigated on 4 November. Nightly run
+[41809294994](https://github.com/eyeb0l/RemoteFiles/actions/runs/41809294994) failed
+`testLongJSONAndSVGHaveReadOnlyVoiceOverPreviews` on commit `a6b5509`, whose push run
+[41788639339](https://github.com/eyeb0l/RemoteFiles/actions/runs/41788639339) had passed it
+hours earlier. The two logs differ from the moment the row opened:
+
+| Run | Focus after opening | Traversal |
+|---|---|---|
+| Passed | `{` | `"version"`, `"prompt"`, `"ready"`, `}` |
+| Failed | `Reading document…` | `Reading document…`, `"ready"`, `}`, `}`, `}` |
+
+**Cause.** This is an app bug that the journey catches only when the read is slow.
+`ReaderView` replaces its `Reading document…` placeholder with the document without telling
+VoiceOver. If VoiceOver has focused the placeholder, its focus goes with it and lands partway
+through the document, or near its end. The failed run's hierarchy had the vertical scroll bar at
+100%, with the first line far above the viewport. The test's own helper also accepted the
+placeholder as the destination.
+
+**Reproduction.** A temporary 3-second delay on the demo read, on an iOS 27.2 simulator,
+produced the failed run's traversal, assertion and scroll position. The new fixture without the
+fix landed on `"prompt"`, skipping `{` and `"version"`, so where focus lands varies.
+
+**Fix.** When the placeholder goes, the reader posts `screenChanged`, so VoiceOver restarts from
+the top of the screen with the document at its start. `testFocusStartsAtTheTopOfADocumentThatLoadsSlowly`
+covers this with a 3-second read, and the helper no longer treats the placeholder as the
+destination.
+
+**Limits.** VoiceOver now often starts on the Back button, about five swipes before the content.
+That can also happen on a fast load: with the fix, the JSON journey started on `{` on an iPhone
+17e and on Back on an iPhone 18 Pro. No physical device or real server was tested. This section's
+evidence covers one failure; the earlier JSON and SVG failures listed under
+[First VoiceOver speech](#first-voiceover-speech) were not rechecked. On an iPhone 17e,
+`testPublicKeyConfirmationVoiceOverAccountKeyCancelAndResult` could not tap `Review Installation`
+after typing, before VoiceOver started. It passed on an iPhone 18 Pro and was not investigated.

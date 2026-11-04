@@ -108,8 +108,13 @@ The demo reader VoiceOver journey enables the service before launching the app
 so the initial screen change establishes focus. The long JSON and SVG journey
 likewise enables VoiceOver before opening each preview, then focuses and
 double-taps the touch-staged row, and stays in VoiceOver to switch the SVG to
-Source. After the double-tap it waits for VoiceOver focus to leave the row: a
-preview's elements can exist before VoiceOver handles the screen change.
+Source. Opening a row first waits for VoiceOver to answer, then for it to speak the
+tapped row, because a tap before it answers is an ordinary tap. After the double-tap
+it waits for VoiceOver focus to leave the row and the `Reading document…` placeholder:
+a preview's elements can exist before VoiceOver handles the screen change. A separate
+journey opens a document that takes 3 seconds to load and requires reading to reach
+its first lines; see
+[Reader loading focus](CI_HISTORY.md#reader-loading-focus).
 
 The first speech read after each enable waits up to 30 seconds for VoiceOver to
 answer, because `enable()` returns before it can; see

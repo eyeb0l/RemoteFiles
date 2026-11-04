@@ -129,6 +129,12 @@ struct ReaderView: View {
         .task(id: FindWork(query: navigation.query, revision: navigation.revision, inSource: showsSource, active: navigation.isFinding)) {
             await navigation.search(inSource: showsSource)
         }
+        .onChange(of: showsLoadingPlaceholder) { wasShown, isShown in
+            guard wasShown, !isShown else { return }
+            // VoiceOver's focus goes with the placeholder and would otherwise land partway
+            // through the document. Post after this update so the content is on screen.
+            Task { @MainActor in UIAccessibility.post(notification: .screenChanged, argument: nil) }
+        }
         .task(id: "\(model.isForeground)-\(model.sessionRevision)-\(refreshID)") { await reloadIfNeeded() }
         .onDisappear {
             releaseInactiveContent()
@@ -177,6 +183,9 @@ struct ReaderView: View {
         readingPosition.overflowGeometry.releaseInactiveContent()
     }
 
+    private var showsLoadingPlaceholder: Bool {
+        !isMedia && loading && (preview == nil || !model.isForeground)
+    }
     private var isMedia: Bool {
         let kind = DocumentPolicy.kind(filename: entry.name)
         return [.image, .pdf, .video, .audio].contains(kind)

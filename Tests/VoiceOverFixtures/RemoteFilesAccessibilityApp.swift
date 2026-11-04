@@ -127,6 +127,34 @@ private struct StaleReaderFixture: View {
     }
 }
 
+/// A reader with nothing cached over a read slow enough for VoiceOver to focus its placeholder.
+private struct SlowReaderFixture: View {
+    @State private var model: AppModel?
+    var body: some View {
+        Group {
+            if let model, let profile = model.metadata.connections.first {
+                NavigationStack {
+                    List {
+                        NavigationLink("Long lines.json") {
+                            ReaderView(model: model, profile: profile,
+                                entry: .init(name: "Long lines.json", path: "/Projects/Long lines.json", kind: .file))
+                        }
+                    }.navigationTitle("Slow reader fixture")
+                }
+            } else { ProgressView("Preparing slow reader fixture") }
+        }.task {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            let value = try! AppModel(directory: directory)
+            await value.setDemo(true)
+            if let service = value.service as? CoalescingFileService,
+               let demo = Mirror(reflecting: service).children.first(where: { $0.label == "base" })?.value as? DemoRemoteFileService {
+                await demo.configure(delayNanoseconds: 3_000_000_000, failure: nil)
+            }
+            model = value
+        }
+    }
+}
+
 @main struct RemoteFilesApp: App {
     var body: some Scene {
         WindowGroup {
@@ -134,6 +162,7 @@ private struct StaleReaderFixture: View {
             else if ProcessInfo.processInfo.arguments.contains("--missing-image-fixture") { MissingImageFixture() }
             else if ProcessInfo.processInfo.arguments.contains("--voiceover-image-fixture") { ImageFixture() }
             else if ProcessInfo.processInfo.arguments.contains("--voiceover-stale-fixture") { StaleReaderFixture() }
+            else if ProcessInfo.processInfo.arguments.contains("--voiceover-slow-reader-fixture") { SlowReaderFixture() }
             else if ProcessInfo.processInfo.arguments.contains("--voiceover-table-links-fixture") {
                 NavigationStack {
                     DocumentContentView(text: largeTableLinkFixture, markdown: true, source: false)
