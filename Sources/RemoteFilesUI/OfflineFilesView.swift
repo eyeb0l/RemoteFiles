@@ -182,9 +182,11 @@ struct OfflineFilesView: View {
         }
         // The library's own navigation replaces the app's while this sheet covers it.
         .focusedSceneValue(\.navigationCommands, NavigationCommandActions(context: "offline", back: path.isEmpty ? nil : { path.removeLast() }))
-        // Its readers take Escape for Find while nothing is presented over this sheet.
+        // Nothing published in this sheet reaches the scene's commands, so its keys are UIKit key
+        // commands on the sheet; see PlainKeyCommands.offlineFilesShows.
+        .onChange(of: path.count, initial: true) { _, count in PlainKeyCommands.shared.offlineBack = count == 0 ? nil : { path.removeLast() } }
         .onAppear { PlainKeyCommands.shared.offlineFilesShows = true }
-        .onDisappear { PlainKeyCommands.shared.offlineFilesShows = false }
+        .onDisappear { PlainKeyCommands.shared.offlineFilesShows = false; PlainKeyCommands.shared.offlineBack = nil }
     }
 
     private var library: some View {
@@ -263,6 +265,8 @@ struct OfflineReaderView: View {
     /// so identical bytes share one position. Nil for Demo and removed connections.
     var readingPositions: ReadingPositionStore? = nil
     let openDocument: (OfflineDocumentRoute) -> Void
+    /// Identifies this reader's commands in PlainKeyCommands while it is on screen.
+    @State private var readerID = UUID()
     @Environment(\.scenePhase) private var scenePhase
     @State private var leaseState = OfflineReaderLeaseState()
     @State private var share: OfflineShareItem?
@@ -411,12 +415,12 @@ struct OfflineReaderView: View {
         .alert("Couldn’t open link", isPresented: Binding(get: { linkError != nil }, set: { if !$0 { linkError = nil } })) {
             Button("OK") { linkError = nil }
         } message: { Text(linkError ?? "") }
-        .focusedSceneValue(\.readerCommands, canRead ? commands : nil)
-        // Focused values from this sheet don't reach the scene's commands, so Escape is handed over here.
-        .onChange(of: navigation.isFinding, initial: true) { _, finding in
-            PlainKeyCommands.shared.offlineCloseFind = finding ? { navigation.closeFind() } : nil
+        // Nothing published in this sheet reaches the scene's commands, so the reader's commands are
+        // handed over directly, and withheld while its Headings sheet or image viewer covers it.
+        .onChange(of: canRead && !headingsPresented && viewer == nil ? commands : nil, initial: true) { _, commands in
+            PlainKeyCommands.shared.setOfflineReader(readerID, commands)
         }
-        .onDisappear { PlainKeyCommands.shared.offlineCloseFind = nil }
+        .onDisappear { PlainKeyCommands.shared.setOfflineReader(readerID, nil) }
     }
     private var findTitle: String { [.html, .svg].contains(kind) ? "Find in Source" : "Find in Document" }
     private func startFind() {
@@ -433,6 +437,7 @@ struct OfflineReaderView: View {
             actions.findNext = { navigation.move(1, inSource: showsSource) }
             actions.findPrevious = { navigation.move(-1, inSource: showsSource) }
         }
+        if navigation.isFinding { actions.closeFind = { navigation.closeFind() } }
         if navigation.index?.headings.isEmpty == false { actions.headings = { headingsPresented = true } }
         if [.markdown, .html, .svg].contains(kind) { actions.toggleSource = { source.toggle() } }
         return actions

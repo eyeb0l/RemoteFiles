@@ -202,6 +202,59 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["offline-copy-date"].exists, "Headings stay in the offline reader")
     }
 
+    /// Nothing published inside the Offline Files sheet reaches the scene's commands, so its
+    /// keys are key commands on the sheet. XCTest sends ⌘ combinations as real key commands,
+    /// unlike Escape and Return.
+    func testReaderShortcutsDriveAnOfflineCopy() throws {
+        let app = openDemoOfflineNavigationGuide()
+        // The first ⌘ shortcut after launch builds UIKit's menu system and is dropped, in a
+        // connected reader too; ⌘G with Find closed does nothing and absorbs it.
+        app.typeKey("g", modifierFlags: .command)
+        // ⌘F finds; ⌘G and ⇧⌘G move between results.
+        app.typeKey("f", modifierFlags: .command)
+        let query = app.textFields["reader-find-query"]
+        XCTAssertTrue(query.waitForExistence(timeout: 20), "⌘F opens Find in an offline copy")
+        wait(for: [expectation(for: NSPredicate(format: "hasKeyboardFocus == true"), evaluatedWith: query)], timeout: 20)
+        query.typeText("Reading marker 2")
+        let status = app.staticTexts["reader-find-status"]
+        func expectStatus(_ label: String) {
+            wait(for: [expectation(for: NSPredicate(format: "label == %@", label), evaluatedWith: status)], timeout: 30)
+        }
+        expectStatus("1 of 10")
+        app.typeKey("g", modifierFlags: .command); expectStatus("2 of 10")
+        app.typeKey("g", modifierFlags: [.command, .shift]); expectStatus("1 of 10")
+        attachScreenshot("Find in an offline copy driven from the keyboard")
+        app.buttons["Done"].tap()
+        wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: query)], timeout: 20)
+        // Closing Find publishes the reader's commands again, so ⌘F reopens it.
+        app.typeKey("f", modifierFlags: .command)
+        XCTAssertTrue(query.waitForExistence(timeout: 20), "⌘F reopens Find after Done")
+        app.buttons["Done"].tap()
+        wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: query)], timeout: 20)
+
+        // ⌥⌘U switches between Rendered and Source; ⇧⌘J lists headings.
+        let rendered = app.scrollViews["Rendered Markdown document"].firstMatch
+        let source = app.textViews["Bounded source text"].firstMatch
+        app.typeKey("u", modifierFlags: [.command, .option])
+        XCTAssertTrue(source.waitForExistence(timeout: 20), "⌥⌘U shows the source of an offline copy")
+        app.typeKey("u", modifierFlags: [.command, .option])
+        XCTAssertTrue(rendered.waitForExistence(timeout: 20), "⌥⌘U shows the rendered offline copy again")
+        app.typeKey("j", modifierFlags: [.command, .shift])
+        let headings = app.navigationBars["Headings"]
+        XCTAssertTrue(headings.waitForExistence(timeout: 20), "⇧⌘J lists headings in an offline copy")
+        headings.buttons["Done"].tap()
+        wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: headings)], timeout: 20)
+        XCTAssertTrue(app.staticTexts["offline-copy-date"].exists, "The shortcuts stay in the offline reader")
+
+        // ⌘[ returns to the library, where the reader's commands are gone with it.
+        app.typeKey("[", modifierFlags: .command)
+        let file = app.buttons["offline-file-Navigation guide.md"]
+        XCTAssertTrue(file.waitForExistence(timeout: 20), "⌘[ goes back in Offline Files")
+        app.typeKey("f", modifierFlags: .command)
+        XCTAssertFalse(query.waitForExistence(timeout: 3), "⌘F does nothing once the reader is closed")
+        XCTAssertTrue(file.exists)
+    }
+
     func testOfflineImageOpensZoomViewerAndReturnsToTheReader() throws {
         continueAfterFailure = false
         let app = launchDemoSearchSamples()

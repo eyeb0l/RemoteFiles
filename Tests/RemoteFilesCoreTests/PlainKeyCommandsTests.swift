@@ -49,7 +49,8 @@ import UIKit
 
         // With nothing presented, Escape closes the root's reader's Find, never Offline Files'.
         var closed = ""
-        keys.closeFind = { closed = "root" }; keys.offlineFilesShows = true; keys.offlineCloseFind = { closed = "offline" }
+        keys.closeFind = { closed = "root" }; keys.offlineFilesShows = true
+        keys.setOfflineReader(UUID(), ReaderCommandActions(context: "offline", closeFind: { closed = "offline" }))
         keys.frontmostCloseFind?()
         XCTAssertEqual(closed, "root")
         keys.closeFind = nil
@@ -101,6 +102,81 @@ import UIKit
         XCTAssertTrue(keys.canPerform(escape) && keys.canPerform(next))
     }
 
+    /// Nothing published inside the Offline Files sheet reaches the scene's commands, so its keys
+    /// are key commands on the sheet, installed while it shows and declined while unavailable.
+    func testOfflineFilesSheetTakesItsKeysWhileItShows() {
+        let keys = PlainKeyCommands(), root = UIViewController(), sheet = UIViewController()
+        let window = (UIApplication.shared.connectedScenes.first as? UIWindowScene).map(UIWindow.init(windowScene:)) ?? UIWindow(frame: UIScreen.main.bounds)
+        window.rootViewController = root; window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        keys.attach(root)
+        root.present(sheet, animated: false)
+        settle { root.presentedViewController === sheet }
+        XCTAssertTrue(root.presentedViewController === sheet)
+        keys.offlineFilesShows = true
+        let titles = { Set(sheet.keyCommands?.map(\.title) ?? []) }
+        XCTAssertEqual(titles(), ["Close Find", "Back", "Find", "Find Next", "Find Previous", "Show Source", "Headings…"], "The sheet's keys are installed as soon as it shows")
+        XCTAssertTrue(sheet.keyCommands?.allSatisfy(\.wantsPriorityOverSystemBehavior) == true)
+        XCTAssertFalse(keys.canPerform(find) || keys.canPerform(escape) || keys.canPerform(back), "Nothing to act on, so every key declines")
+
+        var ran = ""
+        keys.offlineBack = { ran = "back" }
+        XCTAssertTrue(keys.canPerform(back))
+        keys.frontmostOfflineBack?(); XCTAssertEqual(ran, "back")
+
+        // The system Find items act on the sheet's reader while it is in front, else the scene's.
+        let sceneReader = SystemFindRouter.shared.reader
+        defer { SystemFindRouter.shared.reader = sceneReader }
+        SystemFindRouter.shared.reader = ReaderCommandActions(context: "scene", find: { ran = "scene" })
+        XCTAssertNil(keys.frontmostReader, "The sheet in front with no reader hides the scene's")
+
+        let reader = UUID()
+        var actions = ReaderCommandActions(context: "offline|a", find: { ran = "find" }, toggleSource: { ran = "source" })
+        keys.setOfflineReader(reader, actions)
+        XCTAssertEqual(sheet.keyCommands?.count, 7, "Handing over keeps each key installed once")
+        XCTAssertTrue(keys.canPerform(find) && keys.canPerform(toggleSource))
+        XCTAssertFalse(keys.canPerform(findNext) || keys.canPerform(escape), "Keys for actions the reader lacks decline; Escape waits for Find")
+        keys.frontmostOfflineReader?.find?(); XCTAssertEqual(ran, "find")
+        keys.frontmostReader?.find?(); XCTAssertEqual(ran, "find")
+
+        actions.findNext = {}; actions.closeFind = { ran = "close" }; actions.showsSource = true
+        keys.setOfflineReader(reader, actions)
+        XCTAssertTrue(titles().contains("Show Rendered") && !titles().contains("Show Source"), "The source key's title follows the reader")
+        XCTAssertTrue(keys.canPerform(escape) && keys.canPerform(findNext))
+        keys.frontmostCloseFind?(); XCTAssertEqual(ran, "close")
+
+        // Something presented over the sheet keeps the keys.
+        let headings = UIViewController()
+        sheet.present(headings, animated: false)
+        settle { sheet.presentedViewController === headings }
+        XCTAssertTrue(sheet.presentedViewController === headings)
+        XCTAssertFalse(keys.canPerform(find) || keys.canPerform(escape) || keys.canPerform(back))
+        XCTAssertNil(keys.frontmostOfflineReader)
+        headings.dismiss(animated: false)
+        settle { sheet.presentedViewController == nil }
+        XCTAssertTrue(keys.canPerform(find) && keys.canPerform(back))
+
+        // A reader pushed over another keeps its commands when the first hands over nil after it.
+        let second = UUID()
+        keys.setOfflineReader(second, ReaderCommandActions(context: "offline|b", find: { ran = "second" }))
+        keys.setOfflineReader(reader, nil)
+        keys.frontmostOfflineReader?.find?(); XCTAssertEqual(ran, "second")
+
+        // A reader leaving the screen leaves the keys declining; the sheet closing removes them.
+        keys.setOfflineReader(second, nil)
+        XCTAssertFalse(keys.canPerform(find))
+        XCTAssertEqual(sheet.keyCommands?.count, 7)
+        keys.offlineFilesShows = false
+        XCTAssertEqual(sheet.keyCommands ?? [], [])
+        keys.frontmostReader?.find?(); XCTAssertEqual(ran, "scene", "With the sheet gone, the Find items act on the scene's reader")
+        sheet.dismiss(animated: false)
+        settle { root.presentedViewController == nil }
+    }
+    private func settle(_ done: () -> Bool) {
+        let deadline = Date().addingTimeInterval(2)
+        while !done() && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+    }
+
     func testAppDelegateDeclinesTabSoItStillMovesFocus() {
         XCTAssertFalse(RemoteFilesAppDelegate().responds(to: #selector(RemoteFilesAppDelegate.noticeTab(_:))))
         XCTAssertTrue(RemoteFilesAppDelegate().responds(to: #selector(UIResponder.find(_:))))
@@ -110,6 +186,10 @@ import UIKit
     private let next = #selector(RemoteFilesAppDelegate.selectNextFolderRow(_:))
     private let previous = #selector(RemoteFilesAppDelegate.selectPreviousFolderRow(_:))
     private let open = #selector(RemoteFilesAppDelegate.openSelectedFolderRow(_:))
+    private let find = #selector(RemoteFilesAppDelegate.findInOfflineReader(_:))
+    private let findNext = #selector(RemoteFilesAppDelegate.findNextInOfflineReader(_:))
+    private let toggleSource = #selector(RemoteFilesAppDelegate.toggleOfflineReaderSource(_:))
+    private let back = #selector(RemoteFilesAppDelegate.goBackInOfflineFiles(_:))
     private func folder(move: Bool, open: Bool) -> FolderCommandActions {
         FolderCommandActions(context: "test", refresh: {}, search: {}, toggleHidden: {}, showsHidden: false,
                              moveSelection: move ? { _ in } : nil, openSelection: open ? {} : nil)
