@@ -20,9 +20,8 @@ extension XCUIApplication {
         for _ in 0..<6 { if json.exists && json.isHittable { break }; app.swipeUp() }
         XCTAssertTrue(json.exists && json.isHittable)
         // Enable VoiceOver before each preview opens so the screen change
-        // establishes focus; enabling it on a settled preview can leave
-        // currentSpeech() with "No speech available". Rows are staged in touch
-        // mode, then a VoiceOver tap focuses the row and a double-tap opens it.
+        // establishes focus. Rows are staged in touch mode, then a VoiceOver
+        // tap focuses the row and a double-tap opens it.
         try withVoiceOver {
             try open(json, app)
             XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 15))
@@ -62,6 +61,9 @@ extension XCUIApplication {
         }
     }
     private var originalVoiceOver = false
+    private var awaitingFirstSpeech = false
+    /// Budgeted for vot at full CPU on a loaded runner; see "First VoiceOver speech" in docs/CI_HISTORY.md.
+    private let firstSpeechTimeout: TimeInterval = 30
     private var service: XCUIVoiceOverService { XCUIDevice.shared.voiceOverService }
     override func setUpWithError() throws {
         continueAfterFailure = true
@@ -84,11 +86,33 @@ extension XCUIApplication {
             } catch { XCTFail("VoiceOver restore failed: \(error)") }
         }
         if !original { try service.enable() }
+        awaitingFirstSpeech = true
         try body()
+    }
+    /// The speech to start a traversal from. enable() returns before VoiceOver's `vot` process
+    /// can answer, and currentSpeech() does not wait: it reads vot's last phrase and fails with
+    /// noSpeech within about a second if vot has not spoken or is too busy to reply. So the first
+    /// read of each session waits until vot answers. A failure after that is reported at once.
+    private func startingSpeech() throws -> String {
+        guard awaitingFirstSpeech else { return try service.currentSpeech().utterance }
+        awaitingFirstSpeech = false
+        let start = Date()
+        while true {
+            do {
+                let utterance = try service.currentSpeech().utterance
+                print("VO FIRST SPEECH after \(String(format: "%.1f", Date().timeIntervalSince(start))) s: \(utterance)")
+                return utterance
+            } catch XCUIVoiceOverService.Error.noSpeech {
+                if Date().timeIntervalSince(start) >= firstSpeechTimeout {
+                    throw NSError(domain: "VoiceOverNeverSpoke", code: 1, userInfo: [NSLocalizedDescriptionKey: "VoiceOver gave no speech within \(Int(firstSpeechTimeout)) s of starting: \(service.debugDescription)"])
+                }
+                Thread.sleep(forTimeInterval: 0.25)
+            }
+        }
     }
     private func speech(_ name: String, limit: Int = 65) throws -> [String] {
         var result: [String] = []
-        let current = try service.currentSpeech().utterance
+        let current = try startingSpeech()
         print("VO \(name) CURRENT: \(current)")
         result.append(current)
         var duplicates = 0
@@ -103,7 +127,7 @@ extension XCUIApplication {
     }
     @discardableResult
     private func focus(_ contains: String, name: String, limit: Int = 35, backward: Bool = false) throws -> String {
-        var value = try service.currentSpeech().utterance
+        var value = try startingSpeech()
         var previous = ""
         var duplicates = 0
         for _ in 0..<limit {
@@ -145,8 +169,7 @@ extension XCUIApplication {
         let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]
         try withVoiceOver {
             // Launch with VoiceOver already enabled so the initial screen change
-            // establishes focus. Enabling it on an idle Home screen can leave
-            // currentSpeech() without an utterance on a fresh CI simulator.
+            // establishes focus.
             app.launch()
             XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 10))
             try focus("Projects", name: "home")
