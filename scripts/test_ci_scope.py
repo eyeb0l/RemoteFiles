@@ -31,6 +31,7 @@ class CIScopeTests(unittest.TestCase):
         for path in ("Sources/RemoteFilesUI/FolderView.swift", "Sources/RemoteFilesCore/SFTPRemoteFileService.swift",
                      "Sources/RemoteFilesCore/HostTrustStore.swift", "Tests/RemoteFilesCoreTests/SFTPIntegrationTests.swift",
                      "RemoteFiles.xcodeproj/project.pbxproj", "scripts/test_runner_finalization.py",
+                     "scripts/test-voiceover.sh",  # A local launcher now; no CI lane executes it.
                      "Tests/SmallFeatureFixtures/SmallFeaturesUITests.swift"):
             with self.subTest(path=path):
                 result = classify([path])
@@ -47,9 +48,8 @@ class CIScopeTests(unittest.TestCase):
                 self.assertEqual(lanes(result), QUICK_AND_UI)
                 self.assertEqual(result["reasons"], {path: "ui"})
 
-    def test_voiceover_fixtures_and_launcher_add_only_the_voiceover_lane(self):
-        for path in ("Tests/VoiceOverFixtures/VoiceOverUITests.swift", "Tests/VoiceOverFixtures/RemoteFilesAccessibilityApp.swift",
-                     "scripts/test-voiceover.sh"):
+    def test_voiceover_fixtures_add_only_the_voiceover_lane(self):
+        for path in ("Tests/VoiceOverFixtures/VoiceOverUITests.swift", "Tests/VoiceOverFixtures/RemoteFilesAccessibilityApp.swift"):
             with self.subTest(path=path):
                 result = classify([path])
                 self.assertEqual(lanes(result), {"quick": True, "ui": False, "voiceover": True, "release": False})
@@ -88,7 +88,7 @@ TREE = "a" * 40
 BASE = "b" * 40
 PR_HEAD = "c" * 40
 MERGED = "d" * 40
-SHARD_1, SHARD_2 = ci_scope.UI_SHARD_JOBS
+UI_JOB, = ci_scope.UI_JOBS
 
 
 def pull_request_run(**overrides):
@@ -96,9 +96,8 @@ def pull_request_run(**overrides):
             "head_commit": {"tree_id": TREE}, "head_repository": {"full_name": REPOSITORY}, **overrides}
 
 
-def jobs(shard_1="success", shard_2="success"):
-    return [{"name": "Repository checks", "conclusion": "success"}, {"name": SHARD_1, "conclusion": shard_1},
-            {"name": SHARD_2, "conclusion": shard_2}]
+def jobs(ui="success"):
+    return [{"name": "Repository checks", "conclusion": "success"}, {"name": UI_JOB, "conclusion": ui}]
 
 
 class FakeAPI:
@@ -138,25 +137,16 @@ class UIEvidenceTests(unittest.TestCase):
     def test_head_identical_to_previous_main_tip_is_evidence(self):
         self.assertIsNotNone(self.find(FakeAPI(compare="identical")))
 
-    def test_any_shard_short_of_success_does_not_skip(self):
+    def test_ui_job_short_of_success_does_not_skip(self):
         for conclusion in ("failure", "cancelled", "skipped", "timed_out", None):
-            for run_jobs in (jobs(shard_1=conclusion), jobs(shard_2=conclusion)):
-                with self.subTest(conclusion=conclusion, jobs=run_jobs):
-                    self.assertIsNone(self.find(FakeAPI(run_jobs=run_jobs)))
+            with self.subTest(conclusion=conclusion):
+                self.assertIsNone(self.find(FakeAPI(run_jobs=jobs(ui=conclusion))))
 
-    def test_missing_shard_does_not_skip(self):
-        for name in ci_scope.UI_SHARD_JOBS:
-            with self.subTest(missing=name):
-                self.assertIsNone(self.find(FakeAPI(run_jobs=[job for job in jobs() if job["name"] != name])))
+    def test_missing_ui_job_does_not_skip(self):
+        self.assertIsNone(self.find(FakeAPI(run_jobs=[job for job in jobs() if job["name"] != UI_JOB])))
 
-    def test_shards_the_run_skipped_do_not_skip(self):
-        # GitHub reports a skipped matrix job once, under its unexpanded name; PR #67's run looks like this.
-        run_jobs = [{"name": "Repository checks", "conclusion": "success"},
-                    {"name": "Acceptance / simulator-ui-shard-${{ matrix.shard }}", "conclusion": "skipped"}]
-        self.assertIsNone(self.find(FakeAPI(run_jobs=run_jobs)))
-
-    def test_failed_job_sharing_a_shard_name_does_not_skip(self):
-        self.assertIsNone(self.find(FakeAPI(run_jobs=jobs() + [{"name": SHARD_1, "conclusion": "failure"}])))
+    def test_failed_job_sharing_the_ui_job_name_does_not_skip(self):
+        self.assertIsNone(self.find(FakeAPI(run_jobs=jobs() + [{"name": UI_JOB, "conclusion": "failure"}])))
 
     def test_different_tree_does_not_skip_or_read_that_runs_jobs(self):
         api = FakeAPI(runs=[pull_request_run(head_commit={"tree_id": "e" * 40})])
@@ -229,7 +219,7 @@ class UIEvidenceTests(unittest.TestCase):
     def test_earlier_listed_run_without_the_shards_does_not_hide_a_later_one_that_passed(self):
         quick_only = pull_request_run(id=8)
         passing = pull_request_run(id=7)
-        responses = {"8": jobs(shard_1="skipped", shard_2="skipped"), "7": jobs()}
+        responses = {"8": jobs(ui="skipped"), "7": jobs()}
         api = FakeAPI(runs=[quick_only, passing])
 
         def respond(path):
@@ -270,7 +260,7 @@ class MainPushSelectionTests(unittest.TestCase):
 
     def test_main_push_without_evidence_runs_the_ui_shards(self):
         self.assertEqual(self.select(["Sources/RemoteFilesUI/FolderView.swift"], "--main-push", api=FakeAPI(runs=[]))["ui"], "true")
-        self.assertIn("no evidence that a pull request run already passed both shards", self.log)
+        self.assertIn("no evidence that a pull request run already passed the UI journeys", self.log)
 
     def test_main_push_with_an_api_failure_runs_the_ui_shards(self):
         api = mock.Mock(side_effect=subprocess.CalledProcessError(1, "gh"))
@@ -296,10 +286,10 @@ class WorkflowContractTests(unittest.TestCase):
 
     workflow = (Path(__file__).resolve().parents[1] / ci_scope.CI_WORKFLOW).read_text()
 
-    def test_shard_job_names_are_the_ones_the_workflow_produces(self):
-        self.assertEqual(ci_scope.UI_SHARD_JOBS, ("Acceptance / simulator-ui-shard-1", "Acceptance / simulator-ui-shard-2"))
-        self.assertIn("name: Acceptance / simulator-ui-shard-${{ matrix.shard }}", self.workflow)
-        self.assertIn("shard: [1, 2]", self.workflow)
+    def test_ui_job_name_is_the_one_the_workflow_produces(self):
+        self.assertEqual(ci_scope.UI_JOBS, ("Acceptance / simulator-ui",))
+        self.assertIn("name: Acceptance / simulator-ui\n", self.workflow)
+        self.assertNotIn("shard:", self.workflow)
 
     def test_selector_can_read_run_results_and_nothing_can_write(self):
         permissions = self.workflow.split("\npermissions:\n", 1)[1].split("\n\n", 1)[0]

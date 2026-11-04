@@ -6,8 +6,9 @@ Dated investigations of CI failures and the timing baselines they produced, move
 here from the policy page on 3 November 2026. Each section describes the workflow
 as it was at the time it was written; the current selection rules, timing budgets
 and cache behaviour are in [CI policy and timing](CI.md). In particular, the UI,
-VoiceOver and Release lanes no longer run on every escalated PR, and build caches
-are saved only from `main`.
+VoiceOver and Release lanes no longer run on every escalated PR, build caches are
+saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
+no longer builds a disposable project copy.
 
 ## UI lane deadline regression
 
@@ -414,3 +415,34 @@ twice a quarter of a second apart while hittable. Right after a build the list i
 the Rebuild and summary rows above the switch, and a touch synthesized on a row that is
 still moving is swallowed without an error; the stability wait is a precondition with a
 15-second hang guard, not a retry, and a tap that still has no effect fails the journey.
+
+## Generated VoiceOver fixture and one UI job
+
+The audit behind PR #68 found two follow-ups. Successful jobs across the 40 most
+recent runs with acceptance lanes, as of 3 November, took a median of 25.0 minutes for
+VoiceOver (17.9 to 35.5) and 25.7 and 25.3 minutes for UI shards 1 and 2 (18.1 to 39.4).
+
+**VoiceOver.** About 12 of the lane's minutes were the eight journeys. About 8 went to
+rebuilding: `scripts/test-voiceover.sh` copied `RemoteFiles.xcodeproj` into the
+evidence folder with rewritten paths, so Xcode treated it as a different project. The
+composite action also booted the simulator before the runner started, which slowed
+source hashing to 40 to 154 seconds. The fixture is now the generated
+`RemoteFilesAccessibility` app and `RemoteFilesAccessibilityUITests` bundle in the real
+project, and the lane builds, boots, settles and tests in the same order as the core
+and UI lanes.
+
+The old order hid a cost: the eight-minute build absorbed the boot's load spike, so the
+lane's mean load was about half that of the other simulator lanes. Testing after a
+short incremental build instead needs the same settle wait, for which the 3 November
+90-second experiment above gives no safe shortcut. That wait, up to 8 minutes, offsets
+part of the rebuild saving, so compare the lane's `simulator-settle` phase with its
+build when judging the result.
+
+**UI.** Each shard paid about 12 minutes of checkout, cache restore, build, boot, settle
+and cache save. With the journeys now running on `main` rather than on most PRs, runner
+time matters more than wall clock, so one `Acceptance / simulator-ui` job runs the whole
+inventory. Its test execution has a 60-minute command deadline and the job a 120-minute
+ceiling; the 180/240-second method allowances, inventory checks and no-retry policy are
+unchanged. Expect about 45 minutes in place of two jobs of about 25. `--ui-shard` stays
+for local use. One job also means one failure point: a stalled journey now holds up the
+whole inventory rather than half of it, within the same per-method allowances.

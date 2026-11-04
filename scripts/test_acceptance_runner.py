@@ -2,9 +2,11 @@
 """Acceptance environment and skip-policy regressions; no builds or server needed."""
 import importlib.util
 import contextlib
+import inspect
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -274,6 +276,48 @@ class VoiceOverDiagnosticsTests(unittest.TestCase):
                     self.assertFalse((output / "svg-rendering.log").exists())
 
 
+class VoiceOverLaneTests(unittest.TestCase):
+    root = Path(__file__).resolve().parents[1]
+
+    def run_lane_ending(self, status, directory):
+        class Lane:
+            root = self.root
+            output = Path(directory)
+            commands = []
+            def command(self, name, command, timeout=None):
+                self.commands.append((name, command))
+                return {"status": "passed" if name.endswith("-build") else status}
+            def tests(self, *args, **kwargs):
+                pass
+        run = Lane(); run.commands = []
+        acceptance.execute_lanes(run, ["voiceover"], Path("packages"), Path("scratch"), Path("derived"), "owned-simulator")
+        return run
+
+    def test_failed_lane_collects_only_the_svg_lifecycle_category_from_its_own_simulator(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(acceptance.subprocess, "run") as collect:
+            self.run_lane_ending("failed", directory)
+        command = collect.call_args.args[0]
+        self.assertEqual(command[:4], ["xcrun", "simctl", "spawn", "owned-simulator"])
+        self.assertIn('subsystem == "dev.iris.RemoteFiles" AND category == "SVGPreview"', command)
+        self.assertIsNotNone(collect.call_args.kwargs.get("timeout"), "A stalled log query must not hold the lane")
+
+    def test_passing_lane_collects_no_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(acceptance.subprocess, "run") as collect:
+            self.run_lane_ending("passed", directory)
+            self.assertFalse((Path(directory) / "svg-rendering.log").exists())
+        collect.assert_not_called()
+
+    def test_diagnostic_failure_leaves_the_lane_failure_as_the_report(self):
+        for error in (subprocess.TimeoutExpired("log", 120), OSError("no simctl")):
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as directory, \
+                 patch.object(acceptance.subprocess, "run", side_effect=error), \
+                 contextlib.redirect_stdout(io.StringIO()) as printed:
+                self.run_lane_ending("failed", directory)
+                self.assertIn("SVG lifecycle log collection failed", printed.getvalue())
+
+
 class LaneSelectionTests(unittest.TestCase):
     def test_default_keeps_full_acceptance_and_rejects_overlapping_inventories(self):
         self.assertEqual(acceptance.selected_lanes(None), acceptance.DEFAULT_LANES)
@@ -287,12 +331,16 @@ class LaneSelectionTests(unittest.TestCase):
             env = {}
             commands = []
             inventories = []
-            def command(self, name, command):
+            deadlines = {}
+            skips = []
+            def command(self, name, command, timeout=None):
                 self.commands.append((name, command))
+                self.deadlines[name] = timeout
                 return {"name": name, "log": "unused", "status": "passed"}
             def tests(self, lane, expected, allowed_skips=(), xcresult=None):
                 self.inventories.append(expected)
-        run = Recorder(); run.commands = []; run.inventories = []
+                self.skips.append(allowed_skips)
+        run = Recorder(); run.commands = []; run.inventories = []; run.deadlines = {}; run.skips = []
         acceptance.execute_lanes(run, [lane], Path("packages"), Path("scratch"), Path("derived"), "simulator-id", ui_shard=ui_shard)
         return run
 
@@ -395,7 +443,7 @@ class LaneSelectionTests(unittest.TestCase):
         self.assertEqual(run.commands, [lane + "-build"])
 
     def test_failed_build_never_boots_or_runs_cached_tests(self):
-        for lane, shard in (("simulator-core", None), ("simulator-ui", None), ("simulator-ui", 1), ("simulator-ui", 2)):
+        for lane, shard in (("simulator-core", None), ("simulator-ui", None), ("simulator-ui", 1), ("simulator-ui", 2), ("voiceover", None)):
             with self.subTest(lane=lane, shard=shard):
                 self.check_failed_build_never_boots_or_runs_cached_tests(lane, shard)
 
@@ -405,7 +453,7 @@ class LaneSelectionTests(unittest.TestCase):
             root = Path(__file__).resolve().parents[1]
             output = Path("/tmp/unused-evidence")
             env = {}
-            def command(self, name, command):
+            def command(self, name, command, timeout=None):
                 events.append(name)
                 return {"status": "passed"}
             def tests(self, lane, expected, allowed_skips=(), xcresult=None):
@@ -418,7 +466,8 @@ class LaneSelectionTests(unittest.TestCase):
 
     def test_boot_follows_build_and_precedes_same_inventory_execution(self):
         for lane, directory in (("simulator-core", "Tests/RemoteFilesCoreTests"),
-                                ("simulator-ui", "Tests/RemoteFilesUITests")):
+                                ("simulator-ui", "Tests/RemoteFilesUITests"),
+                                ("voiceover", "Tests/VoiceOverFixtures")):
             with self.subTest(lane=lane):
                 self.check_boot_follows_build_and_precedes_same_inventory_execution(lane, directory)
 
@@ -438,6 +487,105 @@ class LaneSelectionTests(unittest.TestCase):
         self.assertTrue(any(name.startswith("RealServerUITests/") for name in run.inventories[0]))
         self.assertFalse(any(name.startswith("IdentityTests/") for name in run.inventories[0]))
 
+    def test_voiceover_builds_its_generated_targets_in_the_real_project_and_shared_caches(self):
+        run = self.run_lane("voiceover")
+        self.assertEqual([name for name, _ in run.commands], ["voiceover-build", "voiceover"])
+        build, execution = run.commands[0][1], run.commands[1][1]
+        for command in (build, execution):
+            self.assertEqual(command[0], "xcodebuild", "The journeys use local fixtures only")
+            self.assertEqual(command[command.index("-project") + 1], "RemoteFiles.xcodeproj")
+            self.assertEqual(command[command.index("-scheme") + 1], "RemoteFilesAccessibility")
+            self.assertEqual(command[command.index("-derivedDataPath") + 1], Path("derived"))
+            self.assertEqual(command[command.index("-clonedSourcePackagesDirPath") + 1], Path("packages"))
+            self.assertIn("-only-testing:RemoteFilesAccessibilityUITests", command)
+        self.assertIn("generic/platform=iOS Simulator", build)
+        self.assertEqual(build[-1], "build-for-testing")
+        self.assertEqual(execution[-1], "test-without-building")
+        self.assertEqual(execution[execution.index("-default-test-execution-time-allowance") + 1], "180")
+        self.assertEqual(execution[execution.index("-maximum-test-execution-time-allowance") + 1], "240")
+        self.assertEqual(execution[execution.index("-resultBundlePath") + 1], run.output / "voiceover.xcresult")
+        self.assertEqual(run.inventories[0], acceptance.expected_tests(run.root, "iOS", ["Tests/VoiceOverFixtures"]))
+        self.assertEqual(len(run.inventories[0]), 8)
+        self.assertEqual(run.skips[0], set(), "No VoiceOver method may skip")
+
+    def test_voiceover_shares_the_compilation_cache_with_the_other_lanes(self):
+        class Recorder:
+            root = Path(__file__).resolve().parents[1]
+            output = Path("/tmp/unused-evidence")
+            commands = []
+            def command(self, name, command, timeout=None):
+                self.commands.append(command)
+                return {"status": "passed"}
+            def tests(self, *args, **kwargs):
+                pass
+        run = Recorder(); run.commands = []
+        acceptance.execute_lanes(run, ["voiceover"], Path("p"), Path("s"), Path("d"), "sim", compilation_cache=Path("cas"))
+        for command in run.commands:
+            self.assertIn("COMPILATION_CACHE_CAS_PATH=cas", command)
+
+    def test_only_ui_test_execution_receives_the_longer_deadline(self):
+        ui = self.run_lane("simulator-ui")
+        self.assertEqual(ui.deadlines, {"simulator-ui-build": None, "simulator-ui": 3600})
+        for lane in ("simulator-core", "voiceover"):
+            with self.subTest(lane=lane):
+                self.assertEqual(self.run_lane(lane).deadlines, {lane + "-build": None, lane: None})
+        self.assertEqual(self.run_lane("simulator").deadlines, {"simulator": None})
+        self.assertEqual(self.run_lane("simulator-ui", 1).deadlines["simulator-ui-shard-1"], 3600)
+
+    def test_ui_journeys_keep_their_per_method_allowances_inventory_and_skips(self):
+        run = self.run_lane("simulator-ui")
+        execution = run.commands[1][1]
+        self.assertEqual(execution[execution.index("-default-test-execution-time-allowance") + 1], "180")
+        self.assertEqual(execution[execution.index("-maximum-test-execution-time-allowance") + 1], "240")
+        self.assertEqual(run.inventories[0], acceptance.expected_tests(run.root, "iOS", ["Tests/RemoteFilesUITests"]))
+        self.assertEqual(run.skips[0], acceptance.SIMULATOR_ALLOWED_SKIPS | {name for name in run.inventories[0] if name.startswith("RealServerUITests/")})
+
+    def check_main_deadlines(self, extra, command_seconds, overrides):
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            metadata = {"commit": "fixture", "mode": "test", "source_tree_sha256": "fixture"}
+            argv = ["test-acceptance.py", "--lane", "macos-openssh", *extra, "--output", str(Path(directory) / "evidence")]
+            with patch.object(acceptance, "execute_lanes", side_effect=lambda run, *args: calls.append((run.timeout, args[-1]))), \
+                 patch.object(acceptance, "capture", return_value="fixture toolchain"), \
+                 patch.object(acceptance, "snapshot", return_value=(Path(directory), metadata)), \
+                 patch.object(sys, "argv", argv), \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                acceptance.main()  # Stops after the lanes: the stubbed snapshot wrote no source manifest.
+        self.assertEqual(calls, [(command_seconds, overrides)])
+
+    def test_default_timeouts_are_thirty_minutes_with_the_ui_override(self):
+        self.check_main_deadlines([], 30 * 60, {"simulator-ui": 60 * 60})
+
+    def test_explicit_timeout_bounds_ui_execution_as_well(self):
+        self.check_main_deadlines(["--timeout-minutes", "5"], 5 * 60, {})
+
+    def test_command_deadline_override_interrupts_and_is_recorded(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(directory)
+            run = acceptance.Run(root, root, {"commit": "fixture", "mode": "test", "source_tree_sha256": "fixture"})
+            lane = run.command("override", ["sleep", "30"], timeout=1)
+            self.assertEqual(lane["status"], "failed")
+            self.assertEqual(lane["deadline_seconds"], 1)
+            self.assertIn("exceeded 1 seconds", lane["errors"][0])
+            self.assertEqual(run.command("default", ["true"])["deadline_seconds"], 1800)
+
+    def test_boot_flag_accepts_each_staged_lane_alone_before_creating_evidence(self):
+        script = Path(__file__).with_name("test-acceptance.py")
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "must-not-exist"
+            for args, message in ((["--lane", "macos-openssh"], "--boot-simulator"),
+                                  (["--lane", "simulator"], "--boot-simulator"),
+                                  (["--lane", "voiceover", "--lane", "simulator-ui"], "--boot-simulator"),
+                                  (["--lane", "voiceover"], "--simulator is required"),
+                                  (["--lane", "simulator-core"], "--simulator is required"),
+                                  (["--lane", "simulator-ui"], "--simulator is required")):
+                with self.subTest(args=args):
+                    result = subprocess.run([sys.executable, "-B", str(script), *args, "--boot-simulator",
+                                             "--output", str(output)], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn(message, result.stderr)
+                    self.assertFalse(output.exists())
+
     def test_mac_lane_never_invokes_xcode_or_a_simulator(self):
         run = self.run_lane("macos-openssh")
         self.assertEqual(len(run.commands), 1)
@@ -451,13 +599,32 @@ class WorkflowShapeTests(unittest.TestCase):
         workflow = (self.root / ".github/workflows/ci.yml").read_text()
         return workflow.split("\n  " + name + ":\n", 1)[1].split("\n\n  ", 1)[0]
 
-    def test_ui_shards_voiceover_and_release_are_gated_on_their_own_selector_outputs(self):
+    def test_ui_journeys_run_in_one_job_that_fits_their_deadlines(self):
         workflow = (self.root / ".github/workflows/ci.yml").read_text()
-        shards = self.job("simulator-ui")
-        self.assertIn("shard: [1, 2]", shards)
-        self.assertIn("fail-fast: false", shards)
-        self.assertNotIn("continue-on-error", shards)
-        self.assertIn("ui-shard: ${{ matrix.shard }}", shards)
+        action = (self.root / ".github/actions/validate/action.yml").read_text()
+        job = self.job("simulator-ui")
+        self.assertIn("name: Acceptance / simulator-ui\n", job)
+        self.assertIn("lane: simulator-ui", job)
+        self.assertNotIn("continue-on-error", job)
+        for text in (workflow, action):
+            self.assertNotIn("matrix.shard", text)
+            self.assertNotIn("ui-shard", text)
+            self.assertNotIn("UI_SHARD", text)
+        settle = inspect.signature(acceptance.settle_after_boot).parameters["limit"].default
+        boot = 6 * 60  # simctl boot, then bootstatus.
+        needed = acceptance.DEFAULT_COMMAND_MINUTES * 60 + boot + settle + acceptance.EXECUTION_DEADLINE_SECONDS["simulator-ui"]
+        ceiling = int(re.search(r"timeout-minutes: (\d+)", job)[1]) * 60
+        self.assertGreater(ceiling - needed, 5 * 60, "Leave time for checkout, caches and evidence upload")
+
+    def test_every_ci_simulator_lane_boots_inside_the_runner_after_building(self):
+        action = (self.root / ".github/actions/validate/action.yml").read_text()
+        self.assertNotIn("simctl boot", action)
+        self.assertIn('--simulator "$SIMULATOR_UDID" --boot-simulator', action)
+        self.assertNotIn("${{ env.EVIDENCE }}/voiceover/", action)
+        self.assertEqual(acceptance.STAGED_LANES, ("simulator-core", "simulator-ui", "voiceover"))
+
+    def test_ui_voiceover_and_release_are_gated_on_their_own_selector_outputs(self):
+        workflow = (self.root / ".github/workflows/ci.yml").read_text()
         for name, lane in (("simulator-ui", "ui"), ("voiceover", "voiceover"), ("release-device-compile", "release")):
             with self.subTest(job=name):
                 job = self.job(name)
@@ -482,7 +649,6 @@ class WorkflowShapeTests(unittest.TestCase):
         action = (self.root / ".github/actions/validate/action.yml").read_text()
         key = next(line for line in action.splitlines() if line.strip().startswith("key: "))
         self.assertIn("steps.build.outputs.prefix", key)
-        self.assertNotIn("evidence-name", key)
         self.assertIn('echo "prefix=v3-xcode-$toolchain-${{ runner.arch }}-$family-$LANE"', action)
         save = action.split("- name: Save build progress", 1)[1]
         self.assertIn("github.ref == 'refs/heads/main'", save.split("uses:", 1)[0])

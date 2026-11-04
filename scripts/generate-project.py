@@ -58,9 +58,26 @@ dep = obj('dependency', f'isa = PBXTargetDependency; target = {ht};')
 tt = obj('testtarget', f'isa = PBXNativeTarget; buildConfigurationList = {tc}; buildPhases = ({testsources}, {testframeworks},); buildRules = (); dependencies = ({dep},); name = RemoteFilesTests; productName = RemoteFilesTests; productReference = {test}; productType = "com.apple.product-type.bundle.unit-test"; packageProductDependencies = ({core},{ui},);')
 uidep = obj('uidependency', f'isa = PBXTargetDependency; target = {at};')
 ut = obj('uitarget', f'isa = PBXNativeTarget; buildConfigurationList = {uc}; buildPhases = ({uitestsources}, {uitestframeworks},); buildRules = (); dependencies = ({uidep},); name = RemoteFilesUITests; productName = RemoteFilesUITests; productReference = {uitestproduct}; productType = "com.apple.product-type.bundle.ui-testing";')
-products = obj('products',f'isa = PBXGroup; children = ({app},{hostapp},{test},{uitestproduct},); name = Products; sourceTree = "<group>";')
-group = obj('group','isa = PBXGroup; children = ('+','.join([source,hostsource,icon,uitestsource,*refs,products])+',); sourceTree = "<group>";')
-project = obj('project',f'isa = PBXProject; attributes = {{ BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 2700; }}; buildConfigurationList = {pc}; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; knownRegions = (en,Base,); mainGroup = {group}; productRefGroup = {products}; projectDirPath = ""; projectRoot = ""; targets = ({at},{ht},{tt},{ut},); packageReferences = ({local},);')
+# The accessibility fixture replaces only the entry point around the production packages. It lives
+# in this project so its lane shares DerivedData and the compilation cache with the app and UI targets.
+a11yapp = obj('a11yapp', 'isa = PBXFileReference; explicitFileType = wrapper.application; path = RemoteFilesAccessibility.app; sourceTree = BUILT_PRODUCTS_DIR;')
+a11ysource = obj('a11ysource', 'isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/VoiceOverFixtures/RemoteFilesAccessibilityApp.swift; sourceTree = SOURCE_ROOT;')
+a11ybuild = obj('a11ybuild', f'isa = PBXBuildFile; fileRef = {a11ysource};')
+a11ysources = obj('a11ysources', f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ({a11ybuild},); runOnlyForDeploymentPostprocessing = 0;')
+a11yuibuild = obj('a11yuibuild', f'isa = PBXBuildFile; productRef = {ui};')
+a11yframeworks = obj('a11yframeworks', f'isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ({a11yuibuild},); runOnlyForDeploymentPostprocessing = 0;')
+a11yc = configs('a11y',appsettings.replace('dev.iris.RemoteFiles;', 'dev.iris.RemoteFilesAccessibility;').replace('ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;', '') + ' INFOPLIST_FILE = App/Info.plist;')
+a11yt = obj('a11ytarget', f'isa = PBXNativeTarget; buildConfigurationList = {a11yc}; buildPhases = ({a11ysources}, {a11yframeworks},); buildRules = (); dependencies = (); name = RemoteFilesAccessibility; productName = RemoteFilesAccessibility; productReference = {a11yapp}; productType = "com.apple.product-type.application"; packageProductDependencies = ({ui},);')
+a11ytestproduct = obj('a11ytestproduct', 'isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = RemoteFilesAccessibilityUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR;')
+a11ytestsource = obj('a11ytestsource', 'isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/VoiceOverFixtures/VoiceOverUITests.swift; sourceTree = SOURCE_ROOT;')
+a11ytestbuild = obj('a11ytestbuild', f'isa = PBXBuildFile; fileRef = {a11ytestsource};')
+a11ytestsources = obj('a11ytestsources', f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ({a11ytestbuild},); runOnlyForDeploymentPostprocessing = 0;')
+a11ytestc = configs('a11ytest', 'PRODUCT_BUNDLE_IDENTIFIER = dev.iris.RemoteFilesAccessibilityUITests; PRODUCT_NAME = "$(TARGET_NAME)"; GENERATE_INFOPLIST_FILE = YES; TEST_TARGET_NAME = RemoteFilesAccessibility;')
+a11ydep = obj('a11ydependency', f'isa = PBXTargetDependency; target = {a11yt};')
+a11yut = obj('a11yuitarget', f'isa = PBXNativeTarget; buildConfigurationList = {a11ytestc}; buildPhases = ({a11ytestsources},); buildRules = (); dependencies = ({a11ydep},); name = RemoteFilesAccessibilityUITests; productName = RemoteFilesAccessibilityUITests; productReference = {a11ytestproduct}; productType = "com.apple.product-type.bundle.ui-testing";')
+products = obj('products',f'isa = PBXGroup; children = ({app},{hostapp},{test},{uitestproduct},{a11yapp},{a11ytestproduct},); name = Products; sourceTree = "<group>";')
+group = obj('group','isa = PBXGroup; children = ('+','.join([source,hostsource,icon,uitestsource,a11ysource,a11ytestsource,*refs,products])+',); sourceTree = "<group>";')
+project = obj('project',f'isa = PBXProject; attributes = {{ BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 2700; }}; buildConfigurationList = {pc}; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; knownRegions = (en,Base,); mainGroup = {group}; productRefGroup = {products}; projectDirPath = ""; projectRoot = ""; targets = ({at},{ht},{tt},{ut},{a11yt},{a11yut},); packageReferences = ({local},);')
 pbx = '// !$*UTF8*$!\n{ archiveVersion = 1; classes = {}; objectVersion = 56; objects = {\n'
 pbx += '\n'.join(f'{i} = {{ {v} }};' for i,v in objects.values())
 pbx += f'\n}}; rootObject = {project}; }}\n'
@@ -84,3 +101,13 @@ core_scheme=f'''<?xml version="1.0" encoding="UTF-8"?>
 <AnalyzeAction buildConfiguration="Debug"/>
 </Scheme>'''
 (root/'RemoteFiles.xcodeproj/xcshareddata/xcschemes/RemoteFilesCoreCI.xcscheme').write_text(core_scheme)
+
+# VoiceOver journeys run here, separate from the app's scheme so neither lane builds the other's bundles.
+a11y_scheme=f'''<?xml version="1.0" encoding="UTF-8"?>
+<Scheme LastUpgradeVersion="2700" version="1.3">
+<BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES"><BuildActionEntries><BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES">{ref(a11yt,'RemoteFilesAccessibility.app')}</BuildActionEntry></BuildActionEntries></BuildAction>
+<TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES"><Testables><TestableReference skipped="NO">{ref(a11yut,'RemoteFilesAccessibilityUITests.xctest')}</TestableReference></Testables></TestAction>
+<LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugDocumentVersioning="YES" debugServiceExtension="internal" allowLocationSimulation="YES"><BuildableProductRunnable runnableDebuggingMode="0">{ref(a11yt,'RemoteFilesAccessibility.app')}</BuildableProductRunnable></LaunchAction>
+<AnalyzeAction buildConfiguration="Debug"/>
+</Scheme>'''
+(root/'RemoteFiles.xcodeproj/xcshareddata/xcschemes/RemoteFilesAccessibility.xcscheme').write_text(a11y_scheme)

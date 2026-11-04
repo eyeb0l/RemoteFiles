@@ -53,7 +53,7 @@ python3 -B Fixtures/generate-fixtures.py /private/tmp/remotefiles-fixtures
 scripts/test-voiceover.sh SIMULATOR_UDID /private/tmp/remotefiles-voiceover-run
 ```
 
-The optional VoiceOver runner copies the project into its output directory and substitutes a local fixture entry point. It tests the current production reader/image views, records actual `XCUIVoiceOverService` utterances and screenshots, and restores the original Simulator VoiceOver enabled state after each test. Use a fresh output directory. It does not install on a physical phone or open external links. Simulator speech/focus checks do not establish touch gestures, rotor behaviour, Braille, or physical-device acceptance.
+The optional VoiceOver runner builds the generated `RemoteFilesAccessibility` scheme, whose app puts a local fixture entry point around the production packages. It tests the current production reader/image views, records actual `XCUIVoiceOverService` utterances and screenshots, and restores the original Simulator VoiceOver enabled state after each test. Use a fresh output directory. It does not install on a physical phone or open external links. Simulator speech/focus checks do not establish touch gestures, rotor behaviour, Braille, or physical-device acceptance.
 
 Use the signed simulator test command for the actual Keychain tests: an unsigned simulator test host returns Keychain error `-34018`. The fixture launcher forwards its environment into iOS XCTest through `TEST_RUNNER_REMOTEFILES_*`; do not run the integration test command without the launcher and count skipped server tests as passed. `-collect-test-diagnostics never` avoids diagnostic collection unrelated to this bounded test run.
 
@@ -87,7 +87,7 @@ from the physical-device and human checks that remain.
 [CI](https://github.com/eyeb0l/RemoteFiles/actions/workflows/ci.yml) runs repository
 checks on every pull request and main push. Documentation-only changes stop there.
 Code changes run macOS/OpenSSH tests and all hosted iOS core tests in parallel.
-A push to `main` then runs the demo UI journeys in two shards, unless a PR run
+A push to `main` then runs the demo UI journeys in one job, unless a PR run
 already passed them on the same tree; a PR runs them before merge only when it
 changes the UI journeys, the app target, packages, vendored code, fixtures, demo
 resources or CI itself. VoiceOver and Release compilation run nightly on `main`,
