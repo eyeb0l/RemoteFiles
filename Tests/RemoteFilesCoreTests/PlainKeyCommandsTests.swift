@@ -152,6 +152,7 @@ import UIKit
         XCTAssertTrue(sheet.presentedViewController === headings)
         XCTAssertFalse(keys.canPerform(find) || keys.canPerform(escape) || keys.canPerform(back))
         XCTAssertNil(keys.frontmostOfflineReader)
+        XCTAssertNil(keys.frontmostReader, "A covering sheet must not restore the scene's Find actions")
         headings.dismiss(animated: false)
         settle { sheet.presentedViewController == nil }
         XCTAssertTrue(keys.canPerform(find) && keys.canPerform(back))

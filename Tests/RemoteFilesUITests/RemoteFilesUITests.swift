@@ -242,9 +242,13 @@ final class RemoteFilesUITests: XCTestCase {
         app.typeKey("j", modifierFlags: [.command, .shift])
         let headings = app.navigationBars["Headings"]
         XCTAssertTrue(headings.waitForExistence(timeout: 20), "⇧⌘J lists headings in an offline copy")
+        // Menu commands now observe the offline reader too; a covering sheet must still
+        // keep the underlying reader from responding to its source shortcut.
+        app.typeKey("u", modifierFlags: [.command, .option])
         headings.buttons["Done"].tap()
         wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: headings)], timeout: 20)
         XCTAssertTrue(app.staticTexts["offline-copy-date"].exists, "The shortcuts stay in the offline reader")
+        XCTAssertTrue(rendered.exists, "Source stays unchanged while Headings covers the reader")
 
         // ⌘[ returns to the library, where the reader's commands are gone with it.
         app.typeKey("[", modifierFlags: .command)
