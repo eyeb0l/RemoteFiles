@@ -3,7 +3,8 @@
 [CI policy](CI.md) · [Build and test](DEVELOPMENT.md)
 
 Betas are built, signed and uploaded by Xcode Cloud. A build starts only when a
-`testflight/*` tag is pushed, never for a pull request or an ordinary push to `main`.
+`testflight/*` tag is pushed or someone starts one by hand on such a tag, never for a pull
+request or an ordinary push to `main`.
 
 ## Release a build
 
@@ -18,7 +19,8 @@ on it. A docs-only commit passes those with its Mac lanes skipped, so check that
 commit's run passed too. It needs your `git` and `gh` logins.
 
 Xcode Cloud then runs `ci_scripts/ci_post_clone.sh`, which fails the build if the commit is
-not on `main`. This also covers a tag pushed by hand, but it cannot check CI results.
+not on `main`. This also covers a tag pushed by hand or a manual start, but it cannot check CI
+results.
 
 Tags are named `testflight/<version>-<n>`, for example `testflight/0.1.0-3`. `<n>` counts
 releases of that version; it is not the build number. A ruleset stops `testflight/*` tags
@@ -34,37 +36,45 @@ being moved or deleted, so each one permanently records what shipped.
 - **Version:** change `MARKETING_VERSION` in `scripts/generate-project.py`, run the generator and
   merge that change before releasing. It must be one to three period-separated integers.
 
-## First-time setup
+## Xcode Cloud configuration
 
-Xcode Cloud workflows live in App Store Connect, not in this repository, and Apple requires the
-first one to be created in Xcode. Each step needs your Apple account.
-
-1. In Xcode → Settings → Apple Accounts, sign in with an account that has the Account Holder,
-   Admin or App Manager role on team `359794K46A`.
-2. Open `RemoteFiles.xcodeproj`. In the Report navigator, choose Cloud → **Get Started**, and select
-   the **RemoteFiles** product (`dev.iris.RemoteFiles`).
-3. Choose **Edit Workflow** and enter the settings below **before** saving. The suggested workflow
-   builds every push to `main` and every pull request, which would use up the allowance.
-4. Grant source access. Apple's Xcode Cloud GitHub app is already on this repository; if it was
-   installed for all your repositories, limit it to this one in GitHub → Settings → Applications.
-5. Let Xcode create the app record. App names are unique across the App Store, so choose another
-   name there if "RemoteFiles" is taken; the name on the Home Screen is set separately in the project.
-6. Skip or cancel the first build if you can. If Xcode insists on one, start it from `main`.
-7. In App Store Connect → the app → TestFlight, add an internal testing group and add yourself.
-   Then edit the workflow again and select that group in its post-action.
+Xcode Cloud workflows live in App Store Connect, not in this repository, so this page is their
+record. The saved `TestFlight` workflow was read back on 4 November 2026:
 
 | Workflow setting | Value |
 |---|---|
-| Name | `TestFlight`, with **Restrict Editing** on |
-| Environment | Latest released Xcode and macOS, **Clean** on |
-| Start conditions | Only **Tag Changes** → **Custom Tags** → tags beginning with `testflight/`. Remove Branch Changes and Pull Request Changes |
-| Actions | Only **Archive**: iOS, scheme `RemoteFiles`, Deployment Preparation **TestFlight and App Store** |
-| Post-actions | **TestFlight Internal Testing**: your group |
+| General | **Restrict Editing** on |
+| Environment | Latest Release for Xcode and macOS, **Clean** on. Xcode 27.2 hides Clean; change it in App Store Connect's workflow editor |
+| Start conditions | **Tag Changes** and **Manual Start - Tag**, both for tags beginning with `testflight/`. No Branch Changes or Pull Request Changes |
+| Actions | Only **Archive - iOS**, scheme `RemoteFiles`, distribution preparation **App Store Connect**, which allows internal and external testers and the App Store |
+| Post-actions | **TestFlight Internal Testing - iOS**: the `Internal` group |
 
-Do not add other workflows without changing `ci_scripts/ci_post_clone.sh`: Xcode Cloud runs it for
-all of them, and it fails any build of a commit that is not on `main`.
+The `Internal` group has automatic distribution off, so the post-action is the only route for a
+build to reach testers. App Store Connect does not let that group setting change later. The app
+record uses bundle ID `dev.iris.RemoteFiles` and SKU `remotefiles`.
+
+Xcode requires a Manual Start condition and has no control to remove it, so it is limited to the
+same tags. A manual start skips the release command's CI check, but the `main` guard still runs.
+
+Xcode also created an `Internal TestFlight Build` workflow, which is deactivated. Leave it off. Do not
+add other workflows without changing `ci_scripts/ci_post_clone.sh`: Xcode Cloud runs it for all of
+them, and it fails any build of a commit that is not on `main`.
 
 External testers need a TestFlight External Testing post-action, test information and Beta App Review.
+
+### If setting this up again
+
+Xcode 27.2 does not follow Apple's documented first-run order, so check these points:
+
+1. After you select the product, Xcode goes straight to **Setup Complete** and saves a workflow that
+   builds every push to `main`. Do not press **Start First Build**. Choose **Close**, then correct the
+   workflow in Integrate → Manage Workflows before anything is pushed.
+2. Save the start conditions before adding Archive, which opens a **Create App** sheet when the app
+   has no record yet. Xcode may then rewrite `project.pbxproj`; run `scripts/generate-project.py` to
+   restore it, because Repository checks require the generated output.
+3. Xcode may warn that the scheme `RemoteFiles` "may only exist locally", although it is committed.
+   The warning appeared with the project open from a Git worktree; the first build will show whether
+   it matters.
 
 ## Export compliance
 

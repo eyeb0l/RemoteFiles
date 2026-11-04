@@ -1,0 +1,9 @@
+{
+  "id" : "f2a5df5f-7bdc-4180-b5a2-b408bed4bf96",
+  "targets" : [
+    {
+      "id" : "6fca19e7-f353-414c-a079-95efbb011f16",
+      "name" : "RemoteFiles"
+    }
+  ]
+}
