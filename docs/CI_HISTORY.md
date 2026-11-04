@@ -567,10 +567,19 @@ placeholder as the destination.
 produced the failed run's traversal, assertion and scroll position. The new fixture without the
 fix landed on `"prompt"`, skipping `{` and `"version"`, so where focus lands varies.
 
-**Fix.** When the placeholder goes, the reader posts `screenChanged`, so VoiceOver restarts from
-the top of the screen with the document at its start. `testFocusStartsAtTheTopOfADocumentThatLoadsSlowly`
-covers this with a 3-second read, and the helper no longer treats the placeholder as the
-destination.
+**Fix.** When the placeholder goes, the reader posts `screenChanged`. On a slow load, VoiceOver
+restarts from the top of the screen with the document at its start.
+`testFocusStartsAtTheTopOfADocumentThatLoadsSlowly` covers this with a 3-second read, and the
+helper no longer treats the placeholder as the destination.
+
+**Still open.** This is a partial fix: VoiceOver can still skip the start of a document on a fast
+load. In the fix's VoiceOver job,
+[41829303481](https://github.com/eyeb0l/RemoteFiles/actions/runs/41829303481) on iOS 27.0, the JSON
+journey landed on `"prompt"` with the scroll bar at 100%, skipping `{` and `"version"`. It passed
+because that journey only looks for the sample text. Hiding the placeholder from VoiceOver and
+announcing it did not settle this: on iOS 27.2, focus started on `{` and the next move still went
+to `"prompt"`. That could be an app bug or the test reading speech too early; `currentSpeech()`
+returns the last phrase, not the current focus.
 
 **Limits.** VoiceOver now often starts on the Back button, about five swipes before the content.
 That can also happen on a fast load: with the fix, the JSON journey started on `{` on an iPhone
