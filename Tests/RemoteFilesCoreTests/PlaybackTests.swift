@@ -169,7 +169,51 @@ private struct NativeVideoFixture: View {
         controller.stop()
         task.cancel()
         do { try await task.value; XCTFail("Cancelled preparation must not publish") }
-        catch { XCTAssertTrue(error is CancellationError) }
+        catch { XCTAssertTrue(error is CancellationError, "Received \(error)") }
+        XCTAssertNil(controller.player)
+    }
+    func testCancelledFilePreparationErrorIsCancellation() async throws {
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let controller = RemotePlaybackController()
+        defer { controller.stop() }
+        let task = Task {
+            // Detached file setup can fail independently of its cancelled caller.
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await controller.prepare(missing, filename: "clip.mp4")
+        }
+        do { try await task.value; XCTFail("Cancelled preparation must not succeed") }
+        catch { XCTAssertTrue(error is CancellationError, "Received \(error)") }
+        XCTAssertNil(controller.player)
+    }
+    func testCancelledPlayableLoadErrorIsCancellation() async throws {
+        try await checkCancelledPlayableLoad(throwing: AVError(.operationCancelled))
+    }
+    func testCancelledPlayableLoadReturningFalseIsCancellation() async throws {
+        try await checkCancelledPlayableLoad(throwing: nil)
+    }
+    private func checkCancelledPlayableLoad(throwing error: Error?) async throws {
+        let source = try await downloaded("Sample video.mp4")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let controller = RemotePlaybackController()
+        defer { controller.stop() }
+        let entered = expectation(description: "Preparation reached the playable load")
+        var completion: CheckedContinuation<Bool, Error>?
+        let task = Task {
+            try await controller.prepare(source, filename: "clip.mp4", loadPlayable: { _ in
+                try await withCheckedThrowingContinuation {
+                    completion = $0
+                    entered.fulfill()
+                }
+            })
+        }
+        // Synchronize at the load rather than relying on a yield or a short sleep.
+        await fulfillment(of: [entered], timeout: 180)
+        controller.stop()
+        task.cancel()
+        if let error { completion?.resume(throwing: error) }
+        else { completion?.resume(returning: false) }
+        do { try await task.value; XCTFail("Cancelled preparation must not publish") }
+        catch { XCTAssertTrue(error is CancellationError, "Received \(error)") }
         XCTAssertNil(controller.player)
     }
     func testRuntimePlaybackFailureRemovesPlayerAndLocalCopy() async throws {

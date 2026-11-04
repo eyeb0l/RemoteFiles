@@ -25,12 +25,19 @@ final class RemotePlaybackController {
         player?.pause()
     }
 
-    func prepare(_ source: URL, filename: String) async throws {
+    func prepare(_ source: URL, filename: String,
+                 loadPlayable: (AVURLAsset) async throws -> Bool = { try await $0.load(.isPlayable) }) async throws {
         let token = UUID(); requestID = token
         // Linking/copying up to 128 MiB must not block scrolling or navigation.
-        let local = try await Task.detached(priority: .userInitiated) {
-            try PlaybackFile(source: source, filename: filename)
-        }.value
+        let local: PlaybackFile
+        do {
+            local = try await Task.detached(priority: .userInitiated) {
+                try PlaybackFile(source: source, filename: filename)
+            }.value
+        } catch {
+            try Task.checkCancellation()
+            throw error
+        }
         try Task.checkCancellation()
         guard token == requestID else { throw CancellationError() }
         let asset = AVURLAsset(url: local.url, options: [
@@ -38,11 +45,11 @@ final class RemotePlaybackController {
         ])
         do {
             let playable = try await withTaskCancellationHandler {
-                try await asset.load(.isPlayable)
+                try await loadPlayable(asset)
             } onCancel: { asset.cancelLoading() }
             guard playable else { throw PlaybackError.unplayable }
         } catch is CancellationError { throw CancellationError() }
-        catch { throw PlaybackError.unplayable }
+        catch { try Task.checkCancellation(); throw PlaybackError.unplayable }
         try Task.checkCancellation()
         guard token == requestID else { throw CancellationError() }
 
