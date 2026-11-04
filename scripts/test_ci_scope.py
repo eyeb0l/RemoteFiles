@@ -23,7 +23,8 @@ def lanes(result):
 
 class CIScopeTests(unittest.TestCase):
     def test_documentation_only_avoids_mac_runners(self):
-        result = classify(["docs/DEVELOPMENT.md", "README.md", "Vendor/Citadel/UPSTREAM.md", "design/icon-options/a.png"])
+        result = classify(["docs/DEVELOPMENT.md", "README.md", "Vendor/Citadel/UPSTREAM.md", "design/icon-options/a.png",
+                           "ci_scripts/ci_post_clone.sh"])
         self.assertEqual(lanes(result), NOTHING)
         self.assertEqual(result["reasons"], {})
 

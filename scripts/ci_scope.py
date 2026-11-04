@@ -11,7 +11,9 @@ import subprocess
 # Documentation and repository metadata: Repository checks only, no Mac runner.
 REPOSITORY_ONLY = ("docs/*", "README.md", "AGENTS.md", "ROADMAP.md", "PREVIEW_STATUS.md",
                    "LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING", ".gitignore",
-                   "Vendor/*/UPSTREAM.md", "Tests/LinuxSearchAcceptance/README.md", "design/*")
+                   "Vendor/*/UPSTREAM.md", "Tests/LinuxSearchAcceptance/README.md", "design/*",
+                   # Runs only in Xcode Cloud; scripts/test_testflight_release.py covers it in Repository checks.
+                   "ci_scripts/*")
 # A change to the workflow, the runner or its launchers must prove every lane.
 INFRASTRUCTURE = (".github/*", "scripts/ci_scope.py", "scripts/test-acceptance.py", "scripts/runner_finalization.py",
                   "scripts/test-openssh.sh", "scripts/generate-project.py")

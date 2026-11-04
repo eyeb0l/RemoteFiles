@@ -1,0 +1,205 @@
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+
+import testflight_release as release
+
+ROOT = Path(__file__).resolve().parent.parent
+GUARD = ROOT / "ci_scripts" / "ci_post_clone.sh"
+
+
+def check(name, conclusion="success", started="2026-11-04T01:00:00Z", app=release.GITHUB_ACTIONS_APP_ID):
+    return {"name": name, "status": "completed", "conclusion": conclusion, "started_at": started, "app": {"id": app}}
+
+
+class CheckGateTests(unittest.TestCase):
+    def test_every_required_check_passing_is_accepted(self):
+        self.assertEqual(release.unmet_checks([check(name) for name in release.REQUIRED_CHECKS]), [])
+
+    def test_missing_failed_and_running_checks_are_rejected(self):
+        running = {"name": "CI gate", "status": "in_progress", "conclusion": None,
+                   "started_at": "2026-11-04T01:00:00Z", "app": {"id": release.GITHUB_ACTIONS_APP_ID}}
+        self.assertEqual(release.unmet_checks([running]), ["Repository checks: missing", "CI gate: in_progress"])
+        self.assertEqual(release.unmet_checks([check("Repository checks", "failure"), check("CI gate", "cancelled")]),
+                         ["Repository checks: failure", "CI gate: cancelled"])
+
+    def test_same_named_check_from_another_app_does_not_count(self):
+        self.assertEqual(release.unmet_checks([check("Repository checks"), check("CI gate", app=1)]), ["CI gate: missing"])
+
+    def test_newest_run_of_a_check_decides(self):
+        older, newer = "2026-11-04T01:00:00Z", "2026-11-04T02:00:00Z"
+        passed_later = [check("Repository checks"), check("CI gate", "failure", older), check("CI gate", "success", newer)]
+        failed_later = [check("Repository checks"), check("CI gate", "success", older), check("CI gate", "failure", newer)]
+        self.assertEqual(release.unmet_checks(passed_later), [])
+        self.assertEqual(release.unmet_checks(failed_later), ["CI gate: failure"])
+
+
+class VersionAndTagTests(unittest.TestCase):
+    def test_marketing_version_must_be_single_and_valid(self):
+        self.assertEqual(release.marketing_version("MARKETING_VERSION = 0.1.0; MARKETING_VERSION = 0.1.0;"), "0.1.0")
+        for project in ("", "MARKETING_VERSION = 0.1.0; MARKETING_VERSION = 0.2.0;", "MARKETING_VERSION = 1.0-beta;"):
+            with self.subTest(project=project), self.assertRaises(release.ReleaseError):
+                release.marketing_version(project)
+
+    def test_generated_project_has_a_releasable_version(self):
+        release.marketing_version((ROOT / release.PROJECT).read_text())
+
+    def test_tag_numbers_count_per_version(self):
+        existing = ["testflight/0.1.0-1", "testflight/0.1.0-10", "testflight/0.1.0-9", "testflight/0.2.0-40", "testflight/0.1.0-x"]
+        self.assertEqual(release.next_tag("0.1.0", existing), "testflight/0.1.0-11")
+        self.assertEqual(release.next_tag("0.3.0", existing), "testflight/0.3.0-1")
+
+    def test_remote_tags_are_parsed_from_ls_remote(self):
+        self.assertEqual(release.remote_tags("abc\trefs/tags/testflight/0.1.0-1\ndef\trefs/tags/testflight/0.1.0-2\n"),
+                         ["testflight/0.1.0-1", "testflight/0.1.0-2"])
+
+
+class ReleaseFlowTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.env = {"PATH": os.environ["PATH"], "HOME": str(self.root), "GIT_CONFIG_GLOBAL": os.devnull,
+                    "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
+                    "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.invalid"}
+        self.origin = self.root / "origin.git"
+        self.git(self.root, "init", "--quiet", "--bare", "--initial-branch=main", str(self.origin))
+        work = self.root / "work"
+        self.git(self.root, "clone", "--quiet", str(self.origin), str(work))
+        self.git(work, "symbolic-ref", "HEAD", "refs/heads/main")
+        self.released = self.commit(work, "first")
+        self.git(work, "tag", "testflight/0.1.0-1")
+        (work / "RemoteFiles.xcodeproj").mkdir()
+        (work / release.PROJECT).write_text("MARKETING_VERSION = 0.1.0;")
+        self.git(work, "add", ".")
+        self.tip = self.commit(work, "second")
+        self.git(work, "push", "--quiet", "origin", "main", "--tags")
+        self.git(work, "switch", "--quiet", "-c", "feature")
+        self.unmerged = self.commit(work, "unmerged")
+        self.git(work, "tag", "testflight/0.1.0-2")
+        self.git(work, "push", "--quiet", "origin", "feature", "--tags")
+        self.work = work
+
+    def git(self, directory, *arguments):
+        return subprocess.run(["git", *arguments], cwd=directory, env=self.env, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def commit(self, directory, message):
+        self.git(directory, "commit", "--quiet", "--allow-empty", "-m", message)
+        return self.git(directory, "rev-parse", "HEAD")
+
+    def clone(self, *arguments):
+        target = self.root / "clone"
+        self.git(self.root, "clone", "--quiet", *arguments, "file://" + str(self.origin), str(target))
+        return target
+
+    def guard(self, **variables):
+        return subprocess.run([str(GUARD)], cwd=GUARD.parent, env={**self.env, **variables}, capture_output=True, text=True)
+
+    def run_guard(self, clone, commit):
+        return self.guard(CI_PRIMARY_REPOSITORY_PATH=str(clone), CI_COMMIT=commit)
+
+    def test_commit_on_main_passes(self):
+        self.assertEqual(self.run_guard(self.clone("--branch", "main"), self.tip).returncode, 0)
+
+    def test_unmerged_commit_is_rejected(self):
+        result = self.run_guard(self.clone("--branch", "feature"), self.unmerged)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not on main", result.stderr)
+
+    def test_shallow_clone_of_an_older_tag_on_main_passes(self):
+        clone = self.clone("--depth", "1", "--branch", "testflight/0.1.0-1")
+        self.assertEqual(self.git(clone, "rev-parse", "--is-shallow-repository"), "true")
+        self.assertEqual(self.run_guard(clone, self.released).returncode, 0)
+
+    def test_shallow_clone_of_an_unmerged_tag_is_rejected(self):
+        self.assertEqual(self.run_guard(self.clone("--depth", "1", "--branch", "testflight/0.1.0-2"), self.unmerged).returncode, 1)
+
+    def test_missing_variables_and_unreachable_remote_fail_closed(self):
+        clone = self.clone("--branch", "main")
+        self.assertNotEqual(self.guard(CI_COMMIT=self.tip).returncode, 0)
+        self.assertNotEqual(self.guard(CI_PRIMARY_REPOSITORY_PATH=str(clone)).returncode, 0)
+        self.git(clone, "remote", "set-url", "origin", "file://" + str(self.root / "missing.git"))
+        self.assertNotEqual(self.run_guard(clone, self.tip).returncode, 0)
+
+    def release_command(self, *arguments, checks=release.REQUIRED_CHECKS):
+        """Run the real command against the local origin, with `gh` replaced by recorded check runs."""
+        tools = self.root / "tools"
+        tools.mkdir(exist_ok=True)
+        (self.root / "checks.json").write_text(json.dumps({"check_runs": [check(name) for name in checks]}))
+        gh = tools / "gh"
+        gh.write_text('#!/bin/sh\ncat "' + str(self.root / "checks.json") + '"\n')
+        gh.chmod(0o755)
+        env = {**self.env, "PATH": str(tools) + os.pathsep + self.env["PATH"]}
+        return subprocess.run([sys.executable, "-B", str(ROOT / "scripts/testflight_release.py"), *arguments],
+                              cwd=self.work, env=env, capture_output=True, text=True)
+
+    def origin_tags(self):
+        return self.git(self.origin, "tag", "--list", "testflight/*").split()
+
+    def test_dry_run_pushes_nothing(self):
+        result = self.release_command()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("testflight/0.1.0-3", result.stdout)
+        self.assertEqual(self.origin_tags(), ["testflight/0.1.0-1", "testflight/0.1.0-2"])
+
+    def test_push_tags_the_tip_of_main_with_the_next_number(self):
+        result = self.release_command("--push")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git(self.origin, "rev-parse", "testflight/0.1.0-3"), self.tip)
+
+    def test_failed_checks_and_unmerged_commits_push_nothing(self):
+        for arguments, checks, message in ((("--push",), ("Repository checks",), "CI gate: missing"),
+                                           (("--push", "--commit", self.unmerged), release.REQUIRED_CHECKS, "not on main")):
+            with self.subTest(message=message):
+                result = self.release_command(*arguments, checks=checks)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(message, result.stderr)
+                self.assertEqual(self.origin_tags(), ["testflight/0.1.0-1", "testflight/0.1.0-2"])
+
+
+class ReleaseConfigurationTests(unittest.TestCase):
+    def app_settings(self):
+        project = (ROOT / release.PROJECT).read_text()
+        return [line for line in project.splitlines()
+                if "PRODUCT_BUNDLE_IDENTIFIER = dev.iris.RemoteFiles;" in line and "isa = XCBuildConfiguration" in line]
+
+    def test_ci_script_is_executable_with_a_shebang(self):
+        self.assertTrue(os.access(GUARD, os.X_OK))
+        self.assertTrue(GUARD.read_text().startswith("#!/bin/sh\n"))
+
+    def test_shipping_app_declares_all_ipad_orientations(self):
+        # App Store validation rejects a multitasking iPad app without all four.
+        settings = self.app_settings()
+        self.assertEqual(len(settings), 2)
+        for line in settings:
+            value = re.search(r'UISupportedInterfaceOrientations_iPad = "([^"]+)"', line).group(1)
+            self.assertEqual(set(value.split()), {"UIInterfaceOrientationPortrait", "UIInterfaceOrientationPortraitUpsideDown",
+                                                  "UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"})
+
+    def test_privacy_manifest_is_copied_into_the_shipping_app_only(self):
+        project = (ROOT / release.PROJECT).read_text()
+        reference = re.search(r"(\w+) = \{ isa = PBXFileReference;[^}]*path = App/PrivacyInfo\.xcprivacy;", project).group(1)
+        build = re.search(r"(\w+) = \{ isa = PBXBuildFile; fileRef = " + reference + r";", project).group(1)
+        phases = re.findall(r"isa = PBXResourcesBuildPhase;[^}]*files = \(([^)]*)\)", project)
+        self.assertEqual(sum(build in files for files in phases), 1)
+
+    def test_privacy_manifest_declares_each_required_reason_category(self):
+        manifest = plistlib.loads((ROOT / "App/PrivacyInfo.xcprivacy").read_bytes())
+        self.assertIs(manifest["NSPrivacyTracking"], False)
+        self.assertEqual(manifest["NSPrivacyCollectedDataTypes"], [])
+        self.assertEqual({entry["NSPrivacyAccessedAPIType"]: entry["NSPrivacyAccessedAPITypeReasons"]
+                          for entry in manifest["NSPrivacyAccessedAPITypes"]},
+                         {"NSPrivacyAccessedAPICategoryFileTimestamp": ["C617.1"],
+                          "NSPrivacyAccessedAPICategoryDiskSpace": ["E174.1"],
+                          "NSPrivacyAccessedAPICategoryUserDefaults": ["CA92.1"]})
+
+
+if __name__ == "__main__":
+    unittest.main()
