@@ -183,6 +183,11 @@ class ReleaseConfigurationTests(unittest.TestCase):
             self.assertEqual(set(value.split()), {"UIInterfaceOrientationPortrait", "UIInterfaceOrientationPortraitUpsideDown",
                                                   "UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"})
 
+    def test_export_compliance_answer_is_declared_for_every_build(self):
+        # Without this key, each uploaded build waits at App Store Connect's questionnaire.
+        info = plistlib.loads((ROOT / "App/Info.plist").read_bytes())
+        self.assertIs(info["ITSAppUsesNonExemptEncryption"], False)
+
     def test_privacy_manifest_is_copied_into_the_shipping_app_only(self):
         project = (ROOT / release.PROJECT).read_text()
         reference = re.search(r"(\w+) = \{ isa = PBXFileReference;[^}]*path = App/PrivacyInfo\.xcprivacy;", project).group(1)
