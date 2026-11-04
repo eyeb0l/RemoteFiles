@@ -382,3 +382,35 @@ and `testImportRSAAndECDSAKeysShowsTheirAlgorithmsAndPublicKeys` exceeded its
 three-minute allowance (it takes about 70 seconds on a settled runner). The bound
 returned to 480 seconds in the same PR. Revisit it only with a comparison of load
 at test start against failures across `main` and nightly runs.
+
+## Saved-index automatic switch
+
+On 3 November, attempt 1 of [run 41707864792](https://github.com/eyeb0l/RemoteFiles/actions/runs/41707864792)
+failed UI shard 2 in `testSavedSearchIndexUpdatesAutomaticallyWhenItsFolderOpens`:
+the Update Automatically switch did not read `1` within the journey's five-second
+wait. The runner had settled, with a 1-minute load of about 80 around the tap, and
+attempt 2 passed the journey in 109 seconds.
+
+The lane artifact points to a tap with no effect rather than a late value, but does
+not show why the tap was lost. The synthesized touch landed at (349, 545.3), inside
+the real switch at x 309 to 372 and y 531 to 559, which was clear of the bottom
+search field. XCTest's idle wait then returned at once, where attempt 2's took about
+two seconds for the first toggle while the switch animated and the update ran. About
+two and six seconds after the touch the switch still read `0` and its frame had not
+moved, although turning it on inserts progress and result rows above it. The app
+answered accessibility queries throughout, and its binding sets the value
+synchronously. Passing methods discard their recordings, so there is no reference
+for the failed attempt's own, which shows no reaction but stops within two seconds of
+the touch.
+
+The wait's bound is now 30 seconds. It costs nothing when the switch responds, and
+it separates the two explanations: a failure at 30 seconds means the tap had no
+effect, and a longer bound will not help. No retry was added and every assertion
+remains. The OCR switch's five-second wait in the saved PDF and OCR journey is
+unchanged.
+
+The journey now also waits, before the tap, until the switch's frame reads the same
+twice a quarter of a second apart while hittable. Right after a build the list inserts
+the Rebuild and summary rows above the switch, and a touch synthesized on a row that is
+still moving is swallowed without an error; the stability wait is a precondition with a
+15-second hang guard, not a retry, and a tap that still has no effect fails the journey.
