@@ -454,7 +454,10 @@ final class AppModel {
     func handle(_ error: Error, profile: ConnectionProfile) {
         guard !isDisconnecting else { return }
         connectionStates[profile.id] = "Disconnected"
-        if isSecurityError(error) { forgetListings(of: profile.id) }
+        // A path outside its boundary says nothing about the connection; these do.
+        if error is HostTrustError || error is IdentityError || error is ConnectionIdentityUnlockRequired {
+            forgetListings(of: profile.id)
+        }
         if let trustError = error as? HostTrustError {
             switch trustError {
             case .unknown(let endpoint, let key): sheet = .trust(endpoint, key)

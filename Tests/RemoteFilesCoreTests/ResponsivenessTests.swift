@@ -231,6 +231,9 @@ private struct SourceFixture: View {
         XCTAssertNotNil(model.cachedListing(other, path: "/p"))
         XCTAssertNotNil(model.cachedDocument(other, path: "/p/report.md"))
         model.handle(RemoteFileError.unavailable("Offline"), profile: .init(name: "Other", host: "other.invalid", username: "u", identityID: UUID()))
+        let unchanged = model.listingGeneration(profile.id)
+        model.handle(RemoteDocumentLinkError.outsideConnection, profile: profile)
+        XCTAssertEqual(model.listingGeneration(profile.id), unchanged, "A path outside its boundary says nothing about the connection")
         XCTAssertNotNil(model.cachedListing(other, path: "/p"), "An ordinary failure leaves remembered folders alone")
     }
 

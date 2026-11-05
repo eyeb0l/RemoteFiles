@@ -329,7 +329,7 @@ struct ReaderView: View {
         let revision = model.sessionRevision
         let generation = model.listingGeneration(profile.id)
         // Another request can fail a host-key or key check while this one is under way; what this
-        // one read through that connection is then neither shown as new nor kept.
+        // one read through that connection is then neither shown as new nor cached.
         let isCurrent = { token == requestID && !model.isDisconnecting && model.sessionRevision == revision
             && model.listingGeneration(profile.id) == generation }
         defer { if token == requestID, model.listingGeneration(profile.id) != generation { loading = false } }
@@ -345,7 +345,11 @@ struct ReaderView: View {
             let version = model.cachedDocumentVersion(profile.id, path: entry.path)
             let cached = await Task.detached(priority: .userInitiated) { DocumentPolicy.decode(bytes, filename: entry.name) }.value
             await prepareReading(cached)
-            guard !Task.isCancelled, isCurrent() else { return }
+            guard !Task.isCancelled, isCurrent() else {
+                // Nothing is on screen for what was just prepared to describe.
+                if token == requestID, model.listingGeneration(profile.id) != generation { navigation.clear() }
+                return
+            }
             preview = cached; contentRevision = navigation.revision; displayedVersion = version
             knownVersion = version
         }
@@ -369,7 +373,14 @@ struct ReaderView: View {
             let oldParts = navigation.index?.parts ?? []
             await prepareReading(decoded)
             try Task.checkCancellation()
-            guard isCurrent() else { return }
+            guard isCurrent() else {
+                // Nothing newer will replace what was just prepared, so Find and Headings go back
+                // to matching the document still on screen.
+                if token == requestID, model.listingGeneration(profile.id) != generation {
+                    if let preview { await prepareReading(preview) } else { navigation.clear() }
+                }
+                return
+            }
             let refreshImages = refreshID != lastImageRefresh
             let references = (oldParts + (navigation.index?.parts ?? [])).compactMap { part -> String? in
                 if case .image(let reference, _) = part.content { return reference }; return nil

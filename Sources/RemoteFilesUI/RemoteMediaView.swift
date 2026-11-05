@@ -154,6 +154,7 @@ struct RemoteMediaView: View {
            refreshID == lastRefreshID, retryID == lastRetryID { loading = false; return }
         let token = UUID(); requestID = token
         let revision = model.sessionRevision
+        let generation = model.listingGeneration(profile.id)
         guard model.isForeground else {
             image = nil; pdf = nil; playback.stop(); loading = false
             failure = "Connection paused while the app is in the background."
@@ -174,21 +175,21 @@ struct RemoteMediaView: View {
             let file = try await model.resources.localFile(for: reference, in: location, progress: { update in
                 await MainActor.run {
                     guard requestID == token, !model.isDisconnecting, model.isForeground,
-                          model.sessionRevision == revision else { return }
+                          model.sessionRevision == revision, model.listingGeneration(profile.id) == generation else { return }
                     downloadProgress = update
                 }
             })
             try Task.checkCancellation()
-            guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else { return }
+            guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision, model.listingGeneration(profile.id) == generation else { return }
             if kind == .image {
                 let decoded = try await RemoteImageDecoder.shared.decode(file, maxPixel: 1600)
                 try Task.checkCancellation()
-                guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else { return }
+                guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision, model.listingGeneration(profile.id) == generation else { return }
                 image = decoded
             } else if kind == .video || kind == .audio {
                 try await playback.prepare(file, filename: entry.name)
                 try Task.checkCancellation()
-                guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else {
+                guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision, model.listingGeneration(profile.id) == generation else {
                     playback.stop(); return
                 }
             } else {
@@ -198,12 +199,12 @@ struct RemoteMediaView: View {
                     restorable = await model.preparePDFReadingPosition(readingPosition, fileURL: file, profile: profile, path: entry.path)
                 }
                 try Task.checkCancellation()
-                guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else { return }
+                guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision, model.listingGeneration(profile.id) == generation else { return }
                 guard let document = PDFDocument(url: file), document.pageCount > 0 else {
                     throw MediaPreviewError.invalidPDF
                 }
                 try Task.checkCancellation()
-                guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else { return }
+                guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision, model.listingGeneration(profile.id) == generation else { return }
                 let restoration = Self.pdfRestoration(openingPage: appliedOpeningPage ? nil : entry.openingPage,
                                                       saved: restorable ? readingPosition?.pdfAnchor : nil,
                                                       pageCount: document.pageCount)
@@ -217,7 +218,7 @@ struct RemoteMediaView: View {
             await model.recordRecent(profile: profile, entry: entry)
         } catch is CancellationError { }
         catch {
-            guard !Task.isCancelled, requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else { return }
+            guard !Task.isCancelled, requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision, model.listingGeneration(profile.id) == generation else { return }
             failure = error.localizedDescription
             if model.isSecurityError(error) { image = nil; pdf = nil; playback.stop() }
             if error is PlaybackError { model.connectionStates[profile.id] = "Connected" }
