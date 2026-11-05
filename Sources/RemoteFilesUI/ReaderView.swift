@@ -329,6 +329,7 @@ struct ReaderView: View {
         model.noteForegroundConnection(profile.id)
         // Opening, returning to the foreground and unlocking revalidate; an explicit Refresh always reads.
         let explicitRefresh = lastRefreshID >= 0 && lastRefreshID != refreshID
+        if explicitRefresh { returning = false }
         let token = UUID(); requestID = token
         let revision = model.sessionRevision
         let generation = model.listingGeneration(profile.id)
