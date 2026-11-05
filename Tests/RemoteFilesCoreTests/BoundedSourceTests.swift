@@ -89,6 +89,29 @@ import RemoteFilesCore
         var moved = VoiceOverLandingWatch(now: start)
         XCTAssertEqual(moved.next(line: 2, now: start), .wait)
         XCTAssertEqual(moved.next(line: 3, now: start + .milliseconds(500)), .stop, "A swipe to the next line is the reader's choice")
+        var movedThroughAGap = VoiceOverLandingWatch(now: start)
+        XCTAssertEqual(movedThroughAGap.next(line: 2, now: start), .wait)
+        XCTAssertEqual(movedThroughAGap.next(line: nil, now: start + .milliseconds(250)), .wait)
+        XCTAssertEqual(movedThroughAGap.next(line: 3, now: start + .milliseconds(500)), .stop, "A poll between lines hides no swipe")
+        var movedAfterCorrection = VoiceOverLandingWatch(now: start)
+        XCTAssertEqual(movedAfterCorrection.next(line: 2, now: start), .wait)
+        XCTAssertEqual(movedAfterCorrection.next(line: 2, now: start + VoiceOverLandingWatch.hold), .correct)
+        XCTAssertEqual(movedAfterCorrection.next(line: 3, now: start + .seconds(2)), .stop, "A swipe before the correction arrives stays")
+    }
+
+    func testVoiceOverLandingHoldRestartsAfterAGapAndBetweenCorrections() {
+        let start = ContinuousClock.now
+        let hold = VoiceOverLandingWatch.hold
+        var gap = VoiceOverLandingWatch(now: start)
+        XCTAssertEqual(gap.next(line: 2, now: start), .wait)
+        XCTAssertEqual(gap.next(line: nil, now: start + .milliseconds(250)), .wait)
+        XCTAssertEqual(gap.next(line: 2, now: start + hold), .wait, "Focus left the line, so it has not held")
+        XCTAssertEqual(gap.next(line: 2, now: start + hold + hold), .correct)
+        var again = VoiceOverLandingWatch(now: start)
+        XCTAssertEqual(again.next(line: 2, now: start), .wait)
+        XCTAssertEqual(again.next(line: 2, now: start + hold), .correct)
+        XCTAssertEqual(again.next(line: 2, now: start + hold + .milliseconds(250)), .wait, "VoiceOver needs time to act on it")
+        XCTAssertEqual(again.next(line: 2, now: start + hold + hold), .correct)
     }
 
     func testVoiceOverLandingWatchEndsWithItsWindowAndCorrectionLimit() {
@@ -98,6 +121,9 @@ import RemoteFilesCore
         XCTAssertEqual(quiet.next(line: nil, now: start + VoiceOverLandingWatch.window), .stop)
         var late = VoiceOverLandingWatch(now: start)
         XCTAssertEqual(late.next(line: 2, now: start + VoiceOverLandingWatch.window), .stop, "A landing this late follows a choice by the reader")
+        var crossing = VoiceOverLandingWatch(now: start)
+        XCTAssertEqual(crossing.next(line: 2, now: start + VoiceOverLandingWatch.window - .milliseconds(250)), .wait)
+        XCTAssertEqual(crossing.next(line: 2, now: start + VoiceOverLandingWatch.window + VoiceOverLandingWatch.hold), .stop, "No correction after the window")
         var stuck = VoiceOverLandingWatch(now: start)
         var now = start
         var corrections = 0

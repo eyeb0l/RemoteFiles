@@ -439,8 +439,8 @@ struct ReaderView: View {
 }
 
 /// Decides when VoiceOver has landed partway through a document instead of on its first line.
-/// Holding first lets a return already under way finish. Focus moving on to another line means
-/// the reader chose it, so that is left alone.
+/// Holding first lets a return already under way finish. Focus reaching any other line means the
+/// reader chose it, so that is left alone, as it is once the window ends.
 struct VoiceOverLandingWatch {
     enum Action: Equatable { case wait, stop, correct }
     static let pollInterval: Duration = .milliseconds(250)
@@ -448,27 +448,27 @@ struct VoiceOverLandingWatch {
     static let hold: Duration = .milliseconds(1250)
     static let window: Duration = .seconds(6)
     static let maximumCorrections = 2
-    private var deadline: ContinuousClock.Instant
-    private var landing: (line: Int, since: ContinuousClock.Instant)?
+    private let deadline: ContinuousClock.Instant
+    private var landedLine: Int?
+    private var heldSince: ContinuousClock.Instant?
     private var corrections = 0
     init(now: ContinuousClock.Instant) { deadline = now + Self.window }
     mutating func next(line: Int?, now: ContinuousClock.Instant) -> Action {
-        if line == 0 { return .stop }
+        guard line != 0, now < deadline else { return .stop }
         guard let line else {
-            landing = nil
-            return now < deadline ? .wait : .stop
-        }
-        guard let landing, landing.line == line else {
-            if self.landing != nil { return .stop }
-            guard now < deadline else { return .stop }
-            self.landing = (line, now)
+            heldSince = nil
             return .wait
         }
-        guard now - landing.since >= Self.hold else { return .wait }
+        if let landedLine, landedLine != line { return .stop }
+        landedLine = line
+        guard let heldSince else {
+            self.heldSince = now
+            return .wait
+        }
+        guard now - heldSince >= Self.hold else { return .wait }
         guard corrections < Self.maximumCorrections else { return .stop }
         corrections += 1
-        self.landing = nil
-        deadline = now + Self.window
+        self.heldSince = now
         return .correct
     }
 }

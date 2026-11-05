@@ -143,34 +143,56 @@ why nothing did in that run: the CI log has no record of the reader's posts, and
 catch it. Ten runs of the journey under 24 CPU burners gave 5 passes, 2 of which returned from `"prompt"`,
 and 5 failures in VoiceOver's start or the row's tap, before the reader.
 
-Two guesses were tested and dropped. VoiceOver scrolling on landing does not defeat the at-the-top check:
-5 seconds after landing the reader was still at offset 0 on iOS 27.2, and 1.4 seconds after on 27.0, and a
-post still returned focus to `{`. A post with no target does happen, because a text view's elements can be
-unavailable when the document first appears, but on its own it was followed by the post after colours.
+One guess was tested and dropped: VoiceOver scrolling on landing does not defeat the at-the-top check. Five
+seconds after landing the reader was still at offset 0 on iOS 27.2, and 1.4 seconds after on 27.0, and a post
+still returned focus to `{`. Another is not excluded. A post can go out with no target, because a text view's
+elements can be unavailable when the document first appears. At low load the post after colours followed
+within a second, but the failed run was far busier, with a load of about 260, and colours arriving after its
+swipes would fit its log.
 
 **Reproduction.** Temporarily dropping the posts gave the failed run's exact traversal: 1 of 6 iterations
 on iOS 27.2, where 2 of the others went to Back. Back skips nothing, so it needs no correction.
 
-**Fix.** After posting, the reader polls where VoiceOver is until it reaches line 1. If it stays on another
-line for 1.25 seconds, longer than the 0.8 to 1.0 s of VoiceOver's own returns, the reader names line 1 again,
-up to twice. It stops once focus moves to a different line, since a person chose that, and it does nothing
-at a saved position. `VoiceOverLandingWatch` holds the decision and has unit tests.
+**Fix.** After posting, the reader polls where VoiceOver is for up to 6 seconds, until it reaches line 1. If it
+stays on another line for 1.25 seconds, longer than the 0.8 to 1.0 s of VoiceOver's own returns, the reader
+names line 1 again, up to twice. It stops once focus reaches a different line, since a person chose that, and
+posts nothing at a saved position. `VoiceOverLandingWatch` holds the decision and has unit tests. The journeys'
+settle wait goes from 4 to 6 seconds of quiet, because a second correction would land about 3.9 seconds after
+the landing, close to the old bound. It adds about 2 seconds to each use.
 
 | Proof | Result |
 |---|---|
 | Posts dropped, with the watch, iOS 27.2 | `"prompt"`, corrected, `{`, then reads on |
 | Posts dropped, with the watch, iOS 27.0, run [42096064380](https://github.com/eyeb0l/RemoteFiles/actions/runs/42096064380) | The same, in `testFocusStartsAtTheTopOfADocumentThatLoadsSlowly`: `{` 2.3 s after `"prompt"`. The VoiceOver lane passed |
-| Real code, iOS 27.2 | The JSON journey passed 7 of 7 and the slow journey 2 of 2 |
+| Real code, iOS 27.2 | JSON half 9 of 9; whole journey 8 of 9; slow journey 4 of 4 that launched. The last 2 runs of each used the final watch |
 
 The real JSON journey's SVG half failed once, in `VoiceOverFocusNotMoved` with speech on `Reading document…`
-for 30 s, while the Mac was still recovering from the burners. The watch does not run for SVG, and none of the
-18 retained CI logs contains this error; the 5 runs after the load fell passed.
+for 30 s, while the Mac was still recovering from the burners. The watch does not run for SVG, and the 5 runs
+after the load fell passed. This error is not new: 3 retained runs of the #80 branch, 41952808251, 41961676643
+and 41970406757, have it with focus on the row. None of the 18 retained `main` and fix-branch logs has it.
 
-**Limits.** This corrects a landing rather than preventing it, so a reader can hear up to about 2 seconds of
-`"prompt"` first. A reader who swipes to a line before VoiceOver has reached line 1 and stays there for 1.25
-seconds within the 6-second window gets sent back once. The landing has only been seen on the JSON sample. App-only
-PRs do not select the VoiceOver job, so a change like this first meets it on `main`'s nightly unless the
-`full-acceptance` label is used. No physical device was tested.
+**Limits.** This corrects a landing rather than preventing it, so a reader can hear about 2.3 seconds of
+`"prompt"` first, or about 4 if a correction is lost. Someone who means to stay on a line they reached without
+passing line 1, such as the line VoiceOver landed on or `}` after a swipe back from the bottom bar, is sent to
+line 1 after 1.25 seconds if that falls within the window. The watch covers every source-mode
+document, and landings have only been seen on the JSON sample. Colours replace the elements, so a focused
+element from before them may not count as a line, and the watch would not correct it; that is safe for the reader. The
+natural landing has no committed test, because staging it needs a hook in the app. App-only PRs do not select
+the VoiceOver job, so a change like this first meets it on `main`'s nightly unless the `full-acceptance` label is
+used. No physical device was tested.
+
+### Offline reader's Back position
+
+This fix's own run, [42104593398](https://github.com/eyeb0l/RemoteFiles/actions/runs/42104593398), failed
+`testLinkedReadersReleaseCoveredLeasesAndReverifyOnBackAndForeground` in simulator-core when going Back: the
+offset did not come within 5 points of 500 in 15 seconds. This is the first time in the last 100 runs. The watch
+does not run with VoiceOver off, and this PR changes nothing it uses. WebKit processes launched in about a second,
+so a slow start does not explain it, though the load was about 150.
+
+It did not reproduce. All 19 local runs that reached this step restored `y=500` within 0.1 s: 11 near idle and
+8 under 16 CPU burners. Under those burners the other 2 of 10 timed out at earlier steps, on the 15-second waits
+of a hop, so the test is fragile under load. One near-idle run failed its cold first render instead. The failure message does not say
+where the offset was, so the test now prints it, and no limit changes until a failure shows what it should be.
 
 ### Performance
 
