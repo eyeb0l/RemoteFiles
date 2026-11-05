@@ -3,7 +3,7 @@
 
 [Documentation](README.md) · [RemoteFiles](../README.md)
 
-Select a file in a folder to open its preview. The reader does not edit the server file. Use **Refresh** to fetch the current version. If refresh fails, the previously loaded content stays visible and is labelled as such.
+Select a file in a folder to open its preview. The reader does not edit the server file. Use **Refresh** to fetch the current version; **Updating…** appears if it takes more than a moment. If refresh fails, the previously loaded content stays visible and is labelled as such, with Retry and Dismiss. Coming back to a reader checks its file quietly.
 
 <a id="reader-scope"></a>
 ## What can I open?

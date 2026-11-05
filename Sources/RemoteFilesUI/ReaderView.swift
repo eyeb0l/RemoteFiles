@@ -16,6 +16,8 @@ struct ReaderView: View {
     @State private var lastImageRefresh = 0
     /// Starts true so the first frame is the placeholder, not the failure view.
     @State private var loading = true
+    /// Coming back to this reader checks it quietly, as coming back to a folder does.
+    @State private var returning = false
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @State private var error: String?
     @State private var refreshID = 0
@@ -94,7 +96,7 @@ struct ReaderView: View {
                 }
             }
         }
-        .contentStatus(progress: !isMedia && preview != nil && loading ? "Updating…" : nil,
+        .contentStatus(progress: !isMedia && preview != nil && loading && !returning ? "Updating…" : nil,
                        failure: !isMedia && preview != nil ? error.map { "Previously loaded copy · \($0)" } : nil,
                        retry: { refreshID += 1 })
         .background(Color(uiColor: .systemBackground))
@@ -166,7 +168,9 @@ struct ReaderView: View {
             await moveVoiceOverToArrivedDocument()
         }
         .task(id: "\(model.isForeground)-\(model.sessionRevision)-\(refreshID)") { await reloadIfNeeded() }
+        .onChange(of: loading) { _, isLoading in if !isLoading { returning = false } }
         .onDisappear {
+            returning = true
             releaseInactiveContent()
             Task { await readingPosition.flush() }
         }
