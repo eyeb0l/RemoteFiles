@@ -173,7 +173,7 @@ struct LoadingPlaceholder: View {
             HStack(spacing: 8) {
                 if explains { ProgressView().controlSize(.small).accessibilityHidden(true) }
                 Text(label).font(.footnote).foregroundStyle(.secondary)
-                    .opacity(explains ? 1 : 0)
+                    .opacity(explains ? 1 : 0.01)
                     .accessibilityIdentifier(label)
                     .accessibilityAddTraits(.updatesFrequently)
             }
