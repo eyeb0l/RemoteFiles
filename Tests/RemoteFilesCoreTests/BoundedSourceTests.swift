@@ -71,6 +71,47 @@ import RemoteFilesCore
         XCTAssertFalse(view.readerIsAtTheTop, "A saved offset is about to be restored")
     }
 
+    func testVoiceOverLandingPartwayIsSentBackOnlyAfterHolding() {
+        let start = ContinuousClock.now
+        var watch = VoiceOverLandingWatch(now: start)
+        XCTAssertEqual(watch.next(line: 2, now: start + .milliseconds(250)), .wait)
+        XCTAssertEqual(watch.next(line: 2, now: start + .seconds(1)), .wait, "VoiceOver may still be on its way back")
+        XCTAssertEqual(watch.next(line: 2, now: start + .milliseconds(1500)), .correct)
+        XCTAssertEqual(watch.next(line: nil, now: start + .seconds(2)), .wait, "The correction takes time to arrive")
+        XCTAssertEqual(watch.next(line: 0, now: start + .seconds(3)), .stop)
+    }
+
+    func testVoiceOverLandingLeavesAReaderWhoReachedTheStartOrMovedOn() {
+        let start = ContinuousClock.now
+        var reached = VoiceOverLandingWatch(now: start)
+        XCTAssertEqual(reached.next(line: 2, now: start), .wait)
+        XCTAssertEqual(reached.next(line: 0, now: start + .milliseconds(900)), .stop, "VoiceOver returned by itself")
+        var moved = VoiceOverLandingWatch(now: start)
+        XCTAssertEqual(moved.next(line: 2, now: start), .wait)
+        XCTAssertEqual(moved.next(line: 3, now: start + .milliseconds(500)), .stop, "A swipe to the next line is the reader's choice")
+    }
+
+    func testVoiceOverLandingWatchEndsWithItsWindowAndCorrectionLimit() {
+        let start = ContinuousClock.now
+        var quiet = VoiceOverLandingWatch(now: start)
+        XCTAssertEqual(quiet.next(line: nil, now: start + VoiceOverLandingWatch.window - .milliseconds(1)), .wait)
+        XCTAssertEqual(quiet.next(line: nil, now: start + VoiceOverLandingWatch.window), .stop)
+        var late = VoiceOverLandingWatch(now: start)
+        XCTAssertEqual(late.next(line: 2, now: start + VoiceOverLandingWatch.window), .stop, "A landing this late follows a choice by the reader")
+        var stuck = VoiceOverLandingWatch(now: start)
+        var now = start
+        var corrections = 0
+        for _ in 0..<20 {
+            now += .milliseconds(250)
+            switch stuck.next(line: 2, now: now) {
+            case .correct: corrections += 1
+            case .stop: XCTAssertEqual(corrections, VoiceOverLandingWatch.maximumCorrections); return
+            case .wait: continue
+            }
+        }
+        XCTFail("The watch never gave up")
+    }
+
     func testLongJSONActuallyDrawsAndKeepsExactSelectableText() async throws {
         let source = "{\n  \"prompt\": \"" + String(repeating: "safe sample 東京 🌍 e\u{301} ", count: 180) + "\",\r\n  \"ready\": true\n}\n"
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)

@@ -87,6 +87,7 @@ struct BoundedSourceTextView: UIViewRepresentable {
         view.anchor = readingPosition?.sourceAnchor
         view.restoreAnchor = view.anchor != nil
         readingPosition?.sourceVoiceOverStart = { [weak view] in view?.voiceOverStart }
+        readingPosition?.sourceVoiceOverLine = { [weak view] in view?.voiceOverLine }
         return view
     }
     func updateUIView(_ view: SourceTextView, context: Context) {
@@ -232,6 +233,11 @@ final class SourceTextView: UITextView {
         anchor == nil && pendingOffset == nil && contentOffset.y + adjustedContentInset.top <= 1
     }
     var voiceOverStart: Any? { readerIsAtTheTop ? accessibilityElement(at: 0) : nil }
+    var voiceOverLine: Int? {
+        guard let focused = UIAccessibility.focusedElement(using: .notificationVoiceOver) else { return nil }
+        let line = index(ofAccessibilityElement: focused)
+        return line == NSNotFound ? nil : line
+    }
     var pendingOffset: CGPoint?
     var unwrappedWidth: CGFloat?
     override var contentSize: CGSize {

@@ -17,6 +17,8 @@ import UIKit
     @ObservationIgnored var capturePDFPosition: (() -> Void)?
     /// Set by a live source view: where VoiceOver should start when the document appears.
     @ObservationIgnored var sourceVoiceOverStart: (() -> Any?)?
+    /// Set by a live source view: the line VoiceOver is on, counted from 0, if it is on one.
+    @ObservationIgnored var sourceVoiceOverLine: (() -> Int?)?
     /// Counts syntax colours reaching the source view, which replaces its accessibility elements.
     var sourceHighlights = 0
     // Weak renderer callbacks let a lifecycle flush await the final DOM capture without
