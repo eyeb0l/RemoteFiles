@@ -658,7 +658,10 @@ final class AppModel {
                 }
                 let prepared = await Task.detached(priority: .utility) { FolderListing(found) }.value
                 guard !Task.isCancelled, self.sessionRevision == revision, self.isForeground, !self.isDisconnecting else { break }
-                guard self.listingGeneration(next.profile.id) == generation else { continue }
+                // Nothing was remembered when this was asked for, so anything there now came from opening
+                // the folder, and is newer than this.
+                guard self.listingGeneration(next.profile.id) == generation,
+                      self.cachedListing(next.profile.id, path: next.path) == nil else { continue }
                 self.cache(prepared, id: next.profile.id, requestedPath: next.path)
             }
             if self?.folderPrefetchToken == token { self?.folderPrefetch = nil; self?.folderPrefetchToken = nil }

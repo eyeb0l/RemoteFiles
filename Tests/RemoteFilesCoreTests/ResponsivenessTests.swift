@@ -237,6 +237,21 @@ private struct SourceFixture: View {
         XCTAssertNotNil(model.cachedListing(other, path: "/p"), "An ordinary failure leaves remembered folders alone")
     }
 
+    func testAPrefetchFinishingLateDoesNotReplaceWhatOpeningTheFolderFound() async throws {
+        let service = CountingFolderService()
+        await service.hold("/p/A")
+        let (model, directory) = try model(service)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        model.noteForegroundConnection(profile.id)
+        model.prefetchFolders(in: listing(["A", "B"]), profile: profile)
+        try await waitUntil { await service.listed == ["/p/A"] }
+        // The folder is opened while its prefetch is still on the way, and the newer listing arrives first.
+        model.cache(listing(["Newer"], path: "/p/A"), id: profile.id, requestedPath: "/p/A")
+        await service.releaseHeld()
+        try await waitUntil { model.cachedListing(self.profile.id, path: "/p/B") != nil }
+        XCTAssertEqual(model.cachedListing(profile.id, path: "/p/A")?.defaultRows.map(\.entry.name), ["Newer"])
+    }
+
     func testAListingFinishingAfterAFailedHostKeyIsNotRemembered() async throws {
         let service = CountingFolderService()
         await service.hold("/p/A")
