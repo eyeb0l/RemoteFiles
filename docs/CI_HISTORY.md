@@ -20,25 +20,25 @@ Nightly run [42004987008](https://github.com/eyeb0l/RemoteFiles/actions/runs/420
 | 1 | `testMediaViewStopsWhenAppBackgrounds` in simulator-core, so the acceptance lanes were skipped |
 | 2, 3 | `testLongJSONAndSVGHaveReadOnlyVoiceOverPreviews`, at the assertion that speech reaches the image |
 
-Attempts 2 and 3 took the same traversal, so this was not a one-off. A rerun passes only if focus
-happens to take the other path, as it did in PR #80's last run,
-[41986933391](https://github.com/eyeb0l/RemoteFiles/actions/runs/41986933391).
-
-### SVG placeholder focus
+Attempts 2 and 3 took the same traversal, so this was not a one-off, and a rerun was only a second
+try at a race. The push run of the same commit,
+[41996288670](https://github.com/eyeb0l/RemoteFiles/actions/runs/41996288670), had passed it.
 
 **Cause.** The journey swiped before VoiceOver had left a placeholder that was going away. Focus
-either starts at Back, and traversal reaches the image, or lands on `Preparing image…`. The second
-is what the nightly runs did:
+either starts at Back, and traversal reaches the image, or lands on `Preparing image…`, where the
+result depends on about a second:
 
-| Run | Focus after opening | Traversal |
-|---|---|---|
-| PR #80's last run, passed | `Projects` Back | Title, Save, Actions, the image, `Find in Source` |
-| Nightly attempts 2 and 3, failed | `Preparing image…` | `Find in Source`, `Rendered`, `Source` |
+| Run | Focus after opening | Speech when traversal starts | Traversal |
+|---|---|---|---|
+| PR #80's last run, passed | `Projects` Back | Back | Title, Save, Actions, the image, `Find in Source` |
+| Push run of `2ce971d`, passed | `Preparing image…` | The image | `Find in Source`, `Rendered`, `Source` |
+| Nightly attempts 2 and 3, failed | `Preparing image…` | `Preparing image…` | `Find in Source`, `Rendered`, `Source` |
 
-The placeholder comes after the web view in the view order, and the image takes its place about a
-second or more after focus arrives. The journey then read speech at once. Its old wait looked for an
-activity indicator, which proved nothing about focus, and it could not look for the image, because
-that element exists, hidden from VoiceOver, throughout the load.
+The two runs that landed on the placeholder differ only in whether VoiceOver had moved to the image
+before the first swipe. The journey read speech as soon as its own wait ended. That wait looked for
+an activity indicator, which proved nothing about focus, and it could not look for the image, because
+that element exists, hidden from VoiceOver, throughout the load. The placeholder comes after the web
+view in the view order, which may be why a swipe from it goes past the image; no run tested that.
 
 **Reproduction.** On a dedicated iOS 27.2 simulator, a temporary test paused each new WebKit content
 process for 7 seconds, moved focus to the placeholder and swiped as soon as the placeholder went. It
@@ -54,12 +54,19 @@ first phrase on iOS 27.2: a tap before anything in the app has focus acts as an 
 of the local runs above failed that way. iOS 27.0, which CI uses, says something else first, so this
 does not affect CI today.
 
+**iOS 27.0.** The fix's own job,
+[42048542312](https://github.com/eyeb0l/RemoteFiles/actions/runs/42048542312), landed on the
+placeholder. Its focus log went from `Preparing image…` to `WKWebView` about five seconds later,
+speech started on the image, and the method took 107 seconds. With the push run above, that makes two
+iOS 27.0 runs in which VoiceOver moved to the image by itself.
+
 **Limits.** A VoiceOver user who swipes in the moment the image replaces the placeholder can still
 skip it, and has to swipe back. The app was not changed: a screen change naming the image would not
-close that moment, and it would interrupt someone who has already moved on. The local evidence is iOS
-27.2, and the journey usually lands on Back locally, so staging focus needed the temporary test. The
-fix's own VoiceOver job is the first iOS 27.0 evidence, and later nightly `VO FOCUS LOG` lines show
-which path each run took. The Markdown and HTML placeholders have the same shape and no journey.
+close that moment, and it would interrupt someone who has already moved on. Moving the placeholder
+ahead of the web view in accessibility order was not tried. Locally the journey usually lands on Back,
+so staging focus needed the temporary test. Later nightly `VO FOCUS LOG` lines show which path each
+run took. No VoiceOver journey covers the HTML placeholder, and the demo reader journey, which reads
+Markdown, wasn't measured for this.
 
 ### Playback background rate
 
@@ -110,15 +117,16 @@ choice not to retry, because the journeys test index behaviour rather than touch
 switch that never turns still fails. The binding sets the value at once, so a repeat should not undo
 a press that worked, unless the main thread stalls for more than 10 seconds. The jump-host journey
 shares the helper. The Local Network switch in the Settings app keeps its own handling. `UI SWITCH`
-lines in the UI lane's log show how often this happens on iOS 27.0, which has not been measured.
+lines in the UI lane's log show how often this happens on iOS 27.0: the fix's own job had none, which
+is one run.
 
 ### Performance
 
 No lane changed. The stability of the first attempt is the larger saving: attempt 1's failure cost 25
 minutes and skipped every acceptance lane. In this run simulator-core spent 8 minutes of its 24 in
 `simulator-settle`, against 6.5 minutes of tests, and VoiceOver spent 5 to 7 of its 22 to 24. Medians
-over the last 70 runs are 4 minutes for macos-openssh, 20 for simulator-core, 25 for VoiceOver, 43 for the
-UI journeys and 3 for the Release compile. The settle bound stays as [Runner load and post-boot
+over the last 70 runs are 4 minutes for macos-openssh, 20 for simulator-core, 25 for VoiceOver, 51 for the
+UI journeys when they run and 3 for the Release compile. The settle bound stays as [Runner load and post-boot
 settling](#runner-load-and-post-boot-settling) left it, because this run adds no comparison of load
 against failures.
 
