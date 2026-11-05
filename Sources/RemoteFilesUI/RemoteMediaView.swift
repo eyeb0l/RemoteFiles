@@ -218,7 +218,7 @@ struct RemoteMediaView: View {
             await model.recordRecent(profile: profile, entry: entry)
         } catch is CancellationError { }
         catch {
-            guard !Task.isCancelled, requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision, model.listingGeneration(profile.id) == generation else { return }
+            guard !Task.isCancelled, requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else { return }
             failure = error.localizedDescription
             if model.isSecurityError(error) { image = nil; pdf = nil; playback.stop() }
             if error is PlaybackError { model.connectionStates[profile.id] = "Connected" }

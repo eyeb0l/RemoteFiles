@@ -373,14 +373,15 @@ struct ReaderView: View {
             let oldParts = navigation.index?.parts ?? []
             await prepareReading(decoded)
             try Task.checkCancellation()
-            guard isCurrent() else {
-                // Nothing newer will replace what was just prepared, so Find and Headings go back
-                // to matching the document still on screen.
-                if token == requestID, model.listingGeneration(profile.id) != generation {
-                    if let preview { await prepareReading(preview) } else { navigation.clear() }
-                }
-                return
+            // Nothing newer will replace what was just prepared if this read is discarded, so Find
+            // and Headings go back to matching the document still on screen.
+            func restoreDiscardedPreparation() async {
+                guard token == requestID, model.listingGeneration(profile.id) != generation else { return }
+                guard case .text(let text, let markdown) = preview else { navigation.clear(); return }
+                await model.prepareReadingPosition(readingPosition, text: text, profile: profile, path: entry.path, discardingCurrent: true)
+                await navigation.prepare(text: text, markdown: markdown)
             }
+            guard isCurrent() else { await restoreDiscardedPreparation(); return }
             let refreshImages = refreshID != lastImageRefresh
             let references = (oldParts + (navigation.index?.parts ?? [])).compactMap { part -> String? in
                 if case .image(let reference, _) = part.content { return reference }; return nil
@@ -400,7 +401,7 @@ struct ReaderView: View {
                     model.connectionStates[profile.id] = "Connected"
                     await model.recordRecent(profile: profile, entry: entry)
                 })
-            guard published else { return }
+            guard published else { await restoreDiscardedPreparation(); return }
             applyInitialFragment()
         } catch {
             guard token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }

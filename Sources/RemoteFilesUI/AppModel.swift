@@ -313,8 +313,8 @@ final class AppModel {
         }
         pinOffline(profile: profile, entry: .init(name: folder.name, path: folder.path, kind: .directory), includeHidden: folder.includeHidden)
     }
-    func prepareReadingPosition(_ position: DocumentReadingPosition, text: String, profile: ConnectionProfile, path: String) async {
-        await position.prepare(text: text, store: demo ? nil : readingPositions, connectionID: profile.id, path: path)
+    func prepareReadingPosition(_ position: DocumentReadingPosition, text: String, profile: ConnectionProfile, path: String, discardingCurrent: Bool = false) async {
+        await position.prepare(text: text, store: demo ? nil : readingPositions, connectionID: profile.id, path: path, discardingCurrent: discardingCurrent)
     }
     /// Returns false when the preview should open without a saved position.
     func preparePDFReadingPosition(_ position: DocumentReadingPosition, fileURL: URL, profile: ConnectionProfile, path: String) async -> Bool {

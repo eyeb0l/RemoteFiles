@@ -275,6 +275,23 @@ private struct SourceFixture: View {
         XCTAssertNotEqual(model.connectionStates[profile.id], "Connected")
     }
 
+    func testReturningFromADiscardedRevisionKeepsTheDocumentsPlace() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ReadingPositionStore(fileURL: directory.appendingPathComponent("positions.json"))
+        let position = DocumentReadingPosition(), id = UUID(), path = "/p/report.md"
+        let kept = "# Kept", discarded = "# Discarded"
+        await position.prepare(text: kept, store: store, connectionID: id, path: path)
+        position.rendered = CGPoint(x: 0, y: 640)
+        await position.prepare(text: discarded, store: store, connectionID: id, path: path)
+        XCTAssertEqual(position.rendered, .zero, "A different revision starts at the top")
+        await position.prepare(text: kept, store: store, connectionID: id, path: path, discardingCurrent: true)
+        XCTAssertEqual(position.rendered.y, 640, "The document on screen keeps its place")
+        let saved = await store.restore(connectionID: id, path: path, revision: SavedReadingPosition.revision(for: kept))
+        XCTAssertEqual(saved?.rendered.y, 640)
+    }
+
     func testOpeningAnotherServerClearsTheFirstServersState() throws {
         let service = CountingFolderService()
         let (model, directory) = try model(service)
