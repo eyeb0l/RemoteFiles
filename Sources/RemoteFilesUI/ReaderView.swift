@@ -327,11 +327,16 @@ struct ReaderView: View {
         let token = UUID(); requestID = token
         let revision = model.sessionRevision
         let generation = model.listingGeneration(profile.id)
+        // Another request can fail a host-key or key check while this one is under way; what this
+        // one read through that connection is then neither shown as new nor kept.
+        let isCurrent = { token == requestID && !model.isDisconnecting && model.sessionRevision == revision
+            && model.listingGeneration(profile.id) == generation }
+        defer { if token == requestID, model.listingGeneration(profile.id) != generation { loading = false } }
         lastSessionRevision = model.sessionRevision; lastRefreshID = refreshID
         loading = true; error = nil
         if let preview, navigation.index == nil {
             await prepareReading(preview)
-            guard !Task.isCancelled, token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
+            guard !Task.isCancelled, isCurrent() else { return }
             contentRevision = navigation.revision
         }
         var knownVersion = preview == nil ? nil : displayedVersion
@@ -339,7 +344,7 @@ struct ReaderView: View {
             let version = model.cachedDocumentVersion(profile.id, path: entry.path)
             let cached = await Task.detached(priority: .userInitiated) { DocumentPolicy.decode(bytes, filename: entry.name) }.value
             await prepareReading(cached)
-            guard !Task.isCancelled, token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
+            guard !Task.isCancelled, isCurrent() else { return }
             preview = cached; contentRevision = navigation.revision; displayedVersion = version
             knownVersion = version
         }
@@ -349,7 +354,7 @@ struct ReaderView: View {
                                                                  since: explicitRefresh ? nil : knownVersion)
             guard case .contents(let bytes, let version) = read else {
                 try Task.checkCancellation()
-                guard token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
+                guard isCurrent() else { return }
                 loadedAt = .now
                 model.connectionStates[profile.id] = "Connected"
                 await model.recordRecent(profile: profile, entry: entry)
@@ -359,11 +364,11 @@ struct ReaderView: View {
             }
             let decoded = await Task.detached(priority: .userInitiated) { DocumentPolicy.decode(bytes, filename: entry.name) }.value
             try Task.checkCancellation()
-            guard token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
+            guard isCurrent() else { return }
             let oldParts = navigation.index?.parts ?? []
             await prepareReading(decoded)
             try Task.checkCancellation()
-            guard token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
+            guard isCurrent() else { return }
             let refreshImages = refreshID != lastImageRefresh
             let references = (oldParts + (navigation.index?.parts ?? [])).compactMap { part -> String? in
                 if case .image(let reference, _) = part.content { return reference }; return nil
@@ -371,7 +376,7 @@ struct ReaderView: View {
             var invalidatedFiles: [URL] = []
             let published = try await ReaderReloadPublication.perform(
                 clearImages: refreshImages,
-                isCurrent: { token == requestID && !model.isDisconnecting && model.sessionRevision == revision },
+                isCurrent: isCurrent,
                 clearResources: { invalidatedFiles = await model.resources.invalidateResources(references, in: .init(profile: profile, path: entry.path, canonicalRoot: entry.canonicalRoot)) },
                 clearDecoded: { await RemoteImageDecoder.shared.invalidate(files: invalidatedFiles) },
                 publish: {
@@ -379,9 +384,7 @@ struct ReaderView: View {
                     if case .text = decoded {} else { navigation.clear() }
                     preview = decoded; contentRevision = navigation.revision; loadedAt = .now; copied = false
                     displayedVersion = version
-                    if model.listingGeneration(profile.id) == generation {
-                        model.cache(bytes, version: version, id: profile.id, path: entry.path)
-                    }
+                    model.cache(bytes, version: version, id: profile.id, path: entry.path)
                     model.connectionStates[profile.id] = "Connected"
                     await model.recordRecent(profile: profile, entry: entry)
                 })

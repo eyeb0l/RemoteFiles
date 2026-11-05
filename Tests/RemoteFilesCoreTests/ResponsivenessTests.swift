@@ -25,7 +25,15 @@ private actor CountingFolderService: RemoteFileService {
     func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
         .init(name: RemotePath.name(of: path), path: path, kind: .directory)
     }
-    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { Data() }
+    private var heldRead: CheckedContinuation<Void, Never>?
+    private var holdsReads = false
+    private(set) var readsWaiting = 0
+    func holdReads() { holdsReads = true }
+    func releaseReads() { holdsReads = false; heldRead?.resume(); heldRead = nil }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data {
+        if holdsReads { readsWaiting += 1; await withCheckedContinuation { heldRead = $0 } }
+        return Data("# Report".utf8)
+    }
     func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
         throw RemoteFileError.unavailable("Not used")
     }
@@ -240,6 +248,28 @@ private struct SourceFixture: View {
         XCTAssertNil(model.cachedListing(profile.id, path: "/p/A"))
         let listed = await service.listed
         XCTAssertEqual(listed, ["/p/A"], "Nothing more is listed through a connection that failed verification")
+    }
+
+    func testAReadFinishingAfterAFailedHostKeyIsNotPublished() async throws {
+        let service = CountingFolderService()
+        await service.holdReads()
+        let (model, directory) = try model(service)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        model.metadata.connections = [profile]
+        let entry = RemoteEntry(name: "report.md", path: "/p/report.md", kind: .file)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: NavigationStack { ReaderView(model: model, profile: profile, entry: entry) })
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        try await waitUntil { await service.readsWaiting == 1 }
+        model.handle(HostTrustError.invalidStore, profile: profile)
+        await service.releaseReads()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertNil(model.cachedDocument(profile.id, path: entry.path), "What was read through a connection that failed verification isn't kept")
+        XCTAssertTrue(model.metadata.recents.isEmpty)
+        XCTAssertNotEqual(model.connectionStates[profile.id], "Connected")
     }
 
     func testOpeningAnotherServerClearsTheFirstServersState() throws {
