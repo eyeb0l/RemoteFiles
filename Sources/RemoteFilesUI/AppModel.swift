@@ -644,7 +644,7 @@ final class AppModel {
             while let self, !Task.isCancelled, !self.folderPrefetchQueue.isEmpty,
                   self.sessionRevision == revision, self.isForeground, !self.isDisconnecting {
                 let next = self.folderPrefetchQueue.removeFirst()
-                guard next.profile.id == self.foregroundConnectionID else { break }
+                guard next.profile.id == self.foregroundConnectionID, !PrefetchConditions.shared.discouraged else { break }
                 guard self.cachedListing(next.profile.id, path: next.path) == nil else { continue }
                 guard let found = try? await self.quietListing(next.profile, path: next.path), !Task.isCancelled, next.profile.id == self.foregroundConnectionID else {
                     self.folderPrefetchQueue.removeAll(); break

@@ -49,7 +49,9 @@ struct ReaderView: View {
         let active: Bool
     }
     var body: some View {
-        Group {
+        // One view, not a Group: a Group's lifecycle modifiers would run per branch, and leaving the
+        // placeholder would count as disappearing and release what just loaded.
+        VStack(spacing: 0) {
             if isMedia {
                 RemoteMediaView(model: model, profile: profile, entry: entry,
                                 kind: DocumentPolicy.kind(filename: entry.name), refreshID: refreshID,

@@ -206,7 +206,7 @@ struct OfflineFilesView: View {
         return Set(Dictionary(grouping: names, by: { $0 }).filter { $0.value.count > 1 }.keys)
     }
     private func source(_ connection: String, parent path: String) -> String {
-        Set(model.offlinePins.map(\.connectionName)).count > 1 ? "\(connection) · \(path)" : path
+        Set(model.offlinePins.map(\.connectionName) + model.offlineFolders.map(\.connectionName)).count > 1 ? "\(connection) · \(path)" : path
     }
     private var storedBytes: Int64 { Int64(model.offlinePins.reduce(0) { $0 + $1.byteCount }) }
     private static let storageLimit: Int64 = 512 * 1024 * 1024
@@ -301,6 +301,7 @@ struct OfflineReaderView: View {
     @State private var leaseState = OfflineReaderLeaseState()
     @State private var share: OfflineShareItem?
     @State private var visible = false
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @State private var preview: DocumentPreview?
     @State private var image: DisplayImage?
     @State private var pdf: PDFDocument?
@@ -339,7 +340,9 @@ struct OfflineReaderView: View {
     }
 
     var body: some View {
-        Group {
+        // One view, not a Group: a Group's lifecycle modifiers would run per branch, and leaving the
+        // placeholder would count as disappearing and release the lease.
+        VStack(spacing: 0) {
             Group {
                 if let failure = failure ?? playback.failure {
                     ContentUnavailableView("Couldn’t open saved copy", systemImage: "exclamationmark.doc", description: Text(failure))
@@ -404,6 +407,17 @@ struct OfflineReaderView: View {
                 }
             }
             if case .text = preview {
+                // VoiceOver reaches the bottom bar after the whole document; these are a shortcut.
+                if voiceOverEnabled {
+                    ToolbarItem(placement: .primaryAction) {
+                        Menu {
+                            Button(findTitle, systemImage: "magnifyingglass") { startFind() }
+                            if navigation.index?.headings.isEmpty == false {
+                                Button("Headings", systemImage: "list.bullet.indent") { headingsPresented = true }
+                            }
+                        } label: { Label("Document actions", systemImage: "ellipsis") }
+                    }
+                }
                 ReaderBottomBar(findTitle: findTitle, find: startFind,
                                 headings: navigation.index?.headings.isEmpty == false ? { headingsPresented = true } : nil,
                                 source: [.markdown, .html, .svg].contains(kind) ? $source : nil)

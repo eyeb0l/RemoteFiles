@@ -60,7 +60,8 @@ struct RemoteMediaView: View {
     }
 
     var body: some View {
-        Group {
+        // One view, not a Group: a Group's lifecycle modifiers would run per branch.
+        VStack(spacing: 0) {
             Group {
                 if kind == .image, let image {
                     ScrollView {

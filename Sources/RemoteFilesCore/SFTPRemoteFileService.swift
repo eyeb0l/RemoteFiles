@@ -207,8 +207,27 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
     public func listDirectoryInBackground(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot? {
         try Task.checkCancellation()
         guard let session = active, session.profile == profile, !session.control.isCancelled, session.client.isConnected else { return nil }
-        return try await performOnDedicatedChannel(session: session, timeout: Self.backgroundListingSeconds) { sftp in
-            try await Self.snapshot(path, sftp: sftp)
+        // Unlike a transfer, this never closes the session when stopped: foreground work is using it.
+        // Stopping returns at once; only this listing's channel closes, whenever it has opened.
+        let channel = SFTPChannelControl()
+        do {
+            return try await withTaskCancellationHandler {
+                try await Self.detachedDeadline(seconds: Self.backgroundListingSeconds, onTimeout: { channel.close() }) {
+                    let sftp = try await session.client.openSFTP(logger: Self.sftpLogger())
+                    channel.install(sftp)
+                    do {
+                        try Task.checkCancellation()
+                        let value = try await Self.snapshot(path, sftp: sftp)
+                        try await sftp.close()
+                        return value
+                    } catch {
+                        try? await sftp.close()
+                        throw error
+                    }
+                }
+            } onCancel: { channel.close() }
+        } catch {
+            throw Self.mapped(error)
         }
     }
     private static let backgroundListingSeconds: UInt64 = 10

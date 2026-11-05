@@ -261,7 +261,8 @@ struct FolderView: View {
             : ("No matching names", "magnifyingglass", "Filtering names in this folder only.")
     }
     var body: some View {
-        Group {
+        // One view, not a Group: a Group's lifecycle modifiers would run per branch.
+        VStack(spacing: 0) {
             if loading && listing == nil {
                 LoadingPlaceholder(label: "Connecting and opening folder…")
             } else if listing == nil {

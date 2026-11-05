@@ -1556,10 +1556,17 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertNil(elsewhere, "Connecting elsewhere would close the session on screen")
         connections = await service.metrics().connections
         XCTAssertEqual(connections, 1, "The open session survives both")
-        let again = try await service.listDirectory(profile: profile, path: fixture.files)
-        XCTAssertEqual(again.entries.map(\.name), shown.entries.map(\.name))
+        // Stopping at any moment, including while its channel opens, leaves the session alone.
+        for delay in [0, 1, 5, 20, 60] {
+            let stopped = Task { try await service.listDirectoryInBackground(profile: profile, path: folder) }
+            try await Task.sleep(for: .milliseconds(delay))
+            stopped.cancel()
+            _ = try? await stopped.value
+            let again = try await service.listDirectory(profile: profile, path: fixture.files)
+            XCTAssertEqual(again.entries.map(\.name), shown.entries.map(\.name))
+        }
         connections = await service.metrics().connections
-        XCTAssertEqual(connections, 1)
+        XCTAssertEqual(connections, 1, "Foreground browsing keeps its session through every cancellation")
     }
 
     func testPipelinedListingIsCompleteInServerOrderAndAlwaysClosesItsHandle() async throws {

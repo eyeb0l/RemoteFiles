@@ -82,16 +82,21 @@ struct FailureBar: View {
     let retry: () -> Void
     let dismiss: () -> Void
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(spacing: 8) {
             Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange).accessibilityHidden(true)
             Text(message).font(.footnote).foregroundStyle(.primary)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Button("Retry", action: retry).font(.footnote.weight(.medium)).buttonStyle(.borderless)
-            Button("Dismiss", systemImage: "xmark", action: dismiss)
-                .labelStyle(.iconOnly).font(.footnote).buttonStyle(.borderless)
+            Button(action: retry) {
+                Text("Retry").font(.footnote.weight(.medium))
+                    .frame(minHeight: 44).padding(.horizontal, 6).contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            Button(action: dismiss) { IconTarget(symbol: "xmark").font(.footnote) }
+                .accessibilityLabel("Dismiss")
+                .buttonStyle(.borderless)
                 .tint(.secondary)
         }
-        .padding(.horizontal, 20).padding(.vertical, 8)
+        .padding(.leading, 20).padding(.trailing, 8)
         .accessibilityElement(children: .contain)
     }
 }
