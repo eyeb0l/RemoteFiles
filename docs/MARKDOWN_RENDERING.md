@@ -47,6 +47,8 @@ Content Security Policy, an all-resource content blocker, denied navigation and 
 nonpersistent data store provide independent boundaries. Only explicit HTTP/HTTPS
 link taps open the system browser. Generated SVG is sanitized again before display.
 
+Mermaid is 5.5 MB of script, so it's injected only when the document's text contains the word `mermaid`.
+
 The existing 2 MiB preview cap applies. Each document renders at most 32 Mermaid
 diagrams of at most 32 KiB each, with 250 edges per diagram. Mermaid initialization
 and frontmatter directives are rejected so a document cannot override renderer

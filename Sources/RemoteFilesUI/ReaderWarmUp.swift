@@ -54,6 +54,10 @@ enum ReaderWarmUp {
             _ = isViewModifier(type); _ = isView(bodyType(type)); prepared += 1
         }
         guard shouldContinue() else { return outcome }
+        _ = isToolbarContent(toolbarBody(of: ReaderBottomBar.self))
+        // The reader's Markdown style wraps every block in its own body types.
+        for type in [body(of: ReaderHeadingStyle.self), body(of: ReaderParagraphStyle.self),
+                     body(of: ReaderBlockQuoteStyle.self), body(of: ReaderCodeBlockStyle.self)] { _ = isView(type) }
         for type in storedPropertyTypes { _ = isDynamicProperty(type) }
         let textual = StructuredText.prepareRendering(shouldContinue: shouldContinue)
         prepared += textual
@@ -65,7 +69,8 @@ enum ReaderWarmUp {
     // included because opening a document adds its Recents section.
     private static var viewTypes: [any View.Type] {
         [ReaderView.self, DocumentContentView.self, SourceCodeView.self, RemoteInlineImage.self,
-         ReaderFindBar.self, ReaderHeadingsView.self, HomeView.self]
+         ReaderFindBar.self, ReaderHeadingsView.self, HomeView.self, FolderView.self, LocationRow.self,
+         LoadingPlaceholder.self, StatusPill.self]
     }
     /// Stored property types of the reader views, which SwiftUI checks for `DynamicProperty`.
     private static var storedPropertyTypes: [Any.Type] {
@@ -82,6 +87,12 @@ enum ReaderWarmUp {
     // Opened through existentials so lookups use the runtime, not specialized static metadata.
     @inline(never) private static func bodyType<V: View>(_: V.Type) -> Any.Type { V.Body.self }
     @inline(never) private static func bodyType<M: ViewModifier>(_: M.Type) -> Any.Type { M.Body.self }
+    @inline(never) private static func body<S: StructuredText.HeadingStyle>(of _: S.Type) -> Any.Type { S.Body.self }
+    @inline(never) private static func body<S: StructuredText.ParagraphStyle>(of _: S.Type) -> Any.Type { S.Body.self }
+    @inline(never) private static func body<S: StructuredText.BlockQuoteStyle>(of _: S.Type) -> Any.Type { S.Body.self }
+    @inline(never) private static func body<S: StructuredText.CodeBlockStyle>(of _: S.Type) -> Any.Type { S.Body.self }
+    @inline(never) private static func toolbarBody<T: ToolbarContent>(of _: T.Type) -> Any.Type { T.Body.self }
+    @inline(never) private static func isToolbarContent(_ type: Any.Type) -> Bool { type is any ToolbarContent.Type }
     @inline(never) private static func isView(_ type: Any.Type) -> Bool { type is any View.Type }
     @inline(never) private static func isDynamicProperty(_ type: Any.Type) -> Bool { type is any DynamicProperty.Type }
     @inline(never) private static func isViewModifier(_ type: Any.Type) -> Bool { type is any ViewModifier.Type }

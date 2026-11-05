@@ -22,10 +22,10 @@ struct SVGContentView: View {
                                  onFinish: { loaded = true }, onFailure: { error = $0 })
                     .opacity(loaded ? 1 : 0)
                     .accessibilityHidden(!loaded)
-                if !loaded { ProgressView("Preparing image…") }
-            } else { ProgressView("Preparing image…") }
+                if !loaded { LoadingPlaceholder(label: "Preparing image…", shape: .plain) }
+            } else { LoadingPlaceholder(label: "Preparing image…", shape: .plain) }
         }
-        .task(id: Data(text.utf8)) {
+        .task(id: ExactText(text: text)) {
             prepared = nil; rules = nil; error = nil; loaded = false
             do {
                 let svg = try await SVGPreparation.shared.prepare(text)

@@ -246,7 +246,7 @@ import UIKit
   }
 
   func captureAnchor() {
-    guard !restoring, geometryAnchor == nil, let scroll, scroll.contentOffset.y > 1,
+    guard !restoring, geometryAnchor == nil, let scroll, scroll.contentOffset.y + scroll.adjustedContentInset.top > 1,
           let saved = visibleAnchor(), resolve(saved, in: scroll) != nil else { return }
     geometryAnchor = saved; readingAnchor = saved
     documentY = saved.viewportY + scroll.contentOffset.y
@@ -271,7 +271,7 @@ import UIKit
     let delta = currentY - documentY
     if abs(delta) > 0.5 {
       scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x,
-                                     y: max(0, scroll.contentOffset.y + delta)), animated: false)
+                                     y: max(-scroll.adjustedContentInset.top, scroll.contentOffset.y + delta)), animated: false)
       documentY = currentY
     }
   }
@@ -302,7 +302,7 @@ import UIKit
     let delta = point.y - viewport.minY - saved.viewportY
     if abs(delta) > 0.5 {
       scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x,
-                                     y: max(0, scroll.contentOffset.y + delta)), animated: false)
+                                     y: max(-scroll.adjustedContentInset.top, scroll.contentOffset.y + delta)), animated: false)
     }
     if (point.ready && now >= until) || now >= restorationDeadline { finishRestoration(scroll) }
   }

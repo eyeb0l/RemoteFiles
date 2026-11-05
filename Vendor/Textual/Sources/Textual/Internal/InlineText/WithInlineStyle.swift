@@ -75,7 +75,8 @@ struct WithInlineStyle<Content: View>: View {
         }
       }
 
-      if run.link != nil {
+      // A revealed match keeps its own colours, so it stays readable over its highlight.
+      if run.link != nil, run.attributes[TextualNavigationTarget.self] == nil {
         style.link.apply(in: &attributes, environment: environment)
       }
 

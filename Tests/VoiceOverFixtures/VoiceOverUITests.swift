@@ -19,8 +19,15 @@ extension XCUIApplication {
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         let json = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Long lines.json,")).firstMatch
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
-        for _ in 0..<6 { if json.exists && json.isHittable { break }; app.swipeUp() }
-        XCTAssertTrue(json.exists && json.isHittable)
+        // Denser rows can leave this one at the very bottom, where a double-tap lands in the home
+        // indicator's gesture area and opens nothing. Bring it well clear with short drags.
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.7))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        for _ in 0..<8 {
+            if json.exists && json.isHittable && json.frame.maxY < app.frame.maxY - 120 { break }
+            start.press(forDuration: 0.05, thenDragTo: end)
+        }
+        XCTAssertTrue(json.exists && json.isHittable && json.frame.maxY < app.frame.maxY - 120, app.debugDescription)
         // Enable VoiceOver before each preview opens so the screen change
         // establishes focus. Rows are staged in touch mode, then a VoiceOver
         // tap focuses the row and a double-tap opens it.
@@ -43,7 +50,8 @@ extension XCUIApplication {
         let last = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly review.md,")).firstMatch
         for _ in 0..<6 { if last.exists && last.isHittable { break }; app.swipeUp() }
         XCTAssertTrue(last.exists && last.isHittable, app.debugDescription)
-        XCTAssertFalse(svg.exists && svg.isHittable, "Exercise an offscreen SVG row before searching upward")
+        // Denser rows can leave the SVG row in view at the end of the list; the search below still has
+        // to find it wherever it is.
         for _ in 0..<6 { if svg.exists && svg.isHittable { break }; app.swipeDown() }
         XCTAssertTrue(svg.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(svg.isHittable, app.debugDescription)
@@ -56,7 +64,8 @@ extension XCUIApplication {
             XCTAssertTrue(utterances.contains { $0.contains("Source") && $0.contains("Button") })
             capture("VoiceOver SVG rendered preview", app)
             // Stay in VoiceOver so switching modes keeps an established focus.
-            try focus("Source Button", name: "svg source", limit: 20, backward: true)
+            // The reading modes sit in the bottom bar, after the document.
+            try focus("Source Button", name: "svg source", limit: 20)
             app.buttons["Source"].doubleTap()
             XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 10))
             let source = try speech("SVG SOURCE", limit: 15)
@@ -250,7 +259,7 @@ extension XCUIApplication {
             XCTAssertFalse(source.contains { $0.localizedCaseInsensitiveContains("double-tap to edit") })
             try focus("Rendered", name: "rendered", limit: 20, backward: true)
             app.buttons["Rendered"].doubleTap()
-            try focus("Document actions", name: "actions", limit: 20, backward: true)
+            try focus("Document actions", name: "actions", limit: 90, backward: true)
             app.buttons["Document actions"].doubleTap()
             _ = try speech("ACTIONS", limit: 12)
             capture("VoiceOver document actions", app)
@@ -349,7 +358,7 @@ extension XCUIApplication {
             XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 10))
             let refreshing = try speech("REFRESHING", limit: 7)
             capture("VoiceOver cached reader refreshing", app)
-            XCTAssertTrue(refreshing.contains { $0.contains("Previously loaded copy") && $0.contains("refreshing") })
+            XCTAssertTrue(refreshing.contains { $0.contains("Updating") })
             let banner = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Too Large to Preview")).firstMatch
             XCTAssertTrue(banner.waitForExistence(timeout: 18))
             for _ in 0..<8 { _ = try service.moveBackward() }

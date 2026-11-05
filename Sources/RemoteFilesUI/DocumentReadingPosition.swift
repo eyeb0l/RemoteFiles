@@ -38,10 +38,12 @@ import UIKit
 
     /// Call before publishing the decoded preview. Changed server content starts at the top;
     /// applying old pixel coordinates to a different revision could skip unrelated content.
-    public func prepare(text: String, store: ReadingPositionStore?, connectionID: UUID, path: String) async {
+    /// `discardingCurrent` returns to a document after a newer revision prepared for it was thrown
+    /// away: the discarded revision isn't saved over the place that document's own record holds.
+    public func prepare(text: String, store: ReadingPositionStore?, connectionID: UUID, path: String, discardingCurrent: Bool = false) async {
         let token = UUID(); preparationID = token
         let nextRevision = await Task.detached(priority: .utility) { SavedReadingPosition.revision(for: text) }.value
-        await prepare(revision: nextRevision, token: token, store: store, connectionID: connectionID, path: path) {
+        await prepare(revision: nextRevision, token: token, store: store, connectionID: connectionID, path: path, savingCurrent: !discardingCurrent) {
             overflowGeometry.documentDidChange(text)
         }
     }
@@ -59,11 +61,11 @@ import UIKit
 
     @discardableResult
     private func prepare(revision nextRevision: String, token: UUID, store: ReadingPositionStore?, connectionID: UUID, path: String,
-                         documentDidChange: () -> Void) async -> Bool {
+                         savingCurrent: Bool = true, documentDidChange: () -> Void) async -> Bool {
         guard preparationID == token, !Task.isCancelled else { return false }
         if self.revision == nextRevision, self.connectionID == connectionID,
            self.path.map({ Data($0.utf8) == Data(path.utf8) }) == true { return true }
-        await flush()
+        if savingCurrent { await flush() } else { pendingSave?.cancel(); pendingSave = nil }
         guard preparationID == token, !Task.isCancelled else { return false }
         preparing = true
         defer { preparing = false }

@@ -73,7 +73,7 @@ struct ReaderTextReveal: Equatable {
               let upper = AttributedString.Index(range.upperBound, within: text) else { return text }
         var result = text
         result[lower..<upper][TextualNavigationTarget.self] = reveal.id
-        result[lower..<upper].backgroundColor = .yellow.opacity(0.65)
+        result[lower..<upper].backgroundColor = .yellow
         result[lower..<upper].foregroundColor = .black
         return result
     }
@@ -84,38 +84,87 @@ struct ReaderFindBar: View {
     @Bindable var navigation: ReaderNavigationState
     let inSource: Bool
     @FocusState private var focused: Bool
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     var body: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 12) {
+        // Large text needs the whole width for what's being typed.
+        let large = dynamicTypeSize.isAccessibilitySize
+        let layout = large ? AnyLayout(VStackLayout(alignment: .trailing, spacing: 2)) : AnyLayout(HStackLayout(spacing: 2))
+        layout {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
                 TextField("Find in document", text: $navigation.query)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .submitLabel(.search).focused($focused)
                     // Return moves to the next result, like Find Next.
                     .onSubmit { navigation.move(1, inSource: inSource) }
                     .accessibilityIdentifier("reader-find-query")
-                    .frame(minHeight: 44)
-                Button("Previous result", systemImage: "chevron.up") { focused = false; navigation.move(-1, inSource: inSource) }
-                    .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44).disabled(navigation.matches.isEmpty)
-                Button("Next result", systemImage: "chevron.down") { focused = false; navigation.move(1, inSource: inSource) }
-                    .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44).disabled(navigation.matches.isEmpty)
-                Button("Done") { focused = false; navigation.closeFind() }.frame(minHeight: 44)
+                if !large { statusText }
             }
-            HStack {
-                Text(status).font(.caption).foregroundStyle(.secondary)
-                    .accessibilityIdentifier("reader-find-status")
-                    .accessibilityAddTraits(.updatesFrequently)
-                Spacer()
+            .padding(.horizontal, 14).frame(minHeight: 44)
+            .background(.fill.tertiary, in: .capsule)
+            HStack(spacing: 0) {
+                if large { statusText; Spacer(minLength: 8) }
+                Button { focused = false; navigation.move(-1, inSource: inSource) } label: { IconTarget(symbol: "chevron.up") }
+                    .accessibilityLabel("Previous result")
+                    .disabled(navigation.matches.isEmpty)
+                Button { focused = false; navigation.move(1, inSource: inSource) } label: { IconTarget(symbol: "chevron.down") }
+                    .accessibilityLabel("Next result")
+                    .disabled(navigation.matches.isEmpty)
+                Button { focused = false; navigation.closeFind() } label: {
+                    Text("Done").frame(minHeight: 44).padding(.horizontal, 6).contentShape(Rectangle())
+                }
             }
+            .buttonStyle(.borderless)
         }
-        .padding(.horizontal).padding(.vertical, 8).background(.bar)
+        .padding(.horizontal, 16).padding(.vertical, 6)
         .onAppear { focused = true }
         .onChange(of: navigation.findFocusRequest) { _, _ in focused = true }
     }
+    private var statusText: some View {
+        Text(status).font(.footnote.monospacedDigit()).foregroundStyle(.secondary)
+            .lineLimit(1).fixedSize()
+            .contentTransition(.numericText())
+            .accessibilityIdentifier("reader-find-status")
+            .accessibilityAddTraits(.updatesFrequently)
+    }
     private var status: String {
-        if navigation.query.isEmpty { return "Enter text to find" }
+        if navigation.query.isEmpty { return " " }
         if navigation.searching { return "Searching…" }
         if navigation.matches.isEmpty { return "No results" }
         return "\(navigation.selected + 1) of \(navigation.matches.count)\(navigation.truncated ? "+" : "")"
+    }
+}
+
+/// Find, the document's reading modes and Headings, within reach of a thumb, in one place for
+/// connected and offline readers.
+struct ReaderBottomBar: ToolbarContent {
+    let findTitle: String
+    let find: () -> Void
+    var headings: (() -> Void)?
+    /// Nil for a document with only one way to read it.
+    var source: Binding<Bool>?
+    var body: some ToolbarContent {
+        ToolbarItem(placement: .bottomBar) {
+            Button(findTitle, systemImage: "magnifyingglass", action: find)
+        }
+        ToolbarSpacer(.flexible, placement: .bottomBar)
+        if let source {
+            ToolbarItem(placement: .bottomBar) {
+                Picker("Reading mode", selection: source) {
+                    Text("Rendered").tag(false)
+                    Text("Source").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
+            }
+            .sharedBackgroundVisibility(.hidden)
+            ToolbarSpacer(.flexible, placement: .bottomBar)
+        }
+        if let headings {
+            ToolbarItem(placement: .bottomBar) {
+                Button("Headings", systemImage: "list.bullet.indent", action: headings)
+            }
+        }
     }
 }
 
@@ -129,14 +178,19 @@ struct ReaderHeadingsView: View {
                 Button {
                     select(heading); dismiss()
                 } label: {
-                    Text(heading.title).foregroundStyle(.primary)
-                        .padding(.leading, CGFloat(max(0, heading.level - 1)) * 12)
+                    Text(heading.title)
+                        .font(heading.level == 1 ? .body.weight(.semibold) : .body)
+                        .foregroundStyle(heading.level > 2 ? .secondary : .primary)
+                        .padding(.leading, CGFloat(max(0, heading.level - 1)) * 14)
                 }
                 .accessibilityLabel("\(heading.title), heading level \(heading.level)")
             }
+            .listStyle(.plain)
             .navigationTitle("Headings").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 }
 #endif

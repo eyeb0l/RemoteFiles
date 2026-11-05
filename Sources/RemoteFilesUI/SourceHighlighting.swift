@@ -119,10 +119,14 @@ struct SourceCodeView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var highlighted: AttributedString?
     @State private var highlightedRequest: Request?
+    @State private var highlightRevision = 0
+    #if os(iOS)
+    @State private var highlightRuns: SourceHighlightRuns?
+    #endif
     private struct Request: Equatable {
         let text: String; let language: String?; let dark: Bool
         static func == (lhs: Self, rhs: Self) -> Bool {
-            lhs.language == rhs.language && lhs.dark == rhs.dark && lhs.text.utf8.elementsEqual(rhs.text.utf8)
+            lhs.language == rhs.language && lhs.dark == rhs.dark && sameBytes(lhs.text, rhs.text)
         }
     }
     private struct Work: Equatable { let request: Request; let phase: ScenePhase }
@@ -134,6 +138,7 @@ struct SourceCodeView: View {
             if bounded {
                 BoundedSourceTextView(text: text,
                     highlighted: highlightedRequest == request ? highlighted : nil,
+                    highlightRevision: highlightRevision, highlightRuns: highlightRuns,
                     readingPosition: readingPosition, reveal: reveal, wrapLines: wrapLines,
                     revealPending: revealPending, onReveal: onReveal)
                 // Scroll to the bottom edge; UITextView insets its content for the home indicator.
@@ -149,7 +154,12 @@ struct SourceCodeView: View {
             do {
                 let result = try await SourceHighlighting.shared.highlight(input.text, language: input.language, dark: input.dark)
                 try Task.checkCancellation()
-                highlighted = result; highlightedRequest = input
+                #if os(iOS)
+                let runs = await Task.detached(priority: .userInitiated) { result.map(SourceHighlightRuns.init) }.value
+                try Task.checkCancellation()
+                highlightRuns = runs
+                #endif
+                highlighted = result; highlightedRequest = input; highlightRevision &+= 1
                 readingPosition?.sourceHighlights += 1
             } catch is CancellationError { }
             catch { highlighted = nil }

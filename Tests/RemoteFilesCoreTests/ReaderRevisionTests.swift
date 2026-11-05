@@ -99,7 +99,7 @@ private actor RevisionFileService: RemoteFileService {
                 !first.isDescendant(of: window) && self.containsDocument(window, source: source, marker: changedMarker)
         }
         let second = try XCTUnwrap(viewport(window, source: source))
-        try await waitUntil("replacement viewport at top", diagnostics: { self.viewportState(window) }) { abs(second.contentOffset.y) < 2 }
+        try await waitUntil("replacement viewport at top", diagnostics: { self.viewportState(window) }) { abs(second.contentOffset.y + second.adjustedContentInset.top) < 2 }
         if source { XCTAssertEqual((second as? UITextView)?.attributedText.string, changed) }
         else { XCTAssertTrue(containsDocument(window, source: false, marker: changedMarker)) }
         window.isHidden = true; window.rootViewController = nil

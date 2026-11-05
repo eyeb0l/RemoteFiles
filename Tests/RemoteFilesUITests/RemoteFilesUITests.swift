@@ -28,6 +28,14 @@ extension XCUIApplication {
         app.launchEnvironment["OS_ACTIVITY_DT_MODE"] = "NO"
         return app
     }
+
+    /// The connection form keeps its port, Tailscale and jump-host options under Advanced.
+    func expandAdvancedConnectionOptions() {
+        let advanced = buttons["Advanced"]
+        for _ in 0..<4 { if advanced.exists && advanced.isHittable { break }; swipeUp() }
+        XCTAssertTrue(advanced.exists && advanced.isHittable, debugDescription)
+        advanced.tap()
+    }
 }
 
 @MainActor
@@ -172,7 +180,6 @@ final class RemoteFilesUITests: XCTestCase {
     func testOfflineCopyFindsTextAndListsHeadings() throws {
         let app = openDemoOfflineNavigationGuide()
         let reader = app.scrollViews["Rendered Markdown document"].firstMatch
-        app.buttons["Document actions"].tap()
         let find = app.buttons["Find in Document"]
         XCTAssertTrue(find.waitForExistence(timeout: 5)); find.tap()
         let query = app.textFields["reader-find-query"]
@@ -186,7 +193,6 @@ final class RemoteFilesUITests: XCTestCase {
         app.buttons["Done"].tap()
         XCTAssertFalse(query.exists)
 
-        app.buttons["Document actions"].tap()
         let headings = app.buttons["Headings"]
         XCTAssertTrue(headings.waitForExistence(timeout: 5)); headings.tap()
         // The Offline Files list stays behind the sheet; scroll the headings list itself.
@@ -420,7 +426,7 @@ final class RemoteFilesUITests: XCTestCase {
         localHeading.tap()
         XCTAssertTrue(app.staticTexts["Reading marker 20"].waitForExistence(timeout: 5) && app.staticTexts["Reading marker 20"].isHittable,
                       "A same-document heading link must reveal its heading without pushing another reader")
-        app.buttons["Document actions"].tap(); app.buttons["Find in Document"].tap()
+        app.buttons["Find in Document"].tap()
         let query = app.textFields["reader-find-query"]
         XCTAssertTrue(query.waitForExistence(timeout: 5)); query.tap(); query.typeText("Reading marker 20")
         let status = app.staticTexts["reader-find-status"]
@@ -436,7 +442,7 @@ final class RemoteFilesUITests: XCTestCase {
     func testHeadingOutlineAndLinkedDocumentHeadingInReader() throws {
         continueAfterFailure = false
         let app = launchDemoReader(filename: "Navigation guide.md")
-        app.buttons["Document actions"].tap(); app.buttons["Headings"].tap()
+        app.buttons["Headings"].tap()
         let outline = app.collectionViews.firstMatch
         XCTAssertTrue(outline.waitForExistence(timeout: 5))
         let last = outline.buttons["Navigation return marker, heading level 2"]
@@ -1321,17 +1327,22 @@ final class RemoteFilesUITests: XCTestCase {
         largeFolder.tap()
         XCTAssertTrue(app.navigationBars["Thousand files"].waitForExistence(timeout: 10))
         for _ in 0..<5 { app.swipeUp() }
+        // The list runs under the search field, so choose a row clear of it, once the swipes have settled.
+        let search = app.searchFields.firstMatch
+        sleep(2)
         let visibleReport = try XCTUnwrap(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Report "))
-            .allElementsBoundByIndex.first(where: { $0.isHittable }))
+            .allElementsBoundByIndex.first(where: { $0.isHittable && $0.frame.minY > search.frame.maxY + 8 }))
         let label = visibleReport.label
         visibleReport.tap()
-        XCTAssertTrue(app.navigationBars.buttons["Thousand files"].waitForExistence(timeout: 10))
+        // The folder's own title menu has the same name as the Back button, so wait for the reader first.
+        let reader = app.navigationBars[String(label.prefix { $0 != "," })]
+        XCTAssertTrue(reader.waitForExistence(timeout: 15), app.debugDescription)
         app.navigationBars.buttons["Thousand files"].tap()
         let restored = app.buttons[label]
         XCTAssertTrue(restored.waitForExistence(timeout: 5) && restored.isHittable,
                       "Returning from a file should preserve the folder's scroll position")
-        XCTAssertFalse(app.staticTexts["Showing cached folder · refreshing…"].exists,
-                       "Back navigation should not refetch a cached listing")
+        XCTAssertFalse(app.staticTexts["Updating…"].exists,
+                       "Back navigation shows no status for a remembered listing")
     }
 
     func testLinkedFolderOpensInOneTapAndSortBySizeReordersFiles() throws {
@@ -1412,6 +1423,7 @@ final class RemoteFilesUITests: XCTestCase {
         attachScreenshot("Physical normal Home")
         add.tap()
         XCTAssertTrue(app.textFields["Hostname or IP address"].waitForExistence(timeout: 5))
+        app.expandAdvancedConnectionOptions()
         let jump = app.switches["Use Jump Host"]
         // XCTest can report this row as hittable while its switch is below the
         // screen. Reveal the whole row before tapping its trailing switch control.
@@ -1548,7 +1560,7 @@ final class RemoteFilesUITests: XCTestCase {
                        "Back should preserve the link's vertical reading position")
         XCTAssertTrue(marker.isHittable)
         XCTAssertEqual(marker.frame.minY, markerY, accuracy: 4)
-        XCTAssertFalse(app.staticTexts["Previously loaded copy · refreshing…"].exists,
+        XCTAssertFalse(app.staticTexts["Updating…"].exists,
                        "Returning to an unchanged reader should not refetch it")
         attachScreenshot("Relative document native Back position")
 
@@ -1630,8 +1642,10 @@ final class RemoteFilesUITests: XCTestCase {
         // The trailing-anchored native menu can cover the title and screen centre.
         // Its left margin remains outside the menu; assert dismissal before proceeding.
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).tap()
-        XCTAssertFalse(app.buttons["Source Copied"].exists, "The native actions menu must be dismissed before navigating or changing reading mode")
-        XCTAssertFalse(app.buttons["Copy Source"].exists)
+        let dismissed = NSPredicate(format: "exists == false")
+        // The menu's closing animation can outlast the tap's idle wait.
+        wait(for: [expectation(for: dismissed, evaluatedWith: app.buttons["Source Copied"]),
+                   expectation(for: dismissed, evaluatedWith: app.buttons["Copy Source"])], timeout: 10)
     }
 
     private func launchDemoSearchSamples() -> XCUIApplication {
@@ -1672,7 +1686,7 @@ final class RemoteFilesUITests: XCTestCase {
         for _ in 0..<16 {
             let search = app.searchFields.firstMatch
             let bottomSearch = search.exists && search.frame.minY > list.frame.midY
-            let top = search.exists && !bottomSearch ? max(list.frame.minY, search.frame.maxY + 16) : list.frame.minY
+            let top = search.exists && !bottomSearch ? max(list.frame.minY, search.frame.maxY) : list.frame.minY
             let bottom = bottomSearch ? min(list.frame.maxY, search.frame.minY - 16) : list.frame.maxY
             if row.exists, row.isHittable, row.frame.minY >= top, row.frame.maxY <= bottom { return row }
             let down = row.exists ? row.frame.maxY > bottom : searchingDown
@@ -1802,6 +1816,7 @@ extension RealServerUITests {
                 if !field.isHittable { app.swipeUp() }
                 field.tap(); field.typeText(value)
             }
+            app.expandAdvancedConnectionOptions()
             let tailscale = app.switches["Show Tailscale Setup Tips"]
             if !tailscale.isHittable { app.swipeUp() }
             if tailscale.value as? String == "0" { tailscale.tap() }

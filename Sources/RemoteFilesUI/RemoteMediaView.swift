@@ -19,7 +19,7 @@ struct RemoteMediaView: View {
     @State private var pdfRestoration: SavedReadingPosition.Anchor?
     @State private var pdfPage = 0
     @State private var appliedOpeningPage = false
-    @State private var loading = false
+    @State private var loading = true
     @State private var downloadProgress = DownloadProgress()
     @State private var failure: String?
     @State private var lastRefreshID = 0
@@ -60,15 +60,8 @@ struct RemoteMediaView: View {
     }
 
     var body: some View {
+        // One view, not a Group: a Group's lifecycle modifiers would run per branch.
         VStack(spacing: 0) {
-            if let failure = previewFailure {
-                StatusBanner(message: hasContent ? "Previously loaded copy · \(failure)" : failure, error: true)
-            } else if loading && hasContent {
-                VStack(spacing: 8) {
-                    StatusBanner(message: "Previously loaded copy · refreshing…")
-                    downloadStatus.padding(.horizontal).padding(.bottom, 8)
-                }
-            }
             Group {
                 if kind == .image, let image {
                     ScrollView {
@@ -82,15 +75,10 @@ struct RemoteMediaView: View {
                         .accessibilityFocused($imageFocused)
                     }
                 } else if kind == .pdf, let pdf {
-                    VStack(spacing: 0) {
-                        Text("Page \(min(pdfPage, pdf.pageCount - 1) + 1) of \(pdf.pageCount)")
-                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
-                            .accessibilityIdentifier("PDF page indicator")
-                        PDFDocumentView(document: pdf, restoration: pdfRestoration, readingPosition: readingPosition,
-                                        onPageChange: { pdfPage = $0 })
-                            .accessibilityLabel("PDF \(entry.name), \(pdf.pageCount) \(pdf.pageCount == 1 ? "page" : "pages")")
-                    }
+                    PDFDocumentView(document: pdf, restoration: pdfRestoration, readingPosition: readingPosition,
+                                    onPageChange: { pdfPage = $0 })
+                        .accessibilityLabel("PDF \(entry.name), \(pdf.pageCount) \(pdf.pageCount == 1 ? "page" : "pages")")
+                        .overlay(alignment: .bottomLeading) { PDFPageBadge(page: min(pdfPage, pdf.pageCount - 1) + 1, count: pdf.pageCount) }
                 } else if let player = playback.player {
                     VStack(spacing: 0) {
                         if kind == .audio {
@@ -110,8 +98,8 @@ struct RemoteMediaView: View {
                     }
                 } else if loading {
                     VStack(spacing: 12) {
-                        Text(loadingMessage).font(.headline)
-                        downloadStatus.frame(maxWidth: 320)
+                        Text(loadingMessage).font(.subheadline).foregroundStyle(.secondary)
+                        downloadStatus.frame(maxWidth: 280)
                         if kind == .video || kind == .audio {
                             Text("You can play this file once the download finishes.")
                                 .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
@@ -129,6 +117,9 @@ struct RemoteMediaView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .contentStatus(progress: hasContent && loading ? "Updating…" : nil,
+                       failure: hasContent ? previewFailure.map { "Previously loaded copy · \($0)" } : nil,
+                       retry: { retryID += 1 })
         .task(id: "\(model.isForeground)-\(model.sessionRevision)-\(refreshID)-\(retryID)") { await load() }
         .onDisappear { if !fullScreenPlayback { requestID = UUID(); playback.stop() } }
         .onChange(of: scenePhase) { _, phase in if phase != .active { playback.stop() } }
@@ -157,11 +148,13 @@ struct RemoteMediaView: View {
     }
 
     private func load() async {
-        guard !model.isDisconnecting else { return }
+        guard !model.isDisconnecting else { loading = false; return }
+        model.noteForegroundConnection(profile.id)
         if model.isForeground, playback.player != nil, lastLoadedSession == model.sessionRevision,
-           refreshID == lastRefreshID, retryID == lastRetryID { return }
+           refreshID == lastRefreshID, retryID == lastRetryID { loading = false; return }
         let token = UUID(); requestID = token
         let revision = model.sessionRevision
+        let generation = model.listingGeneration(profile.id)
         guard model.isForeground else {
             image = nil; pdf = nil; playback.stop(); loading = false
             failure = "Connection paused while the app is in the background."
@@ -182,21 +175,21 @@ struct RemoteMediaView: View {
             let file = try await model.resources.localFile(for: reference, in: location, progress: { update in
                 await MainActor.run {
                     guard requestID == token, !model.isDisconnecting, model.isForeground,
-                          model.sessionRevision == revision else { return }
+                          model.sessionRevision == revision, model.listingGeneration(profile.id) == generation else { return }
                     downloadProgress = update
                 }
             })
             try Task.checkCancellation()
-            guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else { return }
+            guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision, model.listingGeneration(profile.id) == generation else { return }
             if kind == .image {
                 let decoded = try await RemoteImageDecoder.shared.decode(file, maxPixel: 1600)
                 try Task.checkCancellation()
-                guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else { return }
+                guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision, model.listingGeneration(profile.id) == generation else { return }
                 image = decoded
             } else if kind == .video || kind == .audio {
                 try await playback.prepare(file, filename: entry.name)
                 try Task.checkCancellation()
-                guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else {
+                guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision, model.listingGeneration(profile.id) == generation else {
                     playback.stop(); return
                 }
             } else {
@@ -206,12 +199,12 @@ struct RemoteMediaView: View {
                     restorable = await model.preparePDFReadingPosition(readingPosition, fileURL: file, profile: profile, path: entry.path)
                 }
                 try Task.checkCancellation()
-                guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else { return }
+                guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision, model.listingGeneration(profile.id) == generation else { return }
                 guard let document = PDFDocument(url: file), document.pageCount > 0 else {
                     throw MediaPreviewError.invalidPDF
                 }
                 try Task.checkCancellation()
-                guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else { return }
+                guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision, model.listingGeneration(profile.id) == generation else { return }
                 let restoration = Self.pdfRestoration(openingPage: appliedOpeningPage ? nil : entry.openingPage,
                                                       saved: restorable ? readingPosition?.pdfAnchor : nil,
                                                       pageCount: document.pageCount)
@@ -228,8 +221,10 @@ struct RemoteMediaView: View {
             guard !Task.isCancelled, requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else { return }
             failure = error.localizedDescription
             if model.isSecurityError(error) { image = nil; pdf = nil; playback.stop() }
-            if error is PlaybackError { model.connectionStates[profile.id] = "Connected" }
-            else { model.handle(error, profile: profile) }
+            if error is PlaybackError {
+                // The transfer worked, but don't overwrite a failed check that landed meanwhile.
+                if model.listingGeneration(profile.id) == generation { model.connectionStates[profile.id] = "Connected" }
+            } else { model.handle(error, profile: profile) }
         }
     }
 }

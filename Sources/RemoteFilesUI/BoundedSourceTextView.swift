@@ -1,6 +1,24 @@
 import SwiftUI
 import RemoteFilesCore
 
+/// Byte-for-byte identity: two names or documents can be canonically equivalent yet different.
+/// Compares in constant time when both share storage, which is nearly always the case when a
+/// view is simply asked to update with the text it already shows.
+func sameBytes(_ lhs: String, _ rhs: String) -> Bool {
+    guard lhs.utf8.count == rhs.utf8.count else { return false }
+    let shared = lhs.utf8.withContiguousStorageIfAvailable { left in
+        rhs.utf8.withContiguousStorageIfAvailable { right in left.baseAddress == right.baseAddress }
+    }
+    if shared == .some(.some(true)) { return true }
+    return lhs.utf8.elementsEqual(rhs.utf8)
+}
+
+/// A `.task(id:)` value for text, without copying or scanning it on every view update.
+struct ExactText: Equatable {
+    let text: String
+    static func == (lhs: Self, rhs: Self) -> Bool { sameBytes(lhs.text, rhs.text) }
+}
+
 enum SourceLayout {
     /// A two-axis SwiftUI Text creates one enormous layout surface for long lines.
     /// Bound both long lines and tall documents with TextKit's viewport layout.
@@ -19,12 +37,35 @@ enum SourceLayout {
 #if os(iOS)
 import UIKit
 
+/// Where each colour goes in a highlighted document, as UIKit needs it. Up to 16,000 runs can take
+/// noticeable time to measure, so this is prepared before reaching the main actor.
+struct SourceHighlightRuns: @unchecked Sendable {
+    let runs: [(range: NSRange, color: UIColor)]
+    init(_ highlighted: AttributedString) {
+        var offset = 0
+        var result: [(range: NSRange, color: UIColor)] = []
+        result.reserveCapacity(highlighted.runs.count)
+        for run in highlighted.runs {
+            let count = String(highlighted[run.range].characters).utf16.count
+            if let color = run.foregroundColor {
+                result.append((NSRange(location: offset, length: count), UIColor(color)))
+            }
+            offset += count
+        }
+        runs = result
+    }
+}
+
 /// Width-constrained, selectable original source. Wrapping is visual only: no
 /// characters, escapes, indentation or newlines are inserted into the document.
 struct BoundedSourceTextView: UIViewRepresentable {
     @ScaledMetric(relativeTo: .body) private var fontSize: CGFloat = 17
     let text: String
     let highlighted: AttributedString?
+    /// Changes whenever `highlighted` does, so a new highlight is noticed without comparing it.
+    var highlightRevision = 0
+    /// The colours of `highlighted`, when already worked out away from the main actor.
+    var highlightRuns: SourceHighlightRuns? = nil
     let readingPosition: DocumentReadingPosition?
     var reveal: ReaderTextReveal? = nil
     var wrapLines = true
@@ -56,6 +97,19 @@ struct BoundedSourceTextView: UIViewRepresentable {
             readingPosition?.source = point
             readingPosition?.sourceAnchor = anchor
         }
+        // This runs on every SwiftUI update, including each keystroke in Find. Rebuilding and
+        // comparing a 2 MiB attributed string would stall the main thread, so do it only when
+        // something it depends on has changed.
+        let content = Coordinator.Content(text: text, highlightRevision: highlightRevision, highlighted: highlighted != nil,
+                                          fontSize: fontSize, wrapLines: wrapLines,
+                                          reveal: reveal?.inSource == true ? reveal?.id : nil,
+                                          contentSizeCategory: context.environment.sizeCategory)
+        if coordinator.applied == content, view.textContainer.widthTracksTextView == wrapLines {
+            revealIfNeeded(view, coordinator: coordinator)
+            return
+        }
+        coordinator.applied = content
+        coordinator.contentBuilds += 1
         if view.textContainer.widthTracksTextView != wrapLines {
             if view.anchor != nil { view.restoreAnchor = true }
             view.textContainer.widthTracksTextView = wrapLines
@@ -73,13 +127,8 @@ struct BoundedSourceTextView: UIViewRepresentable {
             view.textContainer.size = CGSize(width: max(1, width), height: CGFloat.greatestFiniteMagnitude)
         }
         if let highlighted {
-            var offset = 0
-            for run in highlighted.runs {
-                let count = String(highlighted[run.range].characters).utf16.count
-                if let color = run.foregroundColor {
-                    result.addAttribute(.foregroundColor, value: UIColor(color), range: NSRange(location: offset, length: count))
-                }
-                offset += count
+            for run in (highlightRuns ?? SourceHighlightRuns(highlighted)).runs where NSMaxRange(run.range) <= result.length {
+                result.addAttribute(.foregroundColor, value: run.color, range: run.range)
             }
         }
         // Refresh identity must remain literal even for canonically equivalent Unicode.
@@ -124,6 +173,23 @@ struct BoundedSourceTextView: UIViewRepresentable {
         view.setNeedsLayout()
     }
     final class Coordinator: NSObject, UITextViewDelegate {
+        struct Content: Equatable {
+            let text: String
+            let highlightRevision: Int
+            let highlighted: Bool
+            let fontSize: CGFloat
+            let wrapLines: Bool
+            let reveal: UUID?
+            let contentSizeCategory: ContentSizeCategory
+            static func == (lhs: Self, rhs: Self) -> Bool {
+                lhs.highlightRevision == rhs.highlightRevision && lhs.highlighted == rhs.highlighted
+                    && lhs.fontSize == rhs.fontSize && lhs.wrapLines == rhs.wrapLines && lhs.reveal == rhs.reveal
+                    && lhs.contentSizeCategory == rhs.contentSizeCategory && sameBytes(lhs.text, rhs.text)
+            }
+        }
+        var applied: Content?
+        /// How many times the attributed text was built, which tests hold to one per real change.
+        var contentBuilds = 0
         var position: DocumentReadingPosition?
         var applying = false
         var revealID: UUID?

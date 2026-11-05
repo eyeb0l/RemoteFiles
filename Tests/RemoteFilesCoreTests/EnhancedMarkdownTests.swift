@@ -277,6 +277,46 @@ import WebKit
         XCTAssertEqual(references, ["picture.png"])
     }
 
+    func testDocumentWithoutDiagramsRendersWithoutLoadingMermaid() async throws {
+        XCTAssertTrue(EnhancedMarkdownPolicy.mayContainDiagram("```MerMaid\nflowchart LR\n```"))
+        XCTAssertFalse(EnhancedMarkdownPolicy.mayContainDiagram("# Title\n\n$x^2$ and <kbd>K</kbd>"))
+        let full = try EnhancedMarkdownPolicy.rendererScripts()
+        let lean = try EnhancedMarkdownPolicy.rendererScripts(includingDiagrams: false)
+        XCTAssertEqual(full.count, lean.count + 1)
+        XCTAssertLessThan(lean.reduce(0) { $0 + $1.utf8.count }, 1_000_000, "Mermaid alone is 5.5 MB")
+        let rules = try await SVGResourceBlocker.rules()
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        previous = scene.windows.first { $0.isKeyWindow }
+        func render(_ source: String, scripts: [String]) async throws -> (WKWebView, Duration) {
+            let window = UIWindow(windowScene: scene); self.window = window
+            var loaded = false
+            window.rootViewController = UIHostingController(rootView: EnhancedMarkdownWebView(text: source,
+                scripts: scripts, rules: rules, readingPosition: DocumentReadingPosition(), navigation: nil,
+                location: nil, resolver: nil, active: true,
+                onFinish: { loaded = true }, onFailure: { XCTFail($0) },
+                openExternalLink: { _ in }, openDocumentLink: { _ in }, openImage: { _, _ in }))
+            window.makeKeyAndVisible()
+            let start = ContinuousClock.now, deadline = start + .seconds(60)
+            while !loaded, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            let elapsed = ContinuousClock.now - start
+            XCTAssertTrue(loaded)
+            func web(_ root: UIView) -> WKWebView? {
+                if let view = root as? WKWebView { return view }
+                return root.subviews.lazy.compactMap { web($0) }.first
+            }
+            return (try XCTUnwrap(web(window)), elapsed)
+        }
+        let source = "# Math\n\nInline $x^2$ and <kbd>K</kbd>.\n\n```swift\nlet mathOnly = true\n```"
+        let (view, leanTime) = try await render(source, scripts: lean)
+        try await assertScript("typeof mermaid", in: view, equals: "undefined")
+        try await assertScript("document.querySelectorAll('.rf-math math').length", in: view, equals: 1)
+        try await assertScript("document.querySelector('kbd')?.textContent", in: view, equals: "K")
+        // Both configurations are measured warm, so this records Mermaid's cost, not WebKit's cold start.
+        let (_, fullTime) = try await render(source, scripts: full)
+        let (_, secondLeanTime) = try await render(source, scripts: lean)
+        print("RICH MARKDOWN LOAD lean(cold)=\(leanTime) full=\(fullTime) lean=\(secondLeanTime)")
+    }
+
     func testDynamicTypeChangesRichTextSizeWithoutReloadingDocument() async throws {
         let rules = try await SVGResourceBlocker.rules()
         let scripts = try EnhancedMarkdownPolicy.rendererScripts()

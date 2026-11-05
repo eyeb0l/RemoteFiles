@@ -98,9 +98,16 @@ public enum EnhancedMarkdownPolicy {
         return false
     }
 
+    /// Whether a document might contain a diagram, and so needs Mermaid. The check errs towards
+    /// yes: Mermaid is by far the largest script, 5.5 MB to parse on every open, and most rich
+    /// documents only need math or HTML. Any `mermaid` fence contains this word in some case.
+    public static func mayContainDiagram(_ source: String) -> Bool {
+        source.range(of: "mermaid", options: [.caseInsensitive, .literal]) != nil
+    }
+
     /// Resources are executable app code. Document text is passed separately as a JS argument.
-    public static func rendererScripts() throws -> [String] {
-        try ["marked", "dompurify", "katex", "mermaid", "markdown-renderer"].map { name in
+    public static func rendererScripts(includingDiagrams: Bool = true) throws -> [String] {
+        try (["marked", "dompurify", "katex"] + (includingDiagrams ? ["mermaid"] : []) + ["markdown-renderer"]).map { name in
             guard let url = Bundle.module.url(forResource: name, withExtension: "js") else {
                 throw CocoaError(.fileNoSuchFile)
             }
