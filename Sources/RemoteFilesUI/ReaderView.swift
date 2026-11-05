@@ -224,13 +224,13 @@ struct ReaderView: View {
         try? await Task.sleep(until: settled, clock: .continuous)
         guard !Task.isCancelled, !showsLoadingPlaceholder else { return }
         UIAccessibility.post(notification: .screenChanged, argument: readingPosition.sourceVoiceOverStart?())
-        await keepVoiceOverOnTheDocumentStart()
+        await keepVoiceOverOnTheDocumentStart(arrivedAt: documentArrivedAt)
     }
     /// VoiceOver can land on a later line after that post, with nothing left to send it back. So
     /// check where it lands until it reaches the first line. See "First line not reached" in
     /// docs/CI_HISTORY.md.
-    private func keepVoiceOverOnTheDocumentStart() async {
-        var watch = VoiceOverLandingWatch(now: .now)
+    private func keepVoiceOverOnTheDocumentStart(arrivedAt: ContinuousClock.Instant) async {
+        var watch = VoiceOverLandingWatch(arrivedAt: arrivedAt)
         while !Task.isCancelled {
             try? await Task.sleep(for: VoiceOverLandingWatch.pollInterval)
             guard !Task.isCancelled, let line = readingPosition.sourceVoiceOverLine else { return }
@@ -440,7 +440,8 @@ struct ReaderView: View {
 
 /// Decides when VoiceOver has landed partway through a document instead of on its first line.
 /// Holding first lets a return already under way finish. Focus reaching any other line means the
-/// reader chose it, so that is left alone, as it is once the window ends.
+/// reader chose it, so that is left alone, as it is once the window ends. The window runs from the
+/// document's arrival, so syntax colours restarting the watch cannot extend it.
 struct VoiceOverLandingWatch {
     enum Action: Equatable { case wait, stop, correct }
     static let pollInterval: Duration = .milliseconds(250)
@@ -452,7 +453,7 @@ struct VoiceOverLandingWatch {
     private var landedLine: Int?
     private var heldSince: ContinuousClock.Instant?
     private var corrections = 0
-    init(now: ContinuousClock.Instant) { deadline = now + Self.window }
+    init(arrivedAt: ContinuousClock.Instant) { deadline = arrivedAt + Self.window }
     mutating func next(line: Int?, now: ContinuousClock.Instant) -> Action {
         guard line != 0, now < deadline else { return .stop }
         guard let line else {

@@ -153,12 +153,13 @@ swipes would fit its log.
 **Reproduction.** Temporarily dropping the posts gave the failed run's exact traversal: 1 of 6 iterations
 on iOS 27.2, where 2 of the others went to Back. Back skips nothing, so it needs no correction.
 
-**Fix.** After posting, the reader polls where VoiceOver is for up to 6 seconds, until it reaches line 1. If it
-stays on another line for 1.25 seconds, longer than the 0.8 to 1.0 s of VoiceOver's own returns, the reader
+**Fix.** After posting, the reader polls where VoiceOver is, until it reaches line 1 or 6 seconds have
+passed since the document arrived. If it stays on another line for 1.25 seconds, longer than the 0.8 to 1.0 s of VoiceOver's own returns, the reader
 names line 1 again, up to twice. It stops once focus reaches a different line, since a person chose that, and
 posts nothing at a saved position. `VoiceOverLandingWatch` holds the decision and has unit tests. The journeys'
 settle wait goes from 4 to 6 seconds of quiet, because a second correction would land about 3.9 seconds after
-the landing, close to the old bound. It adds about 2 seconds to each use.
+the landing, close to the old bound. Six seconds of quiet after a landing also outlasts the window, so correcting
+that landing cannot start during traversal. It adds about 2 seconds to each of the 3 uses.
 
 | Proof | Result |
 |---|---|
@@ -185,14 +186,23 @@ used. No physical device was tested.
 
 This fix's own run, [42104593398](https://github.com/eyeb0l/RemoteFiles/actions/runs/42104593398), failed
 `testLinkedReadersReleaseCoveredLeasesAndReverifyOnBackAndForeground` in simulator-core when going Back: the
-offset did not come within 5 points of 500 in 15 seconds. This is the first time in the last 100 runs. The watch
-does not run with VoiceOver off, and this PR changes nothing it uses. WebKit processes launched in about a second,
-so a slow start does not explain it, though the load was about 150.
+offset did not come within 5 points of 500 in 15 seconds. XCTest also reported `InvalidTransition { phase: idle
+targetPhase: failed(deinit) }`, which appears nowhere in this repository and which nobody traced. The landing
+watch returns at once with VoiceOver off, and this test's readers are web views, so it does not run here. This is
+the first such failure in the last 100 runs, which go back to 1 November. An earlier one at this step was fixed in
+#52; see [Console back-pressure and readiness fixes](#console-back-pressure-and-readiness-fixes).
+
+The cause is unknown. The wait ran at a load of 209 to 232, with a lane peak of about 237. The log hints that no
+new reader appeared: four passing runs log 9 `cannot add handler` lines after hop 12, three per web view, while
+this one logs 3 and then nothing during the wait. `reader()` still returned, and it matches on the title alone,
+which is the same for hop 12's route and the first. So a lost position and a test watching the wrong view both
+fit.
 
 It did not reproduce. All 19 local runs that reached this step restored `y=500` within 0.1 s: 11 near idle and
-8 under 16 CPU burners. Under those burners the other 2 of 10 timed out at earlier steps, on the 15-second waits
-of a hop, so the test is fragile under load. One near-idle run failed its cold first render instead. The failure message does not say
-where the offset was, so the test now prints it, and no limit changes until a failure shows what it should be.
+8 under 16 CPU burners, far below that load. Under those burners the other 2 of 10 timed out at earlier steps, on
+the 15-second waits of a hop, so the test is fragile under load. One near-idle run failed its cold first render
+instead. A failure now prints the offset, content height and whether that web view is still the window's last, and
+no limit changes until one shows what it should be.
 
 ### Performance
 
