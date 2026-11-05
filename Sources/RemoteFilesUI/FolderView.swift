@@ -446,7 +446,9 @@ struct FolderView: View {
                     }
                 }
                 .font(.footnote).foregroundStyle(.secondary).listRowSeparator(.hidden)
-                ForEach(search.rows) { result in link(for: result.row, subtitle: result.subtitle, snippet: result.snippet, page: result.page) }
+                ForEach(search.rows) { result in
+                    link(for: result.row, subtitle: result.subtitle, snippet: result.snippet, page: result.page).listRowInsets(.vertical, 7)
+                }
             }
         }
         .listStyle(.plain)
@@ -668,7 +670,7 @@ struct FolderView: View {
         let token = UUID()
         sortID = token
         // Large folders wait for typing to pause, rather than filter on every keystroke.
-        if listing.rows.count > 2_000 {
+        if listing.rows.count > 500 {
             do { try await Task.sleep(for: .milliseconds(70)) } catch { return }
         }
         let query = filter, hidden = showHidden, order = sortOrder, options = searchOptions
