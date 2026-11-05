@@ -19,8 +19,15 @@ extension XCUIApplication {
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
         let json = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Long lines.json,")).firstMatch
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
-        for _ in 0..<6 { if json.exists && json.isHittable { break }; app.swipeUp() }
-        XCTAssertTrue(json.exists && json.isHittable)
+        // Denser rows can leave this one at the very bottom, where a double-tap lands in the home
+        // indicator's gesture area and opens nothing. Bring it well clear with short drags.
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.7))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        for _ in 0..<8 {
+            if json.exists && json.isHittable && json.frame.maxY < app.frame.maxY - 120 { break }
+            start.press(forDuration: 0.05, thenDragTo: end)
+        }
+        XCTAssertTrue(json.exists && json.isHittable && json.frame.maxY < app.frame.maxY - 120, app.debugDescription)
         // Enable VoiceOver before each preview opens so the screen change
         // establishes focus. Rows are staged in touch mode, then a VoiceOver
         // tap focuses the row and a double-tap opens it.
