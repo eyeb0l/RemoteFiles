@@ -10,6 +10,128 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 5 November 2026: nightly VoiceOver and playback failures
+
+Nightly run [42004987008](https://github.com/eyeb0l/RemoteFiles/actions/runs/42004987008) on
+`2ce971d` failed all three attempts, for two different reasons:
+
+| Attempt | Failure |
+|---|---|
+| 1 | `testMediaViewStopsWhenAppBackgrounds` in simulator-core, so the acceptance lanes were skipped |
+| 2, 3 | `testLongJSONAndSVGHaveReadOnlyVoiceOverPreviews`, at the assertion that speech reaches the image |
+
+Attempts 2 and 3 took the same traversal, so this was not a one-off, and a rerun was only a second
+try at a race. The push run of the same commit,
+[41996288670](https://github.com/eyeb0l/RemoteFiles/actions/runs/41996288670), had passed it.
+
+### SVG placeholder focus
+
+**Cause.** The journey swiped before VoiceOver had left a placeholder that was going away. Focus
+either starts at Back, and traversal reaches the image, or lands on `Preparing image…`, where the
+result depends on about a second:
+
+| Run | Focus after opening | Speech when traversal starts | Traversal |
+|---|---|---|---|
+| PR #80's last run, passed | `Projects` Back | Back | Title, Save, Actions, the image, `Find in Source` |
+| Push run of `2ce971d`, passed | `Preparing image…` | The image | `Find in Source`, `Rendered`, `Source` |
+| Nightly attempts 2 and 3, failed | `Preparing image…` | `Preparing image…` | `Find in Source`, `Rendered`, `Source` |
+
+The two runs that landed on the placeholder differ only in whether VoiceOver had moved to the image
+before the first swipe. The journey read speech as soon as its own wait ended. That wait looked for
+an activity indicator, which proved nothing about focus, and it could not look for the image, because
+that element exists, hidden from VoiceOver, throughout the load. The placeholder comes after the web
+view in the view order, which may be why a swipe from it goes past the image; no run tested that.
+
+**Reproduction.** On a dedicated iOS 27.2 simulator, a temporary test paused each new WebKit content
+process for 7 seconds, moved focus to the placeholder and swiped as soon as the placeholder went. It
+gave the nightly traversal, `Preparing image…` then `Find in Source`, with no focus notification for
+the web view. The two other runs of that variant stopped earlier, as the next paragraph explains. Adding
+only the wait below gave `Rendered SVG image` as the current speech in 4 of 4 runs, and the focus
+log recorded `WKWebView` straight after the placeholder. So VoiceOver does move to the image by
+itself, and this is not the fast-load bug in [Fast-load focus](#fast-load-focus).
+
+**Fix.** The journey waits for `Preparing image…` to go, then for the focus log to be quiet and no
+longer on the placeholder, and prints that log. `open(_:_:)` also waits past `VoiceOver on`, the
+first phrase on iOS 27.2: a tap before anything in the app has focus acts as an ordinary tap, and two
+of the local runs above failed that way. iOS 27.0, which CI uses, says something else first, so this
+does not affect CI today.
+
+**iOS 27.0.** The fix's own job,
+[42048542312](https://github.com/eyeb0l/RemoteFiles/actions/runs/42048542312), landed on the
+placeholder. Its focus log went from `Preparing image…` to `WKWebView` about five seconds later,
+speech started on the image, and the method took 107 seconds. With the push run above, that makes two
+iOS 27.0 runs in which VoiceOver moved to the image by itself.
+
+**Limits.** A VoiceOver user who swipes in the moment the image replaces the placeholder can still
+skip it, and has to swipe back. The app was not changed: a screen change naming the image would not
+close that moment, and it would interrupt someone who has already moved on. Moving the placeholder
+ahead of the web view in accessibility order was not tried. Locally the journey usually lands on Back,
+so staging focus needed the temporary test. Later nightly `VO FOCUS LOG` lines show which path each
+run took. No VoiceOver journey covers the HTML placeholder, and the demo reader journey, which reads
+Markdown, wasn't measured for this.
+
+### Playback background rate
+
+`testMediaViewStopsWhenAppBackgrounds` failed with a rate of 1 on an already empty player in four
+runs from 3 to 5 November (41556774386, 41681318140, 41853063475 and this one), each on a first
+attempt, and passed on rerun.
+
+**Cause not established.** It did not reproduce locally in 40 iterations on an idle simulator or
+300 with 24 busy processes (load about 170), with the rate 0 every time the item was gone. An
+`AVPlayer` with no item reports a rate of 1 straight after `play()`, in all 3 local checks. That
+would explain the failure if the controller still held a player that had already been stopped, since
+the test's `play()` would come after the only `pause()`. No CI log shows which player it held.
+
+**Fix.** The test waits for a player that still has an item before playing, and then for an empty
+player with a rate of 0, so a rate that only arrives late passes too. A player that keeps playing
+still fails, after 10 seconds, and prints its state. If this recurs, those lines say which it was.
+
+### Switch touches that do nothing
+
+`testSavedSearchIndexUpdatesAutomaticallyWhenItsFolderOpens` failed twice more after the changes in
+[Saved-index automatic switch](#saved-index-automatic-switch) (41757810352 and 41970406757), and
+`testSavedPDFAndOCRIndexPersistsRecognizedContents` failed on the same kind of wait on 3 November
+(41568670077). That section left open why the touch was lost. It reproduces locally on iOS 27.2, often
+enough to measure.
+
+| Touch | Journey | Result |
+|---|---|---|
+| XCTest tap | Update Automatically | First tap ignored in 5 of 15 iterations, plus one run that ignored two taps in a row |
+| `press(forDuration: 0.2)` | Update Automatically | 0 of 8 |
+| `press(forDuration: 0.2)` | OCR | 3 of 12 |
+| `press(forDuration: 0.5)` and a repeat | All three switch journeys, 6 runs each | All passed; OCR ignored 2 first presses and the repeat worked |
+
+**What is established.** With every touch logged in a temporary `UIWindow.sendEvent` hook, the touch
+reached the real `UISwitch`, which was enabled, and the binding did not fire. At touch-up in an
+ignored press, the switch's long-press recognizer had not begun; in a press that worked, it had. So
+this is not a missed target or a moving row, and the app's binding and saved state are not involved.
+
+**What is not.** Why the recognizer doesn't begin. Length does not explain it. An ignored tap lasted
+27.5 ms where working ones lasted 46 to 86 ms, which looked like the answer, but every 0.2-second
+press had the same 217 ms by its touch timestamps and one was still ignored. The app received that
+one's two events 127 ms apart while another worked at 57 ms, and an ignored 0.5-second press arrived
+558 ms apart. The switches sit in a sheet's scrolling list, which adds gesture recognizers of its own.
+It was not tested with a finger or on a device, so whether a person can ever hit this is unknown.
+
+**Fix.** `pressSwitch` holds for half a second, waits 10 seconds for the value to change and presses
+again, up to three times, printing `UI SWITCH <name> ignored press <n>`. This reverses that section's
+choice not to retry, because the journeys test index behaviour rather than touch delivery, and a
+switch that never turns still fails. The binding sets the value at once, so a repeat should not undo
+a press that worked, unless the main thread stalls for more than 10 seconds. The jump-host journey
+shares the helper. The Local Network switch in the Settings app keeps its own handling. `UI SWITCH`
+lines in the UI lane's log show how often this happens on iOS 27.0: the fix's own job had none, which
+is one run.
+
+### Performance
+
+No lane changed. The stability of the first attempt is the larger saving: attempt 1's failure cost 25
+minutes and skipped every acceptance lane. In this run simulator-core spent 8 minutes of its 24 in
+`simulator-settle`, against 6.5 minutes of tests, and VoiceOver spent 5 to 7 of its 22 to 24. Medians
+over the last 70 runs are 4 minutes for macos-openssh, 20 for simulator-core, 25 for VoiceOver, 51 for the
+UI journeys when they run and 3 for the Release compile. The settle bound stays as [Runner load and post-boot
+settling](#runner-load-and-post-boot-settling) left it, because this run adds no comparison of load
+against failures.
+
 ## 4 November 2026: playback preparation cancellation
 
 [Run 41837893351](https://github.com/eyeb0l/RemoteFiles/actions/runs/41837893351)
