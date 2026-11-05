@@ -1327,11 +1327,16 @@ final class RemoteFilesUITests: XCTestCase {
         largeFolder.tap()
         XCTAssertTrue(app.navigationBars["Thousand files"].waitForExistence(timeout: 10))
         for _ in 0..<5 { app.swipeUp() }
+        // The list runs under the search field, so choose a row clear of it, once the swipes have settled.
+        let search = app.searchFields.firstMatch
+        sleep(2)
         let visibleReport = try XCTUnwrap(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Report "))
-            .allElementsBoundByIndex.first(where: { $0.isHittable }))
+            .allElementsBoundByIndex.first(where: { $0.isHittable && $0.frame.minY > search.frame.maxY + 8 }))
         let label = visibleReport.label
         visibleReport.tap()
-        XCTAssertTrue(app.navigationBars.buttons["Thousand files"].waitForExistence(timeout: 10))
+        // The folder's own title menu has the same name as the Back button, so wait for the reader first.
+        let reader = app.navigationBars[String(label.prefix { $0 != "," })]
+        XCTAssertTrue(reader.waitForExistence(timeout: 15), app.debugDescription)
         app.navigationBars.buttons["Thousand files"].tap()
         let restored = app.buttons[label]
         XCTAssertTrue(restored.waitForExistence(timeout: 5) && restored.isHittable,
