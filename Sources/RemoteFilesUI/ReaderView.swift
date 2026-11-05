@@ -284,8 +284,9 @@ struct ReaderView: View {
                 }
             } catch {
                 guard !Task.isCancelled, linkRequestID == token, model.isForeground, model.sessionRevision == revision else { return }
-                linkError = error.localizedDescription
                 if !(error is RemoteDocumentLinkError) { model.handle(error, profile: profile) }
+                // A trust or unlock request has its own sheet; an alert would sit on top of it.
+                if model.sheet == nil { linkError = error.localizedDescription }
             }
         }
     }
@@ -313,13 +314,19 @@ struct ReaderView: View {
     private func reload() async {
         guard !model.isDisconnecting else { loading = false; return }
         guard !isMedia else { return }
-        guard model.isForeground else { loading = false; error = "Connection paused while the app is in the background."; return }
+        // Going to the background isn't a failure of a document still on screen.
+        guard model.isForeground else {
+            loading = false
+            if preview == nil { error = "Connection paused while the app is in the background." }
+            return
+        }
         guard DocumentPolicy.kind(filename: entry.name) != .unsupported else { preview = .unsupportedFileType; loading = false; return }
         model.noteForegroundConnection(profile.id)
         // Opening, returning to the foreground and unlocking revalidate; an explicit Refresh always reads.
         let explicitRefresh = lastRefreshID >= 0 && lastRefreshID != refreshID
         let token = UUID(); requestID = token
         let revision = model.sessionRevision
+        let generation = model.listingGeneration(profile.id)
         lastSessionRevision = model.sessionRevision; lastRefreshID = refreshID
         loading = true; error = nil
         if let preview, navigation.index == nil {
@@ -372,7 +379,9 @@ struct ReaderView: View {
                     if case .text = decoded {} else { navigation.clear() }
                     preview = decoded; contentRevision = navigation.revision; loadedAt = .now; copied = false
                     displayedVersion = version
-                    model.cache(bytes, version: version, id: profile.id, path: entry.path)
+                    if model.listingGeneration(profile.id) == generation {
+                        model.cache(bytes, version: version, id: profile.id, path: entry.path)
+                    }
                     model.connectionStates[profile.id] = "Connected"
                     await model.recordRecent(profile: profile, entry: entry)
                 })

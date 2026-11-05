@@ -681,12 +681,14 @@ final class AppModel {
         folderPrefetchQueue.removeAll()
         folderPrefetch?.cancel(); folderPrefetch = nil; folderPrefetchToken = nil
     }
-    /// A key or host that fails verification takes what was seen through it off the screen and out
-    /// of memory, so reopening a folder can't show its names without getting past that check.
+    /// A key or host that fails verification takes what was read through it out of memory, so
+    /// reopening a folder or file can't show it without getting past that check.
     private func forgetListings(of id: UUID) {
         let prefix = id.uuidString + ":"
         for key in directoryOrder where key.hasPrefix(prefix) { directories.removeValue(forKey: key) }
         directoryOrder.removeAll { $0.hasPrefix(prefix) }
+        for key in documentOrder where key.hasPrefix(prefix) { documents.removeValue(forKey: key) }
+        documentOrder.removeAll { $0.hasPrefix(prefix) }
         folderPrefetchQueue.removeAll { $0.profile.id == id }
         forgottenListings[id, default: 0] += 1
     }

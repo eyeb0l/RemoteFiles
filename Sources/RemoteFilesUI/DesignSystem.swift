@@ -67,7 +67,8 @@ struct StatusPill: View {
             .foregroundStyle(.secondary)
             .lineLimit(2)
             .padding(.horizontal, 14).padding(.vertical, 8)
-            .glassEffect(.regular, in: .capsule)
+            // Glass would let a large heading show through this small text.
+            .background(.regularMaterial, in: .capsule)
             .padding(.top, 8)
             .allowsHitTesting(false)
             .accessibilityAddTraits(.updatesFrequently)

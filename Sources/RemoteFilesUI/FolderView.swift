@@ -600,6 +600,7 @@ struct FolderView: View {
             prepared.visible(query: query, showHidden: hidden, order: order, options: options)
         }.value
         guard !Task.isCancelled, token == requestID, !model.isDisconnecting, model.sessionRevision == revision,
+              model.listingGeneration(profile.id) == generation,
               query == filter, hidden == showHidden, order == sortOrder, options == searchOptions else { return }
         sortID = UUID()
         listing = prepared; setVisible(rows)
@@ -608,9 +609,15 @@ struct FolderView: View {
     }
     private func reload() async {
         guard !model.isDisconnecting else { loading = false; return }
-        guard model.isForeground else { loading = false; error = "Connection paused while the app is in the background."; return }
+        // Going to the background isn't a failure of a folder still on screen.
+        guard model.isForeground else {
+            loading = false
+            if listing == nil { error = "Connection paused while the app is in the background." }
+            return
+        }
         let token = UUID(); requestID = token
         let revision = model.sessionRevision
+        let generation = model.listingGeneration(profile.id)
         lastSessionRevision = model.sessionRevision; lastRefreshID = refreshID
         loading = true; error = nil
         model.noteForegroundConnection(profile.id)
@@ -626,6 +633,8 @@ struct FolderView: View {
             }.value
             try Task.checkCancellation()
             guard token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
+            // This connection failed verification while the listing was on its way.
+            guard model.listingGeneration(profile.id) == generation else { loading = false; return }
             sortID = UUID() // Supersede a filter task based on the previous listing.
             listing = prepared; setVisible(rows)
             appliedFilter = query; appliedShowHidden = hidden; appliedSortOrder = order; appliedSearchOptions = options
