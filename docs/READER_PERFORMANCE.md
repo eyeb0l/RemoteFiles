@@ -5,6 +5,27 @@ Measured 22 September 2026 with Xcode 27.0 (27A266a), Swift 6.4 and macOS
 thread and reduces the observed simulator reader stall. It does **not** establish
 that all reader hitches or the preview's performance acceptance criteria are resolved.
 
+## Interface overhaul: update cost and journey hangs (4 November 2026)
+
+Measured on the iPhone 18 Pro simulator (iOS 27.2), Release with `ENABLE_TESTABILITY=YES`, against `72bec2d`. No physical-device profile was recorded.
+
+**Source view.** `BoundedSourceTextView.updateUIView` used to build a new attributed string and compare it with the current text on every SwiftUI update, including each Find keystroke. It now returns at once unless the text, highlight, font, wrapping or reveal changed. Main-thread time per update, averaged over 40 updates of a hosted view that gets a new closure each time, as the reader's does:
+
+| Document | Before | After |
+| ---: | ---: | ---: |
+| 64 KiB | 3.2 ms | 0.5 ms |
+| 256 KiB | 7.9 ms | 0.5 ms |
+| 1 MiB | 27.9 ms | 0.8 ms |
+| 2 MiB | 53.6 ms | 0.6 ms |
+
+`ResponsivenessTests.testSourceViewBuildsItsTextOncePerRealChange` fails if the early return is removed.
+
+**Opening a folder.** Through `scripts/benchmark-latency.sh 40 0 3` (40 ms round trip, loopback OpenSSH), listing a folder takes a median 188 ms. A folder already listed ahead of time or remembered shows its rows without waiting for that, then checks them quietly.
+
+**Whole journey: no measurable change.** A 60-second journey (open folders and reports, scroll 1,000 rows, type a filter) was driven by coordinates with no XCTest accessibility queries and profiled with Time Profiler. Builds alternated new, base, base, new, and so on over twelve runs; the first two were discarded as warm-up. Median potential-hang time was 10.4 s before and 10.1 s after, and the median count was 8 in both. The largest single hang, about 5 s, is the system's first software-keyboard setup, which no app code runs in. An earlier three-pair run that always measured the baseline first appeared to show a 25-30% improvement; that was run order. These figures are from a simulator with an automation runner attached, so they say little about absolute hangs on hardware.
+
+**Rich previews.** Mermaid is 5.5 MB of script, parsed for every rich Markdown document until now. It's injected only for documents containing the word `mermaid`. In a hosted test, the page's total load was 3.6 s with it and 3.2 s without, of which about 3.3 s is WebKit starting its content process on the simulator. A shared in-memory data store did not shorten that and wasn't kept.
+
 ## Follow-up: off-main runtime warm-up (19 October 2026)
 
 Measured with Xcode 27.0 on the iPhone 18 Pro simulator (iOS 27.0). This reduces,

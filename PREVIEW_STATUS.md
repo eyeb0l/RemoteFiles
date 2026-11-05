@@ -2,6 +2,10 @@
 
 This is a dated record of feature work and validation, not a live test dashboard. Each result applies to the build, environment and date described with it; an installation or Simulator pass does not establish later physical-device acceptance. For current behavior, start with the [documentation index](docs/README.md). For checks still to perform, see [manual acceptance](docs/MANUAL_ACCEPTANCE.md) and the [roadmap](ROADMAP.md).
 
+**4 November 2026: interface overhaul.**
+
+Home, folders, the reader, Downloads, Offline Files and the connection form were redesigned around less chrome and quieter status, with a shared bottom bar in readers. Up to six subfolders are listed ahead of need, and remembered folder names survive backgrounding, except those read with a passphrase-protected key. Source updates no longer scale with document size: a 2 MiB document went from 53.6 ms to 0.6 ms per SwiftUI update. A controlled whole-journey profile showed no change in potential-hang time, which the system keyboard's first setup dominates; see [reader performance](docs/READER_PERFORMANCE.md). Simulator UI, VoiceOver, hosted and OpenSSH results are in the pull request. Physical-device acceptance of the new interface is outstanding.
+
 **3 November 2026: automatic search-index updates.**
 
 A saved search index can be set to **Update Automatically**. Opening its folder then runs **Update Index** in the background once the index is more than 15 minutes old, using the index's own choices, while the app is open and connected; leaving the app or disconnecting stops it without saving. Local verification on an iPhone 18 Pro Simulator (iOS 27.2): `SearchIndexStoreTests` and `AppModelLifecycleTests` passed in the signed iOS test host, and the new automatic-update UI test passed with the two existing saved-index UI tests. Physical-device acceptance is outstanding.

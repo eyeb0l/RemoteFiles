@@ -41,9 +41,10 @@ private actor CountingFolderService: RemoteFileService {
 private struct SourceFixture: View {
     @ObservedObject var state: SourceFixtureState
     var body: some View {
-        // Reading `unrelated` re-evaluates this body, as Find does for the reader around the text.
-        BoundedSourceTextView(text: state.text, highlighted: nil, readingPosition: nil)
-            .overlay(alignment: .top) { Text(verbatim: "\(state.unrelated)").opacity(0) }
+        // Reading `unrelated` re-evaluates this body, as Find does for the reader around the text. A new
+        // closure each time is what makes SwiftUI update the representable, as in the real reader.
+        let revision = state.unrelated
+        BoundedSourceTextView(text: state.text, highlighted: nil, readingPosition: nil, onReveal: { _ in _ = revision })
     }
 }
 
