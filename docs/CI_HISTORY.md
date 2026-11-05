@@ -122,6 +122,56 @@ shares the helper. The Local Network switch in the Settings app keeps its own ha
 lines in the UI lane's log show how often this happens on iOS 27.0: the fix's own job had none, which
 is one run.
 
+### First line not reached
+
+The push run of the merge, [42073908510](https://github.com/eyeb0l/RemoteFiles/actions/runs/42073908510)
+on `58d08e1`, failed `testLongJSONAndSVGHaveReadOnlyVoiceOverPreviews` at its first-line assertion, before
+the SVG half. The VoiceOver job only ran because that PR changed its fixtures. It is the same journey as
+above but a different defect, this one in the app:
+
+| Run | Focus after opening | Then |
+|---|---|---|
+| 41902107255, 42048542312, 42061912014, passed | `{` | Reads on |
+| 41996288670 and attempt 3 of 42004987008 | `Reading document…`, Back | `{` under a second later |
+| Attempt 2 of 42004987008 | `Reading document…`, `"prompt"` | `{` 0.9 s later |
+| 42073908510, failed | `Reading document…`, `"prompt"` | Nothing for 5.4 s; swipes then read `"ready"`, `}`, `Find in Document` |
+
+**Cause.** The reader named line 1 and never checked that VoiceOver went there. [Fast-load
+focus](#fast-load-focus) recorded the return from `"prompt"` as a limit, and it was treated as reliable;
+when nothing sends VoiceOver back, a VoiceOver user starts on the third line. What is not established is
+why nothing did in that run: the CI log has no record of the reader's posts, and a local run could not
+catch it. Ten runs of the journey under 24 CPU burners gave 5 passes, 2 of which returned from `"prompt"`,
+and 5 failures in VoiceOver's start or the row's tap, before the reader.
+
+Two guesses were tested and dropped. VoiceOver scrolling on landing does not defeat the at-the-top check:
+5 seconds after landing the reader was still at offset 0 on iOS 27.2, and 1.4 seconds after on 27.0, and a
+post still returned focus to `{`. A post with no target does happen, because a text view's elements can be
+unavailable when the document first appears, but on its own it was followed by the post after colours.
+
+**Reproduction.** Temporarily dropping the posts gave the failed run's exact traversal: 1 of 6 iterations
+on iOS 27.2, where 2 of the others went to Back. Back skips nothing, so it needs no correction.
+
+**Fix.** After posting, the reader polls where VoiceOver is until it reaches line 1. If it stays on another
+line for 1.25 seconds, longer than the 0.8 to 1.0 s of VoiceOver's own returns, the reader names line 1 again,
+up to twice. It stops once focus moves to a different line, since a person chose that, and it does nothing
+at a saved position. `VoiceOverLandingWatch` holds the decision and has unit tests.
+
+| Proof | Result |
+|---|---|
+| Posts dropped, with the watch, iOS 27.2 | `"prompt"`, corrected, `{`, then reads on |
+| Posts dropped, with the watch, iOS 27.0, run [42096064380](https://github.com/eyeb0l/RemoteFiles/actions/runs/42096064380) | The same, in `testFocusStartsAtTheTopOfADocumentThatLoadsSlowly`: `{` 2.3 s after `"prompt"`. The VoiceOver lane passed |
+| Real code, iOS 27.2 | The JSON journey passed 7 of 7 and the slow journey 2 of 2 |
+
+The real JSON journey's SVG half failed once, in `VoiceOverFocusNotMoved` with speech on `Reading document…`
+for 30 s, while the Mac was still recovering from the burners. The watch does not run for SVG, and none of the
+18 retained CI logs contains this error; the 5 runs after the load fell passed.
+
+**Limits.** This corrects a landing rather than preventing it, so a reader can hear up to about 2 seconds of
+`"prompt"` first. A reader who swipes to a line before VoiceOver has reached line 1 and stays there for 1.25
+seconds within the 6-second window gets sent back once. The landing has only been seen on the JSON sample. App-only
+PRs do not select the VoiceOver job, so a change like this first meets it on `main`'s nightly unless the
+`full-acceptance` label is used. No physical device was tested.
+
 ### Performance
 
 No lane changed. The stability of the first attempt is the larger saving: attempt 1's failure cost 25
@@ -802,7 +852,8 @@ the journeys fail, so their assertion can catch this. They now read the focus lo
 to settle first, because a swipe during the reader's move can be lost.
 
 **Limits.** In 2 of those 32 runs VoiceOver focused the placeholder, went to `"prompt"` by itself,
-then returned to `{` under a second later, so a reader can hear the start of that line first. A swipe
+then returned to `{` under a second later, so a reader can hear the start of that line first. A
+later run did not return: see [First line not reached](#first-line-not-reached). A swipe
 in the moments after opening can be interrupted by the move to line 1. A rendered Markdown, HTML or
 SVG document gets a screen change with no target, and was not measured for this. Only the JSON
 sample was tested. Reopening at a saved position has only the unit test: demo mode does not persist
