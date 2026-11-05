@@ -221,8 +221,10 @@ struct RemoteMediaView: View {
             guard !Task.isCancelled, requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else { return }
             failure = error.localizedDescription
             if model.isSecurityError(error) { image = nil; pdf = nil; playback.stop() }
-            if error is PlaybackError { model.connectionStates[profile.id] = "Connected" }
-            else { model.handle(error, profile: profile) }
+            if error is PlaybackError {
+                // The transfer worked, but don't overwrite a failed check that landed meanwhile.
+                if model.listingGeneration(profile.id) == generation { model.connectionStates[profile.id] = "Connected" }
+            } else { model.handle(error, profile: profile) }
         }
     }
 }
