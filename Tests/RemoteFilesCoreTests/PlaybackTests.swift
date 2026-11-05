@@ -267,27 +267,28 @@ private struct NativeVideoFixture: View {
             (controller as? AVPlayerViewController).map { [$0] } ?? controller.children.flatMap(players)
         }
         // A representable may allocate its controller before SwiftUI finishes
-        // mounting the view and its lifecycle observers.
+        // mounting the view and its lifecycle observers. It can also still hold a player that has
+        // been stopped, whose play() leaves a rate of 1 with nothing to pause it later.
         do {
             try await waitUntil {
-                players(window.rootViewController!).contains { $0.player != nil && $0.viewIfLoaded?.window === window }
+                players(window.rootViewController!).contains { $0.player?.currentItem != nil && $0.viewIfLoaded?.window === window }
             }
         } catch {
             print("PLAYBACK MOUNT controllers=\(players(window.rootViewController!).count) foreground=\(model.isForeground)")
             await model.disconnect()
             throw error
         }
-        let player = try XCTUnwrap(players(window.rootViewController!).first?.player)
+        let player = try XCTUnwrap(players(window.rootViewController!).lazy.compactMap(\.player).first { $0.currentItem != nil })
         player.play()
         model.isForeground = false
+        // See "Playback background rate" in docs/CI_HISTORY.md. A player that keeps playing fails here.
         do {
-            try await waitUntil { player.currentItem == nil }
+            try await waitUntil { player.currentItem == nil && player.rate == 0 }
         } catch {
             print("PLAYBACK BACKGROUND foreground=\(model.isForeground) rate=\(player.rate) itemStatus=\(String(describing: player.currentItem?.status.rawValue)) attached=\(players(window.rootViewController!).first?.viewIfLoaded?.window === window) controllers=\(players(window.rootViewController!).count)")
             await model.disconnect()
             throw error
         }
-        XCTAssertEqual(player.rate, 0)
         await model.disconnect()
     }
 }

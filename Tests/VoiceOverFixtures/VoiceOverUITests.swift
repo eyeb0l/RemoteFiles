@@ -58,7 +58,13 @@ extension XCUIApplication {
         try withVoiceOver {
             try open(svg, app)
             XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "Rendered SVG image").firstMatch.waitForExistence(timeout: 15))
-            XCTAssertTrue(app.activityIndicators.firstMatch.waitForNonExistence(timeout: 20), app.debugDescription)
+            // That element exists, hidden from VoiceOver, while the placeholder stands in for it. When the
+            // placeholder goes, VoiceOver moves from it to the image, and a swipe before that move skips
+            // the image; see "SVG placeholder focus" in docs/CI_HISTORY.md.
+            let preparing = app.descendants(matching: .any).matching(identifier: "Preparing image…").firstMatch
+            XCTAssertTrue(preparing.waitForNonExistence(timeout: 30), app.debugDescription)
+            waitForFocusToSettle(focusLog, leaving: "Preparing image…")
+            print("VO FOCUS LOG\n\((try? String(contentsOfFile: focusLog, encoding: .utf8)) ?? "")VO FOCUS LOG END")
             let utterances = try speech("SVG", limit: 15)
             XCTAssertTrue(utterances.contains { $0.contains("Rendered SVG image") && $0.contains("Icon.svg") })
             XCTAssertTrue(utterances.contains { $0.contains("Source") && $0.contains("Button") })
@@ -97,10 +103,15 @@ extension XCUIApplication {
     }
     /// A reader moves slower than this test can. Traversing while the reader still names where
     /// to start races that move, and a swipe during it can be lost; see "Reader loading focus".
-    private func waitForFocusToSettle(_ path: String) {
+    /// `placeholder` names an element that has gone but may still hold focus, which is not settled.
+    private func waitForFocusToSettle(_ path: String, leaving placeholder: String? = nil) {
         let quiet: TimeInterval = 4, deadline = Date().addingTimeInterval(45)
         var log = "", changed = Date()
-        while Date() < deadline, Date().timeIntervalSince(changed) < quiet {
+        func onPlaceholder() -> Bool {
+            guard let placeholder, let last = log.split(separator: "\n").last else { return false }
+            return last.contains("label='\(placeholder)'")
+        }
+        while Date() < deadline, Date().timeIntervalSince(changed) < quiet || onPlaceholder() {
             let current = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
             if current != log { log = current; changed = Date() }
             Thread.sleep(forTimeInterval: 0.25)
@@ -188,8 +199,14 @@ extension XCUIApplication {
     }
     private func open(_ row: XCUIElement, _ app: XCUIApplication) throws {
         let label = row.label.components(separatedBy: ",").first ?? row.label
-        // A tap before VoiceOver answers is an ordinary tap, which opens the row too soon.
-        _ = try startingSpeech()
+        // A tap before VoiceOver answers is an ordinary tap, which opens the row too soon. iOS 27.2
+        // first says "VoiceOver on", before anything in the app has focus.
+        var spoken = try startingSpeech()
+        let answered = Date().addingTimeInterval(firstSpeechTimeout)
+        while spoken == "VoiceOver on", Date() < answered {
+            Thread.sleep(forTimeInterval: 0.25)
+            if let value = try? service.currentSpeech().utterance { spoken = value }
+        }
         row.tap()
         // Speech keeps the previous phrase until VoiceOver handles the tap.
         var activated = ""

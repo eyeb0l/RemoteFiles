@@ -1072,9 +1072,8 @@ final class RemoteFilesUITests: XCTestCase {
             }, evaluatedWith: automatic)
             still.expectationDescription = "Update Automatically row stops moving"
             wait(for: [still], timeout: 15)
-            // SwiftUI exposes the entire labelled row as the switch; tap its actual thumb.
-            automatic.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
-            // Long enough that a failure means the tap had no effect, not that the value was late on
+            pressSwitch(automatic, name: "Update Automatically")
+            // Long enough that a failure means the press had no effect, not that the value was late on
             // a loaded runner; see "Saved-index automatic switch" in docs/CI_HISTORY.md.
             wait(for: [expectation(for: NSPredicate(format: "value == %@", value), evaluatedWith: automatic)], timeout: 30)
         }
@@ -1232,8 +1231,7 @@ final class RemoteFilesUITests: XCTestCase {
         }
         let ocr = app.switches["Recognize Text in Images and Scans"]
         reveal(ocr)
-        // SwiftUI exposes the entire labelled row as the switch; tap its actual thumb.
-        ocr.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        pressSwitch(ocr, name: "OCR")
         // SwiftUI's labelled row can publish the new value after the tap returns.
         let ocrEnabled = expectation(for: NSPredicate(format: "value == %@", "1"), evaluatedWith: ocr)
         wait(for: [ocrEnabled], timeout: 5)
@@ -1433,7 +1431,7 @@ final class RemoteFilesUITests: XCTestCase {
             app.swipeUp()
         }
         XCTAssertTrue(jump.exists && jump.isHittable && safeViewport.contains(jump.frame))
-        jump.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        pressSwitch(jump, name: "Jump Host")
         XCTAssertEqual(jump.value as? String, "1", "Enable routing before checking its fields")
         let hopHost = app.textFields["Jump hostname or IP address"]
         for _ in 0..<4 { if hopHost.exists && hopHost.isHittable { break }; app.swipeUp() }
@@ -1730,6 +1728,22 @@ final class RemoteFilesUITests: XCTestCase {
         let state = app.state
         XCTAssertTrue(state == .runningBackground || state == .runningBackgroundSuspended,
                       "Expected a live background app, got \(state)", file: file, line: line)
+    }
+
+    /// SwiftUI exposes the entire labelled row as the switch, so this aims for its actual thumb. The
+    /// switch sometimes ignores a touch that reaches it, so an ignored press is repeated and logged.
+    /// The binding sets the value at once, so ten seconds without it means the press did nothing and
+    /// a repeat can't undo it. The caller still asserts the value. See "Switch touches that do nothing"
+    /// in docs/CI_HISTORY.md.
+    private func pressSwitch(_ row: XCUIElement, name: String) {
+        let before = row.value as? String
+        let thumb = row.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5))
+        for attempt in 1...3 {
+            thumb.press(forDuration: 0.5)
+            let changed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in (row.value as? String) != before }, object: nil)
+            if XCTWaiter.wait(for: [changed], timeout: 10) == .completed { return }
+            print("UI SWITCH \(name) ignored press \(attempt)")
+        }
     }
 
     private func waitUntilHittable(_ element: XCUIElement, _ message: String = "", timeout: TimeInterval = 15) {
