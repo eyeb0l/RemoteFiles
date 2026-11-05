@@ -165,7 +165,7 @@ that landing cannot start during traversal. It adds about 2 seconds to each of t
 |---|---|
 | Posts dropped, with the watch, iOS 27.2 | `"prompt"`, corrected, `{`, then reads on |
 | Posts dropped, with the watch, iOS 27.0, run [42096064380](https://github.com/eyeb0l/RemoteFiles/actions/runs/42096064380) | The same, in `testFocusStartsAtTheTopOfADocumentThatLoadsSlowly`: `{` 2.3 s after `"prompt"`. The VoiceOver lane passed |
-| Real code, iOS 27.2 | JSON half 9 of 9; whole journey 8 of 9; slow journey 4 of 4 that launched. The last 2 runs of each used the final watch |
+| Real code, iOS 27.2 | JSON half 9 of 9; whole journey 8 of 9; slow journey 4 of 4 that launched. The last 2 runs of each came before the watch's window moved to arrival |
 
 The real JSON journey's SVG half failed once, in `VoiceOverFocusNotMoved` with speech on `Reading document…`
 for 30 s, while the Mac was still recovering from the burners. The watch does not run for SVG, and the 5 runs
@@ -192,11 +192,11 @@ watch returns at once with VoiceOver off, and this test's readers are web views,
 the first such failure in the last 100 runs, which go back to 1 November. An earlier one at this step was fixed in
 #52; see [Console back-pressure and readiness fixes](#console-back-pressure-and-readiness-fixes).
 
-The cause is unknown. The wait ran at a load of 209 to 232, with a lane peak of about 237. The log hints that no
-new reader appeared: four passing runs log 9 `cannot add handler` lines after hop 12, three per web view, while
-this one logs 3 and then nothing during the wait. `reader()` still returned, and it matches on the title alone,
-which is the same for hop 12's route and the first. So a lost position and a test watching the wrong view both
-fit.
+The cause is unknown. The wait ran at a load of 209 to 232, with a lane peak of about 237. A new web view was
+very probably created, because the log reaches the next WebKit session number, but it behaved differently: four
+passing runs log 9 `cannot add handler` lines after hop 12, three per web view, while this one logs 3 and then
+none during the wait. `reader()` still returned, and it matches on the title alone, which is the same for hop 12's
+route and the first. So a lost position and a test watching the wrong view both fit.
 
 It did not reproduce. All 19 local runs that reached this step restored `y=500` within 0.1 s: 11 near idle and
 8 under 16 CPU burners, far below that load. Under those burners the other 2 of 10 timed out at earlier steps, on
