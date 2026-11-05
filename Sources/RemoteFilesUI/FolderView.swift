@@ -213,6 +213,7 @@ struct FolderView: View {
     /// Changes with `visible`, so its list compares in constant time.
     @State private var visibleRevision = 0
     @State private var favouriteToggles = 0
+    @State private var pullRefreshing = false
     @State private var error: String?
     /// Starts true without a remembered listing, so the first frame isn't the failure view.
     @State private var loading: Bool
@@ -274,7 +275,11 @@ struct FolderView: View {
                 subfolderResults
             } else {
                 FolderRowList(rows: visible, revision: visibleRevision, selection: keyboardSelection, resolving: resolving,
-                              empty: visible.isEmpty ? folderEmpty : nil, refresh: { await reload() }) { row in
+                              empty: visible.isEmpty ? folderEmpty : nil, refresh: {
+                    pullRefreshing = true
+                    await reload()
+                    pullRefreshing = false
+                }) { row in
                     link(for: row, subtitle: row.subtitle, visibleSubtitle: row.visibleSubtitle)
                 }
                 .equatable()
@@ -293,7 +298,8 @@ struct FolderView: View {
             }
         }
         // A failed first load explains itself in place.
-        .contentStatus(progress: listing != nil && loading ? "Updating…" : nil,
+        // Pulling to refresh has its own spinner.
+        .contentStatus(progress: listing != nil && loading && !pullRefreshing ? "Updating…" : nil,
                        failure: listing == nil ? nil : error.map { "Couldn’t update this folder · \($0)" },
                        retry: { refreshID += 1 })
         .navigationTitle(RemotePath.name(of: path))
@@ -552,8 +558,9 @@ struct FolderView: View {
                 if let workspaceNavigate { workspaceNavigate(route(routed)) } else { model.routes.append(route(routed)) }
             } catch {
                 guard !Task.isCancelled, !model.isDisconnecting, model.sessionRevision == revision else { return }
-                model.errorMessage = error.localizedDescription
                 model.handle(error, profile: profile)
+                // A trust or unlock request has its own sheet; an alert would sit on top of it.
+                if model.sheet == nil { model.errorMessage = error.localizedDescription }
             }
         }
     }
@@ -570,6 +577,7 @@ struct FolderView: View {
         let token = requestID, revision = model.sessionRevision
         guard !model.isDisconnecting else { return }
         model.noteForegroundConnection(profile.id)
+        let generation = model.listingGeneration(profile.id)
         let found: DirectorySnapshot?
         do { found = try await model.quietListing(profile, path: requestedPath) }
         catch { return }
@@ -582,6 +590,7 @@ struct FolderView: View {
             return value.path == current?.path && value.rows.map(\.entry) == current?.rows.map(\.entry) ? nil : value
         }.value
         guard !Task.isCancelled, token == requestID, !model.isDisconnecting, model.sessionRevision == revision else { return }
+        guard model.listingGeneration(profile.id) == generation else { return }
         guard let prepared else {
             if let current { model.cache(current, id: profile.id, requestedPath: requestedPath) }
             return
@@ -629,6 +638,9 @@ struct FolderView: View {
                 self.error = error.localizedDescription
                 if model.isSecurityError(error) { listing = nil; setVisible([]) }
                 model.handle(error, profile: profile)
+            } else if model.connectionStates[profile.id] == "Connecting…" {
+                // Leaving a folder cancels its connection, so don't keep saying one is under way.
+                model.connectionStates[profile.id] = nil
             }
         }
         if token == requestID { loading = false }

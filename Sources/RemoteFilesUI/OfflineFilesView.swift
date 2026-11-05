@@ -144,7 +144,11 @@ struct OfflinePinProgress: View {
                     Text(model.cancellingPin ? "Cancelling save…" : "Saving \(name) offline…")
                         .font(.footnote.weight(.medium)).lineLimit(1).truncationMode(.middle)
                     Spacer(minLength: 4)
-                    Button("Cancel") { model.cancelOfflinePin() }.font(.footnote).disabled(model.cancellingPin)
+                    Button { model.cancelOfflinePin() } label: {
+                        Text("Cancel").font(.footnote).frame(minHeight: 44).padding(.leading, 12).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(model.cancellingPin)
                 }
                 ThinProgress(fraction: model.pinProgress.fraction)
                 HStack(spacing: 4) {
@@ -160,7 +164,7 @@ struct OfflinePinProgress: View {
                     Text(file).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 }
             }
-            .padding(.horizontal, 16).padding(.vertical, 10)
+            .padding(.horizontal, 16).padding(.bottom, 10)
             .glassEffect(.regular, in: .rect(cornerRadius: 20))
             .padding(.horizontal, 12).padding(.bottom, 4)
             .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .bottom)))

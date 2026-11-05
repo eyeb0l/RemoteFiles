@@ -134,6 +134,9 @@ final class AppModel {
     @ObservationIgnored private var folderPrefetch: Task<Void, Never>?
     @ObservationIgnored private var folderPrefetchToken: UUID?
     @ObservationIgnored private var foregroundConnectionID: UUID?
+    /// Counts how often a connection's listings were forgotten, so one read before that isn't kept.
+    @ObservationIgnored private var forgottenListings: [UUID: Int] = [:]
+    func listingGeneration(_ id: UUID) -> Int { forgottenListings[id, default: 0] }
     @ObservationIgnored private var documents: [String: (bytes: Data, version: RemoteFileVersion?)] = [:]
     @ObservationIgnored private var directoryOrder: [String] = []
     @ObservationIgnored private var documentOrder: [String] = []
@@ -646,11 +649,13 @@ final class AppModel {
                 let next = self.folderPrefetchQueue.removeFirst()
                 guard next.profile.id == self.foregroundConnectionID, !PrefetchConditions.shared.discouraged else { break }
                 guard self.cachedListing(next.profile.id, path: next.path) == nil else { continue }
+                let generation = self.listingGeneration(next.profile.id)
                 guard let found = try? await self.quietListing(next.profile, path: next.path), !Task.isCancelled, next.profile.id == self.foregroundConnectionID else {
                     self.folderPrefetchQueue.removeAll(); break
                 }
                 let prepared = await Task.detached(priority: .utility) { FolderListing(found) }.value
                 guard !Task.isCancelled, self.sessionRevision == revision, self.isForeground, !self.isDisconnecting else { break }
+                guard self.listingGeneration(next.profile.id) == generation else { continue }
                 self.cache(prepared, id: next.profile.id, requestedPath: next.path)
             }
             if self?.folderPrefetchToken == token { self?.folderPrefetch = nil; self?.folderPrefetchToken = nil }
@@ -669,6 +674,8 @@ final class AppModel {
         guard foregroundConnectionID != id else { return }
         foregroundConnectionID = id
         folderPrefetchQueue.removeAll()
+        // The transport keeps one session, so opening this one ends any other.
+        connectionStates = connectionStates.filter { $0.key == id }
     }
     private func cancelPrefetch() {
         folderPrefetchQueue.removeAll()
@@ -680,6 +687,8 @@ final class AppModel {
         let prefix = id.uuidString + ":"
         for key in directoryOrder where key.hasPrefix(prefix) { directories.removeValue(forKey: key) }
         directoryOrder.removeAll { $0.hasPrefix(prefix) }
+        folderPrefetchQueue.removeAll { $0.profile.id == id }
+        forgottenListings[id, default: 0] += 1
     }
     func cachedDocument(_ id: UUID, path: String) -> Data? { documents[key(id, path)]?.bytes }
     /// The remote version the cached bytes were read at, when the transport reports one.

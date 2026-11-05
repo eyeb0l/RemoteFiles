@@ -220,6 +220,34 @@ private struct SourceFixture: View {
         XCTAssertNotNil(model.cachedListing(other, path: "/p"), "An ordinary failure leaves remembered folders alone")
     }
 
+    func testAListingFinishingAfterAFailedHostKeyIsNotRemembered() async throws {
+        let service = CountingFolderService()
+        await service.hold("/p/A")
+        let (model, directory) = try model(service)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        model.noteForegroundConnection(profile.id)
+        model.prefetchFolders(in: listing(["A", "B"]), profile: profile)
+        try await waitUntil { await service.listed == ["/p/A"] }
+        model.handle(HostTrustError.invalidStore, profile: profile)
+        await service.releaseHeld()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertNil(model.cachedListing(profile.id, path: "/p/A"))
+        let listed = await service.listed
+        XCTAssertEqual(listed, ["/p/A"], "Nothing more is listed through a connection that failed verification")
+    }
+
+    func testOpeningAnotherServerClearsTheFirstServersState() throws {
+        let service = CountingFolderService()
+        let (model, directory) = try model(service)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        model.noteForegroundConnection(profile.id)
+        model.connectionStates[profile.id] = "Connected"
+        model.noteForegroundConnection(profile.id)
+        XCTAssertEqual(model.connectionStates[profile.id], "Connected")
+        model.noteForegroundConnection(UUID())
+        XCTAssertNil(model.connectionStates[profile.id], "Its session closed, so Home must not still show it connected")
+    }
+
     func testBackgroundKeepsFolderNamesButNotDocumentsAndDisconnectForgetsBoth() async throws {
         let service = CountingFolderService()
         let (model, directory) = try model(service)

@@ -85,8 +85,11 @@ struct ReaderView: View {
                         ProgressView().controlSize(.small)
                         Text("Opening linked file…").font(.footnote).foregroundStyle(.secondary)
                         Spacer()
-                        Button("Cancel") { cancelLink() }.font(.footnote)
-                    }.padding(.horizontal, 20).padding(.vertical, 8)
+                        Button { cancelLink() } label: {
+                            Text("Cancel").font(.footnote).frame(minHeight: 44).padding(.horizontal, 6).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.borderless)
+                    }.padding(.leading, 20).padding(.trailing, 14)
                 }
             }
         }

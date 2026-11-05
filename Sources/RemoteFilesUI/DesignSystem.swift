@@ -81,20 +81,27 @@ struct FailureBar: View {
     let message: String
     let retry: () -> Void
     let dismiss: () -> Void
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange).accessibilityHidden(true)
-            Text(message).font(.footnote).foregroundStyle(.primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Button(action: retry) {
-                Text("Retry").font(.footnote.weight(.medium))
-                    .frame(minHeight: 44).padding(.horizontal, 6).contentShape(Rectangle())
+        // Large text gives the message the whole width, with its actions beneath.
+        let layout = dynamicTypeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .trailing, spacing: 0)) : AnyLayout(HStackLayout(spacing: 8))
+        layout {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange).accessibilityHidden(true)
+                Text(message).font(.footnote).foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .buttonStyle(.borderless)
-            Button(action: dismiss) { IconTarget(symbol: "xmark").font(.footnote) }
-                .accessibilityLabel("Dismiss")
+            HStack(spacing: 0) {
+                Button(action: retry) {
+                    Text("Retry").font(.footnote.weight(.medium))
+                        .frame(minHeight: 44).padding(.horizontal, 6).contentShape(Rectangle())
+                }
                 .buttonStyle(.borderless)
-                .tint(.secondary)
+                Button(action: dismiss) { IconTarget(symbol: "xmark").font(.footnote) }
+                    .accessibilityLabel("Dismiss")
+                    .buttonStyle(.borderless)
+                    .tint(.secondary)
+            }
         }
         .padding(.leading, 20).padding(.trailing, 8)
         .accessibilityElement(children: .contain)
@@ -160,18 +167,26 @@ struct LoadingPlaceholder: View {
     @State private var explains = false
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if explains {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(label).font(.footnote).foregroundStyle(.secondary)
+            // VoiceOver's cursor stays where this element was when the content replaces it, so this
+            // small line at the top is what it reads, rather than a full-screen element that would
+            // leave it in the middle of the document, past the title.
+            HStack(spacing: 8) {
+                if explains { ProgressView().controlSize(.small).accessibilityHidden(true) }
+                Text(label).font(.footnote).foregroundStyle(.secondary)
+                    .opacity(explains ? 1 : 0)
+                    .accessibilityIdentifier(label)
+                    .accessibilityAddTraits(.updatesFrequently)
+            }
+            .padding(.horizontal, 20).padding(.top, explains ? 12 : 0)
+            .frame(height: explains ? nil : 1, alignment: .top)
+            .clipped()
+            Group {
+                switch shape {
+                case .list: listRows
+                case .document: documentLines
                 }
-                .padding(.horizontal, 20).padding(.top, 12)
-                .transition(.opacity)
             }
-            switch shape {
-            case .list: listRows
-            case .document: documentLines
-            }
+            .accessibilityHidden(true)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .clipped()
@@ -183,10 +198,6 @@ struct LoadingPlaceholder: View {
             try? await Task.sleep(for: .milliseconds(1500))
             if !Task.isCancelled { explains = true }
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(label)
-        .accessibilityIdentifier(label)
-        .accessibilityAddTraits(.updatesFrequently)
     }
     private var listRows: some View {
         VStack(alignment: .leading, spacing: 0) {
