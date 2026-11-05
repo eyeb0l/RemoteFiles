@@ -560,7 +560,7 @@ struct FolderView: View {
                 guard !Task.isCancelled, !model.isDisconnecting, model.sessionRevision == revision else { return }
                 model.handle(error, profile: profile)
                 // A trust or unlock request has its own sheet; an alert would sit on top of it.
-                if model.sheet == nil { model.errorMessage = error.localizedDescription }
+                if model.sheet == nil, model.errorMessage == nil { model.errorMessage = error.localizedDescription }
             }
         }
     }

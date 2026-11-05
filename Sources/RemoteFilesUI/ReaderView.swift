@@ -66,7 +66,8 @@ struct ReaderView: View {
                 case .unsupportedEncodingOrBinary: infoView("Can’t display this file", detail: "This file contains binary data or text that is not UTF-8.")
                 case .tooLarge: infoView("Too Large to Preview", detail: "The document exceeds the 2 MiB preview limit.")
                 }
-            } else if loading {
+            } else if loading || preview != nil {
+                // A kept document isn't shown only while the app is returning from the background.
                 LoadingPlaceholder(label: "Reading document…", shape: .document)
             } else {
                 ContentUnavailableView {
@@ -286,7 +287,7 @@ struct ReaderView: View {
                 guard !Task.isCancelled, linkRequestID == token, model.isForeground, model.sessionRevision == revision else { return }
                 if !(error is RemoteDocumentLinkError) { model.handle(error, profile: profile) }
                 // A trust or unlock request has its own sheet; an alert would sit on top of it.
-                if model.sheet == nil { linkError = error.localizedDescription }
+                if model.sheet == nil, model.errorMessage == nil { linkError = error.localizedDescription }
             }
         }
     }
