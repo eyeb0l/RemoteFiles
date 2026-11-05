@@ -160,7 +160,7 @@ private struct ContentStatusModifier: ViewModifier {
 /// Stands in for a list or document while its first load runs. Nearly invisible at first, so a load
 /// that finishes quickly never flashes, and still spoken at once so VoiceOver knows what's going on.
 struct LoadingPlaceholder: View {
-    enum Shape { case list, document }
+    enum Shape { case list, document, plain }
     let label: String
     var shape: Shape = .list
     @State private var visible = false
@@ -185,6 +185,7 @@ struct LoadingPlaceholder: View {
                 switch shape {
                 case .list: listRows
                 case .document: documentLines
+                case .plain: EmptyView()
                 }
             }
             .accessibilityHidden(true)
