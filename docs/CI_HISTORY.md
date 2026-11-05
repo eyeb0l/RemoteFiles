@@ -24,6 +24,8 @@ Attempts 2 and 3 took the same traversal, so this was not a one-off, and a rerun
 try at a race. The push run of the same commit,
 [41996288670](https://github.com/eyeb0l/RemoteFiles/actions/runs/41996288670), had passed it.
 
+### SVG placeholder focus
+
 **Cause.** The journey swiped before VoiceOver had left a placeholder that was going away. Focus
 either starts at Back, and traversal reaches the image, or lands on `Preparing image…`, where the
 result depends on about a second:
