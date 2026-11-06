@@ -67,8 +67,8 @@ public enum SearchDocumentExtractor {
             try check(deadline)
             let (image, multipleFrames) = try image(data)
             try check(deadline)
-            let text = try await recognize(image, textLimit: textLimit, deadline: deadline)
-            return SearchExtraction(segments: text.value.isEmpty ? [] : [.init(text: PrivateKeyRedaction.redact(text.value).text)],
+            let text = hidingKeys(in: try await recognize(image, textLimit: textLimit, deadline: deadline), byteLimit: textLimit)
+            return SearchExtraction(segments: text.value.isEmpty ? [] : [.init(text: text.value)],
                                     isTruncated: multipleFrames || text.truncated)
         default:
             let result: SearchExtraction
@@ -112,11 +112,10 @@ public enum SearchDocumentExtractor {
                 text = try await recognize(raster, textLimit: remaining, deadline: deadline)
             }
             try check(deadline)
+            text = hidingKeys(in: text, byteLimit: remaining)
             if !text.value.isEmpty {
-                // A page or scan can show a key too. Hiding one can use more bytes than it had.
-                let visible = PrivateKeyRedaction.redact(text.value).text
-                segments.append(.init(text: visible, page: index + 1))
-                remaining -= visible.utf8.count
+                segments.append(.init(text: text.value, page: index + 1))
+                remaining -= text.value.utf8.count
             }
             truncated = truncated || text.truncated
         }
@@ -245,6 +244,13 @@ public enum SearchDocumentExtractor {
     private static func check(_ deadline: ContinuousClock.Instant) throws {
         try Task.checkCancellation()
         guard ContinuousClock.now < deadline else { throw SearchExtractionError.deadlineExceeded }
+    }
+
+    /// A page or scan can show a key too. Each hidden character takes more bytes than it had, so
+    /// the text is clipped again to stay within its budget.
+    private static func hidingKeys(in text: (value: String, truncated: Bool), byteLimit: Int) -> (value: String, truncated: Bool) {
+        let clipped = prefix(PrivateKeyRedaction.redact(text.value).text, byteLimit: byteLimit)
+        return (clipped.value, text.truncated || clipped.truncated)
     }
 
     private static func prefix(_ text: String, byteLimit: Int) -> (value: String, truncated: Bool) {
