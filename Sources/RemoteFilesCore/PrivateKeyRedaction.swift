@@ -52,6 +52,10 @@ public enum PrivateKeyRedaction {
     private static let minimumKeyCharacters = 40
     private static let minimumWrappedCharacters = 64
     private static let maximumWrappedLine = 256
+    /// How much of a wrapped candidate to decode: enough to find the words `PRIVATE KEY`.
+    private static let wrappedHeadCharacters = 160
+    /// How far to look for that many characters, allowing for indentation on each line.
+    private static let wrappedHeadWindow = 1_024
     /// How far to look for a PuTTY file's fields, in lines. A 16,384-bit public key has about 40.
     private static let puttyHeaderLines = 64
     private static let puttyTrailerLines = 8
@@ -274,7 +278,13 @@ public enum PrivateKeyRedaction {
                     if start > 0, bytes[start - 1] != 0x3D, PrivateKeyRedaction.isBase64(bytes[start - 1]) { continue }
                     runEnd = max(runEnd, start)
                     while runEnd < bytes.count, PrivateKeyRedaction.isBase64(bytes[runEnd]) { runEnd += 1 }
-                    guard runEnd - start >= PrivateKeyRedaction.minimumWrappedCharacters, isWrappedKey(start..<runEnd, needle: needle) else { continue }
+                    guard runEnd - start >= PrivateKeyRedaction.minimumKeyRun else { continue }
+                    // A line this short may be folded, so its next lines say what it is. Reading only
+                    // far enough to tell keeps a file of short candidates linear.
+                    let head = runEnd - start >= PrivateKeyRedaction.minimumWrappedCharacters
+                        ? [start..<runEnd] : wrappedLines(from: start, upTo: PrivateKeyRedaction.wrappedHeadCharacters)
+                    guard head.reduce(0, { $0 + $1.count }) >= PrivateKeyRedaction.minimumWrappedCharacters,
+                          isWrappedKey(head, needle: needle) else { continue }
                     let body = wrappedLines(from: start)
                     add(body, span: start..<body.last!.upperBound)
                     position = body.last!.upperBound
@@ -282,27 +292,35 @@ public enum PrivateKeyRedaction {
             }
         }
 
-        private func isWrappedKey(_ run: Range<Int>, needle: [UInt8]) -> Bool {
+        private func isWrappedKey(_ runs: [Range<Int>], needle: [UInt8]) -> Bool {
             guard needle == PrivateKeyRedaction.wrappedPEM else { return true }
             // A kubeconfig's certificate is wrapped the same way and stays visible.
-            let length = min(run.count, 160) / 4 * 4
-            guard let head = Data(base64Encoded: Data(bytes[run.lowerBound..<(run.lowerBound + length)])) else { return false }
+            var encoded = [UInt8]()
+            for run in runs where encoded.count < PrivateKeyRedaction.wrappedHeadCharacters {
+                encoded += bytes[run.lowerBound..<min(run.upperBound, run.lowerBound + PrivateKeyRedaction.wrappedHeadCharacters)]
+            }
+            let length = min(encoded.count, PrivateKeyRedaction.wrappedHeadCharacters) / 4 * 4
+            guard let head = Data(base64Encoded: Data(encoded[..<length])) else { return false }
             return PrivateKeyRedaction.first(PrivateKeyRedaction.privateKey, in: Array(head), range: 0..<head.count) != nil
         }
 
         /// The run, and any lines it wraps onto. Every line of wrapped base64 has the same length
         /// but the last, so a shorter or longer one ends it, as does any other kind of line.
-        private func wrappedLines(from start: Int) -> [Range<Int>] {
-            var runs: [Range<Int>] = [], width = 0
-            PrivateKeyRedaction.forEachLine(in: bytes, range: start..<bytes.count) { line in
+        private func wrappedLines(from start: Int, upTo limit: Int? = nil) -> [Range<Int>] {
+            var runs: [Range<Int>] = [], width = 0, total = 0
+            let limit = limit ?? .max
+            // A look ahead stays in a fixed window: one long line of candidates would otherwise have
+            // each of them read the whole line.
+            let end = limit == .max ? bytes.count : min(bytes.count, start + PrivateKeyRedaction.wrappedHeadWindow)
+            PrivateKeyRedaction.forEachLine(in: bytes, range: start..<end) { line in
                 guard let run = line.runs.first else { return false }
                 if runs.isEmpty {
-                    runs.append(run); width = run.count
-                    return width <= PrivateKeyRedaction.maximumWrappedLine
+                    runs.append(run); width = run.count; total = run.count
+                    return width <= PrivateKeyRedaction.maximumWrappedLine && total < limit
                 }
                 guard line.runs.count == 1, run.count <= width, line.isSoleRun(in: bytes) else { return false }
-                runs.append(run)
-                return run.count == width
+                runs.append(run); total += run.count
+                return run.count == width && total < limit
             }
             return runs
         }

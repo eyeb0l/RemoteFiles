@@ -217,6 +217,24 @@ final class PrivateKeyRedactionTests: XCTestCase {
         XCTAssertTrue(PrivateKeyRedaction.redact(blank).text.contains("Afterwards"))
     }
 
+    func testAWholeKeyFoldedNarrowerThanTheMinimumIsStillHidden() {
+        let wrapped = Data(SyntheticKey.pem().utf8).base64EncodedString()
+        let certificate = Data(DemoCertificates.leaf.utf8).base64EncodedString()
+        for width in [32, 48, 64, 76] {
+            let folded = SyntheticKey.wrapped(wrapped, width: width)
+            let text = "data:\n  tls.key: |\n" + folded.map { "    " + $0 + "\n" }.joined() + "  note: kept\n"
+            let result = PrivateKeyRedaction.redact(text)
+            XCTAssertEqual(result.hiddenKeys, 1, "Folded at \(width)")
+            for line in folded { XCTAssertFalse(result.text.contains(line), "Folded at \(width)") }
+            XCTAssertTrue(result.text.contains("note: kept"), "Folded at \(width)")
+            XCTAssertEqual(result.text.utf16.count, text.utf16.count, "Folded at \(width)")
+
+            // A certificate wrapped the same way isn't secret, however narrow.
+            let public_ = SyntheticKey.wrapped(certificate, width: width).joined(separator: "\n") + "\n"
+            XCTAssertEqual(PrivateKeyRedaction.redact(public_).hiddenKeys, 0, "Certificate folded at \(width)")
+        }
+    }
+
     func testWrappedKeysAreHiddenAndACertificateBesideThemStays() throws {
         let key = SyntheticKey.pem()
         let wrapped = Data(key.utf8).base64EncodedString()
@@ -331,6 +349,9 @@ final class PrivateKeyRedactionTests: XCTestCase {
             fill(Data("-----BEGIN ".utf8).base64EncodedString().dropLast(2) + " "),
             // Every candidate is in one run, so each mustn't scan it afresh.
             fill(Data("-----BEGIN ".utf8).base64EncodedString()),
+            // Short candidates that each look ahead at their next lines.
+            fill(Data("-----BEGIN ".utf8).base64EncodedString() + String(repeating: "A", count: 24) + "\n"),
+            fill(Data("-----BEGIN ".utf8).base64EncodedString() + String(repeating: "A", count: 24) + " "),
             fill("---- BEGIN SSH2 "),
             begin + fill("\\"),
             begin + fill(" "),

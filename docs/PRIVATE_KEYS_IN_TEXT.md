@@ -57,7 +57,7 @@ This recognizes key formats. It isn't a secret scanner, and a format it doesn't 
 - A key wrapped at under 32 characters a line isn't recognized.
 - An example key in a tutorial is hidden, because it can't be told from a real one. Save the original to read it.
 - UTF-16 or Latin-1 text isn't checked, because it never opens as text. It shows **Can't display this file**.
-- A key in an image or on a PDF page is still visible when you open that file. Text extracted from them for search is checked, but OCR can misread a key so that it no longer matches.
+- A key in an image or on a PDF page is still visible when you open that file. Text extracted from them for search is checked a page at a time, so the part of a key that continues onto another page can reach a saved index, and OCR can misread a key so that it no longer matches.
 - A `.key` file is unchanged: it has no preview and is never read for search.
 - A saved offline copy keeps the file's original bytes in the protected library, as do folders saved offline that happen to include a key. They are hidden when read, not removed.
 - Bytes are in memory while a file is read and decoded, and are then dropped.
