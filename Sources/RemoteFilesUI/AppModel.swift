@@ -122,6 +122,41 @@ final class AppModel {
     var errorMessage: String?
     var sessionRevision = 0
     var connectionStates: [UUID: String] = [:]
+    private var mediaSecurityFailures: [UUID: String] = [:]
+    @ObservationIgnored private var connectionFailureRevisions: [UUID: Int] = [:]
+    func mediaSecurityFailure(_ id: UUID) -> String? { mediaSecurityFailures[id] }
+
+    /// Owns media connection status before decoding/playback. Local preparation can
+    /// neither verify a connection nor overwrite a later failed check.
+    func loadMediaResource(for reference: String, in location: RemoteDocumentLocation,
+                           progress: @escaping DownloadProgressHandler = { _ in }) async throws -> RemoteResourcePreview {
+        try Task.checkCancellation()
+        guard isForeground, !isDisconnecting else { throw CancellationError() }
+        let profile = location.profile
+        let revision = sessionRevision, failureRevision = connectionFailureRevisions[profile.id, default: 0]
+        func isCurrent() -> Bool {
+            isForeground && !isDisconnecting && sessionRevision == revision
+                && connectionFailureRevisions[profile.id, default: 0] == failureRevision
+        }
+        do {
+            let result = try await resources.localFileForPreview(for: reference, in: location,
+                allowCachedFallback: mediaSecurityFailures[profile.id] == nil, progress: progress)
+            try Task.checkCancellation()
+            guard isCurrent() else { throw CancellationError() }
+            if let error = result.connectionFailure { handle(error, profile: profile) }
+            else {
+                mediaSecurityFailures[profile.id] = nil
+                connectionStates[profile.id] = "Connected"
+            }
+            return result
+        } catch is CancellationError { throw CancellationError() }
+        catch {
+            try Task.checkCancellation()
+            guard isCurrent() else { throw CancellationError() }
+            handle(error, profile: profile)
+            throw error
+        }
+    }
     var demo = false
     var isForeground = true
     private(set) var isDisconnecting = false
@@ -453,9 +488,11 @@ final class AppModel {
     }
     func handle(_ error: Error, profile: ConnectionProfile) {
         guard !isDisconnecting else { return }
+        connectionFailureRevisions[profile.id, default: 0] += 1
         connectionStates[profile.id] = "Disconnected"
         // A path outside its boundary says nothing about the connection; these do.
-        if error is HostTrustError || error is IdentityError || error is ConnectionIdentityUnlockRequired {
+        if isConnectionSecurityError(error) {
+            mediaSecurityFailures[profile.id] = error.localizedDescription
             forgetListings(of: profile.id)
         }
         if let trustError = error as? HostTrustError {
@@ -488,8 +525,13 @@ final class AppModel {
         }
         sheet = nil; sessionRevision += 1
     }
-    func isSecurityError(_ error: Error) -> Bool {
+    private func isConnectionSecurityError(_ error: Error) -> Bool {
         if error is HostTrustError || error is IdentityError || error is ConnectionIdentityUnlockRequired { return true }
+        if case RemoteFileError.authenticationFailed = error { return true }
+        return false
+    }
+    func isSecurityError(_ error: Error) -> Bool {
+        if isConnectionSecurityError(error) { return true }
         if let boundary = error as? RemoteDocumentLinkError, boundary == .outsideConnection { return true }
         if case RemoteResourceError.outsideDocument = error { return true }
         return false

@@ -235,12 +235,13 @@ public extension RemoteFileService {
 }
 
 public enum RemoteFileError: LocalizedError, Sendable {
-    case tooLarge(Int), unavailable(String), notFound, permissionDenied, connectionEnded, timedOut, invalidPath, unsupportedFile
+    case tooLarge(Int), unavailable(String), notFound, permissionDenied, connectionEnded, timedOut, invalidPath, unsupportedFile, authenticationFailed
     public var errorDescription: String? {
         switch self {
         case .tooLarge(let limit): return "Too Large to Preview. The limit is \(ByteCountFormatter.string(fromByteCount: Int64(limit), countStyle: .file))."
         case .unavailable(let message): return message
         case .notFound: return "This file or folder no longer exists at that path. Refresh the folder and try again."
+        case .authenticationFailed: return "SSH authentication failed. Check the account and its public key on the server."
         case .permissionDenied: return "Permission denied. This account cannot read that location on the server."
         case .connectionEnded: return "The SSH connection ended. Refresh to reconnect."
         case .timedOut: return "The connection timed out. Check the address, server availability, network permissions, and Tailscale connection if used."
