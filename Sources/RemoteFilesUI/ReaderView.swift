@@ -224,6 +224,24 @@ struct ReaderView: View {
         try? await Task.sleep(until: settled, clock: .continuous)
         guard !Task.isCancelled, !showsLoadingPlaceholder else { return }
         UIAccessibility.post(notification: .screenChanged, argument: readingPosition.sourceVoiceOverStart?())
+        await keepVoiceOverOnTheDocumentStart(arrivedAt: documentArrivedAt)
+    }
+    /// VoiceOver can land on a later line after that post, with nothing left to send it back. So
+    /// check where it lands until it reaches the first line. See "First line not reached" in
+    /// docs/CI_HISTORY.md.
+    private func keepVoiceOverOnTheDocumentStart(arrivedAt: ContinuousClock.Instant) async {
+        var watch = VoiceOverLandingWatch(arrivedAt: arrivedAt)
+        while !Task.isCancelled {
+            try? await Task.sleep(for: VoiceOverLandingWatch.pollInterval)
+            guard !Task.isCancelled, let line = readingPosition.sourceVoiceOverLine else { return }
+            switch watch.next(line: line(), now: .now) {
+            case .wait: continue
+            case .stop: return
+            case .correct:
+                guard let start = readingPosition.sourceVoiceOverStart?() else { return }
+                UIAccessibility.post(notification: .screenChanged, argument: start)
+            }
+        }
     }
     private func releaseInactiveContent(keepPreview: Bool = false) {
         cancelLink(); requestID = UUID()
@@ -417,6 +435,42 @@ struct ReaderView: View {
             }
         }
         if token == requestID { loading = false }
+    }
+}
+
+/// Decides when VoiceOver has landed partway through a document instead of on its first line.
+/// Holding first lets a return already under way finish. Focus reaching any other line means the
+/// reader chose it, so that is left alone, as it is once the window ends. The window runs from the
+/// document's arrival, so syntax colours restarting the watch cannot extend it.
+struct VoiceOverLandingWatch {
+    enum Action: Equatable { case wait, stop, correct }
+    static let pollInterval: Duration = .milliseconds(250)
+    /// Longer than VoiceOver's own return from a tall line, which took under a second in CI.
+    static let hold: Duration = .milliseconds(1250)
+    static let window: Duration = .seconds(6)
+    static let maximumCorrections = 2
+    private let deadline: ContinuousClock.Instant
+    private var landedLine: Int?
+    private var heldSince: ContinuousClock.Instant?
+    private var corrections = 0
+    init(arrivedAt: ContinuousClock.Instant) { deadline = arrivedAt + Self.window }
+    mutating func next(line: Int?, now: ContinuousClock.Instant) -> Action {
+        guard line != 0, now < deadline else { return .stop }
+        guard let line else {
+            heldSince = nil
+            return .wait
+        }
+        if let landedLine, landedLine != line { return .stop }
+        landedLine = line
+        guard let heldSince else {
+            self.heldSince = now
+            return .wait
+        }
+        guard now - heldSince >= Self.hold else { return .wait }
+        guard corrections < Self.maximumCorrections else { return .stop }
+        corrections += 1
+        self.heldSince = now
+        return .correct
     }
 }
 #endif

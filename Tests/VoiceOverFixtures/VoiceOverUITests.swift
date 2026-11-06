@@ -104,8 +104,9 @@ extension XCUIApplication {
     /// A reader moves slower than this test can. Traversing while the reader still names where
     /// to start races that move, and a swipe during it can be lost; see "Reader loading focus".
     /// `placeholder` names an element that has gone but may still hold focus, which is not settled.
+    /// Quiet outlasts the reader's two corrections of a landing partway through, about 4 s in CI.
     private func waitForFocusToSettle(_ path: String, leaving placeholder: String? = nil) {
-        let quiet: TimeInterval = 4, deadline = Date().addingTimeInterval(45)
+        let quiet: TimeInterval = 6, deadline = Date().addingTimeInterval(45)
         var log = "", changed = Date()
         func onPlaceholder() -> Bool {
             guard let placeholder, let last = log.split(separator: "\n").last else { return false }

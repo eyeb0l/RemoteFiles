@@ -113,7 +113,12 @@ private struct OfflineReaderFixture: View {
         state.path.removeLast(12)
         try await waitUntil { previousWeb.window == nil }
         web = try await reader(in: window, named: "README.md")
-        try await waitUntil { abs(web.scrollView.contentOffset.y - 500) < 5 }
+        do { try await waitUntil { abs(web.scrollView.contentOffset.y - 500) < 5 } }
+        catch {
+            let views = webViews(in: window)
+            print("Offline reader Back position: y=\(web.scrollView.contentOffset.y) height=\(web.scrollView.contentSize.height) inWindow=\(web.window != nil) isLast=\(views.last === web) views=\(views.count)")
+            throw error
+        }
         XCTAssertNotEqual(leaseURLs(directory).first, originalURL, "Back must acquire a new verified lease")
 
         // A new directory alone does not prove verification. Cover this route again,
