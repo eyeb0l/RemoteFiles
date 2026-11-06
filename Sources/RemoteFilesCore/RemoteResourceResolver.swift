@@ -96,6 +96,13 @@ public extension RemoteResourceResolving {
     func invalidate(_ reference: String, in document: RemoteDocumentLocation) async {}
 }
 
+/// A preview may use fresh protected bytes during an ordinary network failure, but that
+/// does not verify the connection. Callers must keep the failure visible.
+public struct RemoteResourcePreview: Sendable {
+    public let file: URL
+    public let connectionFailure: RemoteFileError?
+}
+
 /// Disk bytes only: 256 MiB LRU, 24-hour retention, 5-minute freshness, 128 MiB per file.
 /// After the freshness window, a copy whose remote size and modification time still match is
 /// revalidated with one metadata request instead of being transferred again.
@@ -175,6 +182,61 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         // original boundary and canonical server check; this is not a bypass.
         return try await localFile(for: reference, in: document)
     }
+    /// Standalone media checks the live path before exposing cached bytes. Only explicit
+    /// connectivity failures permit a fresh-cache fallback; trust, identity, authentication,
+    /// permissions and unknown failures propagate. A prior security failure disables fallback
+    /// until the caller observes a successful live check.
+    public func localFileForPreview(for reference: String, in document: RemoteDocumentLocation,
+                                    allowCachedFallback: Bool = true,
+                                    progress: @escaping DownloadProgressHandler = { _ in }) async throws -> RemoteResourcePreview {
+        try Task.checkCancellation()
+        let path = try RemoteResourcePath.resolve(reference, relativeTo: document)
+        let current: RemoteEntry
+        do {
+            current = try await service.resolveEntry(profile: document.profile, path: path)
+        } catch RemoteFileError.notFound {
+            throw RemoteResourceError.missingFile(path)
+        } catch {
+            try Task.checkCancellation()
+            switch error {
+            case RemoteFileError.connectionEnded, RemoteFileError.timedOut, RemoteFileError.unavailable:
+                if allowCachedFallback, document.canonicalRoot == nil,
+                   let file = try freshCachedFile(for: reference, in: document) {
+                    let size = (try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.uint64Value ?? 0
+                    await progress(.init(receivedBytes: size, totalBytes: size, isComplete: true))
+                    try Task.checkCancellation()
+                    return RemoteResourcePreview(file: file, connectionFailure: error as? RemoteFileError)
+                }
+            default: break
+            }
+            throw error
+        }
+        try Task.checkCancellation()
+        guard current.kind == .file else { throw RemoteFileError.unsupportedFile }
+        // A changed symlink must go through the transport's canonical boundary check,
+        // even if the previously downloaded bytes are still fresh.
+        if !RemoteResourcePath.contains(current.path, in: document.resourceRoot) {
+            _ = invalidateResources([reference], in: document)
+        }
+        let file = try await localFile(for: reference, in: document, progress: progress)
+        return RemoteResourcePreview(file: file, connectionFailure: nil)
+    }
+
+    private func freshCachedFile(for reference: String, in document: RemoteDocumentLocation) throws -> URL? {
+        try prepareCacheDirectory()
+        let path = try RemoteResourcePath.resolve(reference, relativeTo: document)
+        let key = try cacheKey(path: path, document: document)
+        let file = directory.appendingPathComponent(key).appendingPathExtension("resource")
+        guard let attributes = try validateCachedFile(at: file),
+              let modified = attributes[.modificationDate] as? Date,
+              Date().timeIntervalSince(modified) < freshness,
+              let size = (attributes[.size] as? NSNumber)?.intValue,
+              size <= fileLimit, size <= diskLimit else { return nil }
+        // A fallback is an access, not a revalidation: never extend its freshness.
+        try? FileManager.default.setAttributes([.creationDate: Date()], ofItemAtPath: file.path)
+        return file
+    }
+
     /// Keys on what determines the bytes: the account that read them and the remote location.
     /// Renaming a connection or editing its starting folder keeps its cached resources, while a
     /// different endpoint, account, identity or jump route never shares them. JSON keeps fields unambiguous.

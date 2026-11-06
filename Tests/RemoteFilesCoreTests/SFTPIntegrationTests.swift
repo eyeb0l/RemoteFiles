@@ -1046,6 +1046,52 @@ final class SFTPIntegrationTests: XCTestCase {
         }
     }
 
+    func testFreshMediaCacheRejectsHostAndAuthenticationFailures() async throws {
+        let fixture = try Fixture(), stores = try Stores(fixture: fixture)
+        let identity = try await stores.identity.generate(name: "Cached media")
+        let authorizedKeys = URL(fileURLWithPath: fixture.directory + "/authorized_keys")
+        let originalKeys = try Data(contentsOf: authorizedKeys)
+        defer { try? originalKeys.write(to: authorizedKeys) }
+        try fixture.authorize(identity.publicKey)
+        let profile = try await stores.profile(identity: identity)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let resolver = RemoteResourceResolver(service: service, directory: directory)
+        // Resource resolution is independent of decoding; a small fixture isolates SSH behaviour.
+        let location = RemoteDocumentLocation(profile: profile, path: fixture.files + "/report.md")
+        let first = try await resolver.localFileForPreview(for: "report.md", in: location)
+        await service.disconnect()
+
+        try await stores.trust.reset(endpoint: fixture.endpoint)
+        do {
+            _ = try await resolver.localFileForPreview(for: "report.md", in: location)
+            XCTFail("Fresh bytes must not bypass unknown-host verification")
+        } catch HostTrustError.unknown { }
+        let wrong = try HostKeyDetails(publicKey: NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey)
+        try await stores.trust.trustUnknown(endpoint: fixture.endpoint, key: wrong)
+        do {
+            _ = try await resolver.localFileForPreview(for: "report.md", in: location)
+            XCTFail("Fresh bytes must not bypass changed-host verification")
+        } catch HostTrustError.changed { }
+
+        try await stores.trust.reset(endpoint: fixture.endpoint)
+        try await stores.trustFixtureHost()
+        try originalKeys.write(to: authorizedKeys)
+        do {
+            _ = try await resolver.localFileForPreview(for: "report.md", in: location)
+            XCTFail("Fresh bytes must not hide SSH authentication rejection")
+        } catch RemoteFileError.authenticationFailed { }
+        try fixture.authorize(identity.publicKey)
+        let recovered = try await resolver.localFileForPreview(for: "report.md", in: location)
+        XCTAssertEqual(recovered.file, first.file)
+        XCTAssertNil(recovered.connectionFailure)
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.fileOperations, 1, "Verification must preserve usable cached bytes")
+    }
+
     func testUnknownAndChangedHostFailBeforeAuthentication() async throws {
         let fixture = try Fixture()
         let stores = try Stores(fixture: fixture)

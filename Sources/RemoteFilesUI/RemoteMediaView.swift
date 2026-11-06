@@ -124,6 +124,11 @@ struct RemoteMediaView: View {
         .onDisappear { if !fullScreenPlayback { requestID = UUID(); playback.stop() } }
         .onChange(of: scenePhase) { _, phase in if phase != .active { playback.stop() } }
         .onChange(of: model.isForeground) { _, active in if !active { playback.stop() } }
+        .onChange(of: model.mediaSecurityFailure(profile.id)) { _, message in
+            guard let message else { return }
+            requestID = UUID(); image = nil; pdf = nil; viewer = nil; playback.stop()
+            failure = message; loading = false
+        }
         .onChange(of: model.isDisconnecting) { _, disconnecting in if disconnecting { playback.stop() } }
         .fullScreenCover(item: $viewer, onDismiss: { imageFocused = true }) { item in RemoteImageViewer(item: item, resolver: model.resources).coversKeyboardCommands() }
         // Native fullscreen playback covers the reader too, though UIKit presents it.
@@ -172,7 +177,7 @@ struct RemoteMediaView: View {
         loading = true; failure = nil
         defer { if requestID == token { loading = false } }
         do {
-            let file = try await model.resources.localFile(for: reference, in: location, progress: { update in
+            let resource = try await model.loadMediaResource(for: reference, in: location, progress: { update in
                 await MainActor.run {
                     guard requestID == token, !model.isDisconnecting, model.isForeground,
                           model.sessionRevision == revision, model.listingGeneration(profile.id) == generation else { return }
@@ -181,6 +186,8 @@ struct RemoteMediaView: View {
             })
             try Task.checkCancellation()
             guard requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision, model.listingGeneration(profile.id) == generation else { return }
+            let file = resource.file
+            failure = resource.connectionFailure?.localizedDescription
             if kind == .image {
                 let decoded = try await RemoteImageDecoder.shared.decode(file, maxPixel: 1600)
                 try Task.checkCancellation()
@@ -213,7 +220,6 @@ struct RemoteMediaView: View {
                 pdfRestoration = restoration; pdfPage = restoration?.ordinal ?? 0
                 pdf = document
             }
-            model.connectionStates[profile.id] = "Connected"
             lastLoadedSession = revision
             await model.recordRecent(profile: profile, entry: entry)
         } catch is CancellationError { }
@@ -221,10 +227,6 @@ struct RemoteMediaView: View {
             guard !Task.isCancelled, requestID == token, !model.isDisconnecting, model.isForeground, model.sessionRevision == revision else { return }
             failure = error.localizedDescription
             if model.isSecurityError(error) { image = nil; pdf = nil; playback.stop() }
-            if error is PlaybackError {
-                // The transfer worked, but don't overwrite a failed check that landed meanwhile.
-                if model.listingGeneration(profile.id) == generation { model.connectionStates[profile.id] = "Connected" }
-            } else { model.handle(error, profile: profile) }
         }
     }
 }

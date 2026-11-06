@@ -664,6 +664,12 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
                 pending = nil; pendingProfile = nil; pendingControl = nil
             }
             if Task.isCancelled { throw CancellationError() }
+            switch error {
+            case SSHClientError.allAuthenticationOptionsFailed, SSHClientError.unsupportedPrivateKeyAuthentication,
+                 is AuthenticationFailed, CitadelError.unauthorized:
+                throw RemoteFileError.authenticationFailed
+            default: break
+            }
             if profile.jumpHost != nil, let sshError = error as? NIOSSHError, sshError.type == .channelSetupRejected {
                 throw RemoteFileError.unavailable("The jump host couldn't reach the destination. Check its hostname and port, and that the jump host permits TCP forwarding to it.")
             }

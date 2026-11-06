@@ -77,7 +77,111 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
     func cancelAll() { cancellations += 1 }
 }
 
+private actor MediaConnectionService: RemoteFileService {
+    private var failure: Error?
+    private var held: CheckedContinuation<Void, Never>?
+    private var holdNext = false
+    private(set) var checks = 0
+    private(set) var downloads = 0
+    func fail(_ error: Error?) { failure = error }
+    func holdNextCheck() { holdNext = true }
+    func isWaiting() -> Bool { held != nil }
+    func release() { held?.resume(); held = nil }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
+        checks += 1
+        if holdNext {
+            holdNext = false
+            await withCheckedContinuation { held = $0 }
+        }
+        if let failure { throw failure }
+        return .init(name: RemotePath.name(of: path), path: path, kind: .file)
+    }
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
+        downloads += 1
+        try Data("cached media".utf8).write(to: destination)
+        return .init(name: RemotePath.name(of: path), path: path, kind: .file, size: 12)
+    }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
+    func disconnect() async { }
+}
+
 @MainActor final class AppModelLifecycleTests: XCTestCase {
+    func testCachedMediaAfterFailedConnectionCheckStaysDisconnectedAndRecoversWithoutDownloading() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = MediaConnectionService()
+        let model = try AppModel(directory: directory, fileService: service)
+        let profile = ConnectionProfile(name: "Media", host: "media.invalid", username: "reader", identityID: UUID())
+        let location = RemoteDocumentLocation(profile: profile, path: "/media/a.mp4")
+        let first = try await model.loadMediaResource(for: "a.mp4", in: location)
+        defer { try? FileManager.default.removeItem(at: first.file) }
+        XCTAssertEqual(model.connectionStates[profile.id], "Connected")
+        await service.fail(RemoteFileError.timedOut)
+        model.handle(RemoteFileError.timedOut, profile: profile)
+        let cached = try await model.loadMediaResource(for: "a.mp4", in: location)
+        XCTAssertEqual(cached.file, first.file)
+        XCTAssertNotNil(cached.connectionFailure)
+        XCTAssertEqual(model.connectionStates[profile.id], "Disconnected", "Cached bytes cannot verify SSH")
+        await service.fail(nil)
+        _ = try await model.loadMediaResource(for: "a.mp4", in: location)
+        XCTAssertEqual(model.connectionStates[profile.id], "Connected")
+        let downloads = await service.downloads
+        XCTAssertEqual(downloads, 1)
+    }
+
+    func testFailedSecurityCheckBlocksCachedMediaUntilLiveVerification() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = MediaConnectionService()
+        let model = try AppModel(directory: directory, fileService: service)
+        let profile = ConnectionProfile(name: "Media", host: "media.invalid", username: "reader", identityID: UUID())
+        let location = RemoteDocumentLocation(profile: profile, path: "/media/a.mp4")
+        let first = try await model.loadMediaResource(for: "a.mp4", in: location)
+        defer { try? FileManager.default.removeItem(at: first.file) }
+        for securityError in [HostTrustError.invalidStore as Error, IdentityError.missingSecret,
+                              RemoteFileError.authenticationFailed] {
+            model.handle(securityError, profile: profile)
+            XCTAssertNotNil(model.mediaSecurityFailure(profile.id))
+            await service.fail(RemoteFileError.timedOut)
+            do {
+                _ = try await model.loadMediaResource(for: "a.mp4", in: location)
+                XCTFail("A later network failure must not erase the failed security check")
+            } catch RemoteFileError.timedOut { }
+            XCTAssertNotNil(model.mediaSecurityFailure(profile.id))
+            XCTAssertEqual(model.connectionStates[profile.id], "Disconnected")
+            await service.fail(nil)
+            let recovered = try await model.loadMediaResource(for: "a.mp4", in: location)
+            XCTAssertEqual(recovered.file, first.file)
+            XCTAssertNil(model.mediaSecurityFailure(profile.id))
+            XCTAssertEqual(model.connectionStates[profile.id], "Connected")
+        }
+    }
+
+    func testMediaCheckOvertakenByAFailureCannotVerifyOrPublishCachedBytes() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = MediaConnectionService()
+        let model = try AppModel(directory: directory, fileService: service)
+        let profile = ConnectionProfile(name: "Media", host: "media.invalid", username: "reader", identityID: UUID())
+        let location = RemoteDocumentLocation(profile: profile, path: "/media/a.mp4")
+        let first = try await model.loadMediaResource(for: "a.mp4", in: location)
+        defer { try? FileManager.default.removeItem(at: first.file) }
+        for error in [RemoteFileError.timedOut as Error, HostTrustError.invalidStore, RemoteFileError.authenticationFailed] {
+            await service.holdNextCheck()
+            let task = Task { try await model.loadMediaResource(for: "a.mp4", in: location) }
+            let deadline = ContinuousClock.now + .seconds(30)
+            while !(await service.isWaiting()), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            let waiting = await service.isWaiting()
+            XCTAssertTrue(waiting)
+            model.handle(error, profile: profile)
+            await service.release()
+            do { _ = try await task.value; XCTFail("An overtaken check must not publish") } catch is CancellationError { }
+            XCTAssertEqual(model.connectionStates[profile.id], "Disconnected")
+            _ = try await model.loadMediaResource(for: "a.mp4", in: location)
+        }
+    }
+
     func testDownloadRetryUsesRequestingWindowsTransportAndUnlockSheet() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
