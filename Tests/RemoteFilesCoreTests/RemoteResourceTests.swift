@@ -151,7 +151,7 @@ final class RemoteResourceTests: XCTestCase {
     func testOpenFileReportsMissingStaleAbsolutePathBeforeFolderRestriction() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let service = ImageExistenceTransportMock(lookupError: .notFound)
+        let service = ImageExistenceTransportMock(lookupError: RemoteFileError.notFound)
         let resolver = RemoteResourceResolver(service: service, directory: dir)
         let doc = RemoteDocumentLocation(profile: location.profile,
             path: "/Users/iris/Developer/wardrobe/data/ui-audit-2026-09-21/audit.md")
@@ -219,7 +219,7 @@ final class RemoteResourceTests: XCTestCase {
         let resolver = RemoteResourceResolver(service: service, directory: dir)
         let doc = location
         _ = try await resolver.localFileForOpening(for: "a.png", in: doc)
-        await service.setLookupError(.notFound)
+        await service.setLookupError(RemoteFileError.notFound)
         do {
             _ = try await resolver.localFileForOpening(for: "a.png", in: doc)
             XCTFail("Cached bytes must not hide a missing remote target during explicit opening")
@@ -229,10 +229,151 @@ final class RemoteResourceTests: XCTestCase {
         let downloads = await service.downloads
         XCTAssertEqual(downloads, 1)
     }
+    func testFreshMediaCacheDoesNotHideAFailedSecurityCheck() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = ImageExistenceTransportMock()
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        let doc = location
+        _ = try await resolver.localFile(for: "a.mp4", in: doc)
+        let identity = IdentityMetadata(name: "Locked", publicKey: "fixture", fingerprint: "fixture",
+                                        requiresPassphrase: true, keychainReference: "fixture")
+        let errors: [Error] = [HostTrustError.invalidStore, IdentityError.missingSecret,
+            ConnectionIdentityUnlockRequired(identity: identity), RemoteFileError.authenticationFailed,
+            RemoteFileError.permissionDenied, RemoteFileError.notFound, RemoteResourceError.outsideDocument]
+        for expected in errors {
+            await service.setLookupError(expected)
+            do {
+                _ = try await service.resolveEntry(profile: doc.profile, path: doc.resourceRoot + "/a.mp4")
+                XCTFail("The simulated connection check must fail")
+            } catch { }
+            do {
+                _ = try await resolver.localFileForPreview(for: "a.mp4", in: doc)
+                XCTFail("A fresh cached media file must not hide \(expected)")
+            } catch {
+                if case RemoteFileError.notFound = expected {
+                    guard case RemoteResourceError.missingFile(let path) = error else { return XCTFail("Expected missing-file guidance, got \(error)") }
+                    XCTAssertEqual(path, doc.resourceRoot + "/a.mp4")
+                } else {
+                    XCTAssertEqual(String(reflecting: type(of: error)), String(reflecting: type(of: expected)))
+                    XCTAssertEqual(error.localizedDescription, expected.localizedDescription)
+                }
+            }
+        }
+        let downloads = await service.downloads
+        XCTAssertEqual(downloads, 1, "Rejected previews must not redownload or discard the useful bytes")
+    }
+
+    func testFreshMediaCachePreservesPlaybackButReportsConnectivityFailure() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = ImageExistenceTransportMock()
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        let doc = location
+        let first = try await resolver.localFileForPreview(for: "a.mp4", in: doc)
+        XCTAssertNil(first.connectionFailure)
+        let modified = try FileManager.default.attributesOfItem(atPath: first.file.path)[.modificationDate] as? Date
+        for error in [RemoteFileError.unavailable("Offline"), .timedOut, .connectionEnded] {
+            await service.setLookupError(error)
+            let recorder = ProgressRecorder()
+            let cached = try await resolver.localFileForPreview(for: "a.mp4", in: doc, progress: { await recorder.record($0) })
+            XCTAssertEqual(cached.file, first.file)
+            XCTAssertEqual(cached.connectionFailure?.localizedDescription, error.localizedDescription)
+            XCTAssertEqual(try Data(contentsOf: cached.file), Data("image bytes".utf8))
+            let progress = await recorder.values
+            XCTAssertEqual(progress.last?.isComplete, true)
+            XCTAssertEqual(progress.last?.receivedBytes, 11)
+            let attributes = try FileManager.default.attributesOfItem(atPath: cached.file.path)
+            XCTAssertEqual(attributes[.modificationDate] as? Date, modified, "Offline playback must not extend freshness")
+        }
+        await service.setLookupError(nil)
+        let recovered = try await resolver.localFileForPreview(for: "a.mp4", in: doc, allowCachedFallback: false)
+        XCTAssertEqual(recovered.file, first.file)
+        XCTAssertNil(recovered.connectionFailure)
+        let downloads = await service.downloads
+        XCTAssertEqual(downloads, 1)
+    }
+
+    func testMediaConnectivityFallbackRequiresFreshBytesAndPermissionToUseThem() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = ImageExistenceTransportMock()
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        let doc = location
+        let file = try await resolver.localFile(for: "a.mp4", in: doc)
+        await service.setLookupError(RemoteFileError.timedOut)
+        for (reference, allowed) in [("missing.mp4", true), ("a.mp4", false)] {
+            do {
+                _ = try await resolver.localFileForPreview(for: reference, in: doc, allowCachedFallback: allowed)
+                XCTFail("Unavailable or security-blocked cache must not play")
+            } catch RemoteFileError.timedOut { }
+        }
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -301)], ofItemAtPath: file.path)
+        do {
+            _ = try await resolver.localFileForPreview(for: "a.mp4", in: doc)
+            XCTFail("Expired cache must not be silently treated as fresh")
+        } catch RemoteFileError.timedOut { }
+        let downloads = await service.downloads
+        XCTAssertEqual(downloads, 1, "Fallback must never initiate an unchecked transfer")
+    }
+
+    func testMediaConnectivityFallbackKeepsCanonicalAndSizeLimits() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = ImageExistenceTransportMock()
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        let doc = location
+        let file = try await resolver.localFile(for: "a.mp4", in: doc)
+        await service.setLookupError(RemoteFileError.timedOut)
+        let restricted = RemoteDocumentLocation(profile: doc.profile, path: doc.path, canonicalRoot: doc.resourceRoot)
+        do {
+            _ = try await resolver.localFileForPreview(for: "a.mp4", in: restricted)
+            XCTFail("Saved results must never bypass canonical server checks")
+        } catch RemoteFileError.timedOut { }
+        let smaller = RemoteResourceResolver(service: service, directory: dir, fileLimit: 10)
+        do {
+            _ = try await smaller.localFileForPreview(for: "a.mp4", in: doc)
+            XCTFail("Cached bytes must obey this resolver's file limit")
+        } catch RemoteFileError.timedOut { }
+        let smallerDisk = RemoteResourceResolver(service: service, directory: dir, diskLimit: 10)
+        do {
+            _ = try await smallerDisk.localFileForPreview(for: "a.mp4", in: doc)
+            XCTFail("Cached bytes must obey this resolver's disk limit")
+        } catch RemoteFileError.timedOut { }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    func testMediaCheckCancellationCannotFallBackToFreshBytes() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = ImageExistenceTransportMock(lookupDelay: .seconds(30))
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        let doc = location
+        _ = try await resolver.localFile(for: "a.mp4", in: doc)
+        let task = Task { try await resolver.localFileForPreview(for: "a.mp4", in: doc) }
+        let deadline = ContinuousClock.now + .seconds(30)
+        while await service.lookups.isEmpty, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        task.cancel()
+        do { _ = try await task.value; XCTFail("Cancellation must not become offline playback") } catch is CancellationError { }
+    }
+
+    func testMediaPreviewRechecksRedirectedPathInsteadOfTrustingFreshBytes() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = VersionedResourceTransportMock()
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        let doc = location
+        _ = try await resolver.localFile(for: "a.mp4", in: doc)
+        await service.redirectLookups(to: "/outside/a.mp4")
+        _ = try await resolver.localFileForPreview(for: "a.mp4", in: doc)
+        let downloads = await service.downloads
+        XCTAssertEqual(downloads, 2, "A redirect must pass through the bounded canonical download path again")
+    }
+
     func testOpenFilePreservesPermissionErrors() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let service = ImageExistenceTransportMock(lookupError: .unavailable("Permission denied."))
+        let service = ImageExistenceTransportMock(lookupError: RemoteFileError.unavailable("Permission denied."))
         let resolver = RemoteResourceResolver(service: service, directory: dir)
         do {
             _ = try await resolver.localFileForOpening(for: "/other/image.png", in: location)
@@ -595,14 +736,14 @@ final class RemoteResourceTests: XCTestCase {
     }
 }
 private actor ImageExistenceTransportMock: RemoteFileService {
-    private var lookupError: RemoteFileError?
+    private var lookupError: Error?
     private let lookupDelay: Duration
     private(set) var lookups: [String] = []
     private(set) var downloads = 0
-    init(lookupError: RemoteFileError? = nil, lookupDelay: Duration = .zero) {
+    init(lookupError: Error? = nil, lookupDelay: Duration = .zero) {
         self.lookupError = lookupError; self.lookupDelay = lookupDelay
     }
-    func setLookupError(_ error: RemoteFileError?) { lookupError = error }
+    func setLookupError(_ error: Error?) { lookupError = error }
     func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
         lookups.append(path)
         try await Task.sleep(for: lookupDelay)

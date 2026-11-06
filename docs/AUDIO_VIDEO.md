@@ -14,6 +14,21 @@ The sizes use decimal KB/MB/GB and a shared unit. The SFTP file handle supplies
 the total; if it is unavailable or a growing file exceeds it, the UI reports only
 bytes downloaded. EOF supplies the actual final size. Cache hits report completion
 immediately, and the screen switches to preparing the preview after transfer.
+
+Standalone images, PDFs, audio and video check the remote file before opening,
+even within the cache's five-minute freshness window. A successful live check or
+transfer can report Connected; local decoding and playback preparation cannot.
+If that check fails because the connection is unavailable, ended or timed out,
+a fresh protected cached copy can still play with Disconnected status and the
+previously loaded-copy warning. This does not extend the copy's freshness.
+Unknown or changed host keys, locked or missing identities, SSH authentication
+rejection, permission errors and missing files never permit this fallback.
+After a reported host-key, identity or authentication failure, that window
+requires successful live verification before cached playback can resume; another
+network failure cannot clear the block. A security failure also releases any
+media currently shown in that window. Saved-search results retain their stricter
+canonical-root checks and cannot use the connectivity fallback.
+
 Refreshes also show transfer progress above the previously loaded copy.
 Playback starts only when
 the user presses Play after the download finishes. Video renders through AVKit
