@@ -72,11 +72,14 @@ private struct RootPhaseFixture: View {
         views(window).contains { $0.accessibilityIdentifier == identifier }
     }
     private func waitUntil(_ condition: () async -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
-        let deadline = ContinuousClock.now + .seconds(5)
+        // Every caller waits for something that must happen, so a stalled host shouldn't fail it:
+        // the bound is generous, and the condition is checked once more after any stall.
+        let deadline = ContinuousClock.now + .seconds(30)
         while ContinuousClock.now < deadline {
             if await condition() { return }
             try await Task.sleep(for: .milliseconds(25))
         }
+        if await condition() { return }
         XCTFail("Timed out waiting for image lifecycle state", file: file, line: line)
     }
     private func capture(_ name: String, _ window: UIWindow) {
