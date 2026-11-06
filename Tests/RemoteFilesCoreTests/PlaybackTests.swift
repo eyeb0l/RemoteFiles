@@ -17,7 +17,65 @@ private struct NativeVideoFixture: View {
     }
 }
 
+private actor CachedPlaybackService: RemoteFileService {
+    private let demo = DemoRemoteFileService(delayNanoseconds: 0)
+    private var failure: Error?
+    func fail(_ error: Error) { failure = error }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
+        if let failure { throw failure }
+        return try await demo.resolveEntry(profile: profile, path: path)
+    }
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
+        try await demo.downloadFile(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination, limit: limit)
+    }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
+    func disconnect() async { }
+}
+
 @MainActor final class PlaybackTests: XCTestCase {
+    func testCachedMediaViewKeepsDisconnectedStatusAndStopsAfterSecurityFailure() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = CachedPlaybackService()
+        let model = try AppModel(directory: directory, fileService: service)
+        let profile = ConnectionProfile(name: "Cached playback", host: "fixture.invalid", username: "fixture", identityID: UUID())
+        let entry = RemoteEntry(name: "Sample video.mp4", path: "/Projects/Sample video.mp4", kind: .file)
+        let location = RemoteDocumentLocation(profile: profile, path: entry.path)
+        let cached = try await model.resources.localFile(for: "Sample%20video.mp4", in: location)
+        defer { try? FileManager.default.removeItem(at: cached) }
+        await service.fail(RemoteFileError.unavailable("The server could not be reached."))
+        model.handle(RemoteFileError.timedOut, profile: profile)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: RemoteMediaView(model: model, profile: profile,
+            entry: entry, kind: .video, refreshID: 0).environment(\.scenePhase, .active))
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previousWindow?.makeKey() }
+        func players(_ controller: UIViewController) -> [AVPlayerViewController] {
+            (controller as? AVPlayerViewController).map { [$0] } ?? controller.children.flatMap(players)
+        }
+        try await waitUntil {
+            players(window.rootViewController!).contains { $0.player?.currentItem != nil && $0.viewIfLoaded?.window === window }
+        }
+        let player = try XCTUnwrap(players(window.rootViewController!).compactMap(\.player).first { $0.currentItem != nil })
+        // Wait beyond player allocation: the view publishes status and recents after preparation.
+        try await waitUntil {
+            player.currentItem?.status == .readyToPlay && model.metadata.recents.contains { $0.path == entry.path }
+        }
+        XCTAssertEqual(model.connectionStates[profile.id], "Disconnected", "Preparing cached playback cannot verify SSH")
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "Cached playback after an ordinary connection failure"; attachment.lifetime = .keepAlways
+        add(attachment)
+        player.play()
+        model.handle(HostTrustError.invalidStore, profile: profile)
+        try await waitUntil { player.currentItem == nil && player.rate == 0 }
+        XCTAssertEqual(model.connectionStates[profile.id], "Disconnected")
+        await model.disconnect()
+    }
+
     func testFullscreenPresentsNativeControllerAndRestoresSamePlayer() async throws {
         let source = try await downloaded("Sample video.mp4")
         defer { try? FileManager.default.removeItem(at: source) }
