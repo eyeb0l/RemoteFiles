@@ -2,6 +2,12 @@
 
 This is a dated record of feature work and validation, not a live test dashboard. Each result applies to the build, environment and date described with it; an installation or Simulator pass does not establish later physical-device acceptance. For current behavior, start with the [documentation index](docs/README.md). For checks still to perform, see [manual acceptance](docs/MANUAL_ACCEPTANCE.md) and the [roadmap](ROADMAP.md).
 
+**6 November 2026: private keys in text files.**
+
+A private key is now found by its content on every text route, so an extensionless `id_rsa`, a hidden `.server.key` or a key pasted into a log no longer opens as text, matches a search or enters the document cache or a saved index. A file that is only keys shows **Contains a Private Key** with no text. A key in a longer document becomes `•`, with a notice above it, and offsets and line numbers don't change. Text that only mentions a marker is untouched. A Markdown image reference can no longer pull a key into the image cache on disk, and an index saved by an older version is cleaned and rewritten when it is next read. See [private keys in text files](docs/PRIVATE_KEYS_IN_TEXT.md).
+
+`swift test` passed on macOS, including the real server search helper script run locally. On an iPhone 18 Pro Simulator (iOS 27.2), the new key suites, `SearchIndexStoreTests` and the hosted reader's cache checks passed in the signed iOS test host. A hands-on Demo pass covered both states and Find past a hidden key. Each route's regression was confirmed to fail with its fix disabled. Detection was compared with the prototype behind the design's measurements on the same 231,203 files, and the classifications matched. VoiceOver, iPad, offline reader UI, Airplane Mode and physical-device acceptance are outstanding, and the UI lanes are left to CI. How VoiceOver reads a run of `•` hasn't been checked.
+
 **6 November 2026: certificate previews.**
 
 Tapping a `.pem`, `.crt`, `.cer`, `.der`, `.p7b`, `.p7c` or `.csr` file now shows a Settings-style summary instead of "preview unavailable", and `.p12`/`.pfx` files explain why they aren't opened. PEM and DER are told apart by content. A private key beside a certificate is reported and never shown, copied, searched or kept; these files have no Source or Find, and content search and saved indexes skip them, including hidden ones, which used to count as text. See [certificate previews](docs/CERTIFICATE_PREVIEWS.md).

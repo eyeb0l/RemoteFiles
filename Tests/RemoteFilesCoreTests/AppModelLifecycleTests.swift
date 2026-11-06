@@ -386,6 +386,23 @@ private actor DisconnectKeyInstaller: PublicKeyInstalling {
         await model.background(); XCTAssertEqual(model.routes.count, 2)
         await model.disconnectAndGoHome(); XCTAssertTrue(model.routes.isEmpty)
     }
+    func testTheDocumentCacheNeverKeepsTheBytesOfAHiddenKey() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try AppModel(directory: directory, fileService: BackgroundExportService())
+        let id = UUID(), key = Data(SyntheticKey.pem().utf8), mixed = Data(("first\n" + SyntheticKey.pem() + "needle\n").utf8)
+        let plain = Data("plain report".utf8)
+        model.cache(plain, decodedAs: DocumentPolicy.decode(plain, filename: "report.txt"), id: id, path: "/report.txt")
+        XCTAssertEqual(model.cachedDocument(id, path: "/report.txt"), plain)
+        for (bytes, name) in [(key, "id_rsa"), (mixed, "notes.txt")] {
+            let path = "/" + name
+            model.cache(plain, id: id, path: path)
+            let decoded = DocumentPolicy.decode(bytes, filename: name)
+            model.cache(bytes, decodedAs: decoded, id: id, path: path)
+            XCTAssertNil(model.cachedDocument(id, path: path), "\(name) was cached, and an older copy doesn't linger")
+        }
+        XCTAssertEqual(model.cachedDocument(id, path: "/report.txt"), plain, "Other documents stay")
+    }
     func testRecentSwipeModelPersistsOnlyEntryRemovalWithoutDisconnectOrCacheDeletion() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

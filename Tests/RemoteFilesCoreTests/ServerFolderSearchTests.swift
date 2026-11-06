@@ -103,6 +103,16 @@ final class ServerFolderSearchTests: XCTestCase {
         XCTAssertEqual(result.contentMatches.first?.snippet, "Café [x].*")
     }
 
+    /// A server need not run the helper as written, so the app can't rely on what it filters.
+    func testHostileResponseCannotDeliverAKeyAsAMatch() throws {
+        let key = SyntheticKey.pem()
+        let fragment = try XCTUnwrap(SyntheticKey.fragments(of: key).first)
+        let data = try response(candidates: [candidate("/r/id_rsa", text: key), candidate("/r/.server.key", text: key)],
+                                overrides: ["files": 2, "bytes": key.utf8.count * 2, "charged": key.utf8.count * 2])
+        let result = try ServerFolderSearch.decode(data, query: fragment, root: "/r", includeHidden: true, limits: .init(), content: .init())
+        XCTAssertEqual(result.contentMatches.count, 0)
+    }
+
     func testKernelRootIdentityRequiresUnambiguousInodeMountAndNamespace() throws {
         let identity = try ServerFolderSearch.RootIdentity(fdinfo: "pos:\t0\nflags:\t0100000\nmnt_id:\t42\nino:\t123456\n", namespace: "mnt:[4026531840]")
         XCTAssertEqual(identity.inode, 123456); XCTAssertEqual(identity.mountID, 42)
@@ -195,6 +205,26 @@ final class ServerFolderSearchTests: XCTestCase {
         }
         XCTAssertFalse(contents.contentMatches.isEmpty, "The ordinary files still match")
         XCTAssertEqual(contents.filesSearched, before.filesSearched, "The helper doesn't even send their bytes back to the app")
+    }
+
+    /// The helper sends back a whole file when its text matches, and the app is what decides.
+    /// A real server's files, and the full round trip through the helper script.
+    func testKeysInOrdinaryFilesFoundOnTheServerNeverBecomeMatches() throws {
+        let root = try fixture()
+        let key = SyntheticKey.pem()
+        let fragment = try XCTUnwrap(SyntheticKey.fragments(of: key).first)
+        let mixed = "first\n\n" + key + "\nserverneedle after the key\n"
+        for name in ["id_rsa", ".server.key", "server.pem.txt"] { try Data(key.utf8).write(to: root.appendingPathComponent(name)) }
+        try Data(mixed.utf8).write(to: root.appendingPathComponent("notes.txt"))
+
+        let probed = try runHelper(root: root.path, query: fragment, hidden: true, content: .init())
+        XCTAssertEqual(probed.contentMatches.count, 0)
+        let found = try runHelper(root: root.path, query: "serverneedle", hidden: true, content: .init())
+        let match = try XCTUnwrap(found.contentMatches.first { $0.entry.name == "notes.txt" })
+        XCTAssertEqual(match.line, (mixed.components(separatedBy: "serverneedle").first ?? "").reduce(1) { $1.isNewline ? $0 + 1 : $0 })
+        let marker = try runHelper(root: root.path, query: "BEGIN RSA", hidden: true, content: .init())
+        XCTAssertEqual(marker.contentMatches.map(\.entry.name), ["notes.txt"], "A file that's only a key has no text to match")
+        XCTAssertFalse(marker.contentMatches[0].snippet.contains(fragment))
     }
 
     func testHelperEnforcesDepthFolderFileByteAndTimeLimits() throws {

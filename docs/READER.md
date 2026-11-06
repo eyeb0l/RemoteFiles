@@ -18,6 +18,7 @@ Select a file in a folder to open its preview. The reader does not edit the serv
 | PDF | Native scrolling and zooming, with a current-page indicator. |
 | Audio and video | Playback and seeking after download. Compatibility depends on the device and codec; see [audio and video](AUDIO_VIDEO.md) for the full format list. |
 | Certificates | A summary of `.pem`, `.crt`, `.cer`, `.der`, `.p7b`, `.p7c` and `.csr` files up to 2 MiB, with no source view. `.p12` and `.pfx` files are not opened. See [certificate previews](CERTIFICATE_PREVIEWS.md). |
+| A private key in any text file | Hidden by its content. A file that is only a key shows no text, and a key in a longer document becomes `•` with a notice. See [private keys in text files](PRIVATE_KEYS_IN_TEXT.md). |
 
 > **Download limit:** Image, PDF and media downloads are limited to 128 MiB per file. Even when a file has no supported preview, you can [save its original bytes](#save-the-original).
 

@@ -1,5 +1,6 @@
 import Foundation
 import Crypto
+import ImageIO
 
 public struct RemoteDocumentLocation: Hashable, Sendable {
     public let profile: ConnectionProfile
@@ -135,7 +136,8 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         try Task.checkCancellation()
         let path = try RemoteResourcePath.resolve(reference, relativeTo: document)
         // A document's image reference can't pull a file that may hold a private key into this
-        // cache on disk. Certificate previews read their bytes without it.
+        // cache on disk, even one that happens to be an image. Certificate previews read their
+        // bytes without it, and `mayKeep` covers the files that can only be told by their content.
         guard !DocumentPolicy.kind(filename: RemotePath.name(of: path)).isCertificateFile else { throw RemoteResourceError.notImage }
         let key = try cacheKey(path: path, document: document)
         let generation = generations[key]
@@ -257,7 +259,12 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         let fm = FileManager.default
         try prepareCacheDirectory()
         let target = directory.appendingPathComponent(key).appendingPathExtension("resource")
-        let targetAttributes = try validateCachedFile(at: target)
+        var targetAttributes = try validateCachedFile(at: target)
+        // An older version could have kept a file that this check now refuses.
+        if targetAttributes != nil, !Self.mayKeep(target, path: path) {
+            try? fm.removeItem(at: target)
+            targetAttributes = nil
+        }
         // Saved results recheck their canonical boundary on every opening, even when an
         // ordinary preview or a previous search opening has already cached these bytes.
         if document.canonicalRoot == nil, let attrs = targetAttributes,
@@ -310,6 +317,8 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         try Task.checkCancellation()
         let size = (try fm.attributesOfItem(atPath: temp.path)[.size] as? NSNumber)?.intValue ?? 0
         guard size <= diskLimit else { throw RemoteFileError.tooLarge(diskLimit) }
+        // The partial file goes with this function's exit, so nothing reaches the cache.
+        guard Self.mayKeep(temp, path: path) else { throw RemoteResourceError.notImage }
         // An invalidated transfer still belongs to its original consumers. Keep its
         // result at a separate URL so it cannot replace the current cached resource.
         let destination = generations[key] == generation ? target :
@@ -389,6 +398,16 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
 
     /// Returns secure attributes for a reusable regular file. Non-regular cache
     /// entries are discarded without following them and treated as a miss.
+    /// A Markdown image can point at any file, such as an `id_rsa` beside the document, and this
+    /// cache is on disk. Anything not named as media must really be an image, like an `.ico`.
+    private static func mayKeep(_ file: URL, path: String) -> Bool {
+        switch DocumentPolicy.kind(filename: RemotePath.name(of: path)) {
+        case .image, .pdf, .video, .audio: return true
+        default:
+            guard let source = CGImageSourceCreateWithURL(file as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return false }
+            return CGImageSourceGetType(source) != nil
+        }
+    }
     private func validateCachedFile(at url: URL) throws -> [FileAttributeKey: Any]? {
         let fm = FileManager.default
         guard let mode = try Self.fileMode(at: url) else { return nil }

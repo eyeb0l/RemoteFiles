@@ -68,15 +68,16 @@ public enum SearchDocumentExtractor {
             let (image, multipleFrames) = try image(data)
             try check(deadline)
             let text = try await recognize(image, textLimit: textLimit, deadline: deadline)
-            return SearchExtraction(segments: text.value.isEmpty ? [] : [.init(text: text.value)],
+            return SearchExtraction(segments: text.value.isEmpty ? [] : [.init(text: PrivateKeyRedaction.redact(text.value).text)],
                                     isTruncated: multipleFrames || text.truncated)
         default:
             let result: SearchExtraction
             switch DocumentPolicy.decode(data, filename: filename) {
-            case .text(let text, _):
+            case .text(let text, _, _):
                 let clipped = prefix(text, byteLimit: textLimit)
                 result = SearchExtraction(segments: clipped.value.isEmpty ? [] : [.init(text: clipped.value)], isTruncated: clipped.truncated)
-            case .empty: result = SearchExtraction(segments: [])
+            // Read and found to hold nothing to search, which doesn't make an index partial.
+            case .empty, .privateKey: result = SearchExtraction(segments: [])
             default: throw SearchExtractionError.unsupported
             }
             try Task.checkCancellation()
@@ -112,8 +113,10 @@ public enum SearchDocumentExtractor {
             }
             try check(deadline)
             if !text.value.isEmpty {
-                segments.append(.init(text: text.value, page: index + 1))
-                remaining -= text.value.utf8.count
+                // A page or scan can show a key too. Hiding one can use more bytes than it had.
+                let visible = PrivateKeyRedaction.redact(text.value).text
+                segments.append(.init(text: visible, page: index + 1))
+                remaining -= visible.utf8.count
             }
             truncated = truncated || text.truncated
         }

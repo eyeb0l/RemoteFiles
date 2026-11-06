@@ -155,7 +155,7 @@ enum ServerFolderSearch {
                       bytes.count <= content.maxFileBytes else { throw Failure.invalidResponse }
                 transferred += bytes.count
                 guard transferred <= value.bytes else { throw Failure.invalidResponse }
-                if case .text(let text, _) = DocumentPolicy.decode(bytes, filename: entry.name, maxBytes: content.maxFileBytes),
+                if case .text(let text, _, _) = DocumentPolicy.decode(bytes, filename: entry.name, maxBytes: content.maxFileBytes),
                    let match = RemoteFolderSearch.firstMatch(in: text, query: query, entry: entry) {
                     matchCount += 1
                     if update.contentMatches.count < limits.maxMatches { update.contentMatches.append(match) }

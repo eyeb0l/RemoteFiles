@@ -22,7 +22,7 @@ final class SearchDocumentExtractorTests: XCTestCase {
         CTLineDraw(line, context)
     }
 
-    private func pdf(_ pages: [String], scanned: Bool = false) throws -> Data {
+    private func pdf(_ pages: [String], scanned: Bool = false, textSize: CGFloat = 32) throws -> Data {
         let data = NSMutableData()
         let consumer = try XCTUnwrap(CGDataConsumer(data: data))
         var box = CGRect(x: 0, y: 0, width: 700, height: 300)
@@ -32,7 +32,7 @@ final class SearchDocumentExtractorTests: XCTestCase {
             if scanned {
                 context.draw(try raster(text), in: box)
             } else {
-                draw(text, in: context)
+                draw(text, in: context, size: textSize)
             }
             context.endPDFPage()
         }
@@ -72,6 +72,17 @@ final class SearchDocumentExtractorTests: XCTestCase {
             do { _ = try await extract(data, filename: "invalid.txt"); XCTFail("Invalid source must not be indexed") }
             catch SearchExtractionError.unsupported { }
         }
+    }
+
+    func testAKeyOnAPDFPageIsHiddenInSearchText() async throws {
+        let body = SyntheticKey.base64(bytes: 90)
+        let page = "-----BEGIN " + SyntheticKey.privateWord + " KEY----- " + body + " -----END " + SyntheticKey.privateWord + " KEY-----"
+        let extracted = try await SearchDocumentExtractor.extract(try pdf([page], textSize: 6), filename: "keys.pdf", options: .init(includePDF: true),
+                                                                  deadline: ContinuousClock.now + .seconds(120))
+        let text = extracted.segments.map(\.text).joined()
+        // The whole line has to be on the page for this to be a test of anything.
+        XCTAssertTrue(text.contains("END"), "The page's text was read")
+        XCTAssertFalse(text.contains(body.prefix(16)))
     }
 
     func testPDFAndImageExtractionRequireExplicitOptions() async throws {

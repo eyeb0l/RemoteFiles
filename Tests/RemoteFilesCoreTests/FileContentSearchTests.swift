@@ -276,6 +276,48 @@ final class FileContentSearchTests: XCTestCase {
         XCTAssertTrue(reads.allSatisfy { $0.root == "/r" })
     }
 
+    func testKeysInOrdinaryFilesAreNeverMatchedOrSavedInAnIndex() async throws {
+        let key = SyntheticKey.pem()
+        let fragment = try XCTUnwrap(SyntheticKey.fragments(of: key).first)
+        let mixed = "first\n\n" + key + "\nneedle after the key\n"
+        let files = ["/r/id_rsa": key, "/r/.server.key": key, "/r/server.pem.txt": key, "/r/notes.txt": mixed]
+        let service = ContentTreeService(["/r": files.keys.sorted().map { file($0) }],
+                                         contents: files.mapValues { bytes($0) })
+        // What the server would return for the key's own text: nothing, whichever part is asked for.
+        for query in [fragment, String(fragment.prefix(8)), "BEGIN RSA"] {
+            var found: [RemoteFolderSearch.ContentMatch] = []
+            for try await update in RemoteFolderSearch.contents(matching: query, below: "/r", profile: profile, service: service, includeHidden: true,
+                                                                extraction: .init(includePDF: true)) {
+                found += update.contentMatches
+            }
+            XCTAssertTrue(found.allSatisfy { $0.entry.path == "/r/notes.txt" }, "A file that's only a key has no text to match")
+            for match in found {
+                XCTAssertFalse(match.snippet.contains(fragment))
+                XCTAssertEqual(match.line, 3, "Only the marker of the key in the document, on its own line")
+            }
+            if query != "BEGIN RSA" { XCTAssertEqual(found.count, 0) }
+        }
+        // A match after the key reports the line it has in the file.
+        var after: [RemoteFolderSearch.ContentMatch] = []
+        for try await update in RemoteFolderSearch.contents(matching: "needle", below: "/r", profile: profile, service: service, includeHidden: true,
+                                                            extraction: .init(includePDF: true)) {
+            after += update.contentMatches
+        }
+        let expectedLine = (mixed.components(separatedBy: "needle").first ?? "").reduce(1) { $1.isNewline ? $0 + 1 : $0 }
+        XCTAssertEqual(after.map(\.line), [expectedLine])
+
+        let snapshot = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: service, includeHidden: true)
+        XCTAssertEqual(snapshot.documents.count, 4)
+        XCTAssertFalse(snapshot.isPartial, "A key file was read, and found to hold nothing to search")
+        let saved = snapshot.documents.flatMap(\.segments).map(\.text).joined()
+        for fragment in SyntheticKey.fragments(of: key) { XCTAssertFalse(saved.contains(fragment)) }
+        XCTAssertEqual(snapshot.documents.first { $0.entry.path == "/r/id_rsa" }?.segments, [])
+        let indexed = try RemoteFolderSearch.indexedContents(matching: "needle", snapshot: snapshot, includeHidden: true, root: "/r")
+        XCTAssertEqual(indexed.contentMatches.map(\.line), [expectedLine])
+        let probed = try RemoteFolderSearch.indexedContents(matching: fragment, snapshot: snapshot, includeHidden: true, root: "/r")
+        XCTAssertEqual(probed.contentMatches.count, 0)
+    }
+
     func testPEMHoldingAPrivateKeyIsNeverReadSearchedOrIndexed() async throws {
         // Built up so secret scanners don't flag this file. The body is what a search would find.
         let keyed = bytes("-----BEGIN PRIVATE" + " KEY-----\nneedleKeyBytes\n-----END PRIVATE" + " KEY-----\n")

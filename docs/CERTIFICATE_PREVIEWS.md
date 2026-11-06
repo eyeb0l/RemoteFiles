@@ -14,7 +14,7 @@ Opening a certificate file shows a native summary of what it states: the fields 
 | `.p12`, `.pfx` | Not opened. These are password-protected containers that usually hold a private key, so the app asks for no password and explains that **Save Original to Files** (or **Share Original** for a saved copy) still works. |
 | `.key` | Unchanged: no preview. Saving the original still works. |
 
-A file is read by its structure, not its name, so a `.crt` holding a bundle or a `.der` holding a request still shows correctly. A file that is only named `pem`, with no extension, stays a text candidate like other extensionless files.
+A file is read by its structure, not its name, so a `.crt` holding a bundle or a `.der` holding a request still shows correctly. A file that is only named `pem`, with no extension, stays a text candidate like other extensionless files, and [a key in it is still hidden](PRIVATE_KEYS_IN_TEXT.md).
 
 The summary shows each certificate's subject, issuer, validity dates, serial number, Subject Alternative Names, public key algorithm and size, signature algorithm, basic constraints, key usage, extended key usage, whether it is self-signed, and its SHA-256 and SHA-1 fingerprints. Hold a row to copy its value. A file with several certificates summarizes the first in full and lists the rest under **Also in This File**; each opens in a sheet. File order is kept, so a chain's leaf normally comes first, but nothing reorders a bundle to find one.
 
@@ -44,7 +44,7 @@ A `.pem` can hold a private key beside its certificates, so these files have a d
 
 Content search, saved search indexes and the server-side helper never read these extensions. `.pem` and the others are in `DocumentPolicy.searchExcludedExtensions`, because the helper otherwise treats any dotfile, such as `.server.pem`, as text. Before certificate previews, a hidden `.pem` counted as text in the reader and in search. An index saved then may still hold such a file's text on the device: searches now ignore it, and it goes the next time that index is updated or rebuilt. File names are still found by name search.
 
-**This doesn't protect every key on a server.** It covers files recognized by extension. An extensionless `id_rsa`, a hidden `.server.key` or a `server.pem.txt` is still a text candidate, as before, and shows as text if you open it or search for it.
+This route covers files recognized by extension. An extensionless `id_rsa`, a hidden `.server.key`, a `server.pem.txt` or a key pasted into any text file goes the text route instead, where the key is found by its content and hidden. See [private keys in text files](PRIVATE_KEYS_IN_TEXT.md).
 
 ## Limits
 

@@ -4,7 +4,8 @@ import Foundation
 /// organization, `example.test` is a reserved domain, and no private key for them was kept.
 public enum DemoCertificates {
     public static let folder = "/Projects/TLS certificates"
-    static let names = ["Example chain.pem", "Expired server.cer", "Future server.crt", "Server with key.pem", "Client identity.p12"]
+    static let names = ["Example chain.pem", "Expired server.cer", "Future server.crt", "Server with key.pem", "Client identity.p12",
+                        "Deploy notes.txt", "id_demo"]
 
     static let leaf = """
     -----BEGIN CERTIFICATE-----
@@ -79,6 +80,14 @@ public enum DemoCertificates {
     static let placeholderKeyBlock = "-----BEGIN " + "PRIVATE" + " KEY-----\n"
         + Data("This is not a real private key.".utf8).base64EncodedString() + "\n-----END " + "PRIVATE" + " KEY-----\n"
 
+    /// A longer placeholder, for the files that show how a key in ordinary text is hidden.
+    static let placeholderKeyFile: String = {
+        let sentence = Data(String(repeating: "This is not a real private key. ", count: 8).utf8).base64EncodedString()
+        var lines: [Substring] = [], rest = sentence[...]
+        while !rest.isEmpty { lines.append(rest.prefix(64)); rest = rest.dropFirst(64) }
+        return "-----BEGIN OPENSSH " + "PRIVATE" + " KEY-----\n" + lines.joined(separator: "\n") + "\n-----END OPENSSH " + "PRIVATE" + " KEY-----\n"
+    }()
+
     public static func entry(named name: String) -> RemoteEntry {
         RemoteEntry(name: name, path: folder + "/" + name, kind: .file, size: UInt64(contents(of: name)?.count ?? 0))
     }
@@ -91,6 +100,9 @@ public enum DemoCertificates {
         case "Server with key.pem": return Data((leaf + "\n" + placeholderKeyBlock).utf8)
         // Random-looking bytes standing in for a container nothing here opens.
         case "Client identity.p12": return Data((0..<1_024).map { UInt8(truncatingIfNeeded: $0 &* 197 &+ 13) })
+        case "Deploy notes.txt":
+            return Data(("Rotate the deploy key on the first of the month.\n\n" + placeholderKeyFile + "\nThe rest of this file stays readable, and Find still works in it.\n").utf8)
+        case "id_demo": return Data(placeholderKeyFile.utf8)
         default: return nil
         }
     }

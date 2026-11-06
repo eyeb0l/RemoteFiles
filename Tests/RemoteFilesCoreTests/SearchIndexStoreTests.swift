@@ -24,6 +24,77 @@ final class SearchIndexStoreTests: XCTestCase {
         try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }
     }
 
+    /// Writes what an older version would have saved, which `save` no longer writes.
+    private func saveAsOlderVersion(_ text: String, path: String, store: SearchIndexStore) async throws {
+        let stand = "STAND-IN-FOR-OLD-TEXT"
+        try await store.save(snapshot([document(path, text: stand)], hidden: true), profile: profile, root: "/r")
+        let file = try XCTUnwrap(files().first)
+        let encoded = String(decoding: try JSONEncoder().encode(text), as: UTF8.self).dropFirst().dropLast()
+        let json = String(decoding: try Data(contentsOf: file), as: UTF8.self).replacingOccurrences(of: stand, with: encoded)
+        try Data(json.utf8).write(to: file)
+        XCTAssertTrue(String(decoding: try Data(contentsOf: file), as: UTF8.self).contains(encoded.prefix(80)))
+    }
+
+    func testAKeyAnOlderVersionSavedIsGoneFromDiskOnceTheIndexIsRead() async throws {
+        let store = SearchIndexStore(directory: directory)
+        let key = SyntheticKey.pem(), fragments = SyntheticKey.fragments(of: key)
+        let text = "first\n\n" + key + "\nneedle\n"
+        for (saved, path) in [(text, "/r/notes.txt"), (key, "/r/id_rsa")] {
+            try await saveAsOlderVersion(saved, path: path, store: store)
+            let loaded = try await store.load(profile: profile, root: "/r")
+            let snapshot = try XCTUnwrap(loaded)
+            let held = snapshot.documents.flatMap(\.segments).map(\.text).joined()
+            for fragment in fragments { XCTAssertFalse(held.contains(fragment)) }
+            let onDisk = String(decoding: try Data(contentsOf: try XCTUnwrap(files().first)), as: UTF8.self)
+            for fragment in fragments {
+                XCTAssertFalse(onDisk.contains(fragment.replacingOccurrences(of: "/", with: "\\/")), "Rewritten as soon as it was read")
+            }
+            XCTAssertEqual(snapshot.createdAt, Date(timeIntervalSince1970: 123), "Still the same index")
+            XCTAssertEqual(snapshot.documents.first?.entry.path, path)
+            if path == "/r/id_rsa" { XCTAssertEqual(snapshot.documents.first?.segments, []) }
+        }
+    }
+
+    /// A key file doesn't change, so an update would reuse its old text for as long as it's there.
+    func testUpdatingAnOlderIndexDoesNotCarryAKeyForward() async throws {
+        let store = SearchIndexStore(directory: directory)
+        let key = SyntheticKey.pem()
+        try await saveAsOlderVersion("first\n" + key, path: "/r/notes.txt", store: store)
+        let loaded = try await store.load(profile: profile, root: "/r")
+        let previous = try XCTUnwrap(loaded)
+        let entry = try XCTUnwrap(previous.documents.first?.entry)
+        let service = NoReadsService(entry: entry)
+        let updated = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: service, includeHidden: true,
+                                                              extraction: previous.extraction, reusing: previous)
+        XCTAssertEqual(updated.documents.count, 1, "The unchanged file was kept, not read again")
+        for fragment in SyntheticKey.fragments(of: key) {
+            XCTAssertFalse(updated.documents.flatMap(\.segments).map(\.text).joined().contains(fragment))
+        }
+    }
+
+    func testCleaningAnOlderIndexKeepsItsSettingAndABuildUnderWay() async throws {
+        let store = SearchIndexStore(directory: directory)
+        try await saveAsOlderVersion("first\n" + SyntheticKey.pem(), path: "/r/notes.txt", store: store)
+        try await store.setUpdatesAutomatically(true, profile: profile, root: "/r")
+        let generation = try await store.beginBuild(profile: profile, root: "/r")
+        _ = try await store.load(profile: profile, root: "/r")
+        let automatic = try await store.updatesAutomatically(profile: profile, root: "/r")
+        XCTAssertTrue(automatic)
+        try await store.save(snapshot([document("/r/new.txt")]), profile: profile, root: "/r", generation: generation)
+        let loaded = try await store.load(profile: profile, root: "/r")
+        XCTAssertEqual(loaded?.documents.map(\.entry.path), ["/r/new.txt"])
+    }
+
+    func testSavingAKeyHidesItEvenIfACallerMissedIt() async throws {
+        let store = SearchIndexStore(directory: directory)
+        let key = SyntheticKey.pem()
+        try await store.save(snapshot([document("/r/notes.txt", text: "first\n" + key)]), profile: profile, root: "/r")
+        let onDisk = String(decoding: try Data(contentsOf: try XCTUnwrap(files().first)), as: UTF8.self)
+        for fragment in SyntheticKey.fragments(of: key) {
+            XCTAssertFalse(onDisk.contains(fragment.replacingOccurrences(of: "/", with: "\\/")))
+        }
+    }
+
     func testReloadPreservesTextPagesMetadataAndPartialCoverage() async throws {
         let store = SearchIndexStore(directory: directory)
         let original = snapshot([document("/r/report.pdf", text: "Saved searchable text", page: 3)], partial: true)
@@ -388,4 +459,18 @@ final class SearchIndexStoreTests: XCTestCase {
         XCTAssertTrue(index.isDueForAutomaticUpdate(at: created.addingTimeInterval(interval)))
         XCTAssertTrue(index.isDueForAutomaticUpdate(at: created.addingTimeInterval(-60)), "A clock set back cannot postpone updates")
     }
+}
+
+/// A folder holding one file. An update that keeps a file's text mustn't read it.
+private actor NoReadsService: RemoteFileService {
+    let entry: RemoteEntry
+    init(entry: RemoteEntry) { self.entry = entry }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { .init(path: path, entries: [entry]) }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
+    func readSearchFile(profile: ConnectionProfile, path: String, canonicalRoot: String, limit: Int) async throws -> Data {
+        XCTFail("An unchanged file should be kept")
+        throw RemoteFileError.unsupportedFile
+    }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.unsupportedFile }
+    func disconnect() async {}
 }
