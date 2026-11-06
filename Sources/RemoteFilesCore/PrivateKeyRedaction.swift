@@ -154,13 +154,24 @@ public enum PrivateKeyRedaction {
         while index < range.upperBound {
             let byte = bytes[index]
             var next: Int?
-            if byte == 0x0A || byte == 0x0D {
+            // CRLF is one line ending, raw or escaped. Counted as two it makes an empty line, which
+            // the scanners read as the end of a key, leaving the rest of the key's lines showing.
+            if byte == 0x0A {
                 next = index + 1
+            } else if byte == 0x0D {
+                next = index + 1
+                if next! < range.upperBound, bytes[next!] == 0x0A { next! += 1 }
             } else if byte == 0x5C {
                 var after = index
                 while after < range.upperBound, bytes[after] == 0x5C { after += 1 }
-                if after < range.upperBound, bytes[after] == 0x6E || bytes[after] == 0x72 { next = after + 1 }
-                else { index = after; continue }
+                if after < range.upperBound, bytes[after] == 0x6E || bytes[after] == 0x72 {
+                    next = after + 1
+                    if bytes[after] == 0x72 {
+                        var pair = after + 1
+                        while pair < range.upperBound, bytes[pair] == 0x5C { pair += 1 }
+                        if pair > after + 1, pair < range.upperBound, bytes[pair] == 0x6E { next = pair + 1 }
+                    }
+                } else { index = after; continue }
             }
             if let next {
                 if !body(Line(start..<index, in: bytes)) { return }

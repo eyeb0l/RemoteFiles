@@ -182,6 +182,41 @@ final class PrivateKeyRedactionTests: XCTestCase {
         }
     }
 
+    /// A line ending of two characters is one line ending, or a key's next line looks like the end.
+    func testWindowsLineEndingsDontExposeTheRestOfAKey() throws {
+        func windows(_ text: String) -> String { text.replacingOccurrences(of: "\n", with: "\r\n") }
+        func json(_ text: String) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: ["value": text]), as: UTF8.self)
+        }
+        let ppk = SyntheticKey.ppk()
+        let lines = ppk.split(separator: "\n").map(String.init)
+        let privateStart = lines.firstIndex { $0.hasPrefix("Private-Lines") }!
+        let wrapped = Data(SyntheticKey.pem().utf8).base64EncodedString()
+        let folded = SyntheticKey.wrapped(wrapped, width: 76)
+        let secret = "kind: Secret\ndata:\n  tls.key: |\n" + folded.map { "    " + $0 + "\n" }.joined() + "  note: kept\n"
+
+        let raw = PrivateKeyRedaction.redact(windows(ppk))
+        XCTAssertEqual(raw.hiddenKeys, 1, "A PuTTY file saved on Windows")
+        XCTAssertTrue(raw.isOnlyKeys)
+        let escaped = PrivateKeyRedaction.redact(try json(windows(ppk)))
+        XCTAssertEqual(escaped.hiddenKeys, 1, "The same file inside a JSON string")
+        for result in [raw, escaped] {
+            for line in lines[(privateStart + 1)...(privateStart + 2)] { XCTAssertFalse(result.text.contains(line)) }
+        }
+
+        for (name, text) in [("Folded", windows(secret)), ("Folded in JSON", try json(windows(secret)))] {
+            let result = PrivateKeyRedaction.redact(text)
+            XCTAssertEqual(result.hiddenKeys, 1, name)
+            for line in folded { XCTAssertFalse(result.text.contains(line), name) }
+            XCTAssertTrue(result.text.contains("note: kept"), name)
+            XCTAssertEqual(result.text.utf16.count, text.utf16.count, name)
+        }
+
+        // A real blank line still ends a key, so what follows it stays readable.
+        let blank = windows(folded.joined(separator: "\n") + "\n\nAfterwards\n")
+        XCTAssertTrue(PrivateKeyRedaction.redact(blank).text.contains("Afterwards"))
+    }
+
     func testWrappedKeysAreHiddenAndACertificateBesideThemStays() throws {
         let key = SyntheticKey.pem()
         let wrapped = Data(key.utf8).base64EncodedString()
