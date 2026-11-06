@@ -294,6 +294,8 @@ final class PrivateKeyRedactionTests: XCTestCase {
             fill("PuTTY-User-Key-File-3: x\n"),
             fill("PuTTY-User-Key-File-3: x\nPrivate-Lines: 1024\n"),
             fill(Data("-----BEGIN ".utf8).base64EncodedString().dropLast(2) + " "),
+            // Every candidate is in one run, so each mustn't scan it afresh.
+            fill(Data("-----BEGIN ".utf8).base64EncodedString()),
             fill("---- BEGIN SSH2 "),
             begin + fill("\\"),
             begin + fill(" "),

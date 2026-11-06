@@ -43,6 +43,9 @@ public enum SearchDocumentExtractor {
     private static let maximumTextBytes = 262_144
     private static let maximumPages = 100
     private static let rasterDimension = 2_048
+    /// Read past a text budget, so a key that crosses it is long enough to be recognized and hidden
+    /// before the text is clipped. The text route has the whole file to go on.
+    private static let keyLookahead = 1_024
 
     public static func supports(filename: String, options: SearchExtractionOptions) -> Bool {
         switch DocumentPolicy.kind(filename: filename) {
@@ -67,7 +70,8 @@ public enum SearchDocumentExtractor {
             try check(deadline)
             let (image, multipleFrames) = try image(data)
             try check(deadline)
-            let text = hidingKeys(in: try await recognize(image, textLimit: textLimit, deadline: deadline), byteLimit: textLimit)
+            let recognized = try await recognize(image, textLimit: textLimit > 0 ? textLimit + keyLookahead : 0, deadline: deadline)
+            let text = hidingKeys(in: recognized, byteLimit: textLimit)
             return SearchExtraction(segments: text.value.isEmpty ? [] : [.init(text: text.value)],
                                     isTruncated: multipleFrames || text.truncated)
         default:
@@ -101,15 +105,15 @@ public enum SearchDocumentExtractor {
             let characters = options.includePDF ? page.numberOfCharacters : 0
             try check(deadline)
             // Selecting a bounded prefix avoids materializing an entire PDF page's text.
-            let selected = min(characters, remaining)
+            let selected = min(characters, remaining + keyLookahead)
             let embedded = selected > 0 ? page.selection(for: NSRange(location: 0, length: selected))?.string ?? "" : ""
             try check(deadline)
-            var text = prefix(embedded, byteLimit: remaining)
+            var text = prefix(embedded, byteLimit: remaining + keyLookahead)
             text.truncated = text.truncated || characters > selected
             if embedded.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, options.includeOCR {
                 let raster = try render(page)
                 try check(deadline)
-                text = try await recognize(raster, textLimit: remaining, deadline: deadline)
+                text = try await recognize(raster, textLimit: remaining + keyLookahead, deadline: deadline)
             }
             try check(deadline)
             text = hidingKeys(in: text, byteLimit: remaining)

@@ -91,6 +91,14 @@ final class SearchDocumentExtractorTests: XCTestCase {
         XCTAssertEqual(bounded.isTruncated, true)
         XCTAssertLessThanOrEqual(bounded.segments.reduce(0) { $0 + $1.text.utf8.count }, budget)
         XCTAssertFalse(bounded.segments.map(\.text).joined().contains(body.prefix(16)))
+
+        // A budget that ends just after the marker leaves too little to recognize as a key by itself.
+        let opening = "-----BEGIN " + SyntheticKey.privateWord + " KEY----- "
+        let crossing = try await SearchDocumentExtractor.extract(try pdf([page], textSize: 6), filename: "keys.pdf",
+            options: .init(includePDF: true, maxTextBytes: opening.utf8.count + 30), deadline: ContinuousClock.now + .seconds(120))
+        XCTAssertEqual(crossing.isTruncated, true)
+        XCTAssertLessThanOrEqual(crossing.segments.reduce(0) { $0 + $1.text.utf8.count }, opening.utf8.count + 30)
+        XCTAssertFalse(crossing.segments.map(\.text).joined().contains(body.prefix(16)))
     }
 
     func testPDFAndImageExtractionRequireExplicitOptions() async throws {

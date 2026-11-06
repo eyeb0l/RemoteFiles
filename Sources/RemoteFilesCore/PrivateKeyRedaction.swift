@@ -253,14 +253,15 @@ public enum PrivateKeyRedaction {
         mutating func findWrappedKeys() {
             let taken = spans.sorted { $0.lowerBound < $1.lowerBound }
             for needle in [PrivateKeyRedaction.wrappedPEM, PrivateKeyRedaction.wrappedOpenSSH] {
-                var position = 0, takenIndex = 0
+                // Candidates in one long run share its end, so it's only scanned once.
+                var position = 0, takenIndex = 0, runEnd = 0
                 while let start = PrivateKeyRedaction.first(needle, in: bytes, range: position..<bytes.count) {
                     position = start + needle.count
                     while takenIndex < taken.count, taken[takenIndex].upperBound <= start { takenIndex += 1 }
                     if takenIndex < taken.count, taken[takenIndex].contains(start) { continue }
                     // Inside a longer run isn't the start of one, though `KEY=` before it is.
                     if start > 0, bytes[start - 1] != 0x3D, PrivateKeyRedaction.isBase64(bytes[start - 1]) { continue }
-                    var runEnd = start
+                    runEnd = max(runEnd, start)
                     while runEnd < bytes.count, PrivateKeyRedaction.isBase64(bytes[runEnd]) { runEnd += 1 }
                     guard runEnd - start >= PrivateKeyRedaction.minimumWrappedCharacters, isWrappedKey(start..<runEnd, needle: needle) else { continue }
                     let body = wrappedLines(from: start)
