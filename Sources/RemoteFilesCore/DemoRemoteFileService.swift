@@ -58,6 +58,9 @@ public actor DemoRemoteFileService: RemoteFileService {
                 Self.searchSampleEntry(path + "/" + $0)
             })
         }
+        if path == DemoCertificates.folder {
+            return DirectorySnapshot(path: path, entries: DemoCertificates.names.map(DemoCertificates.entry))
+        }
         // Reports and its subfolder are finite, so searching subfolders ends.
         if path.hasSuffix("/Reports") {
             return DirectorySnapshot(path: path, entries: [
@@ -106,6 +109,8 @@ public actor DemoRemoteFileService: RemoteFileService {
         ]
         if path == "/Projects" {
             entries.append(.init(name: "Search samples", path: Self.searchSampleFolder, kind: .directory))
+            // Sorts after the other folders, so no folder's place in the list changes.
+            entries.append(.init(name: "TLS certificates", path: DemoCertificates.folder, kind: .directory))
         }
         return DirectorySnapshot(path: path, entries: entries)
     }
@@ -113,6 +118,10 @@ public actor DemoRemoteFileService: RemoteFileService {
         try await pause()
         if let file = Self.searchSampleFile(path) ?? Self.mediaFile(RemotePath.name(of: path)) {
             let bytes = try Data(contentsOf: file)
+            guard bytes.count <= limit else { throw RemoteFileError.tooLarge(limit) }
+            return bytes
+        }
+        if RemotePath.parent(of: path) == DemoCertificates.folder, let bytes = DemoCertificates.contents(of: RemotePath.name(of: path)) {
             guard bytes.count <= limit else { throw RemoteFileError.tooLarge(limit) }
             return bytes
         }
@@ -134,12 +143,13 @@ public actor DemoRemoteFileService: RemoteFileService {
     }
     public func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
         try await pause()
-        if path == "." || path == "/Projects" || path == Self.searchSampleFolder || path == Self.thousandFilesFolder ||
+        if path == "." || path == "/Projects" || path == Self.searchSampleFolder || path == Self.thousandFilesFolder || path == DemoCertificates.folder ||
             path.hasSuffix("/Reports") || path.hasSuffix("/Reports/2026") || path.hasSuffix("/Empty") {
             let canonical = path == "." ? "/Projects" : path
             return RemoteEntry(name: RemotePath.name(of: canonical), path: canonical, kind: .directory)
         }
         if let entry = Self.searchSampleEntry(path) { return entry }
+        if RemotePath.parent(of: path) == DemoCertificates.folder { return DemoCertificates.entry(named: RemotePath.name(of: path)) }
         if path.hasSuffix("/Old notes") { throw RemoteFileError.notFound }
         if path.hasSuffix("/Current reports") { return RemoteEntry(name: "Reports", path: RemotePath.parent(of: path) + "/Reports", kind: .directory) }
         return RemoteEntry(name: "Weekly review.md", path: RemotePath.parent(of: path) + "/Weekly review.md", kind: .file)

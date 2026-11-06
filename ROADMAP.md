@@ -34,6 +34,7 @@ does not block RemoteFiles; see [dependency maintenance](docs/CITADEL_UPSTREAM.m
 - Private-key export through Files, with device authentication and a separate confirmation; imported encryption is preserved. See [key support](docs/KEY_SUPPORT.md).
 - Opt-in public-key installation while saving a direct connection, using the existing reviewed installer. See [public-key installation](docs/PUBLIC_KEY_INSTALLATION.md).
 - Locally rendered Mermaid, mathematical notation and static HTML inside Markdown. Standalone HTML keeps its [static preview](docs/HTML_PREVIEWS.md).
+- Native [certificate previews](docs/CERTIFICATE_PREVIEWS.md) that never show a private key, and don't claim a certificate is trusted.
 - A persistent [download queue](docs/DOWNLOADS.md) with progress, cancellation, retry and Files export, plus system-managed continuation of active SSH transfers in the background.
 
 These features still need physical-device acceptance; see [the dated status record](PREVIEW_STATUS.md) for validation.

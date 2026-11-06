@@ -58,6 +58,11 @@ struct ReaderView: View {
                 RemoteMediaView(model: model, profile: profile, entry: entry,
                                 kind: DocumentPolicy.kind(filename: entry.name), refreshID: refreshID,
                                 readingPosition: readingPosition)
+            } else if kind == .certificate {
+                RemoteCertificateView(model: model, profile: profile, entry: entry, refreshID: refreshID)
+            } else if kind == .protectedCertificate {
+                ProtectedCertificateView(filename: entry.name, saveAction: "Save Original to Files")
+                    .task { await model.recordRecent(profile: profile, entry: entry) }
             } else if let preview, model.isForeground {
                 switch preview {
                 case .text(let text, let markdown): DocumentContentView(text: text, markdown: markdown, source: source, filename: entry.name, location: .init(profile: profile, path: entry.path, canonicalRoot: entry.canonicalRoot), resolver: model.resources, readingPosition: readingPosition, openDocumentLink: openLink, wrapLines: wrapLines, navigation: navigation).id(ContentIdentity(revision: contentRevision, images: imageVersion))
@@ -96,8 +101,8 @@ struct ReaderView: View {
                 }
             }
         }
-        .contentStatus(progress: !isMedia && preview != nil && loading && !returning ? "Updating…" : nil,
-                       failure: !isMedia && preview != nil ? error.map { "Previously loaded copy · \($0)" } : nil,
+        .contentStatus(progress: !loadsOwnContent && preview != nil && loading && !returning ? "Updating…" : nil,
+                       failure: !loadsOwnContent && preview != nil ? error.map { "Previously loaded copy · \($0)" } : nil,
                        retry: { refreshID += 1 })
         .background(Color(uiColor: .systemBackground))
         .navigationTitle(entry.name)
@@ -253,12 +258,13 @@ struct ReaderView: View {
     }
 
     private var showsLoadingPlaceholder: Bool {
-        !isMedia && loading && (preview == nil || !model.isForeground)
+        !loadsOwnContent && loading && (preview == nil || !model.isForeground)
     }
-    private var isMedia: Bool {
-        let kind = DocumentPolicy.kind(filename: entry.name)
-        return [.image, .pdf, .video, .audio].contains(kind)
-    }
+    private var kind: DocumentKind { DocumentPolicy.kind(filename: entry.name) }
+    private var isMedia: Bool { [.image, .pdf, .video, .audio].contains(kind) }
+    /// Media and certificates read their own bytes. A certificate file's never reach `preview`, the
+    /// document cache, Find or Copy Source, because it can hold a private key.
+    private var loadsOwnContent: Bool { isMedia || kind.isCertificateFile }
     private var showsSource: Bool {
         source || ![.markdown, .html, .svg].contains(DocumentPolicy.kind(filename: entry.name))
     }
@@ -336,7 +342,7 @@ struct ReaderView: View {
     }
     private func reload() async {
         guard !model.isDisconnecting else { loading = false; return }
-        guard !isMedia else { return }
+        guard !loadsOwnContent else { return }
         // Going to the background isn't a failure of a document still on screen.
         guard model.isForeground else {
             loading = false

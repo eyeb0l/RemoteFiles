@@ -186,6 +186,24 @@ final class RemoteResourceTests: XCTestCase {
         XCTAssertEqual(lookups, ["/other/image.png"])
         XCTAssertEqual(downloads, 0)
     }
+    func testCertificateFilesNeverEnterTheDiskCacheAsImages() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let service = ImageExistenceTransportMock()
+        let resolver = RemoteResourceResolver(service: service, directory: dir)
+        for reference in ["server.pem", ".server.key.pem", "identity.p12", "chain.CRT"] {
+            do {
+                _ = try await resolver.localFile(for: reference, in: location)
+                XCTFail("Reading \(reference) as an image would keep its bytes on disk")
+            } catch RemoteResourceError.notImage { }
+        }
+        do {
+            _ = try await resolver.localFileForOpening(for: "server.pem", in: location)
+            XCTFail("Opening the same reference from its button must refuse it too")
+        } catch RemoteResourceError.notImage { }
+        let downloads = await service.downloads
+        XCTAssertEqual(downloads, 0)
+    }
     func testOpenFileRejectsUnsafeReferencesWithoutServerAccess() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }

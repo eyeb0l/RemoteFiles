@@ -134,6 +134,9 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
     public func localFile(for reference: String, in document: RemoteDocumentLocation, progress: @escaping DownloadProgressHandler) async throws -> URL {
         try Task.checkCancellation()
         let path = try RemoteResourcePath.resolve(reference, relativeTo: document)
+        // A document's image reference can't pull a file that may hold a private key into this
+        // cache on disk. Certificate previews read their bytes without it.
+        guard !DocumentPolicy.kind(filename: RemotePath.name(of: path)).isCertificateFile else { throw RemoteResourceError.notImage }
         let key = try cacheKey(path: path, document: document)
         let generation = generations[key]
         let flightKey = key + ":" + (generation?.uuidString ?? "initial")

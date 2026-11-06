@@ -373,6 +373,10 @@ struct OfflineReaderView: View {
                         else { Image(systemName: "waveform").font(.system(size: 64)).padding(32).accessibilityHidden(true) }
                         PlaybackControls(playback: playback)
                     }
+                } else if kind == .certificate, let lease {
+                    OfflineCertificateView(url: lease.url, filename: savedCopy.filename)
+                } else if kind == .protectedCertificate, lease != nil {
+                    ProtectedCertificateView(filename: savedCopy.filename, saveAction: "Share Original")
                 } else if let preview {
                     switch preview {
                     case .text(let text, let markdown):
@@ -567,6 +571,9 @@ struct OfflineReaderView: View {
                 try await playback.prepare(local.url, filename: local.pin.documentFilename)
                 try Task.checkCancellation()
                 guard requestID == token else { playback.stop(); return }
+            case .certificate, .protectedCertificate:
+                // The view reads the leased file itself. Its text never reaches `preview`.
+                break
             default:
                 let value = try await store.textPreview(local)
                 try Task.checkCancellation()

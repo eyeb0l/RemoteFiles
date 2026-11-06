@@ -276,6 +276,39 @@ final class FileContentSearchTests: XCTestCase {
         XCTAssertTrue(reads.allSatisfy { $0.root == "/r" })
     }
 
+    func testPEMHoldingAPrivateKeyIsNeverReadSearchedOrIndexed() async throws {
+        // Built up so secret scanners don't flag this file. The body is what a search would find.
+        let keyed = bytes("-----BEGIN PRIVATE" + " KEY-----\nneedleKeyBytes\n-----END PRIVATE" + " KEY-----\n")
+        let names = ["server.pem", ".hidden.pem", "a.crt", "a.cer", "a.der", "a.p7b", "a.p7c", "a.csr", "a.p12", "a.pfx"]
+        let paths = names.map { "/r/" + $0 }
+        let service = ContentTreeService(["/r": paths.map { file($0) } + [file("/r/notes.txt")]],
+            contents: Dictionary(uniqueKeysWithValues: paths.map { ($0, keyed) }).merging(["/r/notes.txt": bytes("needle")]) { _, new in new })
+        // The live search, with hidden files too, and every kind of extraction on.
+        var matches: [RemoteFolderSearch.ContentMatch] = []
+        for try await update in RemoteFolderSearch.contents(matching: "needle", below: "/r", profile: profile, service: service, includeHidden: true,
+                                                            extraction: .init(includePDF: true, includeOCR: true)) {
+            matches += update.contentMatches
+        }
+        XCTAssertEqual(matches.map(\.entry.path), ["/r/notes.txt"])
+        // A saved index keeps text on disk, so this is where a key would last longest.
+        let snapshot = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: service, includeHidden: true,
+                                                               extraction: .init(includePDF: true, includeOCR: true))
+        XCTAssertEqual(snapshot.documents.map(\.entry.path), ["/r/notes.txt"])
+        XCTAssertFalse(snapshot.documents.flatMap(\.segments).contains { $0.text.contains("needleKeyBytes") })
+        let reads = await service.reads
+        XCTAssertEqual(Set(reads.map(\.path)), ["/r/notes.txt"], "Their bytes are never even transferred for a search")
+    }
+
+    func testOlderIndexHoldingAHiddenPEMNoLongerFindsItsText() throws {
+        // Hidden `.pem` files counted as text before certificate previews, so such an index can exist.
+        let segments = [SearchTextSegment(text: "needle")]
+        let snapshot = SearchIndexSnapshot(documents: [.init(entry: file("/r/.server.pem"), segments: segments),
+                                                       .init(entry: file("/r/.notes"), segments: segments)],
+                                           includeHidden: true, extraction: .init(), isPartial: false)
+        let update = try RemoteFolderSearch.indexedContents(matching: "needle", snapshot: snapshot, includeHidden: true)
+        XCTAssertEqual(update.contentMatches.map(\.entry.path), ["/r/.notes"])
+    }
+
     func testRebuildingIndexReplacesDeletedAndChangedDocuments() async throws {
         let original = ContentTreeService(["/r": [file("/r/deleted.txt"), file("/r/changed.txt")]],
             contents: ["/r/deleted.txt": bytes("old phrase"), "/r/changed.txt": bytes("old phrase")])

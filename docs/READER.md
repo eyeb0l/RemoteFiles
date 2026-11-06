@@ -17,6 +17,7 @@ Select a file in a folder to open its preview. The reader does not edit the serv
 | Images | JPEG, PNG, HEIC/HEIF, GIF, TIFF, WebP and BMP. Tap to zoom or share; animated images show their first frame. |
 | PDF | Native scrolling and zooming, with a current-page indicator. |
 | Audio and video | Playback and seeking after download. Compatibility depends on the device and codec; see [audio and video](AUDIO_VIDEO.md) for the full format list. |
+| Certificates | A summary of `.pem`, `.crt`, `.cer`, `.der`, `.p7b`, `.p7c` and `.csr` files up to 2 MiB, with no source view. `.p12` and `.pfx` files are not opened. See [certificate previews](CERTIFICATE_PREVIEWS.md). |
 
 > **Download limit:** Image, PDF and media downloads are limited to 128 MiB per file. Even when a file has no supported preview, you can [save its original bytes](#save-the-original).
 

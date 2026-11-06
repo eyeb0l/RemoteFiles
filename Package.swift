@@ -14,7 +14,8 @@ let package = Package(
         .package(path: "Vendor/swift-nio-ssh"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.12.3"),
-        .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0")
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0"),
+        .package(url: "https://github.com/apple/swift-asn1.git", from: "1.7.0")
     ],
     targets: [
         .target(name: "RemoteFilesCore", dependencies: [
@@ -23,7 +24,8 @@ let package = Package(
             .product(name: "NIOCore", package: "swift-nio"),
             .product(name: "NIOPosix", package: "swift-nio"),
             .product(name: "Logging", package: "swift-log"),
-            .product(name: "Crypto", package: "swift-crypto")
+            .product(name: "Crypto", package: "swift-crypto"),
+            .product(name: "SwiftASN1", package: "swift-asn1")
         ], resources: [.process("Resources")]),
         .target(name: "RemoteFilesUI", dependencies: ["RemoteFilesCore", .product(name: "Textual", package: "textual")]),
         .testTarget(name: "RemoteFilesCoreTests", dependencies: ["RemoteFilesCore", "RemoteFilesUI"])

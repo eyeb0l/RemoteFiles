@@ -17,7 +17,7 @@ Choose a guide by what you want to do.
 - [Save files and folders for offline use](OFFLINE_FILES.md): snapshots, updates, storage limits and offline links.
 - [Use the iPad workspace](IPAD.md): navigate the library, folder and reader in different window sizes.
 
-For a closer look at specific behavior, see [rich Markdown](MARKDOWN_RENDERING.md), [document links](DOCUMENT_LINKS.md), [saving original files](ORIGINAL_EXPORT.md), [remote Markdown images](REMOTE_IMAGES.md), [audio and video](AUDIO_VIDEO.md) and [static HTML](HTML_PREVIEWS.md).
+For a closer look at specific behavior, see [rich Markdown](MARKDOWN_RENDERING.md), [document links](DOCUMENT_LINKS.md), [saving original files](ORIGINAL_EXPORT.md), [remote Markdown images](REMOTE_IMAGES.md), [audio and video](AUDIO_VIDEO.md), [static HTML](HTML_PREVIEWS.md) and [certificates](CERTIFICATE_PREVIEWS.md).
 
 ## Build, change and verify the app
 
