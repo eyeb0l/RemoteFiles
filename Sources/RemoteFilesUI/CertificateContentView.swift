@@ -292,6 +292,7 @@ enum CertificateDescriptions {
 private struct CertificateOverviewSection: View {
     let summary: CertificateSummary
     let position: String?
+    @ScaledMetric(relativeTo: .body) private var iconColumn = RemoteFilesStyle.iconColumn
 
     var body: some View {
         Section {
@@ -306,7 +307,7 @@ private struct CertificateOverviewSection: View {
                 let validity = CertificateDescriptions.validity(summary.validity(at: .now))
                 HStack(spacing: 12) {
                     Image(systemName: validity.symbol).foregroundStyle(validity.color)
-                        .frame(width: RemoteFilesStyle.iconColumn).accessibilityHidden(true)
+                        .frame(width: iconColumn).accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(validity.title).foregroundStyle(validity.color)
                         if let detail = validity.detail { Text(detail).font(.footnote).foregroundStyle(.secondary) }
@@ -374,7 +375,7 @@ private struct CertificateDetailSections: View {
         }
         Section("Details") {
             if let version = summary.version { CertificateRow("Version", "\(version)") }
-            if let serial = summary.serialNumber { CertificateRow("Serial Number", serial, stacked: serial.count > 24, monospaced: true, spokenAsHex: true) }
+            if let serial = summary.serialNumber { CertificateRow("Serial Number", serial, stacked: serial.count > 16, monospaced: true, spokenAsHex: true) }
             CertificateRow("Signature Algorithm", summary.signatureAlgorithm, stacked: summary.signatureAlgorithm.count > 24)
         }
         if let sha256 = summary.sha256Fingerprint, let sha1 = summary.sha1Fingerprint {
