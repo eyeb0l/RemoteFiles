@@ -9,10 +9,11 @@ private actor ImageReloadResolver: RemoteResourceResolving {
     let file: URL
     let reloadError: Error
     private(set) var calls = 0
-    init(file: URL, reloadError: Error) { self.file = file; self.reloadError = reloadError }
+    let failingCall: Int
+    init(file: URL, reloadError: Error, failingCall: Int = 2) { self.file = file; self.reloadError = reloadError; self.failingCall = failingCall }
     func localFile(for reference: String, in document: RemoteDocumentLocation) async throws -> URL {
         calls += 1
-        if calls == 2 { throw reloadError }
+        if calls == failingCall { throw reloadError }
         return file
     }
 }
@@ -30,6 +31,7 @@ private struct RootPhaseFixture: View {
 }
 
 @MainActor final class ImageLifecycleTests: XCTestCase {
+    private let zoomDelegate = ZoomableRemoteImage.Coordinator()
     private func png() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
         let renderer = UIGraphicsImageRenderer(size: CGSize(width: 200, height: 150))
@@ -116,6 +118,62 @@ private struct RootPhaseFixture: View {
         XCTAssertEqual(recoveredCalls, 3, "A later reload must recover after failure")
         try await waitUntil { self.shareEnabled(window) == true }
     }
+    private func zoomView(image: CGSize, bounds: CGSize) -> ImageZoomScrollView {
+        let scroll = ImageZoomScrollView(frame: CGRect(origin: .zero, size: bounds))
+        scroll.delegate = zoomDelegate
+        scroll.minimumZoomScale = 1; scroll.maximumZoomScale = 6
+        let picture = UIGraphicsImageRenderer(size: image, format: { let format = UIGraphicsImageRendererFormat(); format.scale = 1; return format }()).image { _ in }
+        scroll.show(picture)
+        scroll.addSubview(scroll.imageView)
+        scroll.layoutIfNeeded()
+        return scroll
+    }
+    func testDoubleTapZoomFillsTheScreenThenReturnsToTheWholePicture() async throws {
+        let scroll = zoomView(image: CGSize(width: 1400, height: 600), bounds: CGSize(width: 400, height: 800))
+        scroll.toggleZoom(at: CGPoint(x: 200, y: 85))
+        try await waitUntil { abs(scroll.zoomScale - 800 / (400 * 600.0 / 1400)) < 0.05 }
+        scroll.toggleZoom(at: CGPoint(x: 200, y: 85))
+        try await waitUntil { abs(scroll.zoomScale - 1) < 0.01 }
+        XCTAssertEqual(scroll.contentInset.top, 314.3, accuracy: 0.5, "Back to fitted, the picture is centred again")
+    }
+    func testDoubleTapOnAPictureThatNearlyFillsTheScreenStillZooms() async throws {
+        let scroll = zoomView(image: CGSize(width: 400, height: 800), bounds: CGSize(width: 400, height: 800))
+        scroll.toggleZoom(at: CGPoint(x: 200, y: 400))
+        try await waitUntil { abs(scroll.zoomScale - 2.5) < 0.05 }
+    }
+    func testFittedPictureIsCentredAndCannotPanIntoEmptySpace() {
+        let scroll = zoomView(image: CGSize(width: 1400, height: 600), bounds: CGSize(width: 400, height: 800))
+        XCTAssertEqual(scroll.imageView.frame.width, 400, accuracy: 0.5)
+        XCTAssertEqual(scroll.imageView.frame.height, 171.4, accuracy: 0.5)
+        XCTAssertEqual(scroll.contentSize.width, 400, accuracy: 0.5)
+        XCTAssertEqual(scroll.contentSize.height, 171.4, accuracy: 0.5)
+        XCTAssertEqual(scroll.contentInset.top, 314.3, accuracy: 0.5)
+        XCTAssertEqual(scroll.contentOffset.y, -314.3, accuracy: 0.5)
+    }
+    func testZoomedPicturePansOnlyAsFarAsItsEdges() {
+        let scroll = zoomView(image: CGSize(width: 1400, height: 600), bounds: CGSize(width: 400, height: 800))
+        scroll.setZoomScale(3, animated: false)
+        // 1200 x 514 in a 400 x 800 window: free to pan across, and still centred down.
+        XCTAssertEqual(scroll.contentSize.width, 1200, accuracy: 0.5)
+        XCTAssertEqual(scroll.contentInset.left, 0, accuracy: 0.5)
+        XCTAssertEqual(scroll.contentInset.right, 0, accuracy: 0.5)
+        XCTAssertEqual(scroll.contentInset.top, 142.9, accuracy: 0.5)
+        scroll.setZoomScale(6, animated: false)
+        // 2400 x 1029: larger than the window both ways, so no empty space remains to pan into.
+        XCTAssertEqual(scroll.contentInset, .zero)
+    }
+    func testSharperCopyOfTheSamePictureKeepsZoomAndADifferentPictureRefits() {
+        let scroll = zoomView(image: CGSize(width: 1400, height: 600), bounds: CGSize(width: 400, height: 800))
+        scroll.setZoomScale(3, animated: false)
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1
+        scroll.show(UIGraphicsImageRenderer(size: CGSize(width: 2800, height: 1200), format: format).image { _ in })
+        scroll.layoutIfNeeded()
+        XCTAssertEqual(scroll.zoomScale, 3, accuracy: 0.01, "The full-size decode arrives while someone may be zooming")
+        scroll.show(UIGraphicsImageRenderer(size: CGSize(width: 600, height: 1400), format: format).image { _ in })
+        scroll.layoutIfNeeded()
+        XCTAssertEqual(scroll.zoomScale, 1, accuracy: 0.01)
+        XCTAssertEqual(scroll.imageView.frame.height, 800, accuracy: 0.5)
+    }
     func testFullScreenReloadFailureExposesErrorAndRecovers() async throws {
         try await checkReloadFailure(NSError(domain: "ImageFixture", code: 1, userInfo: [NSLocalizedDescriptionKey: "INJECTED RELOAD FAILURE"]))
     }
@@ -138,6 +196,21 @@ private struct RootPhaseFixture: View {
         XCTAssertTrue(image.isAccessibilityElement)
         XCTAssertTrue(image.accessibilityTraits.contains(.image))
         XCTAssertEqual(image.accessibilityLabel, expected)
+    }
+    func testFailedReloadDiscardsTheReadersPreviewAndCannotShareIt() async throws {
+        await RemoteImageDecoder.shared.clear()
+        let url = try png()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let preview = try await RemoteImageDecoder.shared.decode(url, maxPixel: 100)
+        let profile = ConnectionProfile(name: "Image preview tests", host: "fixture.invalid", username: "fixture", identityID: UUID())
+        let item = ImagePresentation(reference: "image.png", filename: "image.png",
+                                     location: .init(profile: profile, path: "/fixture/report.md"), preview: preview)
+        let resolver = ImageReloadResolver(file: url, reloadError: IdentityError.missingPassphrase, failingCall: 1)
+        let previousWindow = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first { $0.isKeyWindow }
+        let window = try host(RemoteImageViewer(item: item, resolver: resolver).environment(\.scenePhase, .active))
+        defer { window.isHidden = true; window.rootViewController = nil; previousWindow?.makeKey() }
+        try await waitUntil { await resolver.calls >= 1 && !self.hasZoomImage(window) }
+        try await waitUntil { self.shareEnabled(window) == false }
     }
     func testFullScreenImageExposesAltDescription() async throws {
         try await checkImageAccessibility(alt: "Purple project diagram", expected: "Purple project diagram")

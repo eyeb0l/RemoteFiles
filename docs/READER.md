@@ -14,7 +14,7 @@ Select a file in a folder to open its preview. The reader does not edit the serv
 | Text, configuration and source code | UTF-8 text up to 2 MiB. Empty, binary and unsupported files get an explanation. |
 | HTML / HTM | UTF-8 text up to 2 MiB, as a static rendered preview or source; scripts and linked resources do not load. See [HTML previews](HTML_PREVIEWS.md). |
 | SVG | A restricted static rendering or source. See [SVG previews](#svg-previews). |
-| Images | JPEG, PNG, HEIC/HEIF, GIF, TIFF, WebP and BMP. Tap to zoom or share; animated images show their first frame. |
+| Images | JPEG, PNG, HEIC/HEIF, GIF, TIFF, WebP and BMP. Tap to open a full-screen viewer with pinch and double-tap zoom, or to share; animated images show their first frame. |
 | PDF | Native scrolling and zooming, with a current-page indicator. |
 | Audio and video | Playback and seeking after download. Compatibility depends on the device and codec; see [audio and video](AUDIO_VIDEO.md) for the full format list. |
 | Certificates | A summary of `.pem`, `.crt`, `.cer`, `.der`, `.p7b`, `.p7c` and `.csr` files up to 2 MiB, with no source view. `.p12` and `.pfx` files are not opened. See [certificate previews](CERTIFICATE_PREVIEWS.md). |

@@ -32,14 +32,18 @@ canonical-root checks and cannot use the connectivity fallback.
 Refreshes also show transfer progress above the previously loaded copy.
 Playback starts only when
 the user presses Play after the download finishes. Video renders through AVKit
-and has a solid fullscreen button beside the inline playback controls, outside
-the video. Fullscreen presents the native iOS AVPlayerViewController directly,
-with system controls and dismissal, using the same player and playback position.
-Both inline video and audio have visible Play/Pause controls and an accessible
-seek bar, backed by a local AVPlayer. Audio has a filename and waveform
-presentation. Refresh pauses the old copy and replaces
-it only after the new file passes playback validation; failed refreshes label
-the previous copy. Runtime playback failures show the same recovery guidance.
+at its own shape, as large as fits, with no black bars of its own; on a landscape
+iPhone the controls sit beside it rather than beneath. The controls stay outside
+the video and follow the system players' layout: a seek bar with elapsed and
+remaining time, then Back 10 Seconds, Play/Pause and Forward 10 Seconds, with
+**Full Screen** apart at the end of the row. Fullscreen presents the native iOS
+AVPlayerViewController directly, with system controls and dismissal, using the
+same player and playback position, for connected and offline copies alike.
+Both inline video and audio share these accessible controls, backed by a local
+AVPlayer. Audio has a filename and waveform presentation. Refresh pauses the old
+copy and replaces it only after the new file passes playback validation; failed
+refreshes label the previous copy. Runtime playback failures show the same
+recovery guidance.
 
 The player uses a protected temporary hard link (or copy) with the original
 extension so cache eviction and refresh cannot remove its active bytes.

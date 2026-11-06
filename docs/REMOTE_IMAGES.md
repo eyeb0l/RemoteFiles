@@ -163,3 +163,16 @@ Evidence: `/private/tmp/remotefiles-blank-final.xcresult`. The fixed signed Rele
 build is installed and was relaunched normally after testing.
 
 Use the reader’s **Save Original to Files** action to export original image/PDF bytes and filename instead of display pixels. See [original export](ORIGINAL_EXPORT.md).
+
+## Standalone images and the full-screen viewer
+
+A standalone image is shown as large as fits, centred, and never enlarged past one point per
+pixel. Tapping it grows it into the full-screen viewer with the system zoom transition, showing
+the reader's 1600-pixel copy at once until the 3072-pixel decode replaces it. **Share** waits for
+that decode, and a failed reload discards both copies, so neither stays on screen or shareable.
+
+The viewer, connected and offline, behaves as Photos does. Pinch zooms up to six times, and
+double-tap zooms in to fill the screen or back out. Panning stops at the picture's edges. Tapping
+hides the bars and turns the background black, and tapping again brings them back. Dragging down
+closes the viewer unless the picture is zoomed, when the drag moves the picture instead. VoiceOver
+and Switch Control keep the bars, and Escape closes the viewer with the bars hidden or shown.

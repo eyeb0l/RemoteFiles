@@ -32,6 +32,7 @@ struct RemoteMediaView: View {
     @State private var requestID = UUID()
     @Environment(\.scenePhase) private var scenePhase
     @AccessibilityFocusState(for: .voiceOver) private var imageFocused: Bool
+    @Namespace private var photoTransition
 
     private var location: RemoteDocumentLocation { .init(profile: profile, path: entry.path, canonicalRoot: entry.canonicalRoot) }
     private var hasContent: Bool { image != nil || pdf != nil || playback.player != nil }
@@ -64,16 +65,11 @@ struct RemoteMediaView: View {
         VStack(spacing: 0) {
             Group {
                 if kind == .image, let image {
-                    ScrollView {
-                        Button { viewer = .init(reference: reference, filename: entry.name, location: location) } label: {
-                            Image(uiImage: UIImage(cgImage: image.image))
-                                .resizable().scaledToFit().frame(maxWidth: .infinity)
-                                .padding()
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Open image \(entry.name) full screen")
-                        .accessibilityFocused($imageFocused)
+                    PhotoStage(image: image.image, accessibilityLabel: "Open image \(entry.name) full screen",
+                               transition: photoTransition) {
+                        viewer = .init(reference: reference, filename: entry.name, location: location, preview: image)
                     }
+                    .accessibilityFocused($imageFocused)
                 } else if kind == .pdf, let pdf {
                     PDFDocumentView(document: pdf, restoration: pdfRestoration, readingPosition: readingPosition,
                                     onPageChange: { pdfPage = $0 })
@@ -91,20 +87,23 @@ struct RemoteMediaView: View {
                         if kind == .audio {
                             PlaybackControls(playback: playback).id(ObjectIdentifier(player))
                         } else {
-                            NativePlaybackView(player: player).id(fullScreenPlayback)
-                            PlaybackControls(playback: playback, openFullScreen: { fullScreenPlayback = true })
-                                .id(ObjectIdentifier(player))
+                            VideoStage(playback: playback, player: player, isFullScreen: fullScreenPlayback,
+                                       openFullScreen: { fullScreenPlayback = true })
                         }
                     }
                 } else if loading {
-                    VStack(spacing: 12) {
-                        Text(loadingMessage).font(.subheadline).foregroundStyle(.secondary)
-                        downloadStatus.frame(maxWidth: 280)
-                        if kind == .video || kind == .audio {
-                            Text("You can play this file once the download finishes.")
-                                .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    VStack(spacing: 16) {
+                        Image(systemName: symbol).font(.system(size: 44, weight: .light)).foregroundStyle(.tertiary)
+                            .accessibilityHidden(true)
+                        VStack(spacing: 4) {
+                            Text(loadingMessage).font(.headline)
+                            if kind == .video || kind == .audio, !downloadProgress.isComplete {
+                                Text("You can play this file once the download finishes.")
+                                    .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                            }
                         }
-                    }.padding()
+                        downloadStatus.frame(maxWidth: 260)
+                    }.padding(24)
                 } else {
                     ContentUnavailableView {
                         Label(entry.name, systemImage: symbol)
@@ -117,6 +116,7 @@ struct RemoteMediaView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .animation(RemoteFilesStyle.contentFade, value: hasContent)
         .contentStatus(progress: hasContent && loading ? "Updating…" : nil,
                        failure: hasContent ? previewFailure.map { "Previously loaded copy · \($0)" } : nil,
                        retry: { retryID += 1 })
@@ -130,7 +130,10 @@ struct RemoteMediaView: View {
             failure = message; loading = false
         }
         .onChange(of: model.isDisconnecting) { _, disconnecting in if disconnecting { playback.stop() } }
-        .fullScreenCover(item: $viewer, onDismiss: { imageFocused = true }) { item in RemoteImageViewer(item: item, resolver: model.resources).coversKeyboardCommands() }
+        .fullScreenCover(item: $viewer, onDismiss: { imageFocused = true }) { item in
+            RemoteImageViewer(item: item, resolver: model.resources).coversKeyboardCommands()
+                .navigationTransition(.zoom(sourceID: PhotoStage.transitionID, in: photoTransition))
+        }
         // Native fullscreen playback covers the reader too, though UIKit presents it.
         .focusedSceneValue(\.keyboardCommandsCovered, fullScreenPlayback ? true : nil)
         .background {
@@ -142,7 +145,7 @@ struct RemoteMediaView: View {
     private var downloadStatus: some View {
         VStack(spacing: 8) {
             if let fraction = downloadProgress.fraction {
-                ProgressView(value: fraction).accessibilityLabel("Download progress")
+                ProgressView(value: fraction).tint(RemoteFilesStyle.accent).accessibilityLabel("Download progress")
             } else {
                 ProgressView().accessibilityLabel(loadingMessage)
             }
@@ -231,14 +234,42 @@ struct RemoteMediaView: View {
     }
 }
 
+/// A video as large as fits at its own shape, with the controls beneath it, or beside it when a
+/// landscape phone has no height to spare. It leaves no black bars for the screen to light around it.
+struct VideoStage: View {
+    let playback: RemotePlaybackController
+    let player: AVPlayer
+    /// AVKit moves the player's layer to its fullscreen controller, so returning needs a new inline view.
+    var isFullScreen = false
+    var openFullScreen: (() -> Void)? = nil
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    var body: some View {
+        let beside = verticalSizeClass == .compact
+        let layout = beside ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
+        layout {
+            NativePlaybackView(player: player).id(isFullScreen)
+                .aspectRatio(playback.videoAspectRatio ?? 16 / 9, contentMode: .fit)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            PlaybackControls(playback: playback, openFullScreen: openFullScreen)
+                .id(ObjectIdentifier(player))
+                .frame(maxWidth: beside ? 320 : .infinity)
+        }
+    }
+}
+
+/// Transport controls laid out as the system's own players do: a scrubber with elapsed and remaining
+/// time, then skip and play in the middle. Fullscreen sits apart, as it isn't part of the transport.
 struct PlaybackControls: View {
     let playback: RemotePlaybackController
     var openFullScreen: (() -> Void)? = nil
     @State private var scrubbing = false
     @State private var position: Double = 0
+    @ScaledMetric(relativeTo: .title) private var playSize: CGFloat = 60
+    private static let skipSeconds: Double = 10
+    private var shownElapsed: Double { scrubbing ? position : min(playback.elapsed, playback.duration) }
     var body: some View {
-        VStack(spacing: 16) {
-            Slider(value: Binding(get: { scrubbing ? position : min(playback.elapsed, playback.duration) },
+        VStack(spacing: 6) {
+            Slider(value: Binding(get: { shownElapsed },
                                   set: { position = $0; if !scrubbing { playback.seek(to: $0) } }), in: 0...max(playback.duration, 0.01)) { editing in
                 if editing { position = min(playback.elapsed, playback.duration) }
                 scrubbing = editing
@@ -248,24 +279,56 @@ struct PlaybackControls: View {
             .accessibilityLabel("Playback position")
             .accessibilityValue("\(time(scrubbing ? position : playback.elapsed)) of \(time(playback.duration))")
             HStack {
-                Text(time(scrubbing ? position : playback.elapsed))
+                Text(time(shownElapsed))
                 Spacer()
-                Text(time(playback.duration))
+                Text("-" + time(playback.duration - shownElapsed))
+                    .accessibilityLabel("\(time(playback.duration - shownElapsed)) remaining")
             }.font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-            HStack(spacing: 16) {
-                Button(playback.isPlaying ? "Pause" : "Play", systemImage: playback.isPlaying ? "pause.fill" : "play.fill") {
-                    playback.togglePlayback()
-                }.buttonStyle(.borderedProminent).controlSize(.large)
+            HStack(spacing: 0) {
+                // The same width as Full Screen, so the transport stays in the middle.
+                Color.clear.frame(width: 44, height: 44).accessibilityHidden(true)
+                Spacer(minLength: 0)
+                HStack(spacing: 20) {
+                    skip("Back 10 Seconds", symbol: "gobackward.10", by: -Self.skipSeconds)
+                    playButton
+                    skip("Forward 10 Seconds", symbol: "goforward.10", by: Self.skipSeconds)
+                }
+                Spacer(minLength: 0)
                 if let openFullScreen {
                     Button(action: openFullScreen) {
                         Label("Full Screen", systemImage: "arrow.up.left.and.arrow.down.right")
-                            .font(.body.weight(.semibold)).foregroundStyle(.primary)
-                            .padding(.horizontal, 16).frame(minHeight: 50)
-                            .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
+                            .labelStyle(.iconOnly).font(.body.weight(.medium)).foregroundStyle(.secondary)
+                            .frame(width: 44, height: 44).contentShape(Rectangle())
                     }.buttonStyle(.plain)
+                } else {
+                    Color.clear.frame(width: 44, height: 44).accessibilityHidden(true)
                 }
             }
-        }.padding(24).accessibilityIdentifier("Playback controls")
+            .padding(.top, 4)
+            .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+        }
+        .padding(.horizontal, 20).padding(.vertical, 12)
+        .accessibilityIdentifier("Playback controls")
+    }
+    private var playButton: some View {
+        Button { playback.togglePlayback() } label: {
+            Label(playback.isPlaying ? "Pause" : "Play", systemImage: playback.isPlaying ? "pause.fill" : "play.fill")
+                .labelStyle(.iconOnly).font(.title).foregroundStyle(.primary)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: playSize, height: playSize)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: .circle)
+    }
+    private func skip(_ title: String, symbol: String, by seconds: Double) -> some View {
+        Button { playback.seek(to: playback.elapsed + seconds) } label: {
+            Label(title, systemImage: symbol)
+                .labelStyle(.iconOnly).font(.title2).foregroundStyle(.primary)
+                .frame(width: 44, height: 44).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(playback.duration <= 0)
     }
     private func time(_ seconds: Double) -> String {
         let value = Int(max(0, min(seconds.isFinite ? seconds : 0, Double(Int.max / 2))))
@@ -283,6 +346,8 @@ struct NativePlaybackView: UIViewControllerRepresentable {
         controller.allowsVideoFrameAnalysis = false
         controller.allowsPictureInPicturePlayback = false
         controller.updatesNowPlayingInfoCenter = false
+        // The stage sizes this to the video; any sliver of rounding shows the screen, not black.
+        controller.view.backgroundColor = .clear
         return controller
     }
     func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
