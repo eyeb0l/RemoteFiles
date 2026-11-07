@@ -27,12 +27,8 @@ final class SFTPDirectoryReadTests: XCTestCase {
         let recorder = try await list(FakeDirectory(entries: [".", "..", "a"], holdMilliseconds: 20), concurrentReads: 8) { names in
             XCTAssertEqual(names, [".", "..", "a"])
         }
-        // With the next answer already here, the first batch sends no more. If it hadn't quite arrived,
-        // one surplus read would go out with CLOSE; either way a second round only closes.
-        XCTAssertLessThanOrEqual(recorder.readdirs, 9)
-        XCTAssertGreaterThanOrEqual(recorder.readdirs, 8)
-        XCTAssertEqual(recorder.requests.first, "opendir")
-        XCTAssertEqual(recorder.requests.last, "close")
+        // The window is topped up only once half of it has been answered, so nothing follows the first.
+        XCTAssertEqual(recorder.requests, ["opendir"] + Array(repeating: "readdir", count: 8) + ["close"])
         XCTAssertEqual(recorder.rounds, 2, "One round answers the window; CLOSE takes the next")
     }
 

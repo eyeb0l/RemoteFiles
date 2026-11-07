@@ -205,7 +205,6 @@ public final class SFTPClient: Sendable {
         // CLOSE goes out behind those still in flight, so the surplus reads cost no extra round trip.
         let window = max(1, concurrentReads)
         var inFlight = CircularBuffer<EventLoopFuture<SFTPResponse>>()
-        let answered = NIOLockedValueBox(0)
         var names = [SFTPMessage.Name]()
         var returned: Set<String>?
         var closing: EventLoopFuture<SFTPResponse>?
@@ -242,24 +241,20 @@ public final class SFTPClient: Sendable {
         func fill() {
             while failure == nil, closing == nil, inFlight.count < window {
                 if Task.isCancelled { failure = CancellationError(); return }
-                let request = self.sendRequestFuture(.readdir(.init(requestId: self.allocateRequestId(), handle: handle.handle)))
-                request.whenComplete { _ in answered.withLockedValue { $0 += 1 } }
-                inFlight.append(request)
+                inFlight.append(self.sendRequestFuture(.readdir(.init(requestId: self.allocateRequestId(), handle: handle.handle))))
             }
         }
         fill()
-        var consumed = 0
         while let next = inFlight.popFirst() {
             do {
                 let response = try await next.get()
-                consumed += 1
                 guard failure == nil else { continue }
                 switch response {
                 case .name(let name) where closing == nil:
                     try await append(name)
-                    // A later answer already here may be the EOF, so a request sent now would only
-                    // make a small folder wait a round trip more for its reply. Top up once answers run out.
-                    if answered.withLockedValue({ $0 }) <= consumed { fill() }
+                    // Any request sent now keeps the listing waiting a round trip for its reply, even if the
+                    // next answer is the EOF. Half a window still keeps the server busy, so top up from there.
+                    if inFlight.count <= window / 2 { fill() }
                 case .name(let name):
                     // Only a server that reorders one handle's requests, or rewinds after EOF, answers names
                     // after EOF. Keep those not already returned, so no entry is lost or repeated.

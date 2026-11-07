@@ -94,7 +94,7 @@ public enum RemoteFolderSearch {
     /// Lists more folders at once while the server answers quickly, and backs off when answers slow:
     /// every listing has to finish within its own deadline, including the time it queues at the server.
     struct ListingPacing {
-        static let quick: Duration = .milliseconds(1_000), slow: Duration = .seconds(3)
+        static let quick: Duration = .seconds(2), slow: Duration = .seconds(5)
         private(set) var window: Int
         private let floor: Int, limit: Int
         init(limits: Limits) { window = limits.concurrentListings; floor = limits.concurrentListings; limit = limits.concurrentListingLimit }

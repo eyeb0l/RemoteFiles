@@ -72,8 +72,7 @@ their filename was already returned (so a server that rewinds after EOF cannot r
 error status after EOF is ignored. After EOF no `readdir` is sent and `SSH_FXP_CLOSE` goes out at once behind
 those still in flight, so draining them costs no extra round trip; its status must still be `ok`. An error
 before EOF, task cancellation, or a reply other than names or EOF (upstream silently ended the listing on
-one) stops new requests, drains those in flight, closes the handle and fails the listing. RemoteFiles
-passes 8.
+one) stops new requests, drains those in flight, closes the handle and fails the listing.
 
 The vendored SFTP decoder rejects a zero-length frame and any frame larger than 1 MiB as soon as its
 four-byte length prefix arrives. Both client and server `ByteToMessageHandler` instances use the matching
@@ -86,6 +85,18 @@ attribute-extension, and per-entry storage by default. Both limits are optional 
 test may select a smaller bound. Crossing either limit stops issuing `READDIR`, drains the already-issued
 pipeline window, sends one `CLOSE`, and then throws the corresponding `SFTPError`; the existing 1,000-entry
 fixture remains below both defaults.
+
+`listDirectory` takes two more optional arguments, both off by default, so upstream behaviour is unchanged
+without them. `onBatch` receives each batch as it arrives, which lets a caller show rows early and release
+attributes and longnames as it goes; only filenames stay, for the post-EOF de-duplication above. `deferringClose`
+hands over the `CLOSE` as a future and returns as soon as the listing is complete, saving a round trip; a failed
+close must still make the caller retire the channel. A window is now topped up only once half of it has been
+answered: every read still outstanding at EOF must be drained, so one sent just before EOF would cost a round
+trip for nothing, and half a window keeps the server busy. RemoteFiles passes 16 for browsing and 8 for walks.
+
+`SFTPClient.sendRealPath`, `sendAttributes` and `sendOpenFile`, and `SFTPFile.sendReadAttributes` and `sendClose`,
+queue a request and return a future without waiting. They expose the existing `sendRequestFuture` ordering, so
+RemoteFiles can send requests together and still judge each answer in whichever order is safe.
 
 `SFTPFile.readAttributes()` sends `FSTAT` for the open handle rather than repeating pathname `STAT`.
 RemoteFiles uses those attributes to validate size and type after `OPEN`, so they now describe the opened

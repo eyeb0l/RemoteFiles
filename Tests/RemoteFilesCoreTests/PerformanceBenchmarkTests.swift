@@ -145,6 +145,15 @@ final class PerformanceBenchmarkTests: XCTestCase {
                 try await self.measureFirstRows("first.\(size)", path: path, profile: profile, service: warm, recorder: recorder)
             }
         }
+        if measuring, selected("prefetch") {
+            // What opening a folder does ahead of time for the next tap.
+            let folders = try await warm.listDirectory(profile: profile, path: root + "/tree").entries.filter { $0.kind == .directory }.prefix(3)
+            let deeper = try await warm.listDirectory(profile: profile, path: folders.first?.path ?? root).entries.filter { $0.kind == .directory }.prefix(3)
+            let paths = (folders + deeper).map(\.path)
+            try await recorder.timeAsync("prefetch.6", runs: runs) {
+                for path in paths { blackHole(try await warm.listDirectoryInBackground(profile: profile, path: path)?.entries.count ?? 0) }
+            }
+        }
         if measuring, selected("list.links") {
             try await recorder.timeAsync("list.links", runs: runs) {
                 blackHole(try await warm.listDirectory(profile: profile, path: root + "/links").entries.count)
@@ -190,8 +199,10 @@ final class PerformanceBenchmarkTests: XCTestCase {
                 }
                 let walkStarted = ContinuousClock.now
                 try await Task.sleep(for: .milliseconds(200))
-                try await recorder.timeAsync("search.contended.list.10", runs: max(runs, 5)) {
-                    blackHole(try await warm.listDirectory(profile: profile, path: root + "/d10").entries.count)
+                for _ in 0..<max(runs, 5) {
+                    try await recorder.timeAsync("search.contended.list.10", runs: 1) {
+                        blackHole(try await warm.listDirectory(profile: profile, path: root + "/d10").entries.count)
+                    }
                     try await Task.sleep(for: .milliseconds(100))
                 }
                 _ = await walk.result
@@ -319,6 +330,48 @@ final class PerformanceBenchmarkTests: XCTestCase {
         }
         recorder.flush()
     }
+
+    /// The folder screen while a large folder is still arriving: rows appear, then grow to the whole folder.
+    @MainActor func testFolderScreenArriving() async throws {
+        let recorder = BenchmarkRecorder(label: environment["REMOTEFILES_BENCHMARK_LABEL"] ?? "unlabelled")
+        let sizes = (environment["REMOTEFILES_BENCHMARK_SCREEN_SIZES"] ?? (measuring ? "10000,50000" : "1000")).split(separator: ",").compactMap { Int($0) }
+        for size in sizes {
+            let service = BenchmarkArrivingFolderService(entries: BenchmarkData.entries(count: size))
+            for _ in 0..<runs {
+                let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                defer { try? FileManager.default.removeItem(at: directory) }
+                let model = try AppModel(directory: directory, fileService: service)
+                let profile = ConnectionProfile(name: "Bench", host: "fixture.invalid", username: "bench", identityID: UUID(), startingDirectory: "/bench")
+                let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+                let previous = scene.windows.first { $0.isKeyWindow }
+                let window = UIWindow(windowScene: scene)
+                let started = ContinuousClock.now
+                window.rootViewController = UIHostingController(rootView: NavigationStack {
+                    FolderView(model: model, profile: profile, requestedPath: "/bench")
+                })
+                window.makeKeyAndVisible()
+                defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+                let frames = FrameSampler()
+                frames.start()
+                defer { frames.stop() }
+                func list() -> UICollectionView? {
+                    func find(_ view: UIView) -> UICollectionView? {
+                        (view as? UICollectionView) ?? view.subviews.lazy.compactMap(find).first
+                    }
+                    return find(window)
+                }
+                let deadline = ContinuousClock.now + .seconds(120)
+                while (list()?.visibleCells.isEmpty ?? true), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+                recorder.add("arriving.firstRows.\(size)", value: started.elapsedMilliseconds)
+                while model.cachedListing(profile.id, path: "/bench") == nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+                recorder.add("arriving.complete.\(size)", value: started.elapsedMilliseconds)
+                try await Task.sleep(for: .milliseconds(measuring ? 200 : 10))
+                recorder.add("arriving.longestFrame.\(size)", value: frames.longestGapMilliseconds)
+                recorder.add("arriving.hitches.\(size)", value: Double(frames.hitches), unit: "frames")
+            }
+        }
+        recorder.flush()
+    }
     #endif
 }
 
@@ -430,14 +483,15 @@ final class BenchmarkRecorder: @unchecked Sendable {
             add(scenario, value: started.elapsedMilliseconds)
         }
     }
-    /// The most memory the process held while `body` ran, above where it started, sampled every 5 ms.
+    /// The most heap memory in use while `body` ran, above where it started, sampled every 5 ms. The
+    /// footprint isn't used here because it hardly moves once earlier work has grown the allocator.
     func peakFootprint(_ scenario: String, runs: Int, _ body: () async throws -> Void) async throws {
         for _ in 0..<runs {
-            let start = BenchmarkMemory.footprint()
+            let start = BenchmarkMemory.heapInUse()
             let sampler = Task.detached(priority: .high) { () -> Int in
                 var peak = start
                 while !Task.isCancelled {
-                    peak = max(peak, BenchmarkMemory.footprint())
+                    peak = max(peak, BenchmarkMemory.heapInUse())
                     try? await Task.sleep(for: .milliseconds(5))
                 }
                 return peak
@@ -511,6 +565,31 @@ private actor BenchmarkFolderService: RemoteFileService {
     private let entries: [RemoteEntry]
     init(entries: [RemoteEntry]) { self.entries = entries }
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { .init(path: path, entries: entries) }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
+        .init(name: RemotePath.name(of: path), path: path, kind: .directory)
+    }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { Data() }
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
+        throw RemoteFileError.unavailable("Not used")
+    }
+    func disconnect() async {}
+}
+
+/// Delivers a folder a hundred entries at a time, as OpenSSH does, at a pace that takes a second or two.
+private actor BenchmarkArrivingFolderService: RemoteFileService, ProgressiveFolderListing {
+    private let entries: [RemoteEntry]
+    init(entries: [RemoteEntry]) { self.entries = entries }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { .init(path: path, entries: entries) }
+    func listDirectory(profile: ConnectionProfile, path: String,
+                       partial: @escaping @Sendable (DirectorySnapshot) -> Void) async throws -> DirectorySnapshot {
+        var delivered = 0
+        while delivered < entries.count {
+            delivered = min(entries.count, delivered + max(800, entries.count / 40))
+            partial(.init(path: path, entries: Array(entries[..<delivered])))
+            try await Task.sleep(for: .milliseconds(40))
+        }
+        return .init(path: path, entries: entries)
+    }
     func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
         .init(name: RemotePath.name(of: path), path: path, kind: .directory)
     }

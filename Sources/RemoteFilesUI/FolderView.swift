@@ -587,6 +587,7 @@ struct FolderView: View {
         guard !Task.isCancelled, token == requestID, loading, !model.isDisconnecting, query == filter, hidden == showHidden,
               options == searchOptions, prepared.rows.count > listing?.rows.count ?? 0 else { return }
         if !userChoseSort { sortOrder = order }
+        sortID = UUID() // Supersede a filter task based on the previous rows.
         listing = prepared; setVisible(rows)
         appliedFilter = query; appliedShowHidden = hidden; appliedSortOrder = order; appliedSearchOptions = options
     }
@@ -614,12 +615,12 @@ struct FolderView: View {
                 guard !Task.isCancelled, model.sessionRevision == revision else { return }
                 search.apply(update, for: key)
             }
-            defer { batcher.cancel() }
+            // A failure still shows the matches found before it.
+            defer { batcher.flush() }
             for try await update in updates {
                 guard !Task.isCancelled, model.sessionRevision == revision else { return }
                 batcher.add(update)
             }
-            batcher.flush()
         } catch {
             guard !Task.isCancelled, !(error is CancellationError), !model.isDisconnecting,
                   model.sessionRevision == revision, search.key == key else { return }

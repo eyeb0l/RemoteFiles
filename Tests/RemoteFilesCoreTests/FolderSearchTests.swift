@@ -209,11 +209,11 @@ final class FolderSearchTests: XCTestCase {
         XCTAssertEqual(pacing.window, 8)
         for _ in 0..<100 { pacing.finished(after: .milliseconds(120)) }
         XCTAssertEqual(pacing.window, 64, "Stops at its limit")
-        pacing.finished(after: .seconds(2))
+        pacing.finished(after: .seconds(3))
         XCTAssertEqual(pacing.window, 64, "Neither quick nor slow")
-        pacing.finished(after: .seconds(4))
+        pacing.finished(after: .seconds(6))
         XCTAssertEqual(pacing.window, 32)
-        for _ in 0..<10 { pacing.finished(after: .seconds(4)) }
+        for _ in 0..<10 { pacing.finished(after: .seconds(6)) }
         XCTAssertEqual(pacing.window, 8, "Never below where it began")
         var fixed = RemoteFolderSearch.ListingPacing(limits: .init(concurrentListings: 4, concurrentListingLimit: 4))
         fixed.finished(after: .milliseconds(1))

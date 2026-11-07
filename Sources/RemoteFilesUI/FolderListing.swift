@@ -301,5 +301,4 @@ final class PartialListingGate: @unchecked Sendable {
         lastApplied = .now
         apply(pending)
     }
-    func cancel() { waiter?.cancel(); waiter = nil; pending = nil }
 }

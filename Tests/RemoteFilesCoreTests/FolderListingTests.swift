@@ -190,7 +190,11 @@ final class FolderListingTests: XCTestCase {
         batcher.add(update(folders: 7, finished: true))
         XCTAssertEqual(applied.last?.isFinished, true, "The end does not wait")
         XCTAssertEqual(applied.flatMap(\.matches).map(\.name), ["first", "second", "third", "fourth"])
-        batcher.cancel()
+        batcher.add(update("late", folders: 8))
+        batcher.flush()
+        XCTAssertEqual(applied.last?.matches.map(\.name), ["late"], "Flushing shows what is held back, as when a search fails")
+        batcher.flush()
+        XCTAssertEqual(applied.last?.matches.map(\.name), ["late"], "And nothing twice")
     }
 }
 

@@ -184,9 +184,12 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         } onCancel: { control.close() }
     }
 
-    /// Most READDIR requests a listing keeps in flight. OpenSSH answers up to 100 names each, so
-    /// eight keep its sequential server busy across a cellular round trip.
-    static let directoryReadWindow = 8
+    /// Most READDIR requests a listing keeps in flight. OpenSSH answers up to 100 names each, so a
+    /// folder of up to 1,600 names takes one round trip of reads and a larger one keeps the sequential
+    /// server busy across a cellular round trip.
+    static let directoryReadWindow = 16
+    /// A walk lists many small folders at once, so each sends fewer surplus requests.
+    static let walkReadWindow = 8
     /// Entries a listing may hold before it fails. Each one held here costs about 180 bytes plus its
     /// name and path, so even a full listing stays far below what the system allows the app.
     static let directoryEntryLimit = 250_000
@@ -230,48 +233,30 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         // A very large folder may take longer than one deadline: it runs out only when replies stop.
         let progress = DeadlineExtension()
         let result = try await perform(session: session, role: role, progress: progress) { sftp, closes in
-            try await Self.snapshot(path, sftp: sftp, progress: progress, closes: closes, partial: partial, resolvesLinks: resolvesLinks)
+            try await Self.snapshot(path, sftp: sftp, readWindow: role == .walk ? Self.walkReadWindow : Self.directoryReadWindow,
+                                    progress: progress, closes: closes, partial: partial, resolvesLinks: resolvesLinks)
         }
         measurements.directoryOperations += 1
         measurements.lastDirectorySeconds = Date().timeIntervalSince(started)
         return result
     }
 
-    /// Lists a folder on its own SFTP channel, only over a session already open for this exact
-    /// profile. It never connects, unlocks a key or replaces another server's session, and a failure
-    /// or slow disk on the server can't retire or queue behind the channel foreground browsing uses.
+    /// Lists a folder on the walk channel, only over a session already open for this exact profile.
+    /// It never connects, unlocks a key or replaces another server's session, and a failure or slow
+    /// disk on the server can't retire or queue behind the channel foreground browsing uses. Opening
+    /// a channel per folder took three round trips more each time.
     public func listDirectoryInBackground(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot? {
         try Task.checkCancellation()
         guard let session = active, session.profile == profile, !session.control.isCancelled, session.client.isConnected else { return nil }
-        // Unlike a transfer, this never closes the session when stopped: foreground work is using it.
-        // Stopping returns at once; only this listing's channel closes, whenever it has opened.
-        let channel = SFTPChannelControl()
-        do {
-            return try await withTaskCancellationHandler {
-                try await Self.detachedDeadline(seconds: Self.backgroundListingSeconds, onTimeout: { channel.close() }) {
-                    let sftp = try await session.client.openSFTP(logger: Self.sftpLogger())
-                    channel.install(sftp)
-                    do {
-                        try Task.checkCancellation()
-                        let value = try await Self.snapshot(path, sftp: sftp, progress: nil, closes: nil, partial: nil, resolvesLinks: true)
-                        try await sftp.close()
-                        return value
-                    } catch {
-                        try? await sftp.close()
-                        throw error
-                    }
-                }
-            } onCancel: { channel.close() }
-        } catch {
-            throw Self.mapped(error)
+        return try await perform(session: session, role: .walk) { sftp, closes in
+            try await Self.snapshot(path, sftp: sftp, readWindow: Self.walkReadWindow, progress: nil, closes: closes, partial: nil, resolvesLinks: true)
         }
     }
-    private static let backgroundListingSeconds: UInt64 = 10
 
     /// Names are ready after two round trips: REALPATH and OPENDIR together, then the READDIRs. With
     /// `closes`, the listing returns without waiting a third for CLOSE, whose reply is checked afterwards.
     /// `partial` receives what has arrived so far before links are resolved, each time with more entries.
-    private nonisolated static func snapshot(_ path: String, sftp: SFTPClient, progress: DeadlineExtension?, closes: DeferredCloses?,
+    private nonisolated static func snapshot(_ path: String, sftp: SFTPClient, readWindow: Int, progress: DeadlineExtension?, closes: DeferredCloses?,
                                              partial: (@Sendable (DirectorySnapshot) -> Void)?, resolvesLinks: Bool) async throws -> DirectorySnapshot {
         let requested = try validated(path)
         // The server resolves both requests from the same path. If REALPATH fails, the listing still
@@ -280,7 +265,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         let collected = CollectedEntries()
         let listed: Result<Void, Error>
         do {
-            _ = try await sftp.listDirectory(atPath: requested, resolvingPath: false, concurrentReads: directoryReadWindow,
+            _ = try await sftp.listDirectory(atPath: requested, resolvingPath: false, concurrentReads: readWindow,
                                              maximumEntries: directoryEntryLimit, maximumMetadataBytes: directoryMetadataLimit,
                                              onBatch: { components in
                 progress?.record()
@@ -422,7 +407,8 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                     handleAttributes = file.sendReadAttributes()
                 }
                 let hint = try? await expected.get()
-                let (bytes, requests) = try await BoundedPreviewReader.read(initialSize: hint?.size, limit: limit, window: Self.previewReadWindow) { offset, amount in
+                let (bytes, requests) = try await BoundedPreviewReader.read(initialSize: hint?.size, limit: limit,
+                    window: hint?.size == nil ? 8 : Self.previewReadWindow) { offset, amount in
                     try await file.read(from: offset, length: amount)
                 }
                 attributes = try await handleAttributes.get()
@@ -495,8 +481,10 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         let session = try await session(for: profile)
         let reportInterval = progressInterval
         let result = try await performOnDedicatedChannel(session: session, budget: managed ? .idle(managedTransferIdle) : .total(180)) { sftp, activity in
-            let root = try await sftp.getRealPath(atPath: Self.validated(allowedRoot))
-            let canonical = try await sftp.getRealPath(atPath: Self.validated(path))
+            let rootPath = sftp.sendRealPath(atPath: try Self.validated(allowedRoot))
+            let targetPath = sftp.sendRealPath(atPath: try Self.validated(path))
+            let root = try await rootPath.get()
+            let canonical = try await targetPath.get()
             if canonicalPaths {
                 guard root.utf8.elementsEqual(allowedRoot.utf8), canonical.utf8.elementsEqual(path.utf8) else {
                     throw RemoteDocumentLinkError.outsideConnection
@@ -507,14 +495,17 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
             do {
                 // This post-OPEN stability check catches durable path replacement before
                 // publication. Atomic confinement still requires a server-side jail or helper.
-                let currentRoot = try await sftp.getRealPath(atPath: root)
-                let currentTarget = try await sftp.getRealPath(atPath: canonical)
+                let rootCheck = sftp.sendRealPath(atPath: root)
+                let targetCheck = sftp.sendRealPath(atPath: canonical)
+                let handleAttributes = file.sendReadAttributes()
+                let currentRoot = try await rootCheck.get()
+                let currentTarget = try await targetCheck.get()
                 guard currentRoot.utf8.elementsEqual(root.utf8),
                       currentTarget.utf8.elementsEqual(canonical.utf8),
                       RemoteResourcePath.contains(currentTarget, in: currentRoot) else {
                     throw RemoteResourceError.outsideDocument
                 }
-                let attributes = try await file.readAttributes()
+                let attributes = try await handleAttributes.get()
                 let entry = Self.entry(name: RemotePath.name(of: canonical), path: canonical, attributes: attributes)
                 guard entry.kind == .file else { throw RemoteFileError.unsupportedFile }
                 if let size = attributes.size, size > UInt64(limit) { throw RemoteFileError.tooLarge(limit) }
