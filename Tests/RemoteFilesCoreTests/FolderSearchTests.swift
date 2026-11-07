@@ -219,4 +219,47 @@ final class FolderSearchTests: XCTestCase {
         fixed.finished(after: .milliseconds(1))
         XCTAssertEqual(fixed.window, 4)
     }
+
+    func testMatchingLinksResolveOnlyBeforeTheSearchDeadline() async throws {
+        let profile = ConnectionProfile(name: "F", host: "f.invalid", username: "f", identityID: UUID(), startingDirectory: "/p")
+        func search(limit: Duration, listingTakes: Duration) async throws -> (entries: [RemoteEntry], resolutions: Int) {
+            let service = WalkingService(listingTakes: listingTakes)
+            var found: [RemoteEntry] = []
+            for try await update in RemoteFolderSearch.names(matching: "needle", below: "/p", profile: profile, service: service,
+                                                             includeHidden: false, limits: .init(timeLimit: limit)) {
+                found += update.matches
+            }
+            return (found, await service.resolutions)
+        }
+        let inTime = try await search(limit: .seconds(60), listingTakes: .zero)
+        XCTAssertEqual(inTime.resolutions, 1)
+        XCTAssertNotNil(inTime.entries.first?.linkTarget)
+        let late = try await search(limit: .milliseconds(20), listingTakes: .milliseconds(100))
+        XCTAssertEqual(late.resolutions, 0, "No new work starts after the deadline")
+        XCTAssertEqual(late.entries.map(\.name), ["needle-link"], "The match is kept")
+        XCTAssertNil(late.entries.first?.link, "It resolves when tapped")
+    }
+}
+
+private actor WalkingService: RemoteFileService, FolderWalking {
+    private let listingTakes: Duration
+    private(set) var resolutions = 0
+    init(listingTakes: Duration) { self.listingTakes = listingTakes }
+    func listDirectoryForWalk(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
+        try await Task.sleep(for: listingTakes)
+        return .init(path: path, entries: [.init(name: "needle-link", path: path + "/needle-link", kind: .symlink)])
+    }
+    func resolvingLinks(in entries: [RemoteEntry], profile: ConnectionProfile) async throws -> [RemoteEntry] {
+        resolutions += 1
+        return entries.map { .init(name: $0.name, path: $0.path, kind: $0.kind, link: .target(.init(name: "t", path: "/t", kind: .file))) }
+    }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
+        throw RemoteFileError.unavailable("Not used")
+    }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { Data() }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { .init(name: "t", path: path, kind: .file) }
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
+        throw RemoteFileError.unavailable("Not used")
+    }
+    func disconnect() async {}
 }

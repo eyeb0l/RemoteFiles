@@ -201,8 +201,10 @@ public enum RemoteFolderSearch {
                             let kept = found.prefix(max(0, limits.maxMatches - matched))
                             matched += kept.count
                             update.matches = Array(kept)
-                            // A row says where a link leads, and only matches are shown.
-                            if let walker, let resolved = try? await walker.resolvingLinks(in: update.matches, profile: profile) {
+                            // A row says where a link leads, and only matches are shown. After the deadline
+                            // no new work starts, and a link left unresolved resolves when tapped.
+                            if let walker, ContinuousClock.now < deadline,
+                               let resolved = try? await walker.resolvingLinks(in: update.matches, profile: profile) {
                                 update.matches = resolved
                             }
                             // At the limit, stop unless this was the last folder there is to list.
