@@ -76,7 +76,7 @@ def inside_fixture(args):
     output = pathlib.Path(args.output).resolve()
     for rtt in [int(value) for value in args.rtt.split(",")]:
         env = dict(os.environ)
-        env.update(REMOTEFILES_BENCHMARK="1", REMOTEFILES_BENCHMARK_RUNS=str(args.runs),
+        env.update(REMOTEFILES_PERFORMANCE_BENCHMARK="1", REMOTEFILES_BENCHMARK_RUNS=str(args.runs),
                    REMOTEFILES_BENCHMARK_ROOT=str(bench.resolve()),
                    REMOTEFILES_BENCHMARK_LABEL=f"{args.label}@rtt{rtt}" + (f"-{args.mbit:g}mbit" if args.mbit else ""), REMOTEFILES_BENCHMARK_OUTPUT=str(output))
         if args.only:
@@ -115,7 +115,7 @@ def inside_device_fixture(args):
                                  stdout=subprocess.DEVNULL)
         time.sleep(0.5)
         env = dict(os.environ)
-        env.update(TEST_RUNNER_REMOTEFILES_BENCHMARK="1", TEST_RUNNER_REMOTEFILES_BENCHMARK_RUNS=str(args.runs),
+        env.update(TEST_RUNNER_REMOTEFILES_PERFORMANCE_BENCHMARK="1", TEST_RUNNER_REMOTEFILES_BENCHMARK_RUNS=str(args.runs),
                    TEST_RUNNER_REMOTEFILES_BENCHMARK_ROOT=str(bench.resolve()),
                    TEST_RUNNER_REMOTEFILES_BENCHMARK_LABEL=f"{args.label}@device+{rtt}ms",
                    TEST_RUNNER_REMOTEFILES_BENCHMARK_PRIVATE_KEY=key.read_text(),
@@ -161,7 +161,7 @@ def run(args):
         handle.write(json.dumps(machine) + "\n")
     if args.kind in ("local", "all"):
         env = dict(os.environ)
-        env.update(REMOTEFILES_BENCHMARK="1", REMOTEFILES_BENCHMARK_RUNS=str(args.runs), REMOTEFILES_BENCHMARK_LABEL=f"{args.label}@local",
+        env.update(REMOTEFILES_PERFORMANCE_BENCHMARK="1", REMOTEFILES_BENCHMARK_RUNS=str(args.runs), REMOTEFILES_BENCHMARK_LABEL=f"{args.label}@local",
                    REMOTEFILES_BENCHMARK_OUTPUT=str(pathlib.Path(args.output).resolve()))
         if args.only:
             env["REMOTEFILES_BENCHMARK_ONLY"] = args.only

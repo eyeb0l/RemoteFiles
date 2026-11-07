@@ -11,11 +11,11 @@ import UIKit
 /// Measurements for `scripts/benchmark_performance.py`, which supplies a generated tree, a delaying
 /// proxy and an optimized build. Each scenario prints one `BENCHJSON` line of raw samples; the script
 /// keeps them and compares runs. Nothing here asserts a timing, so shared machines can't fail it.
-/// Without `REMOTEFILES_BENCHMARK=1` each method runs once at its smallest size, so CI keeps the harness
-/// working in moments. See docs/PERFORMANCE.md.
+/// Without `REMOTEFILES_PERFORMANCE_BENCHMARK=1` each method runs once at its smallest size, so CI keeps
+/// the harness working in moments. See docs/PERFORMANCE.md.
 final class PerformanceBenchmarkTests: XCTestCase {
     private var environment: [String: String] { ProcessInfo.processInfo.environment }
-    private var measuring: Bool { environment["REMOTEFILES_BENCHMARK"] == "1" }
+    private var measuring: Bool { environment["REMOTEFILES_PERFORMANCE_BENCHMARK"] == "1" }
     private var runs: Int { measuring ? Int(environment["REMOTEFILES_BENCHMARK_RUNS"] ?? "") ?? 5 : 1 }
     /// A comma-separated list of scenario prefixes; everything runs without one.
     private func selected(_ scenario: String) -> Bool {

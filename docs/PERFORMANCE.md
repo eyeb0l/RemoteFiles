@@ -128,7 +128,7 @@ The last two rows got worse with no latency at all, a condition no phone has; by
 ## Correctness
 
 - Fast paths are tested against the code they replace: name order, every sort and every filter option over awkward Unicode, numeric, width and case names, plus random printable text (`FolderListingTests`). Equality and hashing survive the hot/cold split (`RemoteEntryLayoutTests`).
-- 283 macOS core tests pass with OpenSSH, including new ones for 340 reads and listings on one channel without waiting for `CLOSE`, a failed `CLOSE` reaching the caller, partial rows, search on its own channel, deadline extension and short and wrong size hints. That a failed `CLOSE` then retires the channel is checked in parts, not end to end against a real server.
+- All 461 macOS tests pass with OpenSSH, including new ones for 340 reads and listings on one channel without waiting for `CLOSE`, a failed `CLOSE` reaching the caller, partial rows, search on its own channel, deadline extension and short and wrong size hints. That a failed `CLOSE` then retires the channel is checked in parts, not end to end against a real server.
 - `ResponsivenessTests`, `FolderListingTests`, `RemoteEntryLayoutTests` and `PerformanceBenchmarkTests` pass hosted on the iOS simulator, 32 tests. A 100,000-entry listing returned exactly 100,000 entries.
 - Eight UI journeys touching folder rows pass on the iPhone simulator. The keyboard journey failed once on its Home screen under load average 27, before reaching a folder, and passed when rerun.
 
@@ -166,7 +166,7 @@ xcodebuild build-for-testing -project RemoteFiles.xcodeproj -scheme RemoteFilesC
   -destination 'id=DEVICE' -derivedDataPath DD -allowProvisioningUpdates ENABLE_TESTABILITY=YES
 
 # Folder screen and local work, no network.
-TEST_RUNNER_REMOTEFILES_BENCHMARK=1 xcodebuild test-without-building -xctestrun DD/Build/Products/*.xctestrun -destination 'id=DEVICE' \
+TEST_RUNNER_REMOTEFILES_PERFORMANCE_BENCHMARK=1 xcodebuild test-without-building -xctestrun DD/Build/Products/*.xctestrun -destination 'id=DEVICE' \
   -only-testing:RemoteFilesTests/PerformanceBenchmarkTests/testFolderScreen -only-testing:RemoteFilesTests/PerformanceBenchmarkTests/testLocalWork
 
 # Transport. The address must be one the phone can reach: this Mac's Tailscale address worked where its LAN address was filtered.

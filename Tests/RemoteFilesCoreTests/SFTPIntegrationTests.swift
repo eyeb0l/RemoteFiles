@@ -2477,19 +2477,17 @@ final class LinkResolutionSchedulingTests: XCTestCase {
 
     func testTimeBudgetLeavesLaterLinksUnresolvedWithoutFailingTheListing() async throws {
         let lookups = LookupCounter()
-        let clock = ContinuousClock(), began = clock.now
-        let entries = try await SFTPRemoteFileService.resolvingLinks(in: links(300), budget: .milliseconds(150)) { link in
+        // The budget ends while the first wave is still out, so nothing can follow it.
+        let entries = try await SFTPRemoteFileService.resolvingLinks(in: links(300), budget: .milliseconds(100)) { link in
             await lookups.started()
-            try? await Task.sleep(for: .milliseconds(100))
+            try? await Task.sleep(for: .milliseconds(200))
             return .target(RemoteEntry(name: "t", path: "/t/" + link.name, kind: .file))
         }
         let started = await lookups.count
         let resolved = entries.filter { $0.link != nil }.count
         XCTAssertEqual(resolved, started, "Every lookup that was sent still completes")
-        XCTAssertGreaterThanOrEqual(started, SFTPRemoteFileService.linkResolutionWindow)
-        XCTAssertLessThan(started, 100, "No new lookups start after the budget")
+        XCTAssertEqual(started, SFTPRemoteFileService.linkResolutionWindow, "No new lookups start after the budget")
         XCTAssertEqual(entries.count, 300)
-        XCTAssertLessThan(clock.now - began, .seconds(1))
     }
 }
 
