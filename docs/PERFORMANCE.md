@@ -27,7 +27,7 @@ Each entry names the bottleneck, the evidence and the cost accepted.
 
 **Fewer round trips.** Requests that can be answered together are sent together and judged afterwards in the order that makes them safe: root confinement still comes before a version match. Listings and reads return without waiting for `CLOSE`; a failed close still retires the channel. A known size ends reads exactly at the end of the file. Directory reads top up from half a window, because every read outstanding at EOF must be drained. *Cost:* five small additions to vendored Citadel ([provenance](../Vendor/Citadel/UPSTREAM.md)), and a failed close is no longer reported as the read's failure, only by retiring the channel. Reads still wait for the post-`OPEN` boundary recheck before any bytes move.
 
-**Rows while a folder arrives.** With nothing on screen, rows appear 100 ms after the first batch if the rest hasn't come, and again each time they grow by half. Links resolve afterwards. The listing limit rose from 10,000 to 250,000 entries, and its deadline now extends while replies keep arriving. *Cost:* partial rows can move while **Updating…** shows. A folder already on screen is unaffected. On iPhone at 50,000 entries the updates cost 2 frames over 57 ms, against a single 2.6 s stall before.
+**Rows while a folder arrives.** With nothing on screen, rows appear 100 ms after the first batch if the rest hasn't come, and again each time they grow by half. Links resolve afterwards. The listing limit rose from 10,000 to 250,000 entries, and its deadline now extends while replies keep arriving. *Cost:* partial rows can move while **Updating…** shows. A folder already on screen is unaffected. On iPhone at 50,000 entries the updates cost 2 hitches, the longest frame 57 ms, against a single 2.6 s stall before.
 
 **Search.** Walks list 8 to 64 folders at once, paced by how quickly the server answers. They skip link resolution except for matches and use their own SFTP channel, which prefetch now shares instead of opening one per folder. The screen refreshes at most ten times a second. *Cost:* a second idle `sftp-server` per session once used, and if a server stalls, more listings time out together. A sweep at a fixed 40 ms took 12.7 s at 4 folders, 6.5 s at 8, 3.4 s at 16, 1.9 s at 32 and 1.3 s at 64.
 
@@ -128,7 +128,7 @@ The last two rows got worse with no latency at all, a condition no phone has; by
 ## Correctness
 
 - Fast paths are tested against the code they replace: name order, every sort and every filter option over awkward Unicode, numeric, width and case names, plus random printable text (`FolderListingTests`). Equality and hashing survive the hot/cold split (`RemoteEntryLayoutTests`).
-- 279 macOS core tests pass with OpenSSH, including new ones for handles closing after 340 reads without waiting for replies, partial rows, search on its own channel, deadline extension and short and wrong size hints.
+- 283 macOS core tests pass with OpenSSH, including new ones for 340 reads and listings on one channel without waiting for `CLOSE`, a failed `CLOSE` reaching the caller, partial rows, search on its own channel, deadline extension and short and wrong size hints. That a failed `CLOSE` then retires the channel is checked in parts, not end to end against a real server.
 - `ResponsivenessTests`, `FolderListingTests`, `RemoteEntryLayoutTests` and `PerformanceBenchmarkTests` pass hosted on the iOS simulator, 32 tests. A 100,000-entry listing returned exactly 100,000 entries.
 - Eight UI journeys touching folder rows pass on the iPhone simulator. The keyboard journey failed once on its Home screen under load average 27, before reaching a folder, and passed when rerun.
 
@@ -172,6 +172,6 @@ python3 -B scripts/benchmark_performance.py device --output phone.jsonl --label 
   --udid DEVICE --address MAC_ADDRESS --rtt 0,40
 ```
 
-Keep the phone unlocked and allow Local Network on first run. Links vary, so alternate short runs and compare pairs, as for downloads above. Remove the app afterwards with `xcrun devicectl device uninstall app`.
+Keep the phone unlocked and allow Local Network on first run. Links vary, so alternate short runs and compare pairs, as for downloads above. Remove the host afterwards with `xcrun devicectl device uninstall app`; it is `dev.iris.RemoteFilesBenchTestHost`.
 
 Nothing in the harness fails on a timing, because shared machines are too noisy for that. `PerformanceBenchmarkTests` runs once in CI at its smallest size, so it can't rot without anyone noticing. To catch a regression, compare against a kept baseline when changing listing, search, reads, rows or transfers.

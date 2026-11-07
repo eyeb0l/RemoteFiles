@@ -1462,10 +1462,30 @@ final class SFTPIntegrationTests: XCTestCase {
             }
             try await group.waitForAll()
         }
-        // OpenSSH allows 100 open handles per process by default on some builds; 80 sequential more would fail if any leaked.
         for _ in 0..<300 { _ = try await service.readFile(profile: profile, path: fixture.files + "/report.md", limit: 4_096) }
         let metrics = await service.metrics()
         XCTAssertEqual(metrics.sftpChannels, 1, "No close failed, so the first channel stayed in use")
+    }
+
+    /// A channel stays reusable only if every deferred close succeeded.
+    func testDeferredClosesSucceedOnlyIfAllOfThemDid() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        addTeardownBlock { try? await group.shutdownGracefully() }
+        let loop = group.next()
+        struct Refused: Error {}
+        let empty = DeferredCloses()
+        let none = await DeferredCloses.succeeded(empty.take())
+        XCTAssertTrue(none)
+        let closes = DeferredCloses()
+        closes.add(loop.makeSucceededFuture(()))
+        closes.add(loop.makeFailedFuture(Refused()))
+        let mixed = closes.take()
+        XCTAssertEqual(mixed.count, 2)
+        XCTAssertTrue(closes.take().isEmpty, "Taken once")
+        let failed = await DeferredCloses.succeeded(mixed)
+        XCTAssertFalse(failed)
+        let succeeded = await DeferredCloses.succeeded([loop.makeSucceededFuture(()), loop.makeSucceededFuture(())])
+        XCTAssertTrue(succeeded)
     }
 
     /// A very large folder may outlast one deadline, but only while replies keep coming.
@@ -2161,7 +2181,7 @@ final class BoundedPreviewReaderTests: XCTestCase {
             XCTAssertEqual(Array(result.0), bytes)
             let requests = await file.requests
             XCTAssertEqual(requests.count, size / (64 * 1024) + (size % (64 * 1024) == 0 ? 0 : 1) + 1, "Chunks to the end, and one probe at \(size)")
-            XCTAssertEqual(requests.last?.0, UInt64(size))
+            XCTAssertEqual(requests.map(\.0).max(), UInt64(size), "Requests start in any order; the furthest is the probe")
         }
     }
 

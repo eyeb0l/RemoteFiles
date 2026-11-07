@@ -100,6 +100,61 @@ final class SFTPDirectoryReadTests: XCTestCase {
         }
     }
 
+    func testDeferredCloseReturnsAtOnceAndHandsOverAFailure() async throws {
+        for (status, succeeds) in [(UInt32(0), true), (UInt32(4), false)] {
+            let server = try await FakeSFTPServer.start(FakeDirectory(entries: ["a"], closeStatus: status))
+            let client = try await server.connect()
+            let sftp = try await client.openSFTP(logger: FakeSFTPServer.quietLogger)
+            let closes = HandedOverCloses(), batches = HandedOverNames()
+            let returned = try await sftp.listDirectory(atPath: "/fake", resolvingPath: false, concurrentReads: 8, onBatch: { batches.add($0.map(\.filename)) },
+                                                        deferringClose: { closes.add($0) })
+            XCTAssertTrue(returned.isEmpty, "Batches went to the caller, not into a second copy")
+            XCTAssertEqual(batches.names, ["a"])
+            let close = try XCTUnwrap(closes.futures.first)
+            XCTAssertEqual(closes.futures.count, 1)
+            do {
+                try await close.get()
+                XCTAssertTrue(succeeds)
+            } catch {
+                XCTAssertFalse(succeeds, "A failed CLOSE must reach the caller so it retires the channel")
+            }
+            XCTAssertEqual(server.recorder.requests.filter { $0 == "close" }.count, 1)
+            try await client.close()
+            try await server.stop()
+        }
+    }
+
+    func testBatchesHoldEveryNameOnceEvenFromAServerThatRewinds() async throws {
+        for directory in [FakeDirectory(entries: thousand, batch: 7, holdMilliseconds: 10),
+                          FakeDirectory(entries: thousand, batch: 50, holdMilliseconds: 10, reverseHeld: true),
+                          FakeDirectory(entries: thousand, batch: 50, rewindAfterEOF: true)] {
+            let server = try await FakeSFTPServer.start(directory)
+            let client = try await server.connect()
+            let sftp = try await client.openSFTP(logger: FakeSFTPServer.quietLogger)
+            let batches = HandedOverNames()
+            _ = try await sftp.listDirectory(atPath: "/fake", resolvingPath: false, concurrentReads: 8, onBatch: { batches.add($0.map(\.filename)) })
+            XCTAssertEqual(batches.names.count, 1_000)
+            XCTAssertEqual(Set(batches.names), Set(thousand))
+            try await client.close()
+            try await server.stop()
+        }
+    }
+
+    func testAFailingBatchHandlerStopsTheListingAndStillCloses() async throws {
+        struct Refused: Error {}
+        let server = try await FakeSFTPServer.start(FakeDirectory(entries: thousand, batch: 10, holdMilliseconds: 5))
+        let client = try await server.connect()
+        let sftp = try await client.openSFTP(logger: FakeSFTPServer.quietLogger)
+        do {
+            _ = try await sftp.listDirectory(atPath: "/fake", resolvingPath: false, concurrentReads: 8, onBatch: { _ in throw Refused() })
+            XCTFail("The handler's failure must end the listing")
+        } catch is Refused {}
+        XCTAssertEqual(server.recorder.requests.last, "close")
+        XCTAssertLessThan(server.recorder.readdirs, 30, "No more were asked for")
+        try await client.close()
+        try await server.stop()
+    }
+
     func testCancellationStopsReadingAndCloses() async throws {
         let server = try await FakeSFTPServer.start(FakeDirectory(entries: thousand, batch: 10, holdMilliseconds: 500))
         let client = try await server.connect()
@@ -215,6 +270,20 @@ final class SFTPDirectoryReadTests: XCTestCase {
         try await server.stop()
         return server.recorder
     }
+}
+
+private final class HandedOverCloses: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [EventLoopFuture<Void>] = []
+    var futures: [EventLoopFuture<Void>] { lock.lock(); defer { lock.unlock() }; return stored }
+    func add(_ future: EventLoopFuture<Void>) { lock.lock(); stored.append(future); lock.unlock() }
+}
+
+private final class HandedOverNames: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String] = []
+    var names: [String] { lock.lock(); defer { lock.unlock() }; return stored }
+    func add(_ names: [String]) { lock.lock(); stored += names; lock.unlock() }
 }
 
 private struct FakeDirectory: Sendable {
