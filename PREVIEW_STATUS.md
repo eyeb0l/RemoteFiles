@@ -2,6 +2,10 @@
 
 This is a dated record of feature work and validation, not a live test dashboard. Each result applies to the build, environment and date described with it; an installation or Simulator pass does not establish later physical-device acceptance. For current behavior, start with the [documentation index](docs/README.md). For checks still to perform, see [manual acceptance](docs/MANUAL_ACCEPTANCE.md) and the [roadmap](ROADMAP.md).
 
+**7 November 2026: iPhone pass of media and certificate work.**
+
+A signed Release build was checked by hand on the physical iPhone 17 Pro (iOS 27.2). Photo and video viewing, certificate previews and hidden keys showed no problems, including real photographs and a video that relies on rotation metadata. VoiceOver reads each hidden line as a count, such as "70 dots", rather than every dot. Results were reported as a whole against a checklist, and iPad and Escape on a hardware keyboard remain outstanding. See the [7 November evidence](docs/REAL_SERVER_ACCEPTANCE.md#7-november-2026-media-and-certificate-pass).
+
 **6 November 2026: private keys in text files.**
 
 A private key is now found by its content on every text route, so an extensionless `id_rsa`, a hidden `.server.key` or a key pasted into a log no longer opens as text, matches a search or enters the document cache or a saved index. A file that is only keys shows **Contains a Private Key** with no text. A key in a longer document becomes `•`, with a notice above it, and offsets and line numbers don't change. Text that only mentions a marker is untouched. A Markdown image reference can no longer pull a key into the image cache on disk, and an index saved by an older version is cleaned and rewritten when it is next read. See [private keys in text files](docs/PRIVATE_KEYS_IN_TEXT.md).

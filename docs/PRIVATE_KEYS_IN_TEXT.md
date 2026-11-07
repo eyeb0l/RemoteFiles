@@ -11,7 +11,7 @@ Any file can hold a private key: an extensionless `id_rsa`, a hidden `.server.ke
 | The file holds | What opens |
 | --- | --- |
 | Only private keys | **Contains a Private Key**, with no text. There is no Source, Find, Copy Source or reading position. |
-| A key among other text | The document, with the key's text replaced by `•` and a notice above it saying how many keys are hidden. Everything else reads, renders and searches as usual. |
+| A key among other text | The document, with the key's text replaced by `•` and a notice above it saying how many keys are hidden. Everything else reads, renders and searches as usual. VoiceOver reads a line of dots as a count, such as "70 dots". |
 | Text that only mentions a key | The document, unchanged. |
 
 **Save Original to Files** and **Share Original** still copy the whole file, key included. They are explicit, and the notice says so.
