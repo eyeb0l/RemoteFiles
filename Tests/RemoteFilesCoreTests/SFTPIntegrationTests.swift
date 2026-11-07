@@ -455,6 +455,7 @@ final class SFTPIntegrationTests: XCTestCase {
         let target = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: target) }
         let progress = ProgressRecorder()
+        await service.setProgressInterval(.zero)
         let entry = try await managed.downloadManagedFile(profile: profile, path: fixture.files + "/oversized.txt",
             allowedRoot: fixture.files, destination: target, limit: 3 * 1024 * 1024,
             progress: { await progress.record($0) })
@@ -509,6 +510,7 @@ final class SFTPIntegrationTests: XCTestCase {
         } catch RemoteResourceError.outsideDocument { }
         #endif
         let progress = ProgressRecorder()
+        await service.setProgressInterval(.zero)
         _ = try await service.downloadFile(profile: profile, path: fixture.files + "/oversized.txt", allowedRoot: fixture.files,
             destination: temp, limit: 3 * 1024 * 1024, progress: { await progress.record($0) })
         let updates = await progress.values
@@ -1435,6 +1437,110 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertEqual(after.connections, before.connections, "An answered close must not replace the connection")
     }
 
+    /// Reads and listings return before CLOSE is answered. The channel must still end up reused, with
+    /// no handle left open, however many of them overlap.
+    func testAnswersWithoutWaitingForCloseStillCloseEveryHandleAndKeepTheChannel() async throws {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Deferred close")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        let expected = try Data(contentsOf: URL(fileURLWithPath: fixture.files + "/large-report.md"))
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<40 {
+                group.addTask {
+                    let bytes = try await service.readFile(profile: profile, path: fixture.files + "/large-report.md", limit: 1 << 20)
+                    XCTAssertEqual(bytes, expected)
+                }
+                group.addTask {
+                    let listed = try await service.listDirectory(profile: profile, path: fixture.files + "/thousand")
+                    XCTAssertEqual(listed.entries.count, 1_000)
+                }
+            }
+            try await group.waitForAll()
+        }
+        // OpenSSH allows 100 open handles per process by default on some builds; 80 sequential more would fail if any leaked.
+        for _ in 0..<300 { _ = try await service.readFile(profile: profile, path: fixture.files + "/report.md", limit: 4_096) }
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.sftpChannels, 1, "No close failed, so the first channel stayed in use")
+    }
+
+    func testListingHandsOverPartialRowsAndCompletes() async throws {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Partial rows")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        let partials = PartialSnapshots()
+        let final = try await service.listDirectory(profile: profile, path: fixture.files + "/thousand") { partials.add($0) }
+        let seen = partials.values
+        XCTAssertGreaterThan(seen.count, 1, "OpenSSH answers about 100 names at a time")
+        XCTAssertEqual(zip(seen, seen.dropFirst()).filter { $0.0.entries.count >= $0.1.entries.count }.count, 0, "Each holds more than the last")
+        XCTAssertTrue(seen.allSatisfy { $0.path == final.path }, "Already canonical")
+        XCTAssertEqual(seen.last?.entries.map(\.path), final.entries.map(\.path), "The last has everything, in the same order")
+        XCTAssertEqual(Set(final.entries.map(\.name)).count, 1_000)
+        XCTAssertFalse(final.entries.contains { $0.name == "." || $0.name == ".." })
+
+        // Links arrive unresolved, then resolved in the result.
+        let linked = PartialSnapshots()
+        let result = try await service.listDirectory(profile: profile, path: fixture.files) { linked.add($0) }
+        let link = "report-link.md"
+        XCTAssertNil(linked.values.last?.entries.first { $0.name == link }?.link)
+        XCTAssertEqual(result.entries.first { $0.name == link }?.linkTarget?.path, fixture.files + "/report.md")
+
+        // A failure is the same failure with or without anyone listening.
+        do {
+            _ = try await service.listDirectory(profile: profile, path: fixture.files + "/does-not-exist") { _ in XCTFail("No rows to hand over") }
+            XCTFail("A missing folder must fail")
+        } catch RemoteFileError.notFound {}
+        _ = try await service.listDirectory(profile: profile, path: fixture.files)
+    }
+
+    func testAWalkKeepsToItsOwnChannelAndLeavesLinksUnresolvedUntilAsked() async throws {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Walk channel")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        _ = try await service.listDirectory(profile: profile, path: fixture.files)
+        let walked = try await service.listDirectoryForWalk(profile: profile, path: fixture.files)
+        let unresolved = try XCTUnwrap(walked.entries.first { $0.name == "report-link.md" })
+        XCTAssertEqual(unresolved.kind, .symlink)
+        XCTAssertNil(unresolved.link)
+        let resolved = try await service.resolvingLinks(in: [unresolved], profile: profile)
+        XCTAssertEqual(resolved.first?.linkTarget?.path, fixture.files + "/report.md")
+        _ = try await service.listDirectoryForWalk(profile: profile, path: fixture.files + "/docs")
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.sftpChannels, 2, "One for browsing and one for walks, each reused")
+    }
+
+    /// A folder search finds names through symbolic links' rows as before, describing where each leads.
+    func testSubfolderSearchDescribesMatchingLinks() async throws {
+        let fixture = try Fixture()
+        let stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Search links")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        var found: [RemoteEntry] = []
+        for try await update in RemoteFolderSearch.names(matching: "report-link", below: fixture.files, profile: profile, service: service, includeHidden: false) {
+            found += update.matches
+        }
+        XCTAssertEqual(found.map(\.name), ["report-link.md"])
+        XCTAssertEqual(found.first?.linkTarget?.path, fixture.files + "/report.md")
+    }
+
     /// Unlike TreeService's fail-once error, every outcome here comes from the real adapter and
     /// OpenSSH. Hold replies before OPENDIR completes, stagger three peers behind the first listing,
     /// then release replies as that first deadline closes their shared channel. The peers still
@@ -1452,8 +1558,8 @@ final class SFTPIntegrationTests: XCTestCase {
         let before = await service.metrics()
         let observed = StaggeredSearchListings(service: service, proxy: proxy, root: root)
         var found: [String] = [], final: RemoteFolderSearch.Update?
-        for try await update in RemoteFolderSearch.names(matching: "needle", below: root, profile: profile,
-                                                         service: observed, includeHidden: false) {
+        for try await update in RemoteFolderSearch.names(matching: "needle", below: root, profile: profile, service: observed,
+                                                         includeHidden: false, limits: .init(concurrentListings: 4, concurrentListingLimit: 4)) {
             found += update.matches.map { String($0.path.dropFirst(root.count + 1)) }
             if update.isFinished { final = update }
         }
@@ -2017,7 +2123,65 @@ final class BoundedPreviewReaderTests: XCTestCase {
             XCTFail("A file that grows beyond its stat size must be rejected")
         } catch RemoteFileError.tooLarge(let limit) { XCTAssertEqual(limit, 8) }
         let requested = await chunks.requests
-        XCTAssertEqual(requested, [9, 5])
+        XCTAssertEqual(requested, [4, 5], "The expected size, then a probe up to one byte past the limit")
+    }
+
+    func testKnownSizeFinishesWithoutASecondRoundOfReads() async throws {
+        for size in [0, 50, 64 * 1024, 64 * 1024 + 1, 300_000] {
+            let bytes = (0..<size).map { UInt8(truncatingIfNeeded: $0 &* 31) }
+            let file = PipelinedPreviewFile(bytes)
+            let result = try await BoundedPreviewReader.read(initialSize: UInt64(size), limit: 2_097_152, window: 32) { offset, amount in
+                await file.read(offset: offset, length: amount)
+            }
+            XCTAssertEqual(Array(result.0), bytes)
+            let requests = await file.requests
+            XCTAssertEqual(requests.count, size / (64 * 1024) + (size % (64 * 1024) == 0 ? 0 : 1) + 1, "Chunks to the end, and one probe at \(size)")
+            XCTAssertEqual(requests.last?.0, UInt64(size))
+        }
+    }
+
+    func testAWrongSizeHintStillReadsTheWholeFile() async throws {
+        let bytes = (0..<300_000).map { UInt8(truncatingIfNeeded: $0 &* 17) }
+        for hint in [0, 100, 64 * 1024, 299_999, 300_001, 2_000_000] {
+            let file = PipelinedPreviewFile(bytes)
+            let result = try await BoundedPreviewReader.read(initialSize: UInt64(hint), limit: 2_097_152, window: 8) { offset, amount in
+                await file.read(offset: offset, length: amount)
+            }
+            XCTAssertEqual(Array(result.0), bytes, "Hint \(hint)")
+        }
+    }
+
+    func testTransferWindowGrowsWithTheConnectionAndStopsAtItsCapacity() {
+        let chunk = 64 * 1024, clock = ContinuousClock()
+        var now = clock.now
+        // A distant connection that delivers whatever is asked for each round trip.
+        var pacing = TransferPacing(window: 16, limit: 64, chunkSize: chunk)
+        for _ in 0..<8 {
+            for _ in 0..<pacing.window { pacing.received(bytes: chunk, latency: .milliseconds(150), at: now) }
+            now += .milliseconds(150)
+        }
+        XCTAssertEqual(pacing.window, 64, "Grows to its limit while more keeps being delivered")
+        // The same latency, but the link carries 20 chunks per round trip however many are queued.
+        pacing = TransferPacing(window: 16, limit: 64, chunkSize: chunk)
+        for _ in 0..<200 {
+            pacing.received(bytes: chunk, latency: .milliseconds(150), at: now)
+            now += .milliseconds(150) / 20
+        }
+        XCTAssertEqual(pacing.window, 30, "Settles at half as much again as the link carries")
+        // A local connection delivers plenty, but a round trip's worth is small.
+        pacing = TransferPacing(window: 16, limit: 64, chunkSize: chunk)
+        for _ in 0..<200 {
+            pacing.received(bytes: chunk, latency: .microseconds(200), at: now)
+            now += .microseconds(100)
+        }
+        XCTAssertEqual(pacing.window, 16, "Stays where it started")
+        // Without a limit above the window, nothing changes.
+        pacing = TransferPacing(window: 8, limit: 8, chunkSize: chunk)
+        for _ in 0..<50 {
+            pacing.received(bytes: chunk, latency: .milliseconds(150), at: now)
+            now += .milliseconds(1)
+        }
+        XCTAssertEqual(pacing.window, 8)
     }
 
     func testExactLimitRequiresEOFProbeAndHandlesShortReads() async throws {
@@ -2280,4 +2444,11 @@ private actor ResumeStartRecorder {
     struct Start { let version: RemoteFileVersion?; let offset: UInt64 }
     private(set) var values: [Start] = []
     func record(version: RemoteFileVersion?, offset: UInt64) { values.append(.init(version: version, offset: offset)) }
+}
+
+private final class PartialSnapshots: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [DirectorySnapshot] = []
+    var values: [DirectorySnapshot] { lock.lock(); defer { lock.unlock() }; return stored }
+    func add(_ value: DirectorySnapshot) { lock.lock(); stored.append(value); lock.unlock() }
 }

@@ -141,10 +141,16 @@ final class PerformanceBenchmarkTests: XCTestCase {
                 let listing = await Task.detached(priority: .userInitiated) { FolderListing(snapshot) }.value
                 blackHole(listing.visible(query: "", showHidden: false, order: .name).count)
             }
+            try await recorder.timeAsync("first.\(size)", runs: runs) {
+                try await self.measureFirstRows("first.\(size)", path: path, profile: profile, service: warm, recorder: recorder)
+            }
         }
         if measuring, selected("list.links") {
             try await recorder.timeAsync("list.links", runs: runs) {
                 blackHole(try await warm.listDirectory(profile: profile, path: root + "/links").entries.count)
+            }
+            try await recorder.timeAsync("first.links", runs: runs) {
+                try await self.measureFirstRows("first.links", path: root + "/links", profile: profile, service: warm, recorder: recorder)
             }
         }
         if measuring, selected("list.100000") {
@@ -152,14 +158,20 @@ final class PerformanceBenchmarkTests: XCTestCase {
             try await recorder.timeAsync("list.100000", runs: min(runs, 3), tolerateFailure: true) {
                 blackHole(try await warm.listDirectory(profile: profile, path: root + "/d100000").entries.count)
             }
+            try await recorder.peakFootprint("list.100000.peakMB", runs: 1) {
+                blackHole((try? await warm.listDirectory(profile: profile, path: root + "/d100000").entries.count) ?? 0)
+            }
         }
         if selected("search") {
+            // Lets one run compare how many folders are listed at once.
+            let window = environment["REMOTEFILES_BENCHMARK_SEARCH_WINDOW"].flatMap { Int($0) }
+            let limits = window.map { RemoteFolderSearch.Limits(concurrentListings: $0, concurrentListingLimit: $0) } ?? RemoteFolderSearch.Limits()
             for (name, query) in [("search.few", "needle"), ("search.none", "zzzqq")] {
                 try await recorder.timeAsync("\(name).total", runs: runs) {
                     var first: Double?, matches = 0
                     let started = ContinuousClock.now
                     for try await update in RemoteFolderSearch.names(matching: query, below: root + "/tree", profile: profile,
-                                                                     service: warm, includeHidden: false) {
+                                                                     service: warm, includeHidden: false, limits: limits) {
                         if first == nil, !update.matches.isEmpty { first = started.elapsedMilliseconds }
                         matches += update.matches.count
                         if update.isFinished { recorder.add("\(name).folders", value: Double(update.foldersSearched), unit: "folders") }
@@ -167,6 +179,23 @@ final class PerformanceBenchmarkTests: XCTestCase {
                     if let first { recorder.add("\(name).first", value: first) }
                     recorder.add("\(name).matches", value: Double(matches), unit: "matches")
                 }
+            }
+            if measuring {
+                // How long a folder tap waits while a search is walking fairly large folders.
+                let walk = Task { [profile] in
+                    for try await update in RemoteFolderSearch.names(matching: "zzzqq", below: root + "/wide", profile: profile,
+                                                                     service: warm, includeHidden: false, limits: limits) {
+                        if update.isFinished { recorder.add("search.wide.folders", value: Double(update.foldersSearched), unit: "folders") }
+                    }
+                }
+                let walkStarted = ContinuousClock.now
+                try await Task.sleep(for: .milliseconds(200))
+                try await recorder.timeAsync("search.contended.list.10", runs: max(runs, 5)) {
+                    blackHole(try await warm.listDirectory(profile: profile, path: root + "/d10").entries.count)
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+                _ = await walk.result
+                recorder.add("search.wide.total", value: walkStarted.elapsedMilliseconds)
             }
         }
         if selected("read") {

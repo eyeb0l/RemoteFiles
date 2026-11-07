@@ -73,6 +73,34 @@ struct FolderSearchState {
     }
 }
 
+/// Hands each listing's partial rows to the screen one at a time, skipping any overtaken while the
+/// previous ones were being prepared.
+private final class PartialRowsUpdate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiting: DirectorySnapshot?
+    private var running = false
+    private let show: @MainActor (DirectorySnapshot) async -> Void
+    init(show: @escaping @MainActor (DirectorySnapshot) async -> Void) { self.show = show }
+    func submit(_ snapshot: DirectorySnapshot) {
+        lock.lock()
+        waiting = snapshot
+        let start = !running
+        running = true
+        lock.unlock()
+        guard start else { return }
+        Task { @MainActor in
+            while let next = self.next() { await self.show(next) }
+        }
+    }
+    private func next() -> DirectorySnapshot? {
+        lock.lock(); defer { lock.unlock() }
+        let value = waiting
+        waiting = nil
+        if value == nil { running = false }
+        return value
+    }
+}
+
 /// Where Up and Down move a folder's keyboard selection.
 enum FolderKeyboardSelection {
     /// Moves `delta` rows, stopping at either end. With nothing selected, or a selection no longer
@@ -161,7 +189,8 @@ struct FolderView: View {
                     await reload()
                     pullRefreshing = false
                 }) { row in
-                    link(for: row, subtitle: row.subtitle, visibleSubtitle: row.visibleSubtitle)
+                    let subtitle = row.subtitle
+                    link(for: row, subtitle: subtitle, visibleSubtitle: .some(subtitle == "Folder" ? nil : subtitle))
                 }
                 .equatable()
             }
@@ -506,7 +535,7 @@ struct FolderView: View {
         // A check over a live connection isn't connecting again; don't flash the state on Home.
         if model.connectionStates[profile.id] != "Connected" { model.connectionStates[profile.id] = "Connecting…" }
         do {
-            let value = try await model.service.listDirectory(profile: profile, path: requestedPath)
+            let value = try await listShowingPartialRows(token: token)
             let prepared = await Task.detached(priority: .userInitiated) { FolderListing(value) }.value
             if !userChoseSort { sortOrder = model.folderSortOrder(profile.id, path: prepared.path) }
             let query = filter, hidden = showHidden, order = sortOrder, options = searchOptions
@@ -536,6 +565,31 @@ struct FolderView: View {
         }
         if token == requestID { loading = false }
     }
+    /// With nothing on screen yet, shows rows as they arrive rather than a spinner until the last one.
+    /// A folder already on screen keeps its complete rows until the new ones are complete.
+    private func listShowingPartialRows(token: UUID) async throws -> DirectorySnapshot {
+        guard listing == nil, let progressive = model.service as? any ProgressiveFolderListing else {
+            return try await model.service.listDirectory(profile: profile, path: requestedPath)
+        }
+        let gate = PartialListingGate()
+        let update = PartialRowsUpdate { snapshot in await showPartialRows(snapshot, token: token) }
+        return try await progressive.listDirectory(profile: profile, path: requestedPath) { snapshot in
+            if gate.shouldShow(count: snapshot.entries.count) { update.submit(snapshot) }
+        }
+    }
+    private func showPartialRows(_ snapshot: DirectorySnapshot, token: UUID) async {
+        let query = filter, hidden = showHidden, options = searchOptions
+        let order = userChoseSort ? sortOrder : model.folderSortOrder(profile.id, path: snapshot.path)
+        let (prepared, rows) = await Task.detached(priority: .userInitiated) { () -> (FolderListing, [FolderRow]) in
+            let value = FolderListing(snapshot)
+            return (value, value.visible(query: query, showHidden: hidden, order: order, options: options))
+        }.value
+        guard !Task.isCancelled, token == requestID, loading, !model.isDisconnecting, query == filter, hidden == showHidden,
+              options == searchOptions, prepared.rows.count > listing?.rows.count ?? 0 else { return }
+        if !userChoseSort { sortOrder = order }
+        listing = prepared; setVisible(rows)
+        appliedFilter = query; appliedShowHidden = hidden; appliedSortOrder = order; appliedSearchOptions = options
+    }
     /// Lists subfolders of the canonical folder once typing pauses; a new query, scope, refresh,
     /// disconnect or backgrounding cancels the walk.
     private func searchSubfolders() async {
@@ -554,10 +608,18 @@ struct FolderView: View {
                     contentLimits: .init(maxFileBytes: extraction.includePDF || extraction.includeOCR ? DocumentPolicy.previewByteLimit : 256 * 1_024),
                     options: searchOptions, extraction: extraction)
                 : RemoteFolderSearch.names(matching: query, below: root, profile: profile, service: model.searchService, includeHidden: showHidden, options: searchOptions)
-            for try await update in updates {
+            // The walk can report over a hundred folders a second, far more often than anyone can read
+            // and each report re-evaluates this view, so reports are gathered up between refreshes.
+            let batcher = FolderSearchBatcher { update in
                 guard !Task.isCancelled, model.sessionRevision == revision else { return }
                 search.apply(update, for: key)
             }
+            defer { batcher.cancel() }
+            for try await update in updates {
+                guard !Task.isCancelled, model.sessionRevision == revision else { return }
+                batcher.add(update)
+            }
+            batcher.flush()
         } catch {
             guard !Task.isCancelled, !(error is CancellationError), !model.isDisconnecting,
                   model.sessionRevision == revision, search.key == key else { return }

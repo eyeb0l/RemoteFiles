@@ -83,7 +83,7 @@ final class FolderSearchTests: XCTestCase {
         }
         for window in [1, 4] {
             let service = TreeService(tree)
-            let result = try await search(service, "needle", limits: .init(concurrentListings: window))
+            let result = try await search(service, "needle", limits: .init(concurrentListings: window, concurrentListingLimit: window))
             XCTAssertEqual(result.paths, expected, "A completed listing can discover more work even when no peer listing remains")
             XCTAssertEqual(result.final.foldersSearched, tree.count)
             XCTAssertNil(result.final.stop)
@@ -161,7 +161,7 @@ final class FolderSearchTests: XCTestCase {
         var wide = ["/r": (0..<10).map { folder("/r/f\($0)") } + (0..<10).map { file("/r/needle-\($0)") }]
         for index in 0..<10 { wide["/r/f\(index)"] = [file("/r/f\(index)/needle")] }
         let folders = TreeService(wide)
-        let fewFolders = try await search(folders, "f", limits: .init(maxFolders: 4, concurrentListings: 1))
+        let fewFolders = try await search(folders, "f", limits: .init(maxFolders: 4, concurrentListings: 1, concurrentListingLimit: 1))
         XCTAssertEqual(fewFolders.final.stop, .folderLimit)
         XCTAssertEqual(fewFolders.final.foldersSearched, 4)
         let listedFolders = await folders.listed
@@ -178,7 +178,7 @@ final class FolderSearchTests: XCTestCase {
         XCTAssertNil(exactly.final.stop, "Exactly the limit in a finished walk is complete")
 
         let slow = TreeService(wide, delay: .milliseconds(60))
-        let timed = try await search(slow, "needle", limits: .init(timeLimit: .milliseconds(150), concurrentListings: 1))
+        let timed = try await search(slow, "needle", limits: .init(timeLimit: .milliseconds(150), concurrentListings: 1, concurrentListingLimit: 1))
         XCTAssertEqual(timed.final.stop, .timeLimit)
         XCTAssertLessThan(timed.final.foldersSearched, 11)
         XCTAssertEqual(timed.paths.count, 10 + timed.final.foldersSearched - 1, "Matches from every listed folder are kept")
@@ -190,7 +190,7 @@ final class FolderSearchTests: XCTestCase {
         let service = TreeService(tree, delay: .milliseconds(30))
         let consumer = Task {
             for try await _ in RemoteFolderSearch.names(matching: "x", below: "/r", profile: profile, service: service,
-                                                        includeHidden: false, limits: .init(concurrentListings: 3)) {}
+                                                        includeHidden: false, limits: .init(concurrentListings: 3, concurrentListingLimit: 3)) {}
         }
         while await service.listed.count < 8 { try await Task.sleep(for: .milliseconds(10)) }
         consumer.cancel()
@@ -202,5 +202,21 @@ final class FolderSearchTests: XCTestCase {
         XCTAssertLessThan(later, 31)
         let mostAtOnce = await service.mostAtOnce
         XCTAssertEqual(mostAtOnce, 3, "Subfolders are listed three at a time")
+    }
+
+    func testListingPacingGrowsWhileAnswersAreQuickAndBacksOffWhenTheySlow() {
+        var pacing = RemoteFolderSearch.ListingPacing(limits: .init(concurrentListings: 8, concurrentListingLimit: 64))
+        XCTAssertEqual(pacing.window, 8)
+        for _ in 0..<100 { pacing.finished(after: .milliseconds(120)) }
+        XCTAssertEqual(pacing.window, 64, "Stops at its limit")
+        pacing.finished(after: .seconds(2))
+        XCTAssertEqual(pacing.window, 64, "Neither quick nor slow")
+        pacing.finished(after: .seconds(4))
+        XCTAssertEqual(pacing.window, 32)
+        for _ in 0..<10 { pacing.finished(after: .seconds(4)) }
+        XCTAssertEqual(pacing.window, 8, "Never below where it began")
+        var fixed = RemoteFolderSearch.ListingPacing(limits: .init(concurrentListings: 4, concurrentListingLimit: 4))
+        fixed.finished(after: .milliseconds(1))
+        XCTAssertEqual(fixed.window, 4)
     }
 }

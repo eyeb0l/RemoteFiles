@@ -9,7 +9,7 @@ import NIOSSH
 /// Read-only SFTP adapter. The SSH connection is reused, and listings, metadata and document
 /// reads share one SFTP channel per session. Streaming downloads own a child channel, so
 /// cancelling one also releases all of its remote file handles.
-public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, ServerFolderSearching, RemoteFileSessionClosing, ResumableManagedDownloading {
+public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing, FolderWalking, BackgroundFolderListing, ServerFolderSearching, RemoteFileSessionClosing, ResumableManagedDownloading {
     private let identityStore: IdentityStore
     private let trustStore: HostTrustStore
     private let metadataStore: MetadataStore
@@ -25,6 +25,8 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
     /// How long a dedicated transfer may take to drain after its channel was asked to close
     /// before the connection's socket is closed too. See `performOnDedicatedChannel`.
     private var dedicatedCloseGrace: Duration = .seconds(5)
+    /// How often a transfer reports its progress. Its start, first bytes and end always report.
+    private var progressInterval: Duration = .milliseconds(100)
 
     public init(identityStore: IdentityStore, trustStore: HostTrustStore,
                 metadataStore: MetadataStore, timeoutSeconds: UInt64 = 15) {
@@ -40,6 +42,7 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
     func setTransferTimings(idle: Duration, closeGrace: Duration) {
         managedTransferIdle = idle; dedicatedCloseGrace = closeGrace
     }
+    func setProgressInterval(_ interval: Duration) { progressInterval = interval }
 
     func searchFolders(query: String, root: String, profile: ConnectionProfile, includeHidden: Bool,
                        limits: RemoteFolderSearch.Limits, content: RemoteFolderSearch.ContentLimits?) async throws -> RemoteFolderSearch.Update? {
@@ -184,18 +187,51 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
     /// Most READDIR requests a listing keeps in flight. OpenSSH answers up to 100 names each, so
     /// eight keep its sequential server busy across a cellular round trip.
     static let directoryReadWindow = 8
+    /// Entries a listing may hold before it fails. Each one held here costs about 180 bytes plus its
+    /// name and path, so even a full listing stays far below what the system allows the app.
+    static let directoryEntryLimit = 250_000
+    /// Decoded names, longnames and attributes that the same listing may hold in total.
+    static let directoryMetadataLimit = 128 * 1024 * 1024
     /// Symbolic links resolved per listing; later links stay unresolved and resolve when tapped.
     static let linkResolutionLimit = 256
-    /// Links resolved at once, each sending REALPATH and STAT together.
-    static let linkResolutionWindow = 16
+    /// Links resolved at once, each sending REALPATH and STAT together. Enough for the whole of
+    /// `linkResolutionLimit` to go in one round trip, which the server then answers at its own pace.
+    static let linkResolutionWindow = 128
     /// Time after which no new link lookups start, keeping best-effort resolution well inside the
     /// listing's deadline on slow connections. Lookups already sent still finish.
     static let linkResolutionBudget: Duration = .seconds(3)
 
     public func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
+        try await listDirectory(profile: profile, path: path, partial: nil, resolvesLinks: true, role: .foreground)
+    }
+
+    public func listDirectory(profile: ConnectionProfile, path: String,
+                              partial: @escaping @Sendable (DirectorySnapshot) -> Void) async throws -> DirectorySnapshot {
+        try await listDirectory(profile: profile, path: path, partial: partial, resolvesLinks: true, role: .foreground)
+    }
+
+    /// A folder search only needs names and kinds, and it asks only about the few links that match.
+    func listDirectoryForWalk(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
+        try await listDirectory(profile: profile, path: path, partial: nil, resolvesLinks: false, role: .walk)
+    }
+
+    func resolvingLinks(in entries: [RemoteEntry], profile: ConnectionProfile) async throws -> [RemoteEntry] {
+        guard entries.contains(where: { $0.kind == .symlink }) else { return entries }
+        let session = try await session(for: profile)
+        return try await perform(session: session) { sftp, _ in
+            try await Self.resolvingLinks(in: entries) { await Self.linkResolution(for: $0, sftp: sftp) }
+        }
+    }
+
+    private func listDirectory(profile: ConnectionProfile, path: String, partial: (@Sendable (DirectorySnapshot) -> Void)?,
+                               resolvesLinks: Bool, role: SFTPChannelRole) async throws -> DirectorySnapshot {
         let started = Date()
         let session = try await session(for: profile)
-        let result = try await perform(session: session) { sftp in try await Self.snapshot(path, sftp: sftp) }
+        // A very large folder may take longer than one deadline: it runs out only when replies stop.
+        let progress = DeadlineExtension()
+        let result = try await perform(session: session, role: role, progress: progress) { sftp, closes in
+            try await Self.snapshot(path, sftp: sftp, progress: progress, closes: closes, partial: partial, resolvesLinks: resolvesLinks)
+        }
         measurements.directoryOperations += 1
         measurements.lastDirectorySeconds = Date().timeIntervalSince(started)
         return result
@@ -217,7 +253,7 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
                     channel.install(sftp)
                     do {
                         try Task.checkCancellation()
-                        let value = try await Self.snapshot(path, sftp: sftp)
+                        let value = try await Self.snapshot(path, sftp: sftp, progress: nil, closes: nil, partial: nil, resolvesLinks: true)
                         try await sftp.close()
                         return value
                     } catch {
@@ -232,22 +268,34 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
     }
     private static let backgroundListingSeconds: UInt64 = 10
 
-    private nonisolated static func snapshot(_ path: String, sftp: SFTPClient) async throws -> DirectorySnapshot {
-        // REALPATH and OPENDIR go out together, saving a round trip; the server resolves both from the
-        // same path. If REALPATH fails, the cancelled listing still drains and closes its handle.
+    /// Names are ready after two round trips: REALPATH and OPENDIR together, then the READDIRs. With
+    /// `closes`, the listing returns without waiting a third for CLOSE, whose reply is checked afterwards.
+    /// `partial` receives what has arrived so far before links are resolved, each time with more entries.
+    private nonisolated static func snapshot(_ path: String, sftp: SFTPClient, progress: DeadlineExtension?, closes: DeferredCloses?,
+                                             partial: (@Sendable (DirectorySnapshot) -> Void)?, resolvesLinks: Bool) async throws -> DirectorySnapshot {
         let requested = try validated(path)
-        async let resolved = sftp.getRealPath(atPath: requested)
-        async let listed = sftp.listDirectory(atPath: requested, resolvingPath: false,
-                                              concurrentReads: directoryReadWindow)
-        let canonical = try await resolved
-        let groups = try await listed
-        let entries = groups.flatMap(\.components).filter {
-            $0.filename != "." && $0.filename != ".."
-        }.map { component in
-            entry(name: component.filename,
-                  path: RemotePath.appending(component.filename, to: canonical),
-                  attributes: component.attributes)
+        // The server resolves both requests from the same path. If REALPATH fails, the listing still
+        // drains and closes its handle.
+        let resolved = sftp.sendRealPath(atPath: requested)
+        let collected = CollectedEntries()
+        let listed: Result<Void, Error>
+        do {
+            _ = try await sftp.listDirectory(atPath: requested, resolvingPath: false, concurrentReads: directoryReadWindow,
+                                             maximumEntries: directoryEntryLimit, maximumMetadataBytes: directoryMetadataLimit,
+                                             onBatch: { components in
+                progress?.record()
+                let canonical = try await resolved.get()
+                let entries = collected.add(components, in: canonical)
+                if let partial { partial(DirectorySnapshot(path: canonical, entries: entries)) }
+            }, deferringClose: closes.map { closes in { closes.add($0) } })
+            listed = .success(())
+        } catch {
+            listed = .failure(error)
         }
+        let canonical = try await resolved.get()
+        try listed.get()
+        let entries = collected.entries
+        guard resolvesLinks else { return DirectorySnapshot(path: canonical, entries: entries) }
         let linked = try await resolvingLinks(in: entries) { await linkResolution(for: $0, sftp: sftp) }
         return DirectorySnapshot(path: canonical, entries: linked)
     }
@@ -283,10 +331,10 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
     }
 
     private nonisolated static func linkResolution(for link: RemoteEntry, sftp: SFTPClient) async -> LinkResolution? {
-        async let canonical = sftp.getRealPath(atPath: link.path)
-        async let attributes = sftp.getAttributes(at: link.path)
+        let canonical = sftp.sendRealPath(atPath: link.path)
+        let attributes = sftp.sendAttributes(at: link.path)
         do {
-            let (path, target) = try await (canonical, attributes)
+            let (path, target) = (try await canonical.get(), try await attributes.get())
             return .target(entry(name: RemotePath.name(of: path), path: path, attributes: target))
         } catch let status as SFTPMessage.Status where status.errorCode == .noSuchFile || status.errorCode == .failure {
             // A missing target, or a loop, which OpenSSH reports as a generic failure.
@@ -324,39 +372,62 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
         guard limit >= 0, limit < Int.max else { throw RemoteFileError.tooLarge(max(0, limit)) }
         let started = Date()
         let session = try await session(for: profile)
-        let result = try await perform(session: session) { sftp -> (Data?, RemoteFileVersion?, Int) in
+        let result = try await perform(session: session) { sftp, closes -> (Data?, RemoteFileVersion?, Int) in
             var target = try Self.validated(path)
             var canonicalRoot: String?
+            // Whatever can be answered together goes together. Each answer is still judged in the order
+            // that makes it safe: root confinement before a version match, so an unchanged answer never
+            // skips the boundary.
+            let currentAttributes: EventLoopFuture<SFTPFileAttributes>?
             if let allowedRoot {
-                let root = try await sftp.getRealPath(atPath: Self.validated(allowedRoot))
+                let rootPath = sftp.sendRealPath(atPath: try Self.validated(allowedRoot))
+                let targetPath = sftp.sendRealPath(atPath: target)
+                currentAttributes = since == nil ? nil : sftp.sendAttributes(at: target)
+                let root = try await rootPath.get()
                 if requiresCanonicalRoot, !root.utf8.elementsEqual(allowedRoot.utf8) { throw RemoteDocumentLinkError.outsideConnection }
-                target = try await sftp.getRealPath(atPath: target)
+                target = try await targetPath.get()
                 guard RemoteResourcePath.contains(target, in: root) else { throw RemoteDocumentLinkError.outsideConnection }
                 canonicalRoot = root
+            } else {
+                currentAttributes = since == nil ? nil : sftp.sendAttributes(at: target)
             }
-            if let since, RemoteFileVersion(attributes: try await sftp.getAttributes(at: target)) == since {
+            if let since, let currentAttributes, RemoteFileVersion(attributes: try await currentAttributes.get()) == since {
                 return (nil, since, 0)
             }
-            let file = try await sftp.openFile(filePath: target, flags: .read)
+            // The handle and the size come back together. The size only shapes the reads, so that a small
+            // file needs one of them rather than a second to find out where it ended.
+            let opening = sftp.sendOpenFile(filePath: target, flags: .read)
+            let expected = sftp.sendAttributes(at: target)
+            let file = try await opening.get()
             do {
+                // The version comes from the handle and is taken before the bytes, so a concurrent
+                // write reads as changed next time.
+                let attributes: SFTPFileAttributes
+                let handleAttributes: EventLoopFuture<SFTPFileAttributes>
                 if let canonicalRoot {
                     // SFTP v3 has no portable openat/no-follow operation. Re-resolving both
                     // paths after OPEN catches stable namespace replacement before bytes move;
                     // the server must still provide a jail or immutable root for an atomic boundary.
-                    let currentRoot = try await sftp.getRealPath(atPath: canonicalRoot)
-                    let currentTarget = try await sftp.getRealPath(atPath: target)
+                    let rootCheck = sftp.sendRealPath(atPath: canonicalRoot)
+                    let targetCheck = sftp.sendRealPath(atPath: target)
+                    handleAttributes = file.sendReadAttributes()
+                    let currentRoot = try await rootCheck.get()
+                    let currentTarget = try await targetCheck.get()
                     guard currentRoot.utf8.elementsEqual(canonicalRoot.utf8),
                           currentTarget.utf8.elementsEqual(target.utf8),
                           RemoteResourcePath.contains(currentTarget, in: currentRoot) else {
                         throw RemoteDocumentLinkError.outsideConnection
                     }
+                } else {
+                    handleAttributes = file.sendReadAttributes()
                 }
-                // The version is taken before the bytes, so a concurrent write reads as changed next time.
-                let attributes = try await file.readAttributes()
-                let (bytes, requests) = try await BoundedPreviewReader.read(initialSize: attributes.size, limit: limit) { offset, amount in
+                let hint = try? await expected.get()
+                let (bytes, requests) = try await BoundedPreviewReader.read(initialSize: hint?.size, limit: limit, window: Self.previewReadWindow) { offset, amount in
                     try await file.read(from: offset, length: amount)
                 }
-                try await file.close()
+                attributes = try await handleAttributes.get()
+                if let size = attributes.size, size > UInt64(limit) { throw RemoteFileError.tooLarge(limit) }
+                closes.add(file.sendClose())
                 return (bytes, RemoteFileVersion(attributes: attributes), requests)
             } catch {
                 // The failure also retires the shared channel, releasing this handle
@@ -408,6 +479,12 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
         try await download(profile: profile, path: path, allowedRoot: canonicalRoot, destination: destination, limit: limit,
                            progress: progress, canonicalPaths: true, managed: true, resumeVersion: resumeVersion, started: started)
     }
+    /// Reads a preview keeps in flight. A foreground read has nothing to wait behind on its channel, and
+    /// knowing the size means none of them is wasted, so a preview of 2 MiB takes one round trip.
+    static let previewReadWindow = 32
+    /// Reads a transfer starts with, and the most it grows to on a fast, distant connection.
+    static let transferReadWindow = 16
+    static let transferReadWindowLimit = 64
     /// Bytes just before a resume offset that must still match the server's copy.
     static let resumeOverlapBytes = 64 * 1024
     private func download(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL,
@@ -416,6 +493,7 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
                           started: @escaping ManagedDownloadStartHandler = { _, _ in }) async throws -> RemoteEntry {
         guard limit > 0, limit < Int.max else { throw RemoteFileError.tooLarge(limit) }
         let session = try await session(for: profile)
+        let reportInterval = progressInterval
         let result = try await performOnDedicatedChannel(session: session, budget: managed ? .idle(managedTransferIdle) : .total(180)) { sftp, activity in
             let root = try await sftp.getRealPath(atPath: Self.validated(allowedRoot))
             let canonical = try await sftp.getRealPath(atPath: Self.validated(path))
@@ -464,14 +542,22 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
                 try Task.checkCancellation()
                 var count = start
                 await progress(.init(receivedBytes: UInt64(start), totalBytes: attributes.size))
-                _ = try await BoundedPreviewReader.stream(initialSize: attributes.size, limit: limit, startOffset: start, window: 16, readChunk: { offset, amount in
+                var lastReport: ContinuousClock.Instant?
+                _ = try await BoundedPreviewReader.stream(initialSize: attributes.size, limit: limit, startOffset: start, window: Self.transferReadWindow,
+                                                          windowLimit: Self.transferReadWindowLimit, readChunk: { offset, amount in
                     let bytes = try await file.read(from: offset, length: amount)
                     activity.receivedBytes(bytes.readableBytes)
                     return bytes
                 }) { chunk in
                     try handle.write(contentsOf: Data(chunk.readableBytesView))
                     count += chunk.readableBytes
-                    await progress(.init(receivedBytes: UInt64(count), totalBytes: attributes.size))
+                    // At full speed this would be thousands of main-actor updates a second, each
+                    // invalidating every view that shows a transfer. The first bytes always show.
+                    let now = ContinuousClock.now
+                    if lastReport.map({ $0.duration(to: now) >= reportInterval }) ?? true {
+                        lastReport = now
+                        await progress(.init(receivedBytes: UInt64(count), totalBytes: attributes.size))
+                    }
                 }
                 try await file.close()
                 try Task.checkCancellation()
@@ -615,7 +701,8 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
                         hostKeyValidator: .custom(TrustValidator(store: trustStore, endpoint: HostEndpoint(host: host, port: port)))
                     )
                     value.connectTimeout = .seconds(Int64(timeout))
-                    value.protocolOptions = [.maximumPacketSize(1 << 21)]
+                    // NIOSSH also uses this as its receive window, which has to hold a full transfer window.
+                    value.protocolOptions = [.maximumPacketSize(1 << 23)]
                     value.onChannelCreated = { control.install($0) }
                     return value
                 }
@@ -688,29 +775,50 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
     /// A deadline marks the channel closing before the timeout is reported, so no later operation
     /// reuses it: the timed-out work holds the channel until the server confirms the close or TCP
     /// drops, and the half-closed channel would fail the next request.
-    private func perform<T: Sendable>(session: LiveSession,
-                                     operation: @escaping @Sendable (SFTPClient) async throws -> T) async throws -> T {
+    ///
+    /// An operation that has what its caller needs can leave its handles closing in `DeferredCloses`
+    /// rather than wait a round trip for the replies. The channel stays in use until they arrive, and
+    /// a failed close retires it just as a failed operation would. A close that never gets a reply
+    /// is ended by the next operation's deadline, or the connection closing.
+    private func perform<T: Sendable>(session: LiveSession, role: SFTPChannelRole = .foreground, progress: DeadlineExtension? = nil,
+                                      operation: @escaping @Sendable (SFTPClient, DeferredCloses) async throws -> T) async throws -> T {
         let channel = SFTPChannelControl()
         do {
-            return try await Self.detachedDeadline(seconds: timeoutSeconds, onTimeout: {
+            return try await Self.detachedDeadline(seconds: timeoutSeconds, extending: progress, onTimeout: {
                 channel.close()
                 if !channel.hasClient { session.control.close() }
             }) {
-                let shared = try await self.acquireSFTP(for: session)
+                let shared = try await self.acquireSFTP(for: session, role: role)
                 channel.install(shared.client, closing: shared.closing)
+                let closes = DeferredCloses()
                 do {
                     try Task.checkCancellation()
-                    let value = try await operation(shared.client)
-                    await self.release(shared, from: session, reusable: true)
+                    let value = try await operation(shared.client, closes)
+                    let pending = closes.take()
+                    if pending.isEmpty {
+                        await self.release(shared, from: session, reusable: true)
+                    } else {
+                        Task { await self.release(shared, from: session, reusable: await DeferredCloses.succeeded(pending)) }
+                    }
                     return value
                 } catch {
-                    await self.release(shared, from: session, reusable: false)
+                    let pending = closes.take()
+                    if pending.isEmpty {
+                        await self.release(shared, from: session, reusable: false)
+                    } else {
+                        Task { _ = await DeferredCloses.succeeded(pending); await self.release(shared, from: session, reusable: false) }
+                    }
                     throw error
                 }
             }
         } catch {
             throw Self.mapped(error)
         }
+    }
+
+    private func perform<T: Sendable>(session: LiveSession,
+                                      operation: @escaping @Sendable (SFTPClient) async throws -> T) async throws -> T {
+        try await perform(session: session, progress: nil) { sftp, _ in try await operation(sftp) }
     }
 
     /// Streaming transfers own a child SFTP channel. Cancelling or timing out closes it, releasing
@@ -768,30 +876,34 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
         }
     }
 
-    private func acquireSFTP(for session: LiveSession) async throws -> SharedSFTPChannel {
-        if let shared = session.sftp {
+    private func acquireSFTP(for session: LiveSession, role: SFTPChannelRole = .foreground) async throws -> SharedSFTPChannel {
+        if let shared = session.sftp[role] {
             if !shared.retired, !shared.closing.isSet, shared.client.isActive { shared.users += 1; return shared }
             retire(shared, from: session)
         }
         let opening: Task<SharedSFTPChannel, Error>
-        if let pending = session.openingSFTP {
+        if let pending = session.openingSFTP[role] {
             opening = pending
         } else {
             let client = session.client
-            opening = Task { SharedSFTPChannel(client: try await client.openSFTP(logger: Self.sftpLogger())) }
-            session.openingSFTP = opening
+            opening = Task { SharedSFTPChannel(client: try await client.openSFTP(logger: Self.sftpLogger()), role: role) }
+            session.openingSFTP[role] = opening
             measurements.sftpChannels += 1
         }
         let shared: SharedSFTPChannel
         do {
             shared = try await opening.value
         } catch {
-            if session.openingSFTP == opening { session.openingSFTP = nil }
+            if session.openingSFTP[role] == opening { session.openingSFTP[role] = nil }
+            // A server allowing few channels may refuse a second one. A walk then shares the first.
+            if role == .walk, let refusal = error as? NIOSSHError, refusal.type == .channelSetupRejected {
+                return try await acquireSFTP(for: session, role: .foreground)
+            }
             throw error
         }
-        if session.openingSFTP == opening { session.openingSFTP = nil; session.sftp = shared }
+        if session.openingSFTP[role] == opening { session.openingSFTP[role] = nil; session.sftp[role] = shared }
         // Another waiter may have failed on this channel and retired it while this one resumed.
-        guard !shared.retired else { return try await acquireSFTP(for: session) }
+        guard !shared.retired else { return try await acquireSFTP(for: session, role: role) }
         shared.users += 1
         return shared
     }
@@ -803,7 +915,7 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
 
     private func retire(_ shared: SharedSFTPChannel, from session: LiveSession) {
         shared.retired = true
-        if session.sftp === shared { session.sftp = nil }
+        if session.sftp[shared.role] === shared { session.sftp[shared.role] = nil }
         if shared.users == 0 { shared.close() }
     }
 
@@ -850,7 +962,7 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
         return path.isEmpty ? "." : path
     }
 
-    private nonisolated static func entry(name: String, path: String, attributes: SFTPFileAttributes) -> RemoteEntry {
+    nonisolated static func entry(name: String, path: String, attributes: SFTPFileAttributes) -> RemoteEntry {
         let kind: RemoteEntry.Kind
         switch (attributes.permissions ?? 0) & 0o170000 {
         case 0o040000: kind = .directory
@@ -867,7 +979,7 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
     /// itself finishes, so an unanswered request still fires `onTimeout` and releases its channel.
     /// `onTimeout` runs before the caller sees the timeout, and once it has run the result is
     /// `timedOut` even if the work fails first because of what `onTimeout` closed.
-    nonisolated static func detachedDeadline<T: Sendable>(seconds: UInt64,
+    nonisolated static func detachedDeadline<T: Sendable>(seconds: UInt64, extending progress: DeadlineExtension? = nil,
                                                           onTimeout: @escaping @Sendable () -> Void,
                                                           operation: @escaping @Sendable () async throws -> T) async throws -> T {
         let outcome = FirstOutcome<T>()
@@ -875,7 +987,13 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
         let fired = LockedFlag()
         let work = Task { try await operation() }
         let timer = Task {
-            try await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+            let interval = Duration.seconds(Int64(seconds))
+            var deadline = ContinuousClock.now + interval
+            while true {
+                try await Task.sleep(until: deadline, clock: .continuous)
+                guard let latest = progress?.latest, latest + interval > ContinuousClock.now else { break }
+                deadline = latest + interval
+            }
             guard !finished.isSet else { return }
             fired.set()
             onTimeout(); work.cancel()
@@ -920,6 +1038,50 @@ public actor SFTPRemoteFileService: RemoteFileService, BackgroundFolderListing, 
     }
 }
 
+/// Keeps an operation's deadline from expiring while it is still receiving what it asked for.
+final class DeadlineExtension: @unchecked Sendable {
+    private let lock = NSLock()
+    private var last: ContinuousClock.Instant?
+    var latest: ContinuousClock.Instant? { lock.lock(); defer { lock.unlock() }; return last }
+    func record() { let now = ContinuousClock.now; lock.lock(); last = now; lock.unlock() }
+}
+
+/// Handles an operation has asked the server to close without waiting for its replies.
+final class DeferredCloses: @unchecked Sendable {
+    private let lock = NSLock()
+    private var futures: [EventLoopFuture<Void>] = []
+    func add(_ future: EventLoopFuture<Void>) { lock.lock(); futures.append(future); lock.unlock() }
+    func take() -> [EventLoopFuture<Void>] {
+        lock.lock(); defer { lock.unlock() }
+        let taken = futures
+        futures = []
+        return taken
+    }
+    static func succeeded(_ futures: [EventLoopFuture<Void>]) async -> Bool {
+        var succeeded = true
+        for future in futures where (try? await future.get()) == nil { succeeded = false }
+        return succeeded
+    }
+}
+
+/// Maps a listing's batches to entries as they arrive, and keeps them.
+private final class CollectedEntries: @unchecked Sendable {
+    private let lock = NSLock()
+    private var collected: [RemoteEntry] = []
+    private var prefix: String?
+    var entries: [RemoteEntry] { lock.lock(); defer { lock.unlock() }; return collected }
+    /// Returns everything so far. Batches arrive one at a time, in the order the server gave them.
+    func add(_ components: [SFTPPathComponent], in canonical: String) -> [RemoteEntry] {
+        lock.lock(); defer { lock.unlock() }
+        let prefix = self.prefix ?? RemotePath.childPrefix(of: canonical)
+        self.prefix = prefix
+        for component in components where component.filename != "." && component.filename != ".." {
+            collected.append(SFTPRemoteFileService.entry(name: component.filename, path: prefix + component.filename, attributes: component.attributes))
+        }
+        return collected
+    }
+}
+
 public struct TransportMetrics: Sendable {
     public fileprivate(set) var serverSearchAttempts = 0
     public fileprivate(set) var serverSearchOperations = 0
@@ -939,23 +1101,29 @@ private final class LiveSession: @unchecked Sendable {
     let client: SSHClient
     let control: SocketControl
     let bastion: SSHClient?
-    // Actor-isolated to SFTPRemoteFileService; closing the SSH socket also closes this channel.
-    var sftp: SharedSFTPChannel?
-    var openingSFTP: Task<SharedSFTPChannel, Error>?
+    // Actor-isolated to SFTPRemoteFileService; closing the SSH socket also closes these channels.
+    var sftp: [SFTPChannelRole: SharedSFTPChannel] = [:]
+    var openingSFTP: [SFTPChannelRole: Task<SharedSFTPChannel, Error>] = [:]
     var serverSearchUnavailable = false
     init(profile: ConnectionProfile, client: SSHClient, control: SocketControl, bastion: SSHClient? = nil) {
         self.profile = profile; self.client = client; self.control = control; self.bastion = bastion
     }
 }
 
-/// The session's reusable SFTP channel. Mutable state is actor-isolated to SFTPRemoteFileService.
+/// A walk over many folders has a channel of its own. OpenSSH runs one server process per channel,
+/// answering in turn, so this keeps a folder someone taps from queueing behind the walk's listings,
+/// and a stalled walk from retiring the channel everything else is using.
+private enum SFTPChannelRole: Hashable, Sendable { case foreground, walk }
+
+/// One of the session's reusable SFTP channels. Mutable state is actor-isolated to SFTPRemoteFileService.
 private final class SharedSFTPChannel: @unchecked Sendable {
     let client: SFTPClient
+    let role: SFTPChannelRole
     /// Set from a deadline outside the actor, before the timeout is reported.
     let closing = LockedFlag()
     var users = 0
     var retired = false
-    init(client: SFTPClient) { self.client = client }
+    init(client: SFTPClient, role: SFTPChannelRole) { self.client = client; self.role = role }
     func close() {
         let client = client
         Task { try? await client.close() }
@@ -1058,15 +1226,45 @@ private final class LockedFlag: @unchecked Sendable {
     func set() { lock.lock(); value = true; lock.unlock() }
 }
 
+/// Grows a transfer's read window to cover what the connection delivers in a round trip, and half as
+/// much again so that a faster link shows itself. The shortest latency seen stands for the round trip
+/// itself, so requests queueing at a slow link don't count: the window settles at a little over the
+/// link's capacity, and browsing over the same connection doesn't wait behind a long queue.
+struct TransferPacing {
+    private(set) var window: Int
+    private let floor: Int, limit: Int, chunkSize: Int
+    private var shortestLatency: Duration?
+    private var intervalStart: ContinuousClock.Instant?
+    private var intervalBytes = 0
+
+    init(window: Int, limit: Int, chunkSize: Int) {
+        self.window = window; floor = window; self.limit = max(window, limit); self.chunkSize = chunkSize
+    }
+
+    mutating func received(bytes: Int, latency: Duration, at now: ContinuousClock.Instant) {
+        guard limit > floor else { return }
+        let shortest = min(shortestLatency ?? latency, latency)
+        shortestLatency = shortest
+        guard let start = intervalStart else { intervalStart = now; return }
+        intervalBytes += bytes
+        let elapsed = start.duration(to: now)
+        guard elapsed >= shortest, elapsed > .zero else { return }
+        let deliveredInRoundTrip = Double(intervalBytes) * (shortest / elapsed)
+        let wanted = (deliveredInRoundTrip * 1.5 / Double(chunkSize)).rounded(.up)
+        window = max(floor, min(limit, wanted >= Double(limit) ? limit : Int(wanted)))
+        intervalStart = now; intervalBytes = 0
+    }
+}
+
 /// Shared receive-time bound, independent of the server's initial size hint.
 /// Kept internal so controlled chunks can exercise growth and short-read behavior.
 enum BoundedPreviewReader {
-    static func read(initialSize: UInt64?, limit: Int,
+    static func read(initialSize: UInt64?, limit: Int, window: Int = 8,
                      readChunk: @escaping @Sendable (UInt64, UInt32) async throws -> ByteBuffer) async throws -> (Data, Int) {
         guard limit >= 0, limit < Int.max else { throw RemoteFileError.tooLarge(max(0, limit)) }
         var bytes = Data()
         bytes.reserveCapacity(min(limit, Int(clamping: initialSize ?? 0)))
-        let result = try await stream(initialSize: initialSize, limit: limit, readChunk: readChunk) { chunk in
+        let result = try await stream(initialSize: initialSize, limit: limit, window: window, readChunk: readChunk) { chunk in
             bytes.append(contentsOf: chunk.readableBytesView)
         }
         return (bytes, result.requests)
@@ -1079,13 +1277,19 @@ enum BoundedPreviewReader {
     /// probe byte past `limit`.
     /// `startOffset` continues a transfer whose earlier bytes are already held; offsets, the
     /// limit and the returned byte count are all absolute file positions.
-    static func stream(initialSize: UInt64?, limit: Int, startOffset: Int = 0, chunkSize: Int = 64 * 1024, window: Int = 8,
+    ///
+    /// A known size shapes the requests: they end exactly where the file should, with one probe just
+    /// past it, so reading a small file takes one round trip. Growth past the size carries on as without one.
+    /// With `windowLimit`, `window` grows towards it for as long as the connection delivers more.
+    static func stream(initialSize: UInt64?, limit: Int, startOffset: Int = 0, chunkSize: Int = 64 * 1024, window: Int = 8, windowLimit: Int? = nil,
                        readChunk: @escaping @Sendable (UInt64, UInt32) async throws -> ByteBuffer,
                        consume: (ByteBuffer) async throws -> Void) async throws -> (bytes: Int, requests: Int) {
         guard limit >= 0, limit < Int.max else { throw RemoteFileError.tooLarge(max(0, limit)) }
         guard startOffset >= 0, startOffset <= limit else { throw RemoteFileError.tooLarge(limit) }
         if let size = initialSize, size > UInt64(limit) { throw RemoteFileError.tooLarge(limit) }
         struct Request { let offset: Int; let amount: Int; let fillsShortRead: Int? }
+        let clock = ContinuousClock()
+        var pacing = TransferPacing(window: max(1, window), limit: windowLimit ?? max(1, window), chunkSize: max(1, chunkSize))
         return try await withThrowingTaskGroup(of: (Int, ByteBuffer).self) { group in
             var issued: [Int: Request] = [:]
             var order: [Int] = []       // Unconsumed request IDs by ascending offset.
@@ -1094,6 +1298,8 @@ enum BoundedPreviewReader {
             var nextID = 0, sent = 0, nextOffset = startOffset, inFlight = 0, consumed = startOffset
             var endOfFile = Int.max     // Lowest offset already answered with EOF.
             var chunk = max(1, chunkSize)
+            var expectedEnd = initialSize.map { Int(clamping: $0) } // Nil once the file has outgrown it.
+            var sentAt: [Int: ContinuousClock.Instant] = [:]
             func register(_ request: Request, at position: Int) -> Int {
                 let id = nextID
                 nextID += 1
@@ -1104,14 +1310,16 @@ enum BoundedPreviewReader {
             func send(_ id: Int) {
                 let request = issued[id]!
                 inFlight += 1; sent += 1
+                sentAt[id] = clock.now
                 group.addTask { (id, try await readChunk(UInt64(request.offset), UInt32(request.amount))) }
             }
             while true {
                 try Task.checkCancellation()
                 // Gaps hold back in-order delivery, so they take free slots before new ranges.
-                while inFlight < max(1, window), !waiting.isEmpty { send(waiting.removeFirst()) }
-                while inFlight < max(1, window), nextOffset <= limit, nextOffset < endOfFile {
-                    let amount = min(chunk, limit - nextOffset + 1)
+                while inFlight < pacing.window, !waiting.isEmpty { send(waiting.removeFirst()) }
+                while inFlight < pacing.window, nextOffset <= limit, nextOffset < endOfFile, nextOffset <= expectedEnd ?? Int.max {
+                    var amount = min(chunk, limit - nextOffset + 1)
+                    if let expectedEnd, nextOffset < expectedEnd { amount = min(amount, expectedEnd - nextOffset) }
                     send(register(Request(offset: nextOffset, amount: amount, fillsShortRead: nil), at: order.endIndex))
                     nextOffset += amount
                 }
@@ -1120,6 +1328,11 @@ enum BoundedPreviewReader {
                 inFlight -= 1
                 received[id] = buffer
                 let request = issued[id]!
+                if let started = sentAt.removeValue(forKey: id) {
+                    let now = clock.now
+                    pacing.received(bytes: buffer.readableBytes, latency: started.duration(to: now), at: now)
+                }
+                if let end = expectedEnd, request.offset >= end, buffer.readableBytes > 0 { expectedEnd = nil }
                 if buffer.readableBytes == 0 {
                     endOfFile = min(endOfFile, request.offset)
                 } else if buffer.readableBytes < request.amount {

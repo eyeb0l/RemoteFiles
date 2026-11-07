@@ -53,6 +53,8 @@ def generate_fixture(bench, include_huge):
     for index in range(256):
         os.symlink(f"file-{index % 44}.txt", links / f"link-{index}.txt")
     tree(bench / "tree", 5, rng)
+    for index in range(40):
+        mixed_folder(bench / "wide" / f"folder {index}", 1_000, rng)
     (bench / "report.md").write_text("# Fixture report\n\nRead over independent OpenSSH.\n")
     (bench / "large-report.md").write_text("# Report\n" + "".join(
         f"- Measurement {i}: the remote preview reads Markdown, keeps useful content, and refreshes.\n" for i in range(1800)))
