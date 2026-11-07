@@ -390,8 +390,9 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     }
 
     public func readSearchFile(profile: ConnectionProfile, path: String, canonicalRoot: String, limit: Int) async throws -> Data {
+        // On the walk's channel, so many reads at once can't queue ahead of browsing or retire its channel.
         try await boundedRead(profile: profile, path: path, allowedRoot: canonicalRoot, limit: limit,
-                              since: nil, requiresCanonicalRoot: true).0 ?? Data()
+                              since: nil, requiresCanonicalRoot: true, role: .walk).0 ?? Data()
     }
 
     public func readFileIfChanged(profile: ConnectionProfile, path: String, allowedRoot: String?, limit: Int,
@@ -403,11 +404,11 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     /// Returns nil bytes only when `since` matches the current file. Root confinement is
     /// checked before that comparison, so an unchanged answer never skips the boundary.
     private func boundedRead(profile: ConnectionProfile, path: String, allowedRoot: String?, limit: Int,
-                             since: RemoteFileVersion?, requiresCanonicalRoot: Bool = false) async throws -> (Data?, RemoteFileVersion?) {
+                             since: RemoteFileVersion?, requiresCanonicalRoot: Bool = false, role: SFTPChannelRole = .foreground) async throws -> (Data?, RemoteFileVersion?) {
         guard limit >= 0, limit < Int.max else { throw RemoteFileError.tooLarge(max(0, limit)) }
         let started = Date()
         let session = try await session(for: profile)
-        let result = try await perform(session: session) { sftp, closes -> (Data?, RemoteFileVersion?, Int) in
+        let result = try await perform(session: session, role: role) { sftp, closes -> (Data?, RemoteFileVersion?, Int) in
             var target = try Self.validated(path)
             var canonicalRoot: String?
             // Whatever can be answered together goes together. Each answer is still judged in the order

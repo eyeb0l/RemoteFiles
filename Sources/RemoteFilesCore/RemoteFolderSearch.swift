@@ -142,7 +142,11 @@ public enum RemoteFolderSearch {
         var finished: [Int: Result<DirectorySnapshot, Error>] = [:], retried: Set<Int> = []
         var progress = Update(), matched = delivered.count
         var pacing = ListingPacing(limits: limits)
+        var listedForIndex: [[RemoteEntry]] = []
         let walker = service as? any FolderWalking
+        // Only where listings already overlap: the same transport can overlap its reads.
+        let readAhead = walker != nil ? content.map { SearchReadAhead(service: service, profile: profile, root: root, limits: $0) } : nil
+        defer { readAhead?.cancelAll() }
         let list: @Sendable (Int, String) async -> Listing = { index, path in
             let started = ContinuousClock.now
             do {
@@ -189,6 +193,18 @@ public enum RemoteFolderSearch {
                     continue
                 }
                 finished[index] = result
+                func offer(_ entries: some Sequence<RemoteEntry>) {
+                    guard let readAhead, let content else { return }
+                    readAhead.offer(entries.filter { scanReads($0, root: root, limits: content, options: options, extraction: extraction)
+                        && reusable?($0) == nil && !delivered.contains(Data($0.path.utf8)) })
+                    readAhead.fill(charged: progress.chargedBytes, files: progress.filesSearched)
+                }
+                // A search reaches only about a folder's reads ahead, so whatever has been listed is worth
+                // starting. An index offers below instead, in the order it will want them.
+                if !query.isEmpty, case .success(let snapshot) = result, RemoteResourcePath.contains(snapshot.path, in: root) {
+                    offer(snapshot.entries.filter { includeHidden || !$0.name.hasPrefix(".") }
+                        .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending })
+                }
                 while let result = finished.removeValue(forKey: reported) {
                     let folder = queue[reported]; reported += 1
                     var update = Update()
@@ -205,12 +221,17 @@ public enum RemoteFolderSearch {
                             if folder.depth < limits.maxDepth { queue.append(Folder(path: entry.path, depth: folder.depth + 1)) }
                             else { progress.skippedDeepFolders += 1 }
                         }
-                        if let content {
+                        if content != nil, query.isEmpty {
+                            // Building an index, with no first match to hurry for. The walk stops listing
+                            // while it reads, so list everything first and let every read overlap.
+                            listedForIndex.append(visible)
+                            offer(visible)
+                        } else if let content {
                             let unreported = delivered.isEmpty ? visible : visible.filter { !delivered.contains(Data($0.path.utf8)) }
                             try await scan(unreported, query: query, root: root, profile: profile,
                                 service: service, limits: content, matchLimit: limits.maxMatches, deadline: deadline,
                                 matched: &matched, progress: &progress, options: options, extraction: extraction, collect: collect,
-                                reusable: reusable, report: report)
+                                reusable: reusable, readAhead: readAhead, report: report)
                             if matched >= limits.maxMatches, reported < queue.count { progress.stop = .matchLimit }
                         } else {
                             let found = visible.filter { options.accepts($0) && options.range(in: $0.name, query: query) != nil && !delivered.contains(Data($0.path.utf8)) }
@@ -242,6 +263,13 @@ public enum RemoteFolderSearch {
                     if progress.stop == .matchLimit || (content != nil && stopsReading(progress.stop)) { break }
                 }
                 if progress.stop == .matchLimit || (content != nil && stopsReading(progress.stop)) { group.cancelAll(); break }
+            }
+        }
+        if let content {
+            for visible in listedForIndex where !stopsReading(progress.stop) {
+                try await scan(visible, query: query, root: root, profile: profile, service: service, limits: content,
+                    matchLimit: limits.maxMatches, deadline: deadline, matched: &matched, progress: &progress, options: options,
+                    extraction: extraction, collect: collect, reusable: reusable, readAhead: readAhead, report: report)
             }
         }
         try Task.checkCancellation()
