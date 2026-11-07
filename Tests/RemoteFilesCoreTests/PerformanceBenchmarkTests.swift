@@ -171,6 +171,18 @@ final class PerformanceBenchmarkTests: XCTestCase {
             }
         }
         if measuring, selected("list.100000") {
+            // Time for Instruments to attach, when asked for.
+            if let wait = environment["REMOTEFILES_BENCHMARK_ATTACH_WAIT"].flatMap({ Int($0) }) {
+                print("BENCHWAIT \(ProcessInfo.processInfo.processIdentifier)")
+                try await Task.sleep(for: .seconds(wait))
+            }
+            if environment["REMOTEFILES_BENCHMARK_ONLY"] == "list.100000" {
+                // Alone in a fresh process, the kernel's own peak covers this listing and nothing larger.
+                let before = BenchmarkMemory.footprint()
+                blackHole(try await warm.listDirectory(profile: profile, path: root + "/d100000").entries.count)
+                recorder.add("list.100000.lifetimePeakMB", value: Double(BenchmarkMemory.lifetimePeakFootprint() - before) / 1_048_576, unit: "MB")
+                recorder.add("list.100000.afterMB", value: Double(BenchmarkMemory.footprint() - before) / 1_048_576, unit: "MB")
+            }
             // Over the listing limit before this work: the time to the answer, whatever the answer is.
             try await recorder.timeAsync("list.100000", runs: min(runs, 3), tolerateFailure: true) {
                 let count = try await warm.listDirectory(profile: profile, path: root + "/d100000").entries.count
@@ -217,6 +229,33 @@ final class PerformanceBenchmarkTests: XCTestCase {
                 _ = await walk.result
                 recorder.add("search.wide.total", value: walkStarted.elapsedMilliseconds)
             }
+        }
+        // Asked for by name: it needs a server that runs the helper, and folders the script's tree doesn't have.
+        if measuring, environment["REMOTEFILES_BENCHMARK_ONLY"]?.contains("assisted") == true {
+            try await measureAssistedSearch(root: root, profile: profile, service: warm, recorder: recorder)
+        }
+        // By name: the two window policies strictly alternate, so link drift can't favour either.
+        if measuring, environment["REMOTEFILES_BENCHMARK_ONLY"]?.contains("windowpairs") == true {
+            let temp = folder.appendingPathComponent("pairs.bin"), file = root + "/big-64m.bin"
+            let bytes = 64.0 * 1024 * 1024
+            for pair in 0..<runs {
+                for limit in pair % 2 == 0 ? [SFTPRemoteFileService.transferReadWindow, SFTPRemoteFileService.transferReadWindowLimit]
+                                           : [SFTPRemoteFileService.transferReadWindowLimit, SFTPRemoteFileService.transferReadWindow] {
+                    await warm.setTransferWindowLimit(limit)
+                    let name = "windowpairs." + (limit == SFTPRemoteFileService.transferReadWindow ? "fixed16" : "growing")
+                    let started = ContinuousClock.now
+                    _ = try await warm.downloadManagedFile(profile: profile, path: file, allowedRoot: root, destination: temp, limit: 1 << 30) { _ in }
+                    let elapsed = started.elapsedMilliseconds
+                    recorder.add(name + ".ms", value: elapsed)
+                    recorder.add(name + ".MiBps", value: bytes / (1024 * 1024) / (elapsed / 1000), unit: "MiB/s")
+                    recorder.add("windowpairs.pair\(pair)." + (limit == SFTPRemoteFileService.transferReadWindow ? "fixed16" : "growing"), value: elapsed)
+                }
+            }
+            await warm.setTransferWindowLimit(SFTPRemoteFileService.transferReadWindowLimit)
+        }
+        // Also by name, for the same reason as above.
+        if measuring, environment["REMOTEFILES_BENCHMARK_ONLY"]?.contains("bulk") == true {
+            try await measureBulkWork(root: root, profile: profile, service: warm, folder: folder, recorder: recorder)
         }
         if selected("read") {
             let readFiles = measuring ? [("read.50B", "report.md"), ("read.173KB", "large-report.md"), ("read.2MB", "big-2m.bin")] : [("read.50B", "report.md")]
@@ -269,6 +308,107 @@ final class PerformanceBenchmarkTests: XCTestCase {
         recorder.flush()
     }
 
+    /// Work that touches a whole folder tree: a saved index and an offline folder, with how long a folder tap
+    /// takes meanwhile. `REMOTEFILES_BENCHMARK_BULK_ROOT` is the tree, of folders of small text files.
+    private func measureBulkWork(root: String, profile: ConnectionProfile, service: SFTPRemoteFileService, folder: URL,
+                                 recorder: BenchmarkRecorder) async throws {
+        let tree = root + "/" + (environment["REMOTEFILES_BENCHMARK_BULK_ROOT"] ?? "docs")
+        try await recorder.timeAsync("bulk.index", runs: runs) {
+            var last = RemoteFolderSearch.Update()
+            let snapshot = try await RemoteFolderSearch.buildIndex(below: tree, profile: profile, service: service, includeHidden: false,
+                                                                   extraction: .init()) { last = $0 }
+            recorder.add("bulk.index.documents", value: Double(snapshot.documents.count), unit: "documents")
+            recorder.add("bulk.index.folders", value: Double(last.foldersSearched), unit: "folders")
+        }
+        // A tap while an index is being built.
+        let building = Task { [profile] in
+            try await RemoteFolderSearch.buildIndex(below: tree, profile: profile, service: service, includeHidden: false, extraction: .init())
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        for _ in 0..<max(runs, 5) {
+            try await recorder.timeAsync("bulk.index.tap", runs: 1) {
+                blackHole(try await service.listDirectory(profile: profile, path: root + "/d10").entries.count)
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        building.cancel()
+        _ = await building.result
+        guard environment["REMOTEFILES_BENCHMARK_BULK_INDEX_ONLY"] == nil else { return }
+        try await recorder.timeAsync("bulk.offline", runs: runs) {
+            let store = try OfflineFileStore(directory: folder.appendingPathComponent("offline-" + UUID().uuidString))
+            let pin = try await store.pinFolder(profile: profile, path: tree, service: service)
+            recorder.add("bulk.offline.files", value: Double(pin.fileIDs.count), unit: "files")
+            try await store.removeFolder(pin.id)
+        }
+        // A tap in the middle of an offline folder.
+        let background = Task { [profile] in
+            let store = try OfflineFileStore(directory: folder.appendingPathComponent("offline-" + UUID().uuidString))
+            return try await store.pinFolder(profile: profile, path: tree, service: service)
+        }
+        try await Task.sleep(for: .milliseconds(500))
+        for _ in 0..<max(runs, 5) {
+            try await recorder.timeAsync("bulk.offline.tap", runs: 1) {
+                blackHole(try await service.listDirectory(profile: profile, path: root + "/d10").entries.count)
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        background.cancel()
+        _ = await background.result
+    }
+
+    /// The Linux helper against the SFTP walk, over the same folders. Only a server that runs the helper
+    /// measures it: `.helperRuns` says how many searches it answered, so a silent fallback is visible.
+    /// A file-extension option of only spaces filters nothing, but differs from the default, so the app walks.
+    private func measureAssistedSearch(root: String, profile: ConnectionProfile, service: SFTPRemoteFileService,
+                                       recorder: BenchmarkRecorder) async throws {
+        let walk = SearchQueryOptions(fileExtension: " ")
+        let cases: [(name: String, folder: String, query: String, content: Bool)] = [
+            ("tree", "tree", "needle", false), ("big", "big", "needle-report", false), ("big.many", "big", "needle", false),
+            ("docs.rare", "docs", "needle", true), ("docs.common", "docs", "the", true)
+        ]
+        for item in cases {
+            for (how, options) in [("helper", SearchQueryOptions()), ("walk", walk)] where environment["REMOTEFILES_BENCHMARK_ASSISTED_MODE"] ?? how == how {
+                let name = "assisted.\(item.name).\(how)"
+                let before = await service.metrics().serverSearchOperations
+                try await recorder.timeAsync(name + ".total", runs: runs) {
+                    #if os(macOS)
+                    Self.runColdCommand(environment["REMOTEFILES_BENCHMARK_COLD_COMMAND"])
+                    #endif
+                    var first: Double?, matches = 0, folders = 0
+                    let started = ContinuousClock.now
+                    let updates = item.content
+                        ? RemoteFolderSearch.contents(matching: item.query, below: root + "/" + item.folder, profile: profile, service: service,
+                                                      includeHidden: false, options: options)
+                        : RemoteFolderSearch.names(matching: item.query, below: root + "/" + item.folder, profile: profile, service: service,
+                                                   includeHidden: false, options: options)
+                    for try await update in updates {
+                        let found = update.matches.count + update.contentMatches.count
+                        if first == nil, found > 0 { first = started.elapsedMilliseconds }
+                        matches += found
+                        folders = max(folders, update.foldersSearched)
+                    }
+                    if let first { recorder.add(name + ".first", value: first) }
+                    recorder.add(name + ".matches", value: Double(matches), unit: "matches")
+                    recorder.add(name + ".folders", value: Double(folders), unit: "folders")
+                }
+                let helped = await service.metrics().serverSearchOperations - before
+                recorder.add(name + ".helperRuns", value: Double(helped), unit: "runs")
+            }
+        }
+    }
+
+    #if os(macOS)
+    /// Lets a run empty the server's caches before each sample. Benchmarks only, from its own environment.
+    private static func runColdCommand(_ command: String?) {
+        guard let command else { return }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", command]
+        try? process.run()
+        process.waitUntilExit()
+    }
+    #endif
+
     /// Without the script's tree, the few files the methods need when running once.
     private static func makeSmokeTree(in fixture: String) throws -> String {
         let root = URL(fileURLWithPath: fixture).appendingPathComponent("files/benchmark-smoke")
@@ -320,6 +460,7 @@ final class PerformanceBenchmarkTests: XCTestCase {
                 while (list()?.visibleCells.isEmpty ?? true), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
                 guard let collection = list(), !collection.visibleCells.isEmpty else { XCTFail("No rows appeared"); return }
                 recorder.add("screen.firstRows.\(size)", value: started.elapsedMilliseconds)
+                recorder.add("screen.displayMaxFPS", value: Double(UIScreen.main.maximumFramesPerSecond), unit: "fps")
                 recorder.add("screen.firstRows.stall.\(size)", value: frames.longestGapMilliseconds)
                 // Let loading settle, then scroll at a steady speed, a screen or so at a time.
                 try await Task.sleep(for: .milliseconds(measuring ? 500 : 50))
@@ -335,6 +476,9 @@ final class PerformanceBenchmarkTests: XCTestCase {
                 recorder.add("screen.scroll.hitches.\(size)", value: Double(frames.hitches), unit: "frames")
                 recorder.add("screen.scroll.longestFrame.\(size)", value: frames.longestGapMilliseconds)
                 recorder.add("screen.scroll.p95Frame.\(size)", value: frames.percentile(0.95))
+                recorder.add("screen.scroll.medianFrame.\(size)", value: frames.percentile(0.5))
+                recorder.add("screen.scroll.p99Frame.\(size)", value: frames.percentile(0.99))
+                recorder.add("screen.scroll.missedShare.\(size)", value: frames.missedShare * 100, unit: "%")
             }
         }
         recorder.flush()
@@ -451,6 +595,16 @@ enum BenchmarkMemory {
             $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count) }
         }
         return result == KERN_SUCCESS ? Int(info.phys_footprint) : 0
+    }
+    /// The most the system has ever counted against this process. The kernel keeps it, so nothing is
+    /// missed between samples, but it never goes down: only the first large thing a process does can use it.
+    static func lifetimePeakFootprint() -> Int {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count) }
+        }
+        return result == KERN_SUCCESS ? Int(info.ledger_phys_footprint_peak) : 0
     }
 }
 
@@ -616,7 +770,10 @@ private actor BenchmarkArrivingFolderService: RemoteFileService, ProgressiveFold
     private var gaps: [Double] = []
     func start() {
         let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
-        let fastest = Float(UIScreen.main.maximumFramesPerSecond)
+        // An iPhone holds a display link to 60 Hz unless the app's Info.plist sets
+        // CADisableMinimumFrameDurationOnPhone, which a benchmark build can add. See docs/PERFORMANCE.md.
+        let requested = ProcessInfo.processInfo.environment["REMOTEFILES_BENCHMARK_FRAME_RATE"].flatMap { Float($0) }
+        let fastest = min(requested ?? .infinity, Float(UIScreen.main.maximumFramesPerSecond))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: fastest / 2, maximum: fastest, preferred: fastest)
         link.add(to: .main, forMode: .common)
         self.link = link
@@ -628,6 +785,12 @@ private actor BenchmarkArrivingFolderService: RemoteFileService, ProgressiveFold
         last = link.timestamp
     }
     var longestGapMilliseconds: Double { gaps.max() ?? 0 }
+    /// Frames that took at least one refresh longer than most did. At 120 Hz a 16.7 ms frame is one of
+    /// these but not a hitch below, which looks for twice the usual.
+    var missedShare: Double {
+        let typical = percentile(0.5)
+        return gaps.isEmpty ? 0 : Double(gaps.filter { $0 > typical * 1.5 }.count) / Double(gaps.count)
+    }
     /// Frames that took more than twice as long as most frames did.
     var hitches: Int {
         let typical = percentile(0.5)

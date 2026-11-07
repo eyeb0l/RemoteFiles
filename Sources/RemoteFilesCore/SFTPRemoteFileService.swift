@@ -27,6 +27,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     private var dedicatedCloseGrace: Duration = .seconds(5)
     /// How often a transfer reports its progress. Its start, first bytes and end always report.
     private var progressInterval: Duration = .milliseconds(100)
+    private var transferWindowLimit = transferReadWindowLimit
 
     public init(identityStore: IdentityStore, trustStore: HostTrustStore,
                 metadataStore: MetadataStore, timeoutSeconds: UInt64 = 15) {
@@ -43,6 +44,8 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         managedTransferIdle = idle; dedicatedCloseGrace = closeGrace
     }
     func setProgressInterval(_ interval: Duration) { progressInterval = interval }
+    /// Lets a benchmark compare the read window's growth with none, in one process.
+    func setTransferWindowLimit(_ limit: Int) { transferWindowLimit = limit }
 
     func searchFolders(query: String, root: String, profile: ConnectionProfile, includeHidden: Bool,
                        limits: RemoteFolderSearch.Limits, content: RemoteFolderSearch.ContentLimits?,
@@ -530,7 +533,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                           started: @escaping ManagedDownloadStartHandler = { _, _ in }) async throws -> RemoteEntry {
         guard limit > 0, limit < Int.max else { throw RemoteFileError.tooLarge(limit) }
         let session = try await session(for: profile)
-        let reportInterval = progressInterval
+        let reportInterval = progressInterval, windowLimit = transferWindowLimit
         let result = try await performOnDedicatedChannel(session: session, budget: managed ? .idle(managedTransferIdle) : .total(180)) { sftp, activity in
             let rootPath = sftp.sendRealPath(atPath: try Self.validated(allowedRoot))
             let targetPath = sftp.sendRealPath(atPath: try Self.validated(path))
@@ -586,7 +589,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                 await progress(.init(receivedBytes: UInt64(start), totalBytes: attributes.size))
                 var lastReport: ContinuousClock.Instant?
                 _ = try await BoundedPreviewReader.stream(initialSize: attributes.size, limit: limit, startOffset: start, window: Self.transferReadWindow,
-                                                          windowLimit: Self.transferReadWindowLimit, readChunk: { offset, amount in
+                                                          windowLimit: windowLimit, readChunk: { offset, amount in
                     let bytes = try await file.read(from: offset, length: amount)
                     activity.receivedBytes(bytes.readableBytes)
                     return bytes
