@@ -92,6 +92,8 @@ final class SearchReadAhead {
     /// Starts what fits, given what the walk has charged and the files it has counted, including the one it
     /// is on. Returns the bytes it reserved, which the walk must charge at once.
     func fill(charged: Int, files: Int) -> Int {
+        // A read starts in a task of its own, which wouldn't inherit a cancellation that has already happened.
+        guard !Task.isCancelled else { return 0 }
         var added = 0
         while reads.count < Self.window, nextWaiting < waiting.count, files + reads.count < limits.maxFiles {
             let entry = waiting[nextWaiting], key = Data(entry.path.utf8)

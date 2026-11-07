@@ -584,6 +584,8 @@ private actor ReadAheadService: RemoteFileService, FolderWalking {
     func resolvingLinks(in entries: [RemoteEntry], profile: ConnectionProfile) async throws -> [RemoteEntry] { entries }
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.invalidPath }
     func readSearchFile(profile: ConnectionProfile, path: String, canonicalRoot: String, limit: Int) async throws -> Data {
+        // As `SFTPRemoteFileService` does first, through `session(for:)`: a cancelled read sends nothing.
+        try Task.checkCancellation()
         reads.append((path, limit))
         running += 1; mostAtOnce = max(mostAtOnce, running)
         defer { running -= 1 }
@@ -757,10 +759,17 @@ final class SearchReadAheadTests: XCTestCase {
         task.cancel()
         _ = await task.result
         let atCancel = await service.reads.count
-        try await Task.sleep(for: .milliseconds(200))
-        let later = await service.reads.count
-        XCTAssertEqual(atCancel, later, "Nothing new starts after cancellation")
-        XCTAssertLessThan(later, 100)
+        // The walk winds down in a task of its own, and reads it had already started may still check in,
+        // later on a loaded machine. Wait until nothing has arrived for a while, then count.
+        var settled = atCancel
+        for _ in 0..<50 {
+            try await Task.sleep(for: .milliseconds(200))
+            let now = await service.reads.count
+            if now == settled { break }
+            settled = now
+        }
+        XCTAssertLessThanOrEqual(settled - atCancel, SearchReadAhead.window, "At most the reads already under way, nothing new")
+        XCTAssertLessThan(settled, 100, "The walk stopped long before the end of 500 files")
     }
 }
 
