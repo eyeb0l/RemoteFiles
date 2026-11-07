@@ -795,10 +795,14 @@ final class SFTPIntegrationTests: XCTestCase {
         let pin = try await store.pin(profile: profile, entry: notes.selectedForTransfer, allowedRoot: notes.selectionRoot, service: service)
         let lease = try await store.lease(pin.id)
         XCTAssertEqual(try Data(contentsOf: lease.url), Data("outside bytes".utf8))
+        let rejectedOperationID = UUID()
         do {
-            _ = try await store.pin(profile: profile, entry: escape.selectedForTransfer, allowedRoot: escape.selectionRoot, service: service)
+            _ = try await store.pin(profile: profile, entry: escape.selectedForTransfer, allowedRoot: escape.selectionRoot,
+                                    service: service, operationID: rejectedOperationID)
             XCTFail("Keep Offline must reject a link out of the chosen file's folder")
         } catch { XCTAssertTrue(Self.isBoundaryRejection(error), "\(error)") }
+        // Rejection returns before its drain releases the store's transfer slot.
+        await store.waitForCancelledTransfer(rejectedOperationID)
         let saved = try await store.pinFolder(profile: profile, path: folder.path, service: service)
         XCTAssertEqual(saved.fileIDs.count, 2, "The folder's two regular files are saved")
         XCTAssertEqual(saved.skippedLinks, 1, "The escaping link is skipped, not followed")
