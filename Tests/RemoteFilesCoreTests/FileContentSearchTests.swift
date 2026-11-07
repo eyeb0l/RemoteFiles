@@ -568,15 +568,19 @@ private actor ReadAheadService: RemoteFileService, FolderWalking {
     let folders: [String: [RemoteEntry]]
     let contents: [String: Data]
     let readDelay: Duration
+    let listingDelays: [String: Duration]
     private(set) var reads: [(path: String, limit: Int)] = []
     private(set) var mostAtOnce = 0
     private(set) var bytesRead = 0
     private var running = 0
-    init(folders: [String: [RemoteEntry]], contents: [String: Data], readDelay: Duration = .milliseconds(5)) {
-        self.folders = folders; self.contents = contents; self.readDelay = readDelay
+    init(folders: [String: [RemoteEntry]], contents: [String: Data], readDelay: Duration = .milliseconds(5), listingDelays: [String: Duration] = [:]) {
+        self.folders = folders; self.contents = contents; self.readDelay = readDelay; self.listingDelays = listingDelays
     }
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { .init(path: path, entries: folders[path] ?? []) }
-    func listDirectoryForWalk(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { .init(path: path, entries: folders[path] ?? []) }
+    func listDirectoryForWalk(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
+        if let delay = listingDelays[path] { try await Task.sleep(for: delay) }
+        return .init(path: path, entries: folders[path] ?? [])
+    }
     func resolvingLinks(in entries: [RemoteEntry], profile: ConnectionProfile) async throws -> [RemoteEntry] { entries }
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.invalidPath }
     func readSearchFile(profile: ConnectionProfile, path: String, canonicalRoot: String, limit: Int) async throws -> Data {
@@ -683,6 +687,52 @@ final class SearchReadAheadTests: XCTestCase {
         XCTAssertEqual(snapshot.isPartial, plain.isPartial)
         let reads = await overlapping.reads
         XCTAssertEqual(reads.count, 48, "Each file once: reads started in the order they're wanted are never repeated by hand")
+    }
+
+    /// A later folder listed first must not read ahead of an earlier one, or the earlier one's ordinary
+    /// read would go over the limits.
+    func testReadsAheadOfALaterFolderCountTowardsTheLimits() async throws {
+        func files(_ sizes: [String: Int]) -> (folders: [String: [RemoteEntry]], contents: [String: Data]) {
+            var folders: [String: [RemoteEntry]] = ["/r": [RemoteEntry(name: "a", path: "/r/a", kind: .directory),
+                                                           RemoteEntry(name: "b", path: "/r/b", kind: .directory)]]
+            var contents: [String: Data] = [:]
+            for (path, size) in sizes {
+                contents[path] = Data(("needle " + String(repeating: "x", count: size - 7)).utf8)
+                folders[RemotePath.parent(of: path), default: []].append(RemoteEntry(name: RemotePath.name(of: path), path: path, kind: .file, size: UInt64(size)))
+            }
+            return (folders, contents)
+        }
+        let (folders, contents) = files(["/r/a/large.txt": 200_000, "/r/b/small.txt": 100_000])
+        let slowFirst: [String: Duration] = ["/r/a": .milliseconds(150)]
+        let oneFile = ReadAheadService(folders: folders, contents: contents, listingDelays: slowFirst)
+        let (matches, final) = try await search(oneFile, content: .init(maxFiles: 1))
+        let reads = await oneFile.reads
+        XCTAssertEqual(reads.map(\.path), ["/r/a/large.txt"], "Only the first file, and nothing ahead of it")
+        XCTAssertEqual(matches, ["/r/a/large.txt"])
+        XCTAssertEqual(final.stop, .fileLimit)
+
+        let budget = 250_000
+        let lean = ReadAheadService(folders: folders, contents: contents, listingDelays: slowFirst)
+        let (_, leanFinal) = try await search(lean, content: .init(maxTotalBytes: budget))
+        let transferred = await lean.bytesRead
+        XCTAssertLessThanOrEqual(transferred, budget, "Everything sent counts, read ahead or not")
+        XCTAssertGreaterThanOrEqual(leanFinal.chargedBytes, transferred)
+        XCTAssertLessThanOrEqual(leanFinal.chargedBytes, budget)
+    }
+
+    /// An index lists before it reads. Files read before the deadline ran out during listing are kept.
+    func testAnIndexKeepsWhatWasReadBeforeTheDeadlineRanOutWhileListing() async throws {
+        let root = RemoteEntry(name: "root.txt", path: "/r/root.txt", kind: .file, size: 11)
+        let late = RemoteEntry(name: "late.txt", path: "/r/slow/late.txt", kind: .file, size: 11)
+        let folders: [String: [RemoteEntry]] = ["/r": [root, RemoteEntry(name: "slow", path: "/r/slow", kind: .directory)], "/r/slow": [late]]
+        let service = ReadAheadService(folders: folders, contents: ["/r/root.txt": Data("root needle".utf8), "/r/slow/late.txt": Data("late needle".utf8)],
+                                       listingDelays: ["/r/slow": .seconds(2)])
+        let snapshot = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: service, includeHidden: false,
+                                                               limits: .init(timeLimit: .milliseconds(400)))
+        XCTAssertEqual(snapshot.documents.map(\.entry.path), ["/r/root.txt"], "Read before the deadline, so kept; the late folder's file never starts")
+        XCTAssertTrue(snapshot.isPartial)
+        let reads = await service.reads
+        XCTAssertEqual(reads.map(\.path), ["/r/root.txt"])
     }
 
     func testAFileThatGrewPastItsListingGetsAnOrdinaryRead() async throws {

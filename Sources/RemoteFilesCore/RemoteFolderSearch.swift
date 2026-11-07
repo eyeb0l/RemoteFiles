@@ -193,17 +193,21 @@ public enum RemoteFolderSearch {
                     continue
                 }
                 finished[index] = result
-                func offer(_ entries: some Sequence<RemoteEntry>) {
-                    guard let readAhead, let content else { return }
-                    readAhead.offer(entries.filter { scanReads($0, root: root, limits: content, options: options, extraction: extraction)
-                        && reusable?($0) == nil && !delivered.contains(Data($0.path.utf8)) })
-                    readAhead.fill(charged: progress.chargedBytes, files: progress.filesSearched)
-                }
-                // A search reaches only about a folder's reads ahead, so whatever has been listed is worth
-                // starting. An index offers below instead, in the order it will want them.
-                if !query.isEmpty, case .success(let snapshot) = result, RemoteResourcePath.contains(snapshot.path, in: root) {
-                    offer(snapshot.entries.filter { includeHidden || !$0.name.hasPrefix(".") }
-                        .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending })
+                // Offer the files of every folder now ready to be reported, in the order the walk will read
+                // them, so that nothing is read ahead of a file the walk still has to read itself.
+                if let readAhead, let content {
+                    var next = reported
+                    while let listed = finished[next] {
+                        next += 1
+                        guard case .success(let snapshot) = listed, RemoteResourcePath.contains(snapshot.path, in: root) else { continue }
+                        readAhead.offer(snapshot.entries.filter { (includeHidden || !$0.name.hasPrefix("."))
+                                && scanReads($0, root: root, limits: content, options: options, extraction: extraction)
+                                && reusable?($0) == nil && !delivered.contains(Data($0.path.utf8)) }
+                            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending })
+                    }
+                    if ContinuousClock.now < deadline {
+                        progress.chargedBytes += readAhead.fill(charged: progress.chargedBytes, files: progress.filesSearched)
+                    }
                 }
                 while let result = finished.removeValue(forKey: reported) {
                     let folder = queue[reported]; reported += 1
@@ -225,7 +229,6 @@ public enum RemoteFolderSearch {
                             // Building an index, with no first match to hurry for. The walk stops listing
                             // while it reads, so list everything first and let every read overlap.
                             listedForIndex.append(visible)
-                            offer(visible)
                         } else if let content {
                             let unreported = delivered.isEmpty ? visible : visible.filter { !delivered.contains(Data($0.path.utf8)) }
                             try await scan(unreported, query: query, root: root, profile: profile,
@@ -265,8 +268,9 @@ public enum RemoteFolderSearch {
                 if progress.stop == .matchLimit || (content != nil && stopsReading(progress.stop)) { group.cancelAll(); break }
             }
         }
+        // Reads that finished before a deadline during listing are still collected; nothing new starts.
         if let content {
-            for visible in listedForIndex where !stopsReading(progress.stop) {
+            for visible in listedForIndex where !stopsReading(progress.stop) || progress.stop == .timeLimit {
                 try await scan(visible, query: query, root: root, profile: profile, service: service, limits: content,
                     matchLimit: limits.maxMatches, deadline: deadline, matched: &matched, progress: &progress, options: options,
                     extraction: extraction, collect: collect, reusable: reusable, readAhead: readAhead, report: report)
