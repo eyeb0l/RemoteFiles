@@ -293,7 +293,9 @@ final class RemoteFilesUITests: XCTestCase {
             XCTAssertTrue(viewer.buttons["Done"].waitForExistence(timeout: 10), app.debugDescription)
             let zoomable = app.images["Image sample.png"]
             XCTAssertTrue(zoomable.waitForExistence(timeout: 10), app.debugDescription)
-            XCTAssertTrue(viewer.buttons["Share"].isEnabled)
+            // The reader's copy shows at once; Share waits for the full-size decode.
+            let shareable = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: viewer.buttons["Share"])
+            wait(for: [shareable], timeout: 15)
             zoomable.pinch(withScale: 3, velocity: 3)
             attachScreenshot("Offline image zoom viewer")
             viewer.buttons["Done"].tap()

@@ -84,7 +84,7 @@ struct RemoteInlineImage: View {
     private func open(from action: ImageAction) {
         invokingAction = action
         viewer = ImagePresentation(reference: reference, filename: filename, location: location, alt: alt,
-                                   checkExistence: action == .openFile)
+                                   checkExistence: action == .openFile, preview: image)
     }
 }
 
@@ -95,6 +95,8 @@ struct ImagePresentation: Identifiable {
     let location: RemoteDocumentLocation
     var alt: String = ""
     var checkExistence = false
+    /// The smaller copy already on screen, shown at once while the full-size decode runs.
+    var preview: DisplayImage? = nil
     var accessibilityDescription: String {
         alt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? filename : alt
     }
@@ -103,61 +105,126 @@ struct ImagePresentation: Identifiable {
 struct RemoteImageViewer: View {
     let item: ImagePresentation
     let resolver: any RemoteResourceResolving
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var image: DisplayImage?
     @State private var failure: String?
     @State private var retry = 0
+    /// A failed reload discards the preview too, so a stale picture never stands in for an error.
+    private var shown: DisplayImage? { image ?? (failure == nil ? item.preview : nil) }
+    var body: some View {
+        ImageViewerChrome(title: item.filename, image: shown.map { UIImage(cgImage: $0.image) },
+                          shareable: image.map { UIImage(cgImage: $0.image) },
+                          description: item.accessibilityDescription) {
+            if let failure {
+                ContentUnavailableView {
+                    Label(item.filename, systemImage: "photo")
+                } description: {
+                    Text(failure).accessibilityIdentifier("remote-image-viewer-error")
+                } actions: {
+                    Button("Tap to retry") { retry += 1 }
+                        .accessibilityIdentifier("remote-image-viewer-retry")
+                }
+            } else { ProgressView("Loading image…") }
+        }
+        .task(id: "\(retry)-\(scenePhase)") {
+            guard scenePhase == .active else { return }
+            failure = nil
+            do {
+                if retry > 0 { await resolver.invalidate(item.reference, in: item.location) }
+                let file: URL
+                if item.checkExistence {
+                    file = try await resolver.localFileForOpening(for: item.reference, in: item.location)
+                } else {
+                    file = try await resolver.localFile(for: item.reference, in: item.location)
+                }
+                let result = try await RemoteImageDecoder.shared.decode(file, maxPixel: 3072)
+                try Task.checkCancellation(); image = result
+            } catch is CancellationError { }
+            catch {
+                if !Task.isCancelled {
+                    image = nil
+                    failure = error.localizedDescription
+                }
+            }
+        }
+    }
+}
+
+/// The full-screen picture, connected and offline, behaving as Photos does: bars over the system
+/// background, and a tap takes them away and turns everything else black. VoiceOver and Switch
+/// Control keep the bars, as the picture alone would leave them nothing to reach.
+struct ImageViewerChrome<Unavailable: View>: View {
+    let title: String
+    /// What's on screen, possibly the reader's smaller copy while the full-size one decodes.
+    let image: UIImage?
+    /// What Share sends: only the full-size copy, and nothing once a reload has failed.
+    let shareable: UIImage?
+    let description: String
+    @ViewBuilder let unavailable: () -> Unavailable
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+    @Environment(\.accessibilitySwitchControlEnabled) private var switchControl
+    @State private var barsHidden = false
+    @State private var zoomed = false
     @State private var sharing = false
+    private var immersive: Bool { barsHidden && image != nil && !voiceOver && !switchControl }
     var body: some View {
         NavigationStack {
-            Group {
-                if let image { ZoomableRemoteImage(image: UIImage(cgImage: image.image), description: item.accessibilityDescription) }
-                else if let failure {
-                    ContentUnavailableView {
-                        Label(item.filename, systemImage: "photo")
-                    } description: {
-                        Text(failure).accessibilityIdentifier("remote-image-viewer-error")
-                    } actions: {
-                        Button("Tap to retry") { retry += 1 }
-                            .accessibilityIdentifier("remote-image-viewer-retry")
-                    }
-                } else { ProgressView("Loading image…") }
+            ZStack {
+                (immersive ? Color.black : Color(uiColor: .systemBackground)).ignoresSafeArea()
+                if let image {
+                    ZoomableRemoteImage(image: image, description: description,
+                                        onTap: { withAnimation(RemoteFilesStyle.contentFade) { barsHidden.toggle() } },
+                                        onZoomChange: { zoomed = $0 })
+                        .ignoresSafeArea()
+                } else { unavailable() }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .navigationTitle(item.filename).navigationBarTitleDisplayMode(.inline)
+            .navigationTitle(title).navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
                 ToolbarItem(placement: .primaryAction) {
-                    Button("Share", systemImage: "square.and.arrow.up") { sharing = true }.disabled(image == nil)
+                    Button("Share", systemImage: "square.and.arrow.up") { sharing = true }.disabled(shareable == nil)
                 }
             }
-            .task(id: "\(retry)-\(scenePhase)") {
-                guard scenePhase == .active else { return }
-                failure = nil
-                do {
-                    if retry > 0 { await resolver.invalidate(item.reference, in: item.location) }
-                    let file: URL
-                    if item.checkExistence {
-                        file = try await resolver.localFileForOpening(for: item.reference, in: item.location)
-                    } else {
-                        file = try await resolver.localFile(for: item.reference, in: item.location)
-                    }
-                    let result = try await RemoteImageDecoder.shared.decode(file, maxPixel: 3072)
-                    try Task.checkCancellation(); image = result
-                } catch is CancellationError { }
-                catch {
-                    if !Task.isCancelled {
-                        image = nil
-                        sharing = false
-                        failure = error.localizedDescription
-                    }
+            .toolbarVisibility(immersive ? .hidden : .visible, for: .navigationBar)
+            .statusBarHidden(immersive)
+            .persistentSystemOverlays(immersive ? .hidden : .automatic)
+            .background {
+                // Done's own Escape shortcut leaves with the bar, so this stands in for it.
+                if immersive {
+                    Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
+                        .opacity(0).accessibilityHidden(true)
                 }
             }
             .sheet(isPresented: $sharing) {
-                if let image { ImageShareSheet(image: UIImage(cgImage: image.image)) }
+                if let shareable { ImageShareSheet(image: shareable) }
             }
+            .onChange(of: shareable == nil) { _, gone in if gone { sharing = false } }
         }
+        // Dragging a zoomed picture moves the picture; it shouldn't also start closing the viewer.
+        .interactiveDismissDisabled(zoomed)
+        .accessibilityAction(.escape) { dismiss() }
+    }
+}
+
+/// A picture in a reader: as large as fits, centred, with no frame of its own, and never blown up
+/// past its pixels. Opening it grows it into the viewer from where it sits.
+struct PhotoStage: View {
+    let image: CGImage
+    let accessibilityLabel: String
+    let transition: Namespace.ID
+    let open: () -> Void
+    static let transitionID = "photo-stage"
+    var body: some View {
+        Button(action: open) {
+            Image(decorative: image, scale: 1).resizable().scaledToFit()
+                .frame(maxWidth: CGFloat(image.width), maxHeight: CGFloat(image.height))
+                .matchedTransitionSource(id: Self.transitionID, in: transition)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
     }
 }
 
@@ -172,12 +239,14 @@ struct ImageShareSheet: UIViewControllerRepresentable {
 struct ZoomableRemoteImage: UIViewRepresentable {
     let image: UIImage
     let description: String
+    var onTap: (() -> Void)? = nil
+    var onZoomChange: ((Bool) -> Void)? = nil
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeUIView(context: Context) -> ImageZoomScrollView {
         let scroll = ImageZoomScrollView()
         scroll.delegate = context.coordinator
         scroll.minimumZoomScale = 1; scroll.maximumZoomScale = 6
-        scroll.imageView.image = image
+        scroll.show(image)
         scroll.imageView.isAccessibilityElement = true
         scroll.imageView.accessibilityTraits = .image
         scroll.imageView.accessibilityLabel = description
@@ -185,24 +254,96 @@ struct ZoomableRemoteImage: UIViewRepresentable {
         return scroll
     }
     func updateUIView(_ scroll: ImageZoomScrollView, context: Context) {
-        scroll.imageView.image = image
+        scroll.show(image)
         scroll.imageView.accessibilityLabel = description
+        scroll.onTap = onTap
+        context.coordinator.onZoomChange = onZoomChange
     }
-    final class Coordinator: NSObject, UIScrollViewDelegate {
+    @MainActor final class Coordinator: NSObject, UIScrollViewDelegate {
+        var onZoomChange: ((Bool) -> Void)?
+        private var zoomed = false
         func viewForZooming(in scrollView: UIScrollView) -> UIView? { (scrollView as? ImageZoomScrollView)?.imageView }
+        func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            (scrollView as? ImageZoomScrollView)?.centerImage()
+            let now = scrollView.zoomScale > scrollView.minimumZoomScale + 0.01
+            guard now != zoomed else { return }
+            zoomed = now
+            // Zooming can happen during layout, where SwiftUI state mustn't change.
+            Task { @MainActor [weak self] in self?.onZoomChange?(now) }
+        }
     }
 }
+
+/// Sizes the image view to the picture rather than the screen, so it stays centred at any zoom and
+/// panning stops at the picture's edges instead of carrying on into empty space.
 final class ImageZoomScrollView: UIScrollView {
     let imageView = UIImageView()
-    private var lastSize: CGSize = .zero
+    var onTap: (() -> Void)?
+    private var fittedBounds: CGSize = .zero
+    private var fittedAspect: CGFloat = 0
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        showsHorizontalScrollIndicator = false
+        showsVerticalScrollIndicator = false
+        contentInsetAdjustmentBehavior = .never
+        decelerationRate = .fast
+        imageView.contentMode = .scaleAspectFit
+        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(didDoubleTap))
+        doubleTap.numberOfTapsRequired = 2
+        let tap = UITapGestureRecognizer(target: self, action: #selector(didTap))
+        tap.require(toFail: doubleTap)
+        addGestureRecognizer(doubleTap)
+        addGestureRecognizer(tap)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    /// Swapping in a sharper copy of the same picture keeps the current zoom and position.
+    func show(_ image: UIImage) {
+        imageView.image = image
+        guard image.size.height > 0, abs(image.size.width / image.size.height - fittedAspect) > 0.01 else { return }
+        fittedBounds = .zero
+        setNeedsLayout()
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
-        guard bounds.size != lastSize else { return }
-        lastSize = bounds.size
-        setZoomScale(1, animated: false)
-        imageView.contentMode = .scaleAspectFit
-        imageView.frame = CGRect(origin: .zero, size: bounds.size)
-        contentSize = bounds.size
+        guard bounds.size != fittedBounds, let size = imageView.image?.size, size.width > 0, size.height > 0,
+              bounds.width > 0, bounds.height > 0 else { return }
+        fittedBounds = bounds.size
+        fittedAspect = size.width / size.height
+        setZoomScale(minimumZoomScale, animated: false)
+        let scale = min(bounds.width / size.width, bounds.height / size.height)
+        imageView.frame = CGRect(x: 0, y: 0, width: size.width * scale, height: size.height * scale)
+        contentSize = imageView.frame.size
+        centerImage()
+        contentOffset = CGPoint(x: -contentInset.left, y: -contentInset.top)
     }
+
+    func centerImage() {
+        let horizontal = max(0, (bounds.width - contentSize.width) / 2)
+        let vertical = max(0, (bounds.height - contentSize.height) / 2)
+        let inset = UIEdgeInsets(top: vertical, left: horizontal, bottom: vertical, right: horizontal)
+        if contentInset != inset { contentInset = inset }
+    }
+
+    /// Zoomed in, returns to the whole picture. Otherwise zooms in around `point`, which is in the
+    /// image view's coordinates: far enough to fill the screen, or further if it nearly fills it.
+    func toggleZoom(at point: CGPoint) {
+        let animated = !UIAccessibility.isReduceMotionEnabled
+        guard zoomScale <= minimumZoomScale + 0.01 else { setZoomScale(minimumZoomScale, animated: animated); return }
+        let fitted = imageView.bounds.size
+        guard fitted.width > 0, fitted.height > 0 else { return }
+        let fill = max(bounds.width / fitted.width, bounds.height / fitted.height)
+        let scale = min(fill > 1.25 ? fill : 2.5, maximumZoomScale)
+        let size = CGSize(width: bounds.width / scale, height: bounds.height / scale)
+        zoom(to: CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2, width: size.width, height: size.height),
+             animated: animated)
+    }
+
+    @objc private func didDoubleTap(_ recognizer: UITapGestureRecognizer) {
+        toggleZoom(at: recognizer.location(in: imageView))
+    }
+    @objc private func didTap() { onTap?() }
 }
 #endif

@@ -313,6 +313,8 @@ struct OfflineReaderView: View {
     @State private var pdfPage = 0
     @State private var viewer: OfflineImagePresentation?
     @AccessibilityFocusState private var imageFocused: Bool
+    @Namespace private var photoTransition
+    @State private var fullScreenPlayback = false
     @State private var headingsPresented = false
     @State private var playback = RemotePlaybackController()
     @State private var source = false
@@ -353,13 +355,10 @@ struct OfflineReaderView: View {
                 } else if loading {
                     LoadingPlaceholder(label: "Opening saved copy…", shape: .document)
                 } else if let image {
-                    Button {
-                        if let lease { viewer = OfflineImagePresentation(lease: lease) }
-                    } label: {
-                        Image(decorative: image.image, scale: 1).resizable().scaledToFit().padding()
+                    PhotoStage(image: image.image, accessibilityLabel: "Open image \(savedCopy.filename) full screen",
+                               transition: photoTransition) {
+                        if let lease { viewer = OfflineImagePresentation(lease: lease, preview: image) }
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Open image \(savedCopy.filename) full screen")
                     .accessibilityFocused($imageFocused)
                 } else if let pdf {
                     PDFDocumentView(document: pdf, restoration: pdfRestoration, readingPosition: readingPosition,
@@ -368,10 +367,14 @@ struct OfflineReaderView: View {
                         .overlay(alignment: .bottomLeading) { PDFPageBadge(page: min(pdfPage, pdf.pageCount - 1) + 1, count: pdf.pageCount) }
                 }
                 else if let player = playback.player {
-                    VStack {
-                        if kind == .video { NativePlaybackView(player: player).aspectRatio(16 / 9, contentMode: .fit) }
-                        else { Image(systemName: "waveform").font(.system(size: 64)).padding(32).accessibilityHidden(true) }
-                        PlaybackControls(playback: playback)
+                    if kind == .video {
+                        VideoStage(playback: playback, player: player, isFullScreen: fullScreenPlayback,
+                                   openFullScreen: { fullScreenPlayback = true })
+                    } else {
+                        VStack {
+                            Image(systemName: "waveform").font(.system(size: 64)).padding(32).accessibilityHidden(true)
+                            PlaybackControls(playback: playback)
+                        }
                     }
                 } else if kind == .certificate, let lease {
                     OfflineCertificateView(url: lease.url, filename: savedCopy.filename)
@@ -448,8 +451,8 @@ struct OfflineReaderView: View {
             await navigation.search(inSource: showsSource)
         }
         .onAppear { visible = true }
-        // A full-screen image viewer covers this reader; it keeps the loaded preview for its return.
-        .onDisappear { visible = false; if viewer == nil { saveAndRelease() } }
+        // A full-screen image or video covers this reader; it keeps what's loaded for its return.
+        .onDisappear { visible = false; if viewer == nil, !fullScreenPlayback { saveAndRelease() } }
         .onChange(of: scenePhase) { _, phase in if phase == .background { saveAndRelease() } }
         .sheet(isPresented: $headingsPresented) {
             ReaderHeadingsView(headings: navigation.index?.headings ?? []) { heading in
@@ -459,13 +462,18 @@ struct OfflineReaderView: View {
         }
         .fullScreenCover(item: $viewer, onDismiss: { imageFocused = true }) { item in
             OfflineImageViewer(item: item).coversKeyboardCommands()
+                .navigationTransition(.zoom(sourceID: PhotoStage.transitionID, in: photoTransition))
+        }
+        .background {
+            NativeVideoPlayerPresentation(player: playback.player, isPresented: $fullScreenPlayback)
+                .frame(width: 0, height: 0)
         }
         .alert("Couldn’t open link", isPresented: Binding(get: { linkError != nil }, set: { if !$0 { linkError = nil } })) {
             Button("OK") { linkError = nil }
         } message: { Text(linkError ?? "") }
         // Nothing published in this sheet reaches the scene's commands, so the reader's commands are
         // handed over directly, and withheld while its Headings sheet or image viewer covers it.
-        .onChange(of: canRead && !headingsPresented && viewer == nil ? commands : nil, initial: true) { _, commands in
+        .onChange(of: canRead && !headingsPresented && viewer == nil && !fullScreenPlayback ? commands : nil, initial: true) { _, commands in
             PlainKeyCommands.shared.setOfflineReader(readerID, commands)
         }
         .onDisappear { PlainKeyCommands.shared.setOfflineReader(readerID, nil) }
@@ -606,6 +614,8 @@ struct OfflineImagePresentation: Identifiable {
     let id = UUID()
     /// The reader's own verified lease: the viewer reads the same private copy and takes no new one.
     let lease: OfflineFileLease
+    /// The reader's smaller copy, shown at once while the full-size decode runs.
+    var preview: DisplayImage? = nil
 }
 
 /// Zoom and Share for a saved image, decoded from the reader's lease without any resolver.
@@ -616,35 +626,23 @@ struct OfflineImageViewer: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var image: DisplayImage?
     @State private var failure: String?
-    @State private var sharing = false
+    private var shown: DisplayImage? { image ?? (failure == nil ? item.preview : nil) }
     var body: some View {
-        NavigationStack {
-            Group {
-                if let image { ZoomableRemoteImage(image: UIImage(cgImage: image.image), description: item.lease.pin.filename) }
-                else if let failure {
-                    ContentUnavailableView(item.lease.pin.filename, systemImage: "photo", description: Text(failure))
-                } else { ProgressView("Loading image…") }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .navigationTitle(item.lease.pin.filename).navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
-                ToolbarItem(placement: .primaryAction) {
-                    Button("Share", systemImage: "square.and.arrow.up") { sharing = true }.disabled(image == nil)
-                }
-            }
-            .task {
-                do {
-                    let result = try await RemoteImageDecoder.shared.decode(item.lease.url, maxPixel: 3072)
-                    try Task.checkCancellation(); image = result
-                } catch is CancellationError { }
-                catch { if !Task.isCancelled { failure = error.localizedDescription } }
-            }
-            .onChange(of: scenePhase) { _, phase in if phase == .background { sharing = false; image = nil; dismiss() } }
-            .sheet(isPresented: $sharing) {
-                if let image { ImageShareSheet(image: UIImage(cgImage: image.image)) }
-            }
+        ImageViewerChrome(title: item.lease.pin.filename, image: shown.map { UIImage(cgImage: $0.image) },
+                          shareable: image.map { UIImage(cgImage: $0.image) },
+                          description: item.lease.pin.filename) {
+            if let failure {
+                ContentUnavailableView(item.lease.pin.filename, systemImage: "photo", description: Text(failure))
+            } else { ProgressView("Loading image…") }
         }
+        .task {
+            do {
+                let result = try await RemoteImageDecoder.shared.decode(item.lease.url, maxPixel: 3072)
+                try Task.checkCancellation(); image = result
+            } catch is CancellationError { }
+            catch { if !Task.isCancelled { failure = error.localizedDescription } }
+        }
+        .onChange(of: scenePhase) { _, phase in if phase == .background { image = nil; dismiss() } }
     }
 }
 #endif

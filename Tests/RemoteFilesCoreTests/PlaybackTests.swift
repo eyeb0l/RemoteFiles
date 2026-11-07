@@ -200,6 +200,33 @@ private actor CachedPlaybackService: RemoteFileService {
         controller.togglePlayback()
         try await waitUntil { controller.isPlaying && controller.elapsed < 1 }
     }
+    func testSkippingPastTheEndStopsAtTheEnd() async throws {
+        let source = try await downloaded("Sample video.mp4")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let playback = RemotePlaybackController()
+        defer { playback.stop() }
+        try await playback.prepare(source, filename: "clip.mp4")
+        let player = try XCTUnwrap(playback.player)
+        playback.seek(to: playback.elapsed + 10)
+        // An in-flight seek already reports its target, so let it land before reading where it did.
+        try await Task.sleep(for: .seconds(2))
+        XCTAssertEqual(player.currentTime().seconds, playback.duration, accuracy: 0.25)
+        try await waitUntil { abs(playback.elapsed - playback.duration) < 0.25 }
+    }
+    func testVideoPublishesItsShapeAndAudioHasNone() async throws {
+        let video = try await downloaded("Sample video.mp4")
+        let audio = try await downloaded("Sample audio.m4a")
+        defer { try? FileManager.default.removeItem(at: video); try? FileManager.default.removeItem(at: audio) }
+        let playback = RemotePlaybackController()
+        defer { playback.stop() }
+        try await playback.prepare(video, filename: "clip.mp4")
+        XCTAssertEqual(try XCTUnwrap(playback.videoAspectRatio), 16.0 / 9.0, accuracy: 0.05)
+        try await playback.prepare(audio, filename: "clip.m4a")
+        XCTAssertNil(playback.videoAspectRatio)
+        try await playback.prepare(video, filename: "clip.mp4")
+        playback.stop()
+        XCTAssertNil(playback.videoAspectRatio, "Stopping releases the file, and what it said about itself")
+    }
     func testCorruptRefreshPreservesPreviousPlayerAndReportsCodecError() async throws {
         let source = try await downloaded("Sample audio.m4a")
         let corrupt = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

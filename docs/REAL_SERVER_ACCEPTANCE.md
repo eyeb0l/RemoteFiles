@@ -301,3 +301,28 @@ was saved to iCloud Drive and its SHA-256 compared on the Mac mini.
 
 Not checked: iOS ending a background transfer (resource expiration), which could not be
 forced, and resuming over a recorded cellular route.
+
+## 7 November 2026 media and certificate pass
+
+A hands-on check of photo and video viewing ([PR #84](https://github.com/eyeb0l/RemoteFiles/pull/84)),
+certificate previews ([PR #85](https://github.com/eyeb0l/RemoteFiles/pull/85)) and hidden private keys
+([PR #86](https://github.com/eyeb0l/RemoteFiles/pull/86)) on the physical iPhone 17 Pro (iOS 27.2,
+24B119) against the MacBook server. The build was a signed Release of `73c2359`, installed from the
+Mac mini. The network route was not recorded. The fixtures were generated media, certificates and
+throwaway keys in a temporary `Fixtures/iphone-pass` folder on the MacBook, removed afterwards; no
+fixture key was authorised anywhere.
+
+The tester worked from a checklist and reported the results as a whole, with no problems, rather
+than item by item. The checklist covered the photo viewer's gestures, video controls and fullscreen,
+a saved video in Airplane Mode, each certificate state, and each way of hiding a key.
+
+- **Photos: no problems.** Crops of a system wallpaper, then real photographs from outside the
+  fixture folder.
+- **Rotated video: passed, with a screenshot.** A 1920×1080 track with 90-degree rotation metadata
+  appeared upright in a portrait frame, with the controls beneath it.
+- **VoiceOver on hidden keys: passed.** A line of dots reads as a count, such as "70 dots" for a
+  70-column key line, rather than every dot.
+- **Crash reports: none.** The phone held no report naming RemoteFiles dated 6 or 7 November, read
+  with `devicectl` after the session.
+
+Not checked: iPad, and Escape on a hardware keyboard. Reduce Motion wasn't on the checklist.

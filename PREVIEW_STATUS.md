@@ -2,6 +2,10 @@
 
 This is a dated record of feature work and validation, not a live test dashboard. Each result applies to the build, environment and date described with it; an installation or Simulator pass does not establish later physical-device acceptance. For current behavior, start with the [documentation index](docs/README.md). For checks still to perform, see [manual acceptance](docs/MANUAL_ACCEPTANCE.md) and the [roadmap](ROADMAP.md).
 
+**7 November 2026: iPhone pass of media and certificate work.**
+
+A signed Release build was checked by hand on the physical iPhone 17 Pro (iOS 27.2). Photo and video viewing, certificate previews and hidden keys showed no problems, including real photographs and a video that relies on rotation metadata. VoiceOver reads each hidden line as a count, such as "70 dots", rather than every dot. Results were reported as a whole against a checklist, and iPad and Escape on a hardware keyboard remain outstanding. See the [7 November evidence](docs/REAL_SERVER_ACCEPTANCE.md#7-november-2026-media-and-certificate-pass).
+
 **6 November 2026: private keys in text files.**
 
 A private key is now found by its content on every text route, so an extensionless `id_rsa`, a hidden `.server.key` or a key pasted into a log no longer opens as text, matches a search or enters the document cache or a saved index. A file that is only keys shows **Contains a Private Key** with no text. A key in a longer document becomes `•`, with a notice above it, and offsets and line numbers don't change. Text that only mentions a marker is untouched. A Markdown image reference can no longer pull a key into the image cache on disk, and an index saved by an older version is cleaned and rewritten when it is next read. See [private keys in text files](docs/PRIVATE_KEYS_IN_TEXT.md).
@@ -13,6 +17,10 @@ A private key is now found by its content on every text route, so an extensionle
 Tapping a `.pem`, `.crt`, `.cer`, `.der`, `.p7b`, `.p7c` or `.csr` file now shows a Settings-style summary instead of "preview unavailable", and `.p12`/`.pfx` files explain why they aren't opened. PEM and DER are told apart by content. A private key beside a certificate is reported and never shown, copied, searched or kept; these files have no Source or Find, and content search and saved indexes skip them, including hidden ones, which used to count as text. See [certificate previews](docs/CERTIFICATE_PREVIEWS.md).
 
 The certificate, search, policy, link and offline suites passed under `swift test` on macOS, with fields and fingerprints compared with OpenSSL's report. On an iPhone 18 Pro Simulator (iOS 27.2), `CertificatePreviewTests`, `CertificatePolicyTests` and `FolderBrowsingTests` passed in the signed iOS test host. A hands-on Demo pass covered the chain and its detail sheet, expired, not-yet-valid, private-key and protected states, the absence of Find and Source, hold-to-copy, light and dark appearance, the largest accessibility text size, and a saved `.pem` opened offline and after backgrounding. VoiceOver, iPad, Airplane Mode and physical-device acceptance are outstanding, and the UI lanes are left to CI.
+
+**6 November 2026: more native photo and video viewing.**
+
+Standalone images now sit centred at the largest size that fits and open with the system zoom transition into a viewer with Photos-style behaviour: double-tap zoom, panning that stops at the picture's edges, tap for an immersive black background and drag down to close. See [remote images](docs/REMOTE_IMAGES.md#standalone-images-and-the-full-screen-viewer). Video now keeps its own shape instead of filling the space above the controls with black, and the controls follow the system layout with 10-second skips and remaining time. Offline videos gained native fullscreen. See [audio and video](docs/AUDIO_VIDEO.md). Local verification on an iPhone 18 Pro Simulator (iOS 27.2) covered these in the connected Demo reader, plus the offline video path, in light and dark appearance, portrait and landscape video, and the largest accessibility text size for video. Physical-device gesture feel, iPad, and VoiceOver in the new viewer are outstanding.
 
 **4 November 2026: interface overhaul.**
 

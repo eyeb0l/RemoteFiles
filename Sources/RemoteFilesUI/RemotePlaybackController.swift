@@ -11,6 +11,8 @@ final class RemotePlaybackController {
     private(set) var isPlaying = false
     private(set) var elapsed: Double = 0
     private(set) var duration: Double = 0
+    /// Width over height as shown, after any rotation the file asks for; nil without a video track.
+    private(set) var videoAspectRatio: CGFloat?
     @ObservationIgnored private var file: PlaybackFile?
     @ObservationIgnored private var observation: NSKeyValueObservation?
     @ObservationIgnored private var playbackObservation: NSKeyValueObservation?
@@ -59,6 +61,11 @@ final class RemotePlaybackController {
         try Task.checkCancellation()
         guard token == requestID else { throw CancellationError() }
 
+        // Only the layout depends on this, so a file that won't say still plays.
+        let aspectRatio = await Self.displayAspectRatio(of: asset)
+        try Task.checkCancellation()
+        guard token == requestID else { throw CancellationError() }
+
         stop(deactivateAudioSession: false)
         requestID = token
         playbackID = token
@@ -66,6 +73,7 @@ final class RemotePlaybackController {
         let item = AVPlayerItem(asset: asset)
         player = AVPlayer(playerItem: item) // The user starts playback with the native controls.
         duration = seconds.isFinite && seconds > 0 ? seconds : 0
+        videoAspectRatio = aspectRatio
         playbackObservation = player?.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
             let playing = player.timeControlStatus != .paused
             Task { @MainActor [weak self] in
@@ -88,6 +96,14 @@ final class RemotePlaybackController {
             object: item, queue: .main) { [weak self] _ in
                 Task { @MainActor [weak self] in self?.playbackFailed(token: token) }
             }
+    }
+
+    private static func displayAspectRatio(of asset: AVURLAsset) async -> CGFloat? {
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+              let (size, transform) = try? await track.load(.naturalSize, .preferredTransform) else { return nil }
+        let shown = size.applying(transform)
+        let width = abs(shown.width), height = abs(shown.height)
+        return width > 0 && height > 0 ? width / height : nil
     }
 
     func pause() { player?.pause() }
@@ -120,7 +136,7 @@ final class RemotePlaybackController {
         player = nil
         file = nil
         failure = nil
-        isPlaying = false; elapsed = 0; duration = 0
+        isPlaying = false; elapsed = 0; duration = 0; videoAspectRatio = nil
         if deactivateAudioSession && hadPlayer {
             AVAudioSession.sharedInstance().deactivate(options: .notifyOthersOnDeactivation) { _, _ in }
         }
