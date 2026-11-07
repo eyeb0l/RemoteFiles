@@ -1,0 +1,7 @@
+OpenSSH 9.6p1 sftp-server: open confirm rwindow 0 rmax 32768
+OpenSSH 9.6p1 internal-sftp: open confirm rwindow 0 rmax 32768
+Dropbear 2022.83: open confirm rwindow 24576 rmax 32759
+ProFTPD 1.3.8b mod_sftp: open confirm rwindow 4294967295 rmax 32768
+AsyncSSH 2.10.1: open confirm rwindow 2097152 rmax 32768
+SFTPGo 2.7.6: open confirm rwindow 2097152 rmax 32768
+Apache MINA SSHD 2.15.0: open confirm rwindow 2097152 rmax 32768

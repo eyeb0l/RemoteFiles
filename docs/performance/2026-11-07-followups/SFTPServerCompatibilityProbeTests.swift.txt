@@ -1,0 +1,69 @@
+import XCTest
+import Foundation
+import NIOSSH
+import Citadel
+@testable import RemoteFilesCore
+
+/// Opt-in. Opens SFTP channels on real server implementations with the app's client, with the subsystem
+/// request and INIT sent in turn and together, and prints what each did. It also records what a server
+/// does to a client it can't negotiate with. Servers come from SFTP_PROBE_SERVERS: name:port:hostKeyFile:listPath,...
+final class SFTPServerCompatibilityProbeTests: XCTestCase {
+    func testChannelOpeningAcrossServers() async throws {
+        let env = ProcessInfo.processInfo.environment
+        let local = try XCTUnwrap(env["LINUX_SEARCH_LOCAL"])
+        let user = env["LINUX_SEARCH_USER"] ?? "ubuntu"
+        let rounds = Int(env["SFTP_PROBE_ROUNDS"] ?? "") ?? 20
+        let offset = Int(env["SFTP_PROBE_PORT_OFFSET"] ?? "") ?? 0
+        let identities = IdentityStore(secretStore: ProbeSecrets())
+        let identity = try await identities.importKey(name: "Probe", openSSH: String(contentsOfFile: local + "/client", encoding: .utf8))
+        let key = try await identities.unlock(identity)
+        for server in try XCTUnwrap(env["SFTP_PROBE_SERVERS"]).split(separator: ",") {
+            let parts = server.split(separator: ":").map(String.init)
+            let name = parts[0], port = Int(parts[1])! + offset, listPath = parts[3]
+            let trust = try HostTrustStore(fileURL: URL(fileURLWithPath: local).appendingPathComponent(UUID().uuidString + ".json"))
+            addTeardownBlock { try? FileManager.default.removeItem(at: URL(fileURLWithPath: local).appendingPathComponent("x")) }
+            let hostKey = try HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: String(contentsOfFile: parts[2], encoding: .utf8)))
+            let endpoint = HostEndpoint(host: "127.0.0.1", port: port)
+            try await trust.trustUnknown(endpoint: endpoint, key: hostKey)
+            for (setName, algorithms) in [("production", SSHAlgorithms()), ("wider", SSHAlgorithms.all)] {
+                var settings = SSHClientSettings(host: endpoint.host, port: port, authenticationMethod: { key.authentication(username: user) },
+                                                 hostKeyValidator: .custom(TrustValidator(store: trust, endpoint: endpoint)))
+                settings.algorithms = algorithms
+                settings.protocolOptions = [.maximumPacketSize(1 << 23)]
+                let client: SSHClient
+                do { client = try await SSHClient.connect(to: settings) }
+                catch { print("PROBE \(name) \(setName) connect=FAILED \(type(of: error)) \(String(describing: error).prefix(110))"); continue }
+                for mode in [false, true, false, true] {
+                    var ok = 0, failures: [String] = [], times: [Double] = [], entries = 0
+                    for _ in 0..<rounds {
+                        let started = ContinuousClock.now
+                        do {
+                            let sftp = try await SFTPRemoteFileService.detachedDeadline(seconds: 20, onTimeout: {}) {
+                                try await client.openSFTP(sendingInitializeWithSubsystem: mode)
+                            }
+                            let elapsed = started.duration(to: .now)
+                            let listing = try await sftp.listDirectory(atPath: listPath, resolvingPath: false)
+                            entries = listing.flatMap(\.components).count
+                            try? await sftp.close()
+                            times.append(Double(elapsed.components.attoseconds) / 1e15 + Double(elapsed.components.seconds) * 1000)
+                            ok += 1
+                        } catch { failures.append(String(String(describing: error).prefix(90))) }
+                    }
+                    times.sort()
+                    let median = times.isEmpty ? -1 : times[times.count / 2]
+                    print("PROBE \(name) \(setName) \(mode ? "together" : "in-turn ") ok=\(ok)/\(rounds) medianOpenMs=\(String(format: "%.1f", median)) maxOpenMs=\(String(format: "%.1f", times.last ?? -1)) entries=\(entries) failures=\(Set(failures).joined(separator: "|"))")
+                }
+                try? await client.close()
+                break // The wider set is only for servers the production set can't reach.
+            }
+        }
+    }
+}
+
+private final class ProbeSecrets: IdentitySecretStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Data] = [:]
+    func save(_ data: Data, reference: String) throws { lock.lock(); defer { lock.unlock() }; values[reference] = data }
+    func load(reference: String) throws -> Data { lock.lock(); defer { lock.unlock() }; guard let data = values[reference] else { throw IdentityError.missingSecret }; return data }
+    func delete(reference: String) throws { lock.lock(); defer { lock.unlock() }; values.removeValue(forKey: reference) }
+}

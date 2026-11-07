@@ -1,0 +1,35 @@
+exit 0
+PROBE openssh-sftp-server production in-turn  ok=12/12 medianOpenMs=316.2 maxOpenMs=321.8 entries=12 failures=
+PROBE openssh-sftp-server production together ok=12/12 medianOpenMs=271.1 maxOpenMs=276.5 entries=12 failures=
+PROBE openssh-sftp-server production in-turn  ok=12/12 medianOpenMs=321.4 maxOpenMs=329.2 entries=12 failures=
+PROBE openssh-sftp-server production together ok=12/12 medianOpenMs=278.4 maxOpenMs=296.3 entries=12 failures=
+PROBE openssh-internal-sftp production in-turn  ok=12/12 medianOpenMs=315.5 maxOpenMs=342.3 entries=12 failures=
+PROBE openssh-internal-sftp production together ok=12/12 medianOpenMs=271.7 maxOpenMs=335.7 entries=12 failures=
+PROBE openssh-internal-sftp production in-turn  ok=12/12 medianOpenMs=321.3 maxOpenMs=334.1 entries=12 failures=
+PROBE openssh-internal-sftp production together ok=12/12 medianOpenMs=284.3 maxOpenMs=316.7 entries=12 failures=
+PROBE dropbear production connect=FAILED NIOSSHError NIOSSHError.keyExchangeNegotiationFailure
+PROBE dropbear wider in-turn  ok=12/12 medianOpenMs=277.4 maxOpenMs=284.0 entries=12 failures=
+PROBE dropbear wider together ok=12/12 medianOpenMs=236.7 maxOpenMs=244.7 entries=12 failures=
+PROBE dropbear wider in-turn  ok=12/12 medianOpenMs=278.3 maxOpenMs=443.3 entries=12 failures=
+PROBE dropbear wider together ok=12/12 medianOpenMs=234.9 maxOpenMs=249.8 entries=12 failures=
+PROBE proftpd production in-turn  ok=12/12 medianOpenMs=274.1 maxOpenMs=287.4 entries=12 failures=
+PROBE proftpd production together ok=12/12 medianOpenMs=230.5 maxOpenMs=236.4 entries=12 failures=
+PROBE proftpd production in-turn  ok=12/12 medianOpenMs=276.1 maxOpenMs=279.5 entries=12 failures=
+PROBE proftpd production together ok=12/12 medianOpenMs=228.6 maxOpenMs=237.4 entries=12 failures=
+PROBE paramiko production connect=FAILED NIOSSHError NIOSSHError.keyExchangeNegotiationFailure
+PROBE paramiko wider in-turn  ok=12/12 medianOpenMs=282.4 maxOpenMs=288.2 entries=10 failures=
+PROBE paramiko wider together ok=12/12 medianOpenMs=232.3 maxOpenMs=234.4 entries=10 failures=
+PROBE paramiko wider in-turn  ok=12/12 medianOpenMs=280.0 maxOpenMs=285.1 entries=10 failures=
+PROBE paramiko wider together ok=12/12 medianOpenMs=227.3 maxOpenMs=235.2 entries=10 failures=
+PROBE asyncssh production in-turn  ok=12/12 medianOpenMs=273.9 maxOpenMs=293.4 entries=12 failures=
+PROBE asyncssh production together ok=12/12 medianOpenMs=228.2 maxOpenMs=235.6 entries=12 failures=
+PROBE asyncssh production in-turn  ok=12/12 medianOpenMs=280.6 maxOpenMs=282.7 entries=12 failures=
+PROBE asyncssh production together ok=12/12 medianOpenMs=233.8 maxOpenMs=245.0 entries=12 failures=
+PROBE sftpgo production in-turn  ok=12/12 medianOpenMs=277.4 maxOpenMs=305.1 entries=12 failures=
+PROBE sftpgo production together ok=12/12 medianOpenMs=230.2 maxOpenMs=234.7 entries=12 failures=
+PROBE sftpgo production in-turn  ok=12/12 medianOpenMs=274.3 maxOpenMs=280.5 entries=12 failures=
+PROBE sftpgo production together ok=12/12 medianOpenMs=229.5 maxOpenMs=232.6 entries=12 failures=
+PROBE mina production in-turn  ok=12/12 medianOpenMs=281.3 maxOpenMs=367.2 entries=12 failures=
+PROBE mina production together ok=12/12 medianOpenMs=229.0 maxOpenMs=237.6 entries=12 failures=
+PROBE mina production in-turn  ok=12/12 medianOpenMs=283.1 maxOpenMs=299.9 entries=12 failures=
+PROBE mina production together ok=12/12 medianOpenMs=233.8 maxOpenMs=237.7 entries=12 failures=

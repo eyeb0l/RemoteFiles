@@ -2,20 +2,24 @@
 
 [Documentation](README.md) · [Build and test](DEVELOPMENT.md)
 
-What limits each operation, what was measured on 7 November 2026, and how to benchmark a change. Measured on iPhone means a physical iPhone 17 Pro; measured on Mac means the same code on a Mac, which says little about absolute speed on a phone. Raw samples are in [`performance/2026-11-07`](performance/2026-11-07).
+What limits each operation, what was measured on 7 November 2026, and how to benchmark a change. Measured on iPhone means a physical iPhone 17 Pro; measured on Mac means the same code on a Mac, which says little about absolute speed on a phone. Raw samples are in [`performance/2026-11-07`](performance/2026-11-07), and for the [follow-ups](#follow-ups-7-november) in [`performance/2026-11-07-followups`](performance/2026-11-07-followups).
 
 ## What limits what
 
 | Operation | Limited by | Evidence |
 |---|---|---|
 | Recursive search, without the Linux helper | Round trips | 330 ms with no added latency, 12.8 s at 40 ms, on the same 364 folders (Mac) |
+| Recursive search with the Linux helper | Round trips to set it up, then the server's disk | About 9 round trips before the first line, from about 35. On a cold, slow disk the server's reads take the rest (Mac) |
+| Contents search over SFTP and saved indexes | Round trips per file | About 4.4 each; reads now overlap, up to 32 at a time |
+| Offline folders | Round trips per file | About 10.7 each, mostly the file's own channel. Listing is under 6% (Mac) |
+| Opening a connection | The protocol | 9 round trips at 40 ms to the first rows, all but one fixed by SSH, the server or SFTP. [The ledger](#connection-setup) |
 | Opening a file or small folder | Round trips | 3.5 to 10 round trips each before this work |
 | Opening a very large folder (first frame) | SwiftUI on the main thread | 2.6 s stall at 50,000 rows (iPhone); none of it in sorting, the network or layout of the data |
 | Listing 10,000 names on OpenSSH | The server | 850 ms, of which about 18 ms is client CPU (Mac) or 80 ms (iPhone). `sftp-server` looks up the owner and group of every entry |
 | Preparing rows | Formatting, then sorting | 127 ms per 10,000 rows on iPhone, over half of it formatting sizes and dates no one was looking at |
 | Downloads over a fast, distant link | The read window | At most 16 × 64 KiB per round trip |
-| Downloads over this phone's Wi-Fi and Tailscale | The link | 5 to 12 MiB/s, varying by a factor of two between passes |
-| Scrolling | Nothing measured | 0 to 1 hitches and a 16.67 ms 95th-percentile frame up to 50,000 rows, before and after, at the 60 Hz the test ran at (iPhone) |
+| Downloads on this phone, every path available | The phone's Wi-Fi | 5 to 12 MiB/s over Tailscale, 6 to 7 MiB/s to a Mac on the same LAN, which itself downloads that file at 17 MiB/s |
+| Scrolling | Nothing that grows with the folder | At 120 Hz, 8 to 10% of frames miss one refresh, and none misses two, at 100 rows as at 50,000 (iPhone) |
 
 Memory layout was not the limit on anything a person waits for, except sorting by date, size and kind. It's the one place a data-layout change made a large difference.
 
@@ -136,16 +140,137 @@ The last two rows got worse with no latency at all, a condition no phone has; by
 
 Not run: the whole UI inventory, VoiceOver and the Linux server helper. The rows' structure changed, so a pull request should carry `full-acceptance`.
 
+## Follow-ups, 7 November
+
+The five opportunities this work left, each treated as a hypothesis. Before is `b9bdcd1`'s code with the follow-ups' benchmark scenarios added; after is the follow-ups. Pairs were interleaved or alternated, and the order reversed every other pass.
+
+The Linux server is a disposable QEMU guest on the Mac mini: Ubuntu 24.04, Linux 6.8, OpenSSH 9.6p1, Python 3.12, forwarded to loopback only. The existing [Linux acceptance suite](../Tests/LinuxSearchAcceptance/README.md) passed on it before anything was measured, and passes after, with two new tests.
+
+### The Linux helper: adopted
+
+**What limited it.** The helper was slower than the SFTP walk it was meant to beat: 1.56 s against the walk's 0.91 s for 364 folders at 40 ms (Mac), and the walk's first match came at 0.27 s. Timing it at three latencies put its setup at about 35 round trips, not 10 + 2 per descriptor: finding the root's descriptor took a directory listing of `/proc/PID/fd` twice, a READLINK and a REALPATH per descriptor in turn, and the results waited for the channel to close.
+
+**What changed.**
+
+- *Setup in four round trips.* Requests that don't depend on an earlier answer go together, judged in the same order as before. Descriptors are found by READLINK by number, up to 32, either side of the root's OPEN, all in one batch. The checks are unchanged: one new descriptor, leading to the root by READLINK and REALPATH, with its inode, mount and namespace compared by the helper before it reads anything, and the root held open until the helper exits. A server that answers out of order can only fail the one-new-descriptor test, which falls back to the walk; so does one with more than 32 descriptors open. The channel closes in the background.
+- *Results as they're found.* The helper writes a line at most ten times a second, or at 64 KiB, and the app decodes each one off the actor and event loop, checking every candidate and every limit across lines as before. At the match limit the app stops listening and the helper ends at its next write. If the helper gives up part way, the walk that follows doesn't repeat what was already shown and counts it towards the limit. Duplicate checks now compare bytes, so two Unicode spellings of a name in one folder no longer make a response invalid.
+- *Less work on the server.* A name that doesn't match takes no system call: the directory already says what each entry is. Only folders are sorted, and the binary check runs in C. Run on the guest directly, 91,000 entries took 74 ms instead of 341 ms warm, and 146 ms instead of 511 ms with its cache emptied.
+
+| Search, Mac → guest through the proxy | Added | Before | After | First result after | SFTP walk, total (first) |
+|---|---:|---:|---:|---:|---:|
+| 364 folders, names | 0 | 45 ms | 30 ms | 28 ms | 71 ms (3) |
+| | 40 ms | 1,571 ms | 460 ms | 458 ms | 910 ms (271) |
+| | 150 ms | 5,236 ms | 1,467 ms | 1,464 ms | 3,147 ms (936) |
+| 1,000 folders, 91,000 entries | 0 | 387 ms | 85 ms | 17 ms | 636 ms (14) |
+| | 40 ms | 1,892 ms | 511 ms | 436 ms | 1,635 ms (276) |
+| | 150 ms | 5,533 ms | 1,513 ms | 1,427 ms | 5,959 ms (953) |
+| Contents, 500 files, a word in all of them | 0 | 277 ms | 78 ms | 16 ms | |
+| | 40 ms | 1,794 ms | 507 ms | 438 ms | 30.1 s, stopped at 167 matches |
+| | 150 ms | 5,476 ms | 1,494 ms | 1,425 ms | |
+
+Pipelining alone took the 364 folders at 40 ms from 1,555 ms to 477 ms and the 1,000 folders from 1,903 ms to 787 ms; streaming and the helper's own speed did the rest. With a cold, slow disk (the guest's second drive held to 150 operations a second, cache emptied before every sample, so this is a model and not a real disk), at 40 ms:
+
+| Search, cold modelled disk | Before | After | First result before | First result after |
+|---|---:|---:|---:|---:|
+| 1,000 folders, names | 9.60 s | 8.34 s | 9.33 s | 0.50 s |
+| Contents, 500 files | 5.69 s | 4.51 s | 5.56 s | 0.45 s |
+| 364 folders, names | 4.06 s | 2.94 s | 3.92 s | 0.56 s |
+
+On iPhone, over Tailscale to the same guest, six samples each in alternating pairs:
+
+| Search, iPhone → guest | Added | Before | After | First result after |
+|---|---:|---:|---:|---:|
+| 364 folders, names | 0 | 484 ms | 235 ms | 231 ms |
+| | 40 ms | 1,876 ms | 607 ms | 603 ms |
+| 1,000 folders, names | 0 | 957 ms | 267 ms | 145 ms |
+| | 40 ms | 2,191 ms | 623 ms | 532 ms |
+| Contents, a word in all 500 files | 0 | 2,924 ms | 1,654 ms | 163 ms |
+| | 40 ms | 3,410 ms | 1,053 ms | 552 ms |
+
+Results were the same in every run: the same matches, in the same counts. *Cost:* five more lines of vendored Citadel ([provenance](../Vendor/Citadel/UPSTREAM.md)), an output protocol of one line per batch, and results ordered by batch: within a batch in the app's natural order, nearer folders first, and between batches in the server's. The walk still shows its first match sooner at 40 ms (271 ms against 458 ms), because the helper must prove the root's identity before it reads anything. *Would reverse it:* a server where the descriptor scan or batching falls back when it didn't before; the acceptance suite catches the first on Linux.
+
+Not tried: opening the exec channel during the identity checks, about one round trip; keeping the checked root and its channel between searches of the same folder, about six of the nine round trips, at the cost of holding a directory open on the server between searches.
+
+### Connection setup: nothing to adopt
+
+**The hypothesis was wrong.** Sending the subsystem request and `INIT` together saves nothing, because the app already does it: Citadel completes the request's promise when it's written, not when it's answered. Seven server implementations behaved identically either way, with every round succeeding: 80 each with nothing added and 48 each at 40 ms ([probe](performance/2026-11-07-followups/SFTPServerCompatibilityProbeTests.swift.txt)): about 92 ms to open a channel on all but OpenSSH, and 137 ms on OpenSSH. OpenSSH's extra round trip is its own: it opens a session channel with a window of zero and widens it only once the subsystem has started, so `INIT` can't go sooner ([each server's window](performance/2026-11-07-followups/session-channel-initial-window.txt)). The fear that a server might hang on early `INIT` isn't new risk, then: the app has always sent it early.
+
+The servers were OpenSSH's `sftp-server` and `internal-sftp`, Dropbear 2022.83 with `sftp-server`, ProFTPD 1.3.8b `mod_sftp`, Paramiko 2.12, AsyncSSH 2.10, SFTPGo 2.7.6 and Apache MINA SSHD 2.15. Dropbear and Paramiko can't be reached with the app's algorithms (Paramiko has no AES-GCM), so they were probed with Citadel's wider set.
+
+<a id="connection-setup"></a>Where a cold open's time goes, counted from a [trace](performance/2026-11-07-followups/connect-and-list-trace-40ms.txt) at 40 ms (the proxy hides TCP's handshake, one more):
+
+| Round trip | What | Can the app save it? |
+|---|---|---|
+| 1 | Version banners | No |
+| 2 | Key exchange | Already overlaps the client's offer |
+| 3 | New keys, service request | Only by sending authentication unasked, which needs a change to NIOSSH's state machine |
+| 4 | Signed authentication | No |
+| 5 | Channel open | No: the request needs the server's channel number |
+| 6 | Subsystem, and OpenSSH's window | No |
+| 7 | `INIT` and the server's version | See below |
+| 8-9 | The folder: REALPATH and OPENDIR, then reads | Already together |
+
+**Measured, not adopted: the first requests with `INIT`.** Letting a channel's first requests follow `INIT` without waiting for the server's version saves a round trip on every implementation above, and every one of 320 rounds with nothing added and 192 at 40 ms succeeded ([0 ms](performance/2026-11-07-followups/probe-first-requests-0ms.txt), [40 ms](performance/2026-11-07-followups/probe-first-requests-40ms.txt)): a channel and its first listing took 271 ms instead of 316 ms on OpenSSH, and about 230 ms instead of 278 ms on the others. It was left out because the app reads a failed subsystem or version as a failed *open*, and decides on that whether to fall back from server search and whether to share a channel; with requests in flight, the failure would surface as a failed listing instead. It's also one round trip in nine on a cold open, for servers no one here can test, like Bitvise or Synology's. *Would reverse it:* a version check that runs before any reply is used, with the same fallbacks, and evidence from a closed-source server.
+
+### Offline folders and saved indexes: `FolderWalking` rejected, reads overlapped instead
+
+**The hypothesis was wrong on both counts.** Saved indexes already list through `FolderWalking`. For offline folders, the walk's listings changed nothing: 22.09 s against 21.99 s for 50 files at 40 ms, and 18.52 s against 18.37 s for a folder of 256 links, where skipping link lookups should help most. A folder tap during an offline download was already unaffected, at about 90 ms. What limits both is each file's round trips, taken one at a time: about 4.4 for a search or index read, about 10.7 for an offline file, most of them the file's own channel.
+
+**Adopted: reading ahead.** A content walk and an index build start reading the files they'll reach next, so the round trips overlap. Each read keeps its own confinement checks, files are still handled strictly in order, and a read's limit is charged against the byte budget from the moment it starts, so the limit still holds. Reads move to the walk's channel, so they can't queue ahead of browsing or retire its channel. The window is 32 files and 2 MiB of expected bytes, because a read's deadline includes its wait behind the others. An index build lists every folder before reading: the walk can't take more listings while it reads, and reads started in the order they'll be wanted waste no slots.
+
+| Mac → guest through the proxy | Added | Before | After |
+|---|---:|---:|---:|
+| Saved index, 500 files in 101 folders | 0 | 564 ms | 201 ms |
+| | 40 ms | 30.1 s, stopped at 166 of 500 | 3.4 s, all 500 |
+| | 150 ms | 30.3 s, stopped at 48 of 500 | 11.8 s, all 500 |
+| Contents over SFTP only, a word in all 500 | 40 ms | 30.1 s, 167 matches | 13.6 s, all 500 |
+| Contents over SFTP only, a word in 32 | 40 ms | 30.2 s, 14 matches | 15.4 s, all 32 |
+| A folder tap meanwhile | 40 ms | 90 ms | 90 ms |
+
+| Index at 40 ms, by window | 4 | 8 | 16 | 32 | 64 |
+|---|---:|---:|---:|---:|---:|
+| Offered as listed | 30.1 s, stopped | 26.9 s | 20.6 s | 5.4 s | 2.2 s |
+| Offered in the order wanted | 25.3 s | 12.3 s | 6.4 s | 3.5 s | 2.1 s |
+
+Name searches, which read nothing, didn't change. *Cost:* up to 32 reads and their results held at once, within the byte budget; an index shows only folder counts until its listing is done; a live search reads ahead only about a folder at a time, since its walk can't take listings while it reads. *Would reverse it:* reads timing out on a slow server that read one at a time in time, which the 2 MiB cap is there to prevent.
+
+Not tried: offline folders, whose files each open their own channel for about four of their 10.7 round trips. Sharing one channel, or downloading a few at once, is the next step there.
+
+### Downloads on a faster phone link: no measurable change, `TransferPacing` kept
+
+No faster path from the phone exists here. To a MacBook Air's SSH fixture on the same LAN the phone reached 6 to 7 MiB/s, though the Mac mini downloads the same file from it at 17 MiB/s, so the phone's Wi-Fi is the limit. A cable gave no path either: an app can't reach the Mac through the device tunnel (the connection timed out). This Mac's LAN address isn't filtered by the network, as the earlier note said, but by Little Snitch, per process.
+
+On that LAN path, with the window's growth switched off and on in turn within one process, six pairs at each of three latencies:
+
+| iPhone → Air over Wi-Fi | Fixed at 16 | Growing | Growing's speed-up, median (range) |
+|---|---:|---:|---:|
+| Nothing added | 6.5 MiB/s | 6.4 MiB/s | 0.98 (0.79-1.08) |
+| 40 ms | 5.1 MiB/s | 4.7 MiB/s | 0.93 (0.86-1.10) |
+| 150 ms | 3.8 MiB/s | 3.8 MiB/s | 1.01 (0.92-1.22) |
+
+That shows no change, and couldn't: even at 150 ms, something below the window held both to 3.8 MiB/s, where a fixed window of 16 allows 6.7 MiB/s. `TransferPacing` stays, because it grows only once a round trip delivers more than the window, so it does nothing on these links, and through the proxy it was worth +114 to +171%. *Would reverse it:* a phone path that delivers more than 1 MiB a round trip and still shows no gain, or shows a loss.
+
+### Measurement gaps: closed
+
+**120 Hz.** An iPhone holds an app's display links to 60 Hz unless its Info.plist sets `CADisableMinimumFrameDurationOnPhone`, so no change to the test could have shown more. A benchmark build now adds it to its own host only, and the test records the median, 99th percentile and the share of frames that miss a refresh. On iPhone at 120 Hz, the median frame is 8.3 ms and the 95th and 99th percentiles 16.7 ms, at 100, 1,000, 10,000 and 50,000 rows alike: 8 to 10% of frames miss one refresh, none misses two, and the 100-row control misses as many as 50,000 rows. Asked for 60 Hz in the same build, the median is 16.7 ms. The app itself doesn't set the key; Apple documents it as lifting the limit for an app's own display links and animations, not for system scrolling.
+
+**Peak memory while listing.** The kernel keeps a peak footprint for each process that never goes down, so a fresh process that lists once can read the listing's true peak; the benchmark now records it when run with `--only list.100000` alone. Listing 100,000 entries peaks at 37 MB on iPhone, over Tailscale to the guest (the heap sampler had said 31 MB), and 39 MB on the Mac (sampler: 12 MB). Instruments' Allocations, attached on iPhone over the same three listings, recorded 1.15 GB allocated in 1.26 million allocations, nearly all short-lived: about 3.8 KB and four allocations per entry each listing, with 5 MB live at the end ([statistics](performance/2026-11-07-followups/iphone-list100000-allocations-statistics.xml)). `xctrace` can't export a peak from the command line, which is why the kernel's figure is the one reported. The churn costs no time anyone waits for: the server sets the pace of a large listing.
+
+### Correctness of the follow-ups
+
+- The Linux acceptance suite passes on the guest, 7 tests: the original five, one that results arrive before the search finishes, and one that the match limit ends the helper and browsing carries on. The two that use the production adapter also pass with `internal-sftp` as the subsystem.
+- All 478 macOS tests pass with OpenSSH on top of `b9bdcd1`, with the opt-in `LatencyBenchmarkTests` skipped as usual. New ones cover output split anywhere between chunks, a missing or trailing final line, limits and duplicates across lines, two Unicode spellings of one name, the match limit on the last line, a walk after a partial server answer, the helper's binary check against every byte value, the helper's types without stat, and reading ahead within file, byte and in-flight limits, a file that grew, cancellation, and index order.
+- Not run: the iOS simulator, the UI journeys and VoiceOver. Nothing in the follow-ups touches a view.
+
 ## Remaining opportunities
 
 Theoretical until measured, most promising first.
 
-1. **The Linux helper's setup.** On a server with SSH command access, a search first makes about 10 + 2 per descriptor sequential requests, then returns everything at once. Pipelining them and streaming results would help first results most. No Linux server was available here to test on.
-2. **Time to open a connection.** Six to eight round trips, unchanged by this work, and the largest remaining part of a cold open. Sending the SFTP subsystem request and `INIT` together would save one, but no server beyond OpenSSH could be tested, so it was left out.
-3. **Offline folder downloads and saved indexes** still use one listing channel and the foreground path. They could use the walk.
-4. **Faster links on a phone.** The read window's benefit is measured only through the proxy. Repeat the download comparison over a path faster than this Tailscale one.
-5. **120 Hz.** The hosted test ran at 60 Hz, so frame results can't show anything finer than 16.67 ms.
-6. **Peak memory while listing.** The heap sampler here is too coarse to report; Instruments would settle it. Longnames and attributes are now released batch by batch.
+1. **Offline folders' files.** About 10.7 round trips each, one at a time; a shared channel would save about four.
+2. **Repeated server searches of one folder.** Keeping the checked root and its channel could take a search from about nine round trips to three.
+3. **The first requests with `INIT`.** One round trip per channel, measured on seven implementations; see [why it was left out](#connection-setup-nothing-to-adopt).
+4. **Live content searches over SFTP** read ahead only about a folder at a time. Letting the walk take listings while it reads would give them the index's window.
+5. **A phone path faster than 1 MiB per round trip,** to test the read window on a phone at all.
 
 ## Run it
 
@@ -169,10 +294,19 @@ xcodebuild build-for-testing -project RemoteFiles.xcodeproj -scheme RemoteFilesC
 TEST_RUNNER_REMOTEFILES_PERFORMANCE_BENCHMARK=1 xcodebuild test-without-building -xctestrun DD/Build/Products/*.xctestrun -destination 'id=DEVICE' \
   -only-testing:RemoteFilesTests/PerformanceBenchmarkTests/testFolderScreen -only-testing:RemoteFilesTests/PerformanceBenchmarkTests/testLocalWork
 
-# Transport. The address must be one the phone can reach: this Mac's Tailscale address worked where its LAN address was filtered.
+# Transport. The address must be one the phone can reach: Little Snitch on this Mac lets the phone in over Tailscale but not the LAN.
 python3 -B scripts/benchmark_performance.py device --output phone.jsonl --label after --xctestrun DD/Build/Products/*.xctestrun \
   --udid DEVICE --address MAC_ADDRESS --rtt 0,40
 ```
+
+Against a server you already run, such as the Linux guest above, alternating builds:
+
+```sh
+python3 -B scripts/benchmark_performance.py server --output linux.jsonl --checkout before=../before --checkout after=. \
+  --port 22401 --user ubuntu --key KEY --host-key HOST_KEY.pub --root /srv/rf/bench --only assisted,bulk --rtt 0,40,150
+```
+
+The `assisted` scenarios search the guest's `tree`, `big` and `docs` folders with the helper and with the walk; `REMOTEFILES_BENCHMARK_ASSISTED_MODE=helper` or `walk` runs one. `bulk` builds an index and saves an offline folder of `REMOTEFILES_BENCHMARK_BULK_ROOT`. `--cold-command` empties the server's caches before each search sample. `windowpairs` alternates a fixed and a growing read window in one process. For 120 Hz frames, give the benchmark host an Info.plist with `CADisableMinimumFrameDurationOnPhone`; `REMOTEFILES_BENCHMARK_FRAME_RATE=60` asks for 60 Hz in the same build.
 
 Keep the phone unlocked and allow Local Network on first run. Links vary, so alternate short runs and compare pairs, as for downloads above. Remove the host afterwards with `xcrun devicectl device uninstall app`; it is `dev.iris.RemoteFilesBenchTestHost`.
 
