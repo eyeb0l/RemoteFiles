@@ -1,0 +1,13 @@
+Time Profiler, iPhone 17 Pro, test host attached during six 64 MiB downloads at 0 ms added (7.2-7.6 MiB/s), 40.9 s.
+ThreadCPUUsage table:
+span 41.0s; mean % of one core per thread:
+  NIO-SGLTN-1-#1 0xd828ac                               7.1%
+  RemoteFiles 0xd8289f                                  0.6%
+  RemoteFiles 0xd828a5                                  0.6%
+  RemoteFiles 0xd828a7                                  0.5%
+  RemoteFiles 0xd8289e                                  0.4%
+  RemoteFiles 0xd828a0                                  0.4%
+  RemoteFiles 0xd82a9a                                  0.3%
+  Main Thread 0xd82861                                  0.1%
+busiest NIO thread, per second (% of one core):
+6 7 8 8 8 7 8 8 8 8 8 8 8 7 7 6 6 7 8 7 6 6 6 7 6 7 7 7 7 7 6 7 6 6 7 7 7 7 8 7 6 1

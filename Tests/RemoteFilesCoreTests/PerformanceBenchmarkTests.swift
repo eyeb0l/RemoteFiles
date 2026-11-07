@@ -14,6 +14,28 @@ import UIKit
 /// Without `REMOTEFILES_PERFORMANCE_BENCHMARK=1` each method runs once at its smallest size, so CI keeps
 /// the harness working in moments. See docs/PERFORMANCE.md.
 final class PerformanceBenchmarkTests: XCTestCase {
+    /// Reads a TCP stream to its end and returns its length: the link's speed with nothing above TCP.
+    private static func readAll(host: String, port: Int, receiveBuffer: Int32? = nil) throws -> Int {
+        var hints = addrinfo(); hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM
+        var found: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, String(port), &hints, &found) == 0, let info = found else { throw POSIXError(.EHOSTUNREACH) }
+        defer { freeaddrinfo(info) }
+        let socket = Darwin.socket(info.pointee.ai_family, info.pointee.ai_socktype, info.pointee.ai_protocol)
+        guard socket >= 0 else { throw POSIXError(.EIO) }
+        defer { close(socket) }
+        if var size = receiveBuffer {
+            guard setsockopt(socket, SOL_SOCKET, SO_RCVBUF, &size, socklen_t(MemoryLayout<Int32>.size)) == 0 else { throw POSIXError(.EINVAL) }
+        }
+        guard connect(socket, info.pointee.ai_addr, info.pointee.ai_addrlen) == 0 else { throw POSIXError(.ECONNREFUSED) }
+        var buffer = [UInt8](repeating: 0, count: 1 << 16), total = 0
+        while true {
+            let count = buffer.withUnsafeMutableBytes { read(socket, $0.baseAddress, $0.count) }
+            guard count > 0 else { break }
+            total += count
+        }
+        return total
+    }
+
     private var environment: [String: String] { ProcessInfo.processInfo.environment }
     private var measuring: Bool { environment["REMOTEFILES_PERFORMANCE_BENCHMARK"] == "1" }
     private var runs: Int { measuring ? Int(environment["REMOTEFILES_BENCHMARK_RUNS"] ?? "") ?? 5 : 1 }
@@ -234,24 +256,79 @@ final class PerformanceBenchmarkTests: XCTestCase {
         if measuring, environment["REMOTEFILES_BENCHMARK_ONLY"]?.contains("assisted") == true {
             try await measureAssistedSearch(root: root, profile: profile, service: warm, recorder: recorder)
         }
-        // By name: the two window policies strictly alternate, so link drift can't favour either.
+        // By name: the window policies take turns, in a rotating order, so link drift can't favour any.
+        // Each records the largest window it reached, since growth that never happens compares nothing.
         if measuring, environment["REMOTEFILES_BENCHMARK_ONLY"]?.contains("windowpairs") == true {
             let temp = folder.appendingPathComponent("pairs.bin"), file = root + "/big-64m.bin"
             let bytes = 64.0 * 1024 * 1024
+            let low = SFTPRemoteFileService.transferReadWindow, high = SFTPRemoteFileService.transferReadWindowLimit
+            let arms = [("fixed\(low)", low, low), ("growing", low, high), ("fixed\(high)", high, high)]
             for pair in 0..<runs {
-                for limit in pair % 2 == 0 ? [SFTPRemoteFileService.transferReadWindow, SFTPRemoteFileService.transferReadWindowLimit]
-                                           : [SFTPRemoteFileService.transferReadWindowLimit, SFTPRemoteFileService.transferReadWindow] {
-                    await warm.setTransferWindowLimit(limit)
-                    let name = "windowpairs." + (limit == SFTPRemoteFileService.transferReadWindow ? "fixed16" : "growing")
+                for index in 0..<arms.count {
+                    let (name, floor, limit) = arms[(index + pair) % arms.count]
+                    await warm.setTransferWindow(floor: floor, limit: limit)
                     let started = ContinuousClock.now
                     _ = try await warm.downloadManagedFile(profile: profile, path: file, allowedRoot: root, destination: temp, limit: 1 << 30) { _ in }
                     let elapsed = started.elapsedMilliseconds
-                    recorder.add(name + ".ms", value: elapsed)
-                    recorder.add(name + ".MiBps", value: bytes / (1024 * 1024) / (elapsed / 1000), unit: "MiB/s")
-                    recorder.add("windowpairs.pair\(pair)." + (limit == SFTPRemoteFileService.transferReadWindow ? "fixed16" : "growing"), value: elapsed)
+                    let metrics = await warm.metrics()
+                    recorder.add("windowpairs.\(name).ms", value: elapsed)
+                    recorder.add("windowpairs.\(name).MiBps", value: bytes / (1024 * 1024) / (elapsed / 1000), unit: "MiB/s")
+                    recorder.add("windowpairs.\(name).peakWindow", value: Double(metrics.lastTransferPeakWindow), unit: "reads")
+                    recorder.add("windowpairs.\(name).meanInFlight", value: metrics.lastTransferMeanInFlight, unit: "reads")
+                    recorder.add("windowpairs.pair\(pair).\(name)", value: elapsed)
                 }
             }
-            await warm.setTransferWindowLimit(SFTPRemoteFileService.transferReadWindowLimit)
+            await warm.setTransferWindow(floor: low, limit: high)
+        }
+        // By name: the same link without SSH or SFTP. `REMOTEFILES_BENCHMARK_RAW_PORTS` lists ports on the server's
+        // host that send the 64 MiB file over plain TCP; `REMOTEFILES_BENCHMARK_SFTP_PORTS` lists other ports of this
+        // server, such as one without the proxy. Every arm takes its turn in a rotating order.
+        if measuring, environment["REMOTEFILES_BENCHMARK_ONLY"]?.contains("linkbaseline") == true {
+            func ports(_ key: String) -> [Int] { (environment[key] ?? "").split(separator: ",").compactMap { Int($0) } }
+            var arms: [(String, () async throws -> Int)] = []
+            // Each entry is a port on the server's host, or HOST:PORT for another sender, such as a second machine.
+            // The two-stream arm reads its second stream from the next port, so a sender that serves one connection at a time works.
+            for entry in (environment["REMOTEFILES_BENCHMARK_RAW_PORTS"] ?? "").split(separator: ",") {
+                let parts = entry.split(separator: ":")
+                guard let raw = parts.last.flatMap({ Int($0) }) else { continue }
+                let sender = parts.count == 2 ? String(parts[0]) : host
+                let name = "tcp" + (parts.count == 2 ? "-\(sender)-" : "") + "\(raw)"
+                arms.append((name, { try await Task.detached { try Self.readAll(host: sender, port: raw) }.value }))
+                // A receive buffer that limited one stream would let a larger one, or two streams, go faster.
+                arms.append((name + ".rcvbuf8m", { try await Task.detached { try Self.readAll(host: sender, port: raw, receiveBuffer: 8 << 20) }.value }))
+                arms.append((name + ".two", {
+                    async let first = Task.detached { try Self.readAll(host: sender, port: raw) }.value
+                    async let second = Task.detached { try Self.readAll(host: sender, port: raw + 1) }.value
+                    return try await first + second
+                }))
+            }
+            let temp = folder.appendingPathComponent("baseline.bin"), file = root + "/big-64m.bin"
+            for other in [port] + ports("REMOTEFILES_BENCHMARK_SFTP_PORTS") {
+                let endpointProfile = ConnectionProfile(name: "Benchmark \(other)", host: host, port: other, username: user,
+                                                        identityID: key.id, startingDirectory: root)
+                try await trust.trustUnknown(endpoint: HostEndpoint(host: host, port: other),
+                                             key: HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: hostKey)))
+                let client = other == port ? warm : service()
+                if other != port {
+                    value.connections.append(endpointProfile); try await metadata.save(value)
+                    _ = try await client.listDirectory(profile: endpointProfile, path: root + "/d10")
+                    addTeardownBlock { await client.disconnect() }
+                }
+                arms.append(("sftp\(other)", {
+                    let entry = try await client.downloadManagedFile(profile: endpointProfile, path: file, allowedRoot: root, destination: temp, limit: 1 << 30) { _ in }
+                    return Int(entry.size ?? 0)
+                }))
+            }
+            for pass in 0..<runs {
+                for index in 0..<arms.count {
+                    let (name, arm) = arms[(index + pass) % arms.count]
+                    let started = ContinuousClock.now
+                    let bytes = try await arm()
+                    let elapsed = started.elapsedMilliseconds
+                    recorder.add("linkbaseline.\(name).MiBps", value: Double(bytes) / (1024 * 1024) / (elapsed / 1000), unit: "MiB/s")
+                    recorder.add("linkbaseline.pass\(pass).\(name)", value: elapsed)
+                }
+            }
         }
         // Also by name, for the same reason as above.
         if measuring, environment["REMOTEFILES_BENCHMARK_ONLY"]?.contains("bulk") == true {

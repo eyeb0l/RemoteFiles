@@ -2,7 +2,7 @@
 
 [Documentation](README.md) · [Build and test](DEVELOPMENT.md)
 
-What limits each operation, what was measured on 7 November 2026, and how to benchmark a change. Measured on iPhone means a physical iPhone 17 Pro; measured on Mac means the same code on a Mac, which says little about absolute speed on a phone. Raw samples are in [`performance/2026-11-07`](performance/2026-11-07), and for the [follow-ups](#follow-ups-7-november) in [`performance/2026-11-07-followups`](performance/2026-11-07-followups).
+What limits each operation, what was measured on 7 November 2026, and how to benchmark a change. Measured on iPhone means a physical iPhone 17 Pro; measured on Mac means the same code on a Mac, which says little about absolute speed on a phone. Raw samples are in [`performance/2026-11-07`](performance/2026-11-07), for the [follow-ups](#follow-ups-7-november) in [`performance/2026-11-07-followups`](performance/2026-11-07-followups), and for [the phone's download cap](#the-phones-download-cap-not-the-client) in [`performance/2026-11-07-download-cap`](performance/2026-11-07-download-cap).
 
 ## What limits what
 
@@ -17,8 +17,8 @@ What limits each operation, what was measured on 7 November 2026, and how to ben
 | Opening a very large folder (first frame) | SwiftUI on the main thread | 2.6 s stall at 50,000 rows (iPhone); none of it in sorting, the network or layout of the data |
 | Listing 10,000 names on OpenSSH | The server | 850 ms, of which about 18 ms is client CPU (Mac) or 80 ms (iPhone). `sftp-server` looks up the owner and group of every entry |
 | Preparing rows | Formatting, then sorting | 127 ms per 10,000 rows on iPhone, over half of it formatting sizes and dates no one was looking at |
-| Downloads over a fast, distant link | The read window | At most 16 × 64 KiB per round trip |
-| Downloads on this phone, every path available | The phone's Wi-Fi | 5 to 12 MiB/s over Tailscale, 6 to 7 MiB/s to a Mac on the same LAN, which itself downloads that file at 17 MiB/s |
+| Downloads over a fast, distant link | The read window | Fixed at 16 reads, at most 1 MiB per round trip. On iPhone from a wired Mac at 150 ms added, 5.3 MiB/s fixed at 16, 11.9 growing, 14.3 fixed at 64 |
+| Downloads from the MacBook Air to this phone | The mesh node forwarding between two of its wireless clients | Plain TCP from the Air is no faster than SFTP, 7 to 14 MiB/s. From the wired Mac mini the same phone reads 77 MiB/s of plain TCP and 58 to 67 MiB/s by SFTP, and the Air sends the mini 95 MiB/s. The client used 7% of one core. [Details](#the-phones-download-cap-not-the-client) |
 | Scrolling | Nothing that grows with the folder | At 120 Hz, 8 to 10% of frames miss one refresh, and none misses two, at 100 rows as at 50,000 (iPhone) |
 
 Memory layout was not the limit on anything a person waits for, except sorting by date, size and kind. It's the one place a data-layout change made a large difference.
@@ -238,6 +238,8 @@ Not tried: offline folders, whose files each open their own channel for about fo
 
 ### Downloads on a faster phone link: no measurable change, `TransferPacing` kept
 
+*Later this was found wrong twice over: the comparison couldn't show a difference, and a faster phone path did exist, from the wired Mac mini. The cap was the path from the Air, not the phone's Wi-Fi. See [the phone's download cap](#the-phones-download-cap-not-the-client). The figures below stand as measured.*
+
 No faster path from the phone exists here. To a MacBook Air's SSH fixture on the same LAN the phone reached 6 to 7 MiB/s, though the Mac mini downloads the same file from it at 17 MiB/s, so the phone's Wi-Fi is the limit. A cable gave no path either: an app can't reach the Mac through the device tunnel (the connection timed out). This Mac's LAN address isn't filtered by the network, as the earlier note said, but by Little Snitch, per process.
 
 On that LAN path, with the window's growth switched off and on in turn within one process, six pairs at each of three latencies:
@@ -248,7 +250,7 @@ On that LAN path, with the window's growth switched off and on in turn within on
 | 40 ms | 5.1 MiB/s | 4.7 MiB/s | 0.93 (0.86-1.10) |
 | 150 ms | 3.8 MiB/s | 3.8 MiB/s | 1.01 (0.92-1.22) |
 
-That shows no change, and couldn't: even at 150 ms, something below the window held both to 3.8 MiB/s, where a fixed window of 16 allows 6.7 MiB/s. `TransferPacing` stays, because it grows only once a round trip delivers more than the window, so it does nothing on these links, and through the proxy it was worth +114 to +171%. *Would reverse it:* a phone path that delivers more than 1 MiB a round trip and still shows no gain, or shows a loss.
+That shows no change, and couldn't, though not for the reason first given here (that something below the window held both to 3.8 MiB/s): the growing arm can't have grown, as [below](#the-phones-download-cap-not-the-client) explains. `TransferPacing` stays, because it grows only once a round trip delivers more than the window, so it does nothing on these links, and through the proxy it was worth +114 to +171%. *Would reverse it:* a phone path that delivers more than 1 MiB a round trip and still shows no gain, or shows a loss.
 
 ### Measurement gaps: closed
 
@@ -262,6 +264,43 @@ That shows no change, and couldn't: even at 150 ms, something below the window h
 - All 478 macOS tests pass with OpenSSH on top of `b9bdcd1`, with the opt-in `LatencyBenchmarkTests` skipped as usual. New ones cover output split anywhere between chunks, a missing or trailing final line, limits and duplicates across lines, two Unicode spellings of one name, the match limit on the last line, a walk after a partial server answer, the helper's binary check against every byte value, the helper's types without stat, and reading ahead within file, byte and in-flight limits, a file that grew, cancellation, and index order.
 - Not run: the iOS simulator, the UI journeys and VoiceOver. Nothing in the follow-ups touches a view.
 
+## The phone's download cap: not the client
+
+Why phone downloads stayed below the link and, at 150 ms, below what a window of 16 allows. Each cause was a hypothesis, tested in arms that rotate within one process. The phone was on the home Wi-Fi with two servers: a throwaway OpenSSH fixture on the MacBook Air, which is also on Wi-Fi (802.11ax, 5 GHz, 80 MHz, −37 dBm), and one on the Mac mini, on gigabit Ethernet. Delays came from `latency_proxy.py`, on the Air for the Air and on the mini's loopback for the mini. Little Snitch on the mini lets `nc` take LAN connections but not the fixture, so a loop of `nc` relays the phone to it. Raw data: [`performance/2026-11-07-download-cap`](performance/2026-11-07-download-cap).
+
+**The cap is the Air-to-phone path.** A bench-only arm reads the same 64 MiB by plain TCP, rotated with SFTP in one process:
+
+| iPhone ← server, 3 or 4 rotations | Median | Range |
+|---|---:|---:|
+| Mini, plain TCP | 77.1 MiB/s | 8.4-80.2 |
+| Mini, plain TCP, 8 MiB `SO_RCVBUF` | 71.7 MiB/s | 36.5-72.8 |
+| Mini, two plain TCP streams at once, together | 65.5 MiB/s | 62.5-67.3 |
+| Mini, SFTP through the relay | 58.5 MiB/s | 29.7-66.6 |
+| Air, plain TCP, same rotation | 7.8 MiB/s | 7.2-11.0 |
+| Air, plain TCP, 8 MiB `SO_RCVBUF` | 12.0 MiB/s | 12.0-13.6 |
+| Air, two streams, together | 13.7 MiB/s | 12.8-14.5 |
+| *Earlier runs, Air only:* plain TCP | 7.1 and 8.7 MiB/s | 5.1-11.1 |
+| SFTP without the proxy | 8.3 and 9.9 MiB/s | 6.2-10.6 |
+| SFTP through the proxy, nothing added | 7.0 MiB/s | 5.8-9.0 |
+
+The phone's Wi-Fi carries 77 MiB/s and RemoteFiles takes most of it, so neither the phone nor the client sets the 7 MiB/s seen from the Air. The Air isn't slow either: it sends the mini 93 to 97 MiB/s of plain TCP and receives 82. Only traffic from one wireless device to the other is slow, and in the earlier rotations SFTP over it was never slower than plain TCP. The network is a mesh, but the router's app shows the Air, the phone and the mini's own Wi-Fi all on one node. Through that node the Air sends 256 MiB to the mini's Wi-Fi address at 17.0 and 17.5 MiB/s, and to its Ethernet address at 62.9 and 65.3 MiB/s; the mini's interface counters confirm each path. Two strong 802.11ax clients on one node and channel reach each other at well under half of what either gets alone, which no client can change. Turning off AirDrop and Handoff on the Air changed nothing (17.2 and 15.2 against 65.3 and 61.1 MiB/s, alternating), though its peer-to-peer interface (`awdl0`) still reported itself active and the mini's was left on. The first sample of an arm was sometimes low on every path.
+
+**The earlier pairs compared 16 with 16.** `TransferPacing` grows only while one and a half times what a round trip delivers exceeds the window. Through the Air at 150 ms the phone delivered about 0.6 MiB a round trip, and 1.5 × 0.6 MiB is less than the 1 MiB window, so the growing arm stayed at 16, and nothing recorded how far it grew. `windowpairs` now rotates three arms (fixed at 16, growing, fixed at 64) and records each one's largest window and mean reads in flight. From the mini, the first phone path faster than the window:
+
+| iPhone ← mini, 3 rotations | Fixed at 16 | Growing (largest window) | Fixed at 64 |
+|---|---:|---:|---:|
+| Nothing added, relay only | 37.0 MiB/s (25.8-39.5) | 41.1 MiB/s (36.4-53.7), 24-29 | 44.7 MiB/s (14.8-53.4) |
+| 40 ms | 13.2 MiB/s (13.1-14.2) | 25.7 MiB/s (17.7-28.7), 64 | 26.2 MiB/s (22.0-38.0) |
+| 150 ms | 5.3 MiB/s (5.2-5.3) | 11.9 MiB/s (7.1-12.8), 64 | 14.3 MiB/s (8.6-14.3) |
+
+Growth doubles a fixed window's speed at 40 ms and more than doubles it at 150 ms, reaching 98% and 83% of a fixed 64. Fixed at 16, the phone gets close to the window's bound: at 150 ms, about 1 MiB per 155 ms once about 1.3 s of channel setup, path checks and `OPEN` is taken off. Through the Air the window mattered only at 150 ms (4.9 fixed at 16, 7.0 growing, 8.7 fixed at 64), and the earlier 3.8 MiB/s wasn't reproduced; it fits a slower link that day, whose queue lengthened the round trip once the window nearly filled it.
+
+**Not the proxy, the client's CPU or SSH.** From the Mac mini, OpenSSH's own `sftp -R 16 -B 65536` through the Air's 150 ms proxy moved a flat 6.0 MiB/s once connected, at the window's bound. `TCP_SENDMOREACKS` on both of the proxy's sockets changed nothing (4.5 and 4.6 MiB/s with connection setup), and NIOSSH's 8 MiB channel window, topped up at half, can't bind with at most 4 MiB in flight. On the Mac with the proxy capped at 52 Mbit/s, RemoteFiles reached the cap at every latency. On the phone, Instruments' Time Profiler found the NIO event loop thread, which decrypts and parses every byte, busy 7% of one core during downloads at 7.2 to 7.6 MiB/s, and every other thread under 1%.
+
+Nothing in the app changed. The benchmark gained the three window arms and the plain TCP baseline (`linkbaseline`), and transfers report their largest window and mean reads in flight to `TransportMetrics`, at the cost of one closure call per reply. *Would reverse it:* plain TCP over some phone path clearly beating SFTP over the same path, or two streams beating one where one SFTP connection is used.
+
+**What it leaves.** At 150 ms growth settles below a fixed 64 (11.9 against 14.3 MiB/s from the mini). By design it stops once requests wait half as long again as the shortest round trip; a fixed 64 keeps about 4 MiB in flight, which anything else on the connection waits behind. Whether the rest is worth that wait needs `contended` measured on the phone at that latency.
+
 ## Remaining opportunities
 
 Theoretical until measured, most promising first.
@@ -270,7 +309,7 @@ Theoretical until measured, most promising first.
 2. **Repeated server searches of one folder.** Keeping the checked root and its channel could take a search from about nine round trips to three.
 3. **The first requests with `INIT`.** One round trip per channel, measured on seven implementations; see [why it was left out](#connection-setup-nothing-to-adopt).
 4. **Live content searches over SFTP** read ahead only about a folder at a time. Letting the walk take listings while it reads would give them the index's window.
-5. **A phone path faster than 1 MiB per round trip,** to test the read window on a phone at all.
+5. **Read-window growth on a long phone path.** At 150 ms it reached 11.9 MiB/s against 14.3 for a fixed 64; measure browsing during a transfer on the phone before trading queue depth for it. See [the phone's download cap](#the-phones-download-cap-not-the-client).
 
 ## Run it
 
@@ -306,7 +345,7 @@ python3 -B scripts/benchmark_performance.py server --output linux.jsonl --checko
   --port 22401 --user ubuntu --key KEY --host-key HOST_KEY.pub --root /srv/rf/bench --only assisted,bulk --rtt 0,40,150
 ```
 
-The `assisted` scenarios search the guest's `tree`, `big` and `docs` folders with the helper and with the walk; `REMOTEFILES_BENCHMARK_ASSISTED_MODE=helper` or `walk` runs one. `bulk` builds an index and saves an offline folder of `REMOTEFILES_BENCHMARK_BULK_ROOT`. `--cold-command` empties the server's caches before each search sample. `windowpairs` alternates a fixed and a growing read window in one process. For 120 Hz frames, give the benchmark host an Info.plist with `CADisableMinimumFrameDurationOnPhone`; `REMOTEFILES_BENCHMARK_FRAME_RATE=60` asks for 60 Hz in the same build.
+The `assisted` scenarios search the guest's `tree`, `big` and `docs` folders with the helper and with the walk; `REMOTEFILES_BENCHMARK_ASSISTED_MODE=helper` or `walk` runs one. `bulk` builds an index and saves an offline folder of `REMOTEFILES_BENCHMARK_BULK_ROOT`. `--cold-command` empties the server's caches before each search sample. `windowpairs` rotates a read window fixed at 16, a growing one and one fixed at 64 in one process, and records how far each grew. `linkbaseline` rotates SFTP with a plain TCP read of the same file: `REMOTEFILES_BENCHMARK_RAW_PORTS` lists ports on the server's host, or `HOST:PORT` elsewhere, that send `big-64m.bin` and close, such as a loop of `nc -l`; the two-stream arm also reads from the next port up, and `REMOTEFILES_BENCHMARK_SFTP_PORTS` lists other ports of the same server, such as one without the proxy. For 120 Hz frames, give the benchmark host an Info.plist with `CADisableMinimumFrameDurationOnPhone`; `REMOTEFILES_BENCHMARK_FRAME_RATE=60` asks for 60 Hz in the same build.
 
 Keep the phone unlocked and allow Local Network on first run. Links vary, so alternate short runs and compare pairs, as for downloads above. Remove the host afterwards with `xcrun devicectl device uninstall app`; it is `dev.iris.RemoteFilesBenchTestHost`.
 

@@ -28,6 +28,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     /// How often a transfer reports its progress. Its start, first bytes and end always report.
     private var progressInterval: Duration = .milliseconds(100)
     private var transferWindowLimit = transferReadWindowLimit
+    private var transferWindowFloor = transferReadWindow
 
     public init(identityStore: IdentityStore, trustStore: HostTrustStore,
                 metadataStore: MetadataStore, timeoutSeconds: UInt64 = 15) {
@@ -44,8 +45,8 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         managedTransferIdle = idle; dedicatedCloseGrace = closeGrace
     }
     func setProgressInterval(_ interval: Duration) { progressInterval = interval }
-    /// Lets a benchmark compare the read window's growth with none, in one process.
-    func setTransferWindowLimit(_ limit: Int) { transferWindowLimit = limit }
+    /// Lets a benchmark compare fixed and growing read windows in one process.
+    func setTransferWindow(floor: Int, limit: Int) { transferWindowFloor = floor; transferWindowLimit = limit }
 
     func searchFolders(query: String, root: String, profile: ConnectionProfile, includeHidden: Bool,
                        limits: RemoteFolderSearch.Limits, content: RemoteFolderSearch.ContentLimits?,
@@ -533,7 +534,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                           started: @escaping ManagedDownloadStartHandler = { _, _ in }) async throws -> RemoteEntry {
         guard limit > 0, limit < Int.max else { throw RemoteFileError.tooLarge(limit) }
         let session = try await session(for: profile)
-        let reportInterval = progressInterval, windowLimit = transferWindowLimit
+        let reportInterval = progressInterval, windowLimit = transferWindowLimit, windowFloor = transferWindowFloor
         let result = try await performOnDedicatedChannel(session: session, budget: managed ? .idle(managedTransferIdle) : .total(180)) { sftp, activity in
             let rootPath = sftp.sendRealPath(atPath: try Self.validated(allowedRoot))
             let targetPath = sftp.sendRealPath(atPath: try Self.validated(path))
@@ -588,8 +589,9 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                 var count = start
                 await progress(.init(receivedBytes: UInt64(start), totalBytes: attributes.size))
                 var lastReport: ContinuousClock.Instant?
-                _ = try await BoundedPreviewReader.stream(initialSize: attributes.size, limit: limit, startOffset: start, window: Self.transferReadWindow,
-                                                          windowLimit: windowLimit, readChunk: { offset, amount in
+                var window = WindowSample()
+                _ = try await BoundedPreviewReader.stream(initialSize: attributes.size, limit: limit, startOffset: start, window: windowFloor,
+                                                          windowLimit: windowLimit, observe: { window.add(window: $0, inFlight: $1) }, readChunk: { offset, amount in
                     let bytes = try await file.read(from: offset, length: amount)
                     activity.receivedBytes(bytes.readableBytes)
                     return bytes
@@ -607,13 +609,14 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                 try await file.close()
                 try Task.checkCancellation()
                 await progress(.init(receivedBytes: UInt64(count), totalBytes: UInt64(count), isComplete: true))
-                return (entry, count - start)
+                return (entry, count - start, window)
             } catch {
                 try? await file.close()
                 throw error
             }
         }
         measurements.fileOperations += 1; measurements.bytesReceived += result.1
+        measurements.lastTransferPeakWindow = result.2.peak; measurements.lastTransferMeanInFlight = result.2.meanInFlight
         return result.0
     }
 
@@ -1162,6 +1165,16 @@ public struct TransportMetrics: Sendable {
     public fileprivate(set) var lastConnectionSeconds: TimeInterval = 0
     public fileprivate(set) var lastDirectorySeconds: TimeInterval = 0
     public fileprivate(set) var lastReadSeconds: TimeInterval = 0
+    /// The largest read window the last download reached, and the reads it had in flight on average when one returned.
+    public fileprivate(set) var lastTransferPeakWindow = 0
+    public fileprivate(set) var lastTransferMeanInFlight: Double = 0
+}
+
+private struct WindowSample {
+    private(set) var peak = 0
+    private var inFlightTotal = 0, samples = 0
+    var meanInFlight: Double { samples == 0 ? 0 : Double(inFlightTotal) / Double(samples) }
+    mutating func add(window: Int, inFlight: Int) { peak = max(peak, window); inFlightTotal += inFlight; samples += 1 }
 }
 
 private final class LiveSession: @unchecked Sendable {
@@ -1350,6 +1363,7 @@ enum BoundedPreviewReader {
     /// past it, so reading a small file takes one round trip. Growth past the size carries on as without one.
     /// With `windowLimit`, `window` grows towards it for as long as the connection delivers more.
     static func stream(initialSize: UInt64?, limit: Int, startOffset: Int = 0, chunkSize: Int = 64 * 1024, window: Int = 8, windowLimit: Int? = nil,
+                       observe: (_ window: Int, _ inFlight: Int) -> Void = { _, _ in },
                        readChunk: @escaping @Sendable (UInt64, UInt32) async throws -> ByteBuffer,
                        consume: (ByteBuffer) async throws -> Void) async throws -> (bytes: Int, requests: Int) {
         guard limit >= 0, limit < Int.max else { throw RemoteFileError.tooLarge(max(0, limit)) }
@@ -1393,6 +1407,7 @@ enum BoundedPreviewReader {
                 }
                 // Every byte through the probe was requested and accepted: only growth gets here.
                 guard let (id, buffer) = try await group.next() else { throw RemoteFileError.tooLarge(limit) }
+                observe(pacing.window, inFlight)
                 inFlight -= 1
                 received[id] = buffer
                 let request = issued[id]!

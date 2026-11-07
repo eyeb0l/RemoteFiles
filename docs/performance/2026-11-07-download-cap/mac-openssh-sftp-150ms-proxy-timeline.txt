@@ -1,0 +1,7 @@
+OpenSSH sftp -R 16 -B 65536, Mac mini over Ethernet -> MacBook Air (Wi-Fi) fixture through the Air's delaying proxy at 150 ms. Bytes the proxy read from sshd, MiB/s per 500 ms:
+conn 1: 13.7s, 64.1 MiB, bulk 5.62 MiB/s from first data at 2.3s
+0.0 0.0 0.0 0.0 0.1 2.6 5.8 7.0 6.4 6.0 6.0 6.0 6.0 6.0 6.0 6.0 6.0 6.0 6.1 6.1 6.0 6.6 6.0 6.6 6.0 6.0 2.8 0.0
+conn 2: 13.7s, 64.1 MiB, bulk 5.66 MiB/s from first data at 2.3s
+0.0 0.0 0.0 0.0 0.1 1.8 7.0 6.9 6.1 6.0 6.0 6.0 6.0 6.0 6.0 6.0 6.0 6.4 6.0 6.1 6.4 5.9 6.4 6.8 6.0 6.0 2.1 0.0
+conn 3: 13.7s, 64.1 MiB, bulk 5.66 MiB/s from first data at 2.3s
+0.0 0.0 0.0 0.0 0.1 1.8 6.5 7.5 6.0 6.0 6.0 6.0 6.0 6.0 6.0 6.0 6.1 6.0 6.0 6.5 6.7 6.7 6.0 6.0 6.1 6.0 2.0 0.0
