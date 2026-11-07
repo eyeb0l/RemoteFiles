@@ -1060,20 +1060,24 @@ final class SFTPIntegrationTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let resolver = RemoteResourceResolver(service: service, directory: directory)
-        // Resource resolution is independent of decoding; a small fixture isolates SSH behaviour.
+        // Resource resolution is independent of decoding, so these needn't be real video. They are
+        // named as media because the cache refuses to keep anything else that isn't an image.
+        let clip = URL(fileURLWithPath: fixture.files + "/clip.mp4")
+        try Data("small fixture".utf8).write(to: clip)
+        defer { try? FileManager.default.removeItem(at: clip) }
         let location = RemoteDocumentLocation(profile: profile, path: fixture.files + "/report.md")
-        let first = try await resolver.localFileForPreview(for: "report.md", in: location)
+        let first = try await resolver.localFileForPreview(for: "clip.mp4", in: location)
         await service.disconnect()
 
         try await stores.trust.reset(endpoint: fixture.endpoint)
         do {
-            _ = try await resolver.localFileForPreview(for: "report.md", in: location)
+            _ = try await resolver.localFileForPreview(for: "clip.mp4", in: location)
             XCTFail("Fresh bytes must not bypass unknown-host verification")
         } catch HostTrustError.unknown { }
         let wrong = try HostKeyDetails(publicKey: NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey)
         try await stores.trust.trustUnknown(endpoint: fixture.endpoint, key: wrong)
         do {
-            _ = try await resolver.localFileForPreview(for: "report.md", in: location)
+            _ = try await resolver.localFileForPreview(for: "clip.mp4", in: location)
             XCTFail("Fresh bytes must not bypass changed-host verification")
         } catch HostTrustError.changed { }
 
@@ -1081,11 +1085,11 @@ final class SFTPIntegrationTests: XCTestCase {
         try await stores.trustFixtureHost()
         try originalKeys.write(to: authorizedKeys)
         do {
-            _ = try await resolver.localFileForPreview(for: "report.md", in: location)
+            _ = try await resolver.localFileForPreview(for: "clip.mp4", in: location)
             XCTFail("Fresh bytes must not hide SSH authentication rejection")
         } catch RemoteFileError.authenticationFailed { }
         try fixture.authorize(identity.publicKey)
-        let recovered = try await resolver.localFileForPreview(for: "report.md", in: location)
+        let recovered = try await resolver.localFileForPreview(for: "clip.mp4", in: location)
         XCTAssertEqual(recovered.file, first.file)
         XCTAssertNil(recovered.connectionFailure)
         let metrics = await service.metrics()

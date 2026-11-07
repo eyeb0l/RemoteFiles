@@ -32,6 +32,27 @@ private actor OfflineTransport: RemoteFileService {
 }
 
 final class OfflineFileTests: XCTestCase {
+    func testAKeyInASavedCopyIsHiddenWhileItsOriginalBytesStay() async throws {
+        let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try OfflineFileStore(directory: dir)
+        let key = SyntheticKey.pem(), fragments = SyntheticKey.fragments(of: key)
+        for (name, text, keyOnly) in [("id_rsa", key, true), (".server.key", key, true), ("server.pem.txt", key, true),
+                                      ("notes.txt", "first\n" + key + "\nneedle\n", false)] {
+            let service = OfflineTransport(Data(text.utf8))
+            let pin = try await store.pin(profile: profile, entry: .init(name: name, path: "/root/" + name, kind: .file), allowedRoot: "/root", service: service)
+            let lease = try await store.lease(pin.id)
+            XCTAssertEqual(try Data(contentsOf: lease.url), Data(text.utf8), "Share Original gives the whole file")
+            let preview = try await store.textPreview(lease)
+            if keyOnly {
+                XCTAssertEqual(preview, .privateKey, name)
+            } else if case .text(let shown, _, let hidden) = preview {
+                XCTAssertEqual(hidden, 1)
+                XCTAssertTrue(shown.contains("needle"))
+                for fragment in fragments { XCTAssertFalse(shown.contains(fragment)) }
+            } else { XCTFail("Should stay readable") }
+        }
+    }
+
     func testDocumentLinksUseOnlyStandaloneCopiesFromTheSameSavedRouteAfterRelaunch() async throws {
         let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
         let store = try OfflineFileStore(directory: dir), service = OfflineTransport()

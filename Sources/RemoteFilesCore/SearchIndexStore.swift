@@ -89,6 +89,7 @@ public actor SearchIndexStore {
         try Task.checkCancellation()
         let key = try Self.key(profile: profile, root: root)
         if let generation, builds[key]?.generation != generation { throw SearchIndexError.superseded }
+        let snapshot = Self.withoutPrivateKeys(snapshot) ?? snapshot
         try Self.validate(snapshot, root: root)
         let envelope = Envelope(version: 1, key: key, connectionID: profile.id, root: root,
                                 createdAt: snapshot.createdAt, includeHidden: snapshot.includeHidden,
@@ -141,7 +142,38 @@ public actor SearchIndexStore {
         catch is CancellationError { throw CancellationError() }
         catch { throw SearchIndexError.damaged }
         try Task.checkCancellation()
-        return snapshot
+        guard let cleaned = Self.withoutPrivateKeys(snapshot) else { return snapshot }
+        // An index saved before keys were hidden holds them on disk, and an update would keep that
+        // text for as long as the key's file didn't change, so it's rewritten as soon as it's read.
+        // A build under way keeps its reservation, which a save would otherwise clear.
+        let reservation = builds[key]
+        defer { builds[key] = reservation }
+        do { try save(cleaned, profile: profile, root: root) }
+        catch is CancellationError { throw CancellationError() }
+        catch SearchIndexError.tooLarge {
+            try remove(profile: profile, root: root)
+            return nil
+        } catch {} // It's rewritten at the next opening. What's returned is already clean.
+        return cleaned
+    }
+
+    /// The same snapshot with any private keys hidden, or nil when it holds none.
+    private static func withoutPrivateKeys(_ snapshot: SearchIndexSnapshot) -> SearchIndexSnapshot? {
+        var changed = false
+        let documents = snapshot.documents.map { document -> SearchIndexDocument in
+            var segments: [SearchTextSegment] = [], hid = false
+            for segment in document.segments {
+                let result = PrivateKeyRedaction.redact(segment.text)
+                hid = hid || result.hiddenKeys > 0
+                if !result.isOnlyKeys { segments.append(.init(text: result.text, page: segment.page)) }
+            }
+            guard hid else { return document }
+            changed = true
+            return SearchIndexDocument(entry: document.entry, segments: segments, isTruncated: document.isTruncated)
+        }
+        guard changed else { return nil }
+        return SearchIndexSnapshot(createdAt: snapshot.createdAt, documents: documents, includeHidden: snapshot.includeHidden,
+                                   extraction: snapshot.extraction, isPartial: snapshot.isPartial)
     }
 
     public func remove(profile: ConnectionProfile, root: String) throws {

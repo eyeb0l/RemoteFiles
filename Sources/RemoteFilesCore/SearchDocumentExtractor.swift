@@ -43,6 +43,9 @@ public enum SearchDocumentExtractor {
     private static let maximumTextBytes = 262_144
     private static let maximumPages = 100
     private static let rasterDimension = 2_048
+    /// Read past a text budget, so a key that crosses it is long enough to be recognized and hidden
+    /// before the text is clipped. The text route has the whole file to go on.
+    private static let keyLookahead = 1_024
 
     public static func supports(filename: String, options: SearchExtractionOptions) -> Bool {
         switch DocumentPolicy.kind(filename: filename) {
@@ -67,16 +70,18 @@ public enum SearchDocumentExtractor {
             try check(deadline)
             let (image, multipleFrames) = try image(data)
             try check(deadline)
-            let text = try await recognize(image, textLimit: textLimit, deadline: deadline)
+            let recognized = try await recognize(image, textLimit: textLimit > 0 ? textLimit + keyLookahead : 0, deadline: deadline)
+            let text = hidingKeys(in: recognized, byteLimit: textLimit)
             return SearchExtraction(segments: text.value.isEmpty ? [] : [.init(text: text.value)],
                                     isTruncated: multipleFrames || text.truncated)
         default:
             let result: SearchExtraction
             switch DocumentPolicy.decode(data, filename: filename) {
-            case .text(let text, _):
+            case .text(let text, _, _):
                 let clipped = prefix(text, byteLimit: textLimit)
                 result = SearchExtraction(segments: clipped.value.isEmpty ? [] : [.init(text: clipped.value)], isTruncated: clipped.truncated)
-            case .empty: result = SearchExtraction(segments: [])
+            // Read and found to hold nothing to search, which doesn't make an index partial.
+            case .empty, .privateKey: result = SearchExtraction(segments: [])
             default: throw SearchExtractionError.unsupported
             }
             try Task.checkCancellation()
@@ -100,17 +105,18 @@ public enum SearchDocumentExtractor {
             let characters = options.includePDF ? page.numberOfCharacters : 0
             try check(deadline)
             // Selecting a bounded prefix avoids materializing an entire PDF page's text.
-            let selected = min(characters, remaining)
+            let selected = min(characters, remaining + keyLookahead)
             let embedded = selected > 0 ? page.selection(for: NSRange(location: 0, length: selected))?.string ?? "" : ""
             try check(deadline)
-            var text = prefix(embedded, byteLimit: remaining)
+            var text = prefix(embedded, byteLimit: remaining + keyLookahead)
             text.truncated = text.truncated || characters > selected
             if embedded.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, options.includeOCR {
                 let raster = try render(page)
                 try check(deadline)
-                text = try await recognize(raster, textLimit: remaining, deadline: deadline)
+                text = try await recognize(raster, textLimit: remaining + keyLookahead, deadline: deadline)
             }
             try check(deadline)
+            text = hidingKeys(in: text, byteLimit: remaining)
             if !text.value.isEmpty {
                 segments.append(.init(text: text.value, page: index + 1))
                 remaining -= text.value.utf8.count
@@ -242,6 +248,13 @@ public enum SearchDocumentExtractor {
     private static func check(_ deadline: ContinuousClock.Instant) throws {
         try Task.checkCancellation()
         guard ContinuousClock.now < deadline else { throw SearchExtractionError.deadlineExceeded }
+    }
+
+    /// A page or scan can show a key too. Each hidden character takes more bytes than it had, so
+    /// the text is clipped again to stay within its budget.
+    private static func hidingKeys(in text: (value: String, truncated: Bool), byteLimit: Int) -> (value: String, truncated: Bool) {
+        let clipped = prefix(PrivateKeyRedaction.redact(text.value).text, byteLimit: byteLimit)
+        return (clipped.value, text.truncated || clipped.truncated)
     }
 
     private static func prefix(_ text: String, byteLimit: Int) -> (value: String, truncated: Bool) {

@@ -65,9 +65,12 @@ struct ReaderView: View {
                     .task { await model.recordRecent(profile: profile, entry: entry) }
             } else if let preview, model.isForeground {
                 switch preview {
-                case .text(let text, let markdown): DocumentContentView(text: text, markdown: markdown, source: source, filename: entry.name, location: .init(profile: profile, path: entry.path, canonicalRoot: entry.canonicalRoot), resolver: model.resources, readingPosition: readingPosition, openDocumentLink: openLink, wrapLines: wrapLines, navigation: navigation).id(ContentIdentity(revision: contentRevision, images: imageVersion))
+                case .text(let text, let markdown, let hiddenKeys):
+                    if hiddenKeys > 0 { HiddenPrivateKeyNotice(count: hiddenKeys, saveAction: "Save Original to Files") }
+                    DocumentContentView(text: text, markdown: markdown, source: source, filename: entry.name, location: .init(profile: profile, path: entry.path, canonicalRoot: entry.canonicalRoot), resolver: model.resources, readingPosition: readingPosition, openDocumentLink: openLink, wrapLines: wrapLines, navigation: navigation).id(ContentIdentity(revision: contentRevision, images: imageVersion))
                     .textual.structuredTextStyle(.reader)
                     .transition(.opacity)
+                case .privateKey: PrivateKeyFileView(filename: entry.name, saveAction: "Save Original to Files")
                 case .empty: ContentUnavailableView("This file is empty", systemImage: "doc", description: Text("Refresh after it has been updated on the server."))
                 case .unsupportedFileType: infoView("Preview not available", detail: "This file type is not supported for preview.")
                 case .unsupportedEncodingOrBinary: infoView("Can’t display this file", detail: "This file contains binary data or text that is not UTF-8.")
@@ -114,7 +117,7 @@ struct ReaderView: View {
                         Button("Refresh", systemImage: "arrow.clockwise") { refreshID += 1 }
                         OfflinePinActions(model: model, profile: profile, entry: entry)
                     }
-                    if case .text(let text, _) = preview {
+                    if case .text(let text, _, _) = preview {
                         // VoiceOver reaches the bottom bar after the whole document; these are a shortcut.
                         if voiceOverEnabled {
                             Section {
@@ -332,7 +335,7 @@ struct ReaderView: View {
         revealHeading(fragment)
     }
     private func prepareReading(_ decoded: DocumentPreview) async {
-        guard case .text(let text, let markdown) = decoded else { return }
+        guard case .text(let text, let markdown, _) = decoded else { return }
         await model.prepareReadingPosition(readingPosition, text: text, profile: profile, path: entry.path)
         await navigation.prepare(text: text, markdown: markdown)
     }
@@ -406,7 +409,7 @@ struct ReaderView: View {
             // and Headings go back to matching the document still on screen.
             func restoreDiscardedPreparation() async {
                 guard token == requestID, model.listingGeneration(profile.id) != generation else { return }
-                guard case .text(let text, let markdown) = preview else { navigation.clear(); return }
+                guard case .text(let text, let markdown, _) = preview else { navigation.clear(); return }
                 await model.prepareReadingPosition(readingPosition, text: text, profile: profile, path: entry.path, discardingCurrent: true)
                 await navigation.prepare(text: text, markdown: markdown)
             }
@@ -426,7 +429,7 @@ struct ReaderView: View {
                     if case .text = decoded {} else { navigation.clear() }
                     preview = decoded; contentRevision = navigation.revision; loadedAt = .now; copied = false
                     displayedVersion = version
-                    model.cache(bytes, version: version, id: profile.id, path: entry.path)
+                    model.cache(bytes, decodedAs: decoded, version: version, id: profile.id, path: entry.path)
                     model.connectionStates[profile.id] = "Connected"
                     await model.recordRecent(profile: profile, entry: entry)
                 })

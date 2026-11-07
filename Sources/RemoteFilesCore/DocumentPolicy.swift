@@ -8,11 +8,24 @@ public enum DocumentKind: Equatable, Sendable {
 }
 
 public enum DocumentPreview: Equatable, Sendable {
-    case text(String, markdown: Bool)
+    /// `hiddenKeys` counts the private keys `PrivateKeyRedaction` hid in the text.
+    case text(String, markdown: Bool, hiddenKeys: Int = 0)
+    /// The file is nothing but private keys, so none of its text is kept.
+    case privateKey
     case empty
     case unsupportedFileType
     case unsupportedEncodingOrBinary
     case tooLarge
+
+    /// Whether the reader may hold on to the bytes this came from. A hidden key is still in the
+    /// original bytes, and text the app couldn't decode can't be checked for one.
+    public var allowsKeepingOriginalBytes: Bool {
+        switch self {
+        case .text(_, _, let hiddenKeys): return hiddenKeys == 0
+        case .empty: return true
+        case .privateKey, .unsupportedFileType, .unsupportedEncodingOrBinary, .tooLarge: return false
+        }
+    }
 }
 
 /// The reader's local policy. The transport must also enforce the limit while receiving bytes.
@@ -72,7 +85,11 @@ public enum DocumentPolicy {
               var text = String(data: data, encoding: .utf8) else { return .unsupportedEncodingOrBinary }
         if text.first == "\u{FEFF}" { text.removeFirst() }
         guard !text.isEmpty else { return .empty }
-        return .text(text, markdown: kind == .markdown)
+        // Every text route comes through here, so a key is gone before any view, cache or index
+        // sees it, and before a search clips the text to its budget.
+        let redacted = PrivateKeyRedaction.redact(text)
+        if redacted.isOnlyKeys { return .privateKey }
+        return .text(redacted.text, markdown: kind == .markdown, hiddenKeys: redacted.hiddenKeys)
     }
 
     /// Called only in response to the reader's link-tap action. No relative resource resolution.

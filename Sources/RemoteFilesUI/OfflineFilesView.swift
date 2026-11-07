@@ -379,10 +379,12 @@ struct OfflineReaderView: View {
                     ProtectedCertificateView(filename: savedCopy.filename, saveAction: "Share Original")
                 } else if let preview {
                     switch preview {
-                    case .text(let text, let markdown):
+                    case .text(let text, let markdown, let hiddenKeys):
+                        if hiddenKeys > 0 { HiddenPrivateKeyNotice(count: hiddenKeys, saveAction: "Share Original") }
                         DocumentContentView(text: text, markdown: markdown, source: source, filename: savedCopy.documentFilename,
                                             readingPosition: readingPosition, openDocumentLink: openLink, navigation: navigation)
                             .textual.structuredTextStyle(.reader)
+                    case .privateKey: PrivateKeyFileView(filename: savedCopy.filename, saveAction: "Share Original")
                     case .empty: ContentUnavailableView("This file is empty", systemImage: "doc")
                     case .tooLarge: unavailable("The file exceeds the 2 MiB text preview limit. You can share its original bytes.")
                     case .unsupportedEncodingOrBinary: unavailable("This file contains binary data or text that is not UTF-8. You can share the original.")
@@ -578,7 +580,7 @@ struct OfflineReaderView: View {
                 let value = try await store.textPreview(local)
                 try Task.checkCancellation()
                 guard requestID == token else { return }
-                if case .text(let text, let markdown) = value {
+                if case .text(let text, let markdown, _) = value {
                     await readingPosition.prepare(text: text, store: readingPositions, connectionID: local.pin.connectionID, path: local.pin.path)
                     await navigation.prepare(text: text, markdown: markdown)
                     try Task.checkCancellation()

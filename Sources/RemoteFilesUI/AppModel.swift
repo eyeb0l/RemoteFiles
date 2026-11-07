@@ -750,6 +750,16 @@ final class AppModel {
             documents.removeValue(forKey: documentOrder.removeFirst())
         }
     }
+    /// Keeps a document's bytes only if reopening them can't bring back a key its preview hides.
+    /// The reader then reads such a file again, and an older copy of it doesn't linger.
+    func cache(_ value: Data, decodedAs preview: DocumentPreview, version: RemoteFileVersion? = nil, id: UUID, path: String) {
+        if preview.allowsKeepingOriginalBytes {
+            cache(value, version: version, id: id, path: path)
+        } else {
+            let k = key(id, path)
+            documents.removeValue(forKey: k); documentOrder.removeAll { $0 == k }
+        }
+    }
     func setDemo(_ enabled: Bool) async {
         await disconnect(); routes = []
         if enabled {

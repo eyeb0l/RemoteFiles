@@ -6,6 +6,69 @@ import zlib
 @testable import RemoteFilesCore
 
 final class RemoteResourceTests: XCTestCase {
+    /// A Markdown image can point at any file beside its document, and this cache is on disk.
+    func testAnImageReferenceCantPullAKeyOrOtherFileIntoTheDiskCache() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let doc = location
+        for name in ["id_rsa", "server.key", ".server.key", "server.pem.txt", "notes.md", "config.yaml"] {
+            let service = FixedBytesTransportMock(bytes: Data(SyntheticKey.pem().utf8))
+            let resolver = RemoteResourceResolver(service: service, directory: dir)
+            do {
+                _ = try await resolver.localFile(for: name, in: doc)
+                XCTFail("\(name) isn't an image")
+            } catch RemoteResourceError.notImage {}
+            let left = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+            for file in left where !file.hasDirectoryPath {
+                let bytes = (try? Data(contentsOf: file)) ?? Data()
+                XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("BEGIN RSA"), "\(name) left \(file.lastPathComponent)")
+            }
+        }
+    }
+
+    /// Named oddly, or not an extension this app treats as an image, but really an image.
+    func testAnImageWithAnUnusualNameStillLoads() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let image = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
+        defer { try? FileManager.default.removeItem(at: image) }
+        let context = try XCTUnwrap(CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithURL(image as CFURL, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()), nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        let bytes = try Data(contentsOf: image)
+        let resolver = RemoteResourceResolver(service: FixedBytesTransportMock(bytes: bytes), directory: dir)
+        for name in ["favicon.ico", "logo"] {
+            let file = try await resolver.localFile(for: name, in: location)
+            XCTAssertEqual(try Data(contentsOf: file), bytes, name)
+        }
+    }
+
+    /// An older version kept what it fetched, so opening the same reference clears that copy.
+    func testACopyAnOlderVersionKeptIsRemoved() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let doc = location
+        // A real image is fetched first, to learn where this reference's copy is kept.
+        let context = try XCTUnwrap(CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let image = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
+        defer { try? FileManager.default.removeItem(at: image) }
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithURL(image as CFURL, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()), nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        let resolver = RemoteResourceResolver(service: FixedBytesTransportMock(bytes: try Data(contentsOf: image)), directory: dir)
+        let kept = try await resolver.localFile(for: "id_rsa", in: doc)
+        try Data(SyntheticKey.pem().utf8).write(to: kept)
+        let later = RemoteResourceResolver(service: FixedBytesTransportMock(bytes: Data(SyntheticKey.pem().utf8)), directory: dir)
+        do {
+            _ = try await later.localFile(for: "id_rsa", in: doc)
+            XCTFail("It isn't an image")
+        } catch RemoteResourceError.notImage {}
+        XCTAssertFalse(FileManager.default.fileExists(atPath: kept.path))
+    }
+
     private var location: RemoteDocumentLocation {
         .init(profile: .init(name: "Test", host: "mac", username: "reader", identityID: UUID()),
               path: "/Users/iris/wardrobe/data/ui-audit-2026-09-21/audit.md")
@@ -777,6 +840,19 @@ private actor ImageExistenceTransportMock: RemoteFileService {
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
     func disconnect() async {}
 }
+private actor FixedBytesTransportMock: RemoteFileService {
+    let bytes: Data
+    init(bytes: Data) { self.bytes = bytes }
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
+        try bytes.write(to: destination)
+        return .init(name: RemotePath.name(of: path), path: path, kind: .file, size: UInt64(bytes.count))
+    }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.unsupportedFile }
+    func disconnect() async {}
+}
+
 private actor ImageTransportMock: RemoteFileService {
     var downloads = 0
     var listings = 0
