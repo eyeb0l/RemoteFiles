@@ -132,6 +132,8 @@ The last two rows got worse with no latency at all, a condition no phone has; by
 - `ResponsivenessTests`, `FolderListingTests`, `RemoteEntryLayoutTests` and `PerformanceBenchmarkTests` pass hosted on the iOS simulator, 32 tests. A 100,000-entry listing returned exactly 100,000 entries.
 - Eight UI journeys touching folder rows pass on the iPhone simulator. The keyboard journey failed once on its Home screen under load average 27, before reaching a folder, and passed when rerun.
 
+- On an iPad Pro 11-inch simulator, `testAdaptiveWorkspaceKeepsLibraryFolderAndReaderOnIPad` fails at "Opening a preview keeps its folder visible", because the row sits under the column's bottom edge. The unchanged baseline fails on the same line. With that one assertion bypassed in a throwaway run, the rest of the journey passes on the new rows.
+
 Not run: the whole UI inventory, VoiceOver and the Linux server helper. The rows' structure changed, so a pull request should carry `full-acceptance`.
 
 ## Remaining opportunities
