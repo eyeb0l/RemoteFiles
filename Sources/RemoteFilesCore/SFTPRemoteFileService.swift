@@ -769,8 +769,8 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     ///
     /// An operation that has what its caller needs can leave its handles closing in `DeferredCloses`
     /// rather than wait a round trip for the replies. The channel stays in use until they arrive, and
-    /// a failed close retires it just as a failed operation would. A close that never gets a reply
-    /// is ended by the next operation's deadline, or the connection closing.
+    /// a failed close retires it just as a failed operation would. A close still unanswered after a
+    /// full deadline closes the channel, which also ends anything else outstanding on it.
     private func perform<T: Sendable>(session: LiveSession, role: SFTPChannelRole = .foreground, progress: DeadlineExtension? = nil,
                                       operation: @escaping @Sendable (SFTPClient, DeferredCloses) async throws -> T) async throws -> T {
         let channel = SFTPChannelControl()
@@ -789,7 +789,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                     if pending.isEmpty {
                         await self.release(shared, from: session, reusable: true)
                     } else {
-                        Task { await self.release(shared, from: session, reusable: await DeferredCloses.succeeded(pending)) }
+                        Task { await self.release(shared, from: session, reusable: await self.settle(pending, on: shared)) }
                     }
                     return value
                 } catch {
@@ -797,13 +797,21 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                     if pending.isEmpty {
                         await self.release(shared, from: session, reusable: false)
                     } else {
-                        Task { _ = await DeferredCloses.succeeded(pending); await self.release(shared, from: session, reusable: false) }
+                        Task { _ = await self.settle(pending, on: shared); await self.release(shared, from: session, reusable: false) }
                     }
                     throw error
                 }
             }
         } catch {
             throw Self.mapped(error)
+        }
+    }
+
+    private func settle(_ pending: [EventLoopFuture<Void>], on shared: SharedSFTPChannel) async -> Bool {
+        await DeferredCloses.succeeded(pending, within: .seconds(Int64(timeoutSeconds))) {
+            // Marked first, so that nothing reuses a channel being closed.
+            shared.closing.set()
+            shared.close()
         }
     }
 
@@ -1048,10 +1056,20 @@ final class DeferredCloses: @unchecked Sendable {
         futures = []
         return taken
     }
-    static func succeeded(_ futures: [EventLoopFuture<Void>]) async -> Bool {
+    /// Whether every close succeeded. Replies can't be cancelled, so `onTimeout` must make them fail by
+    /// closing what they are waiting on. Anything that outlasted `limit` counts as failed.
+    static func succeeded(_ futures: [EventLoopFuture<Void>], within limit: Duration,
+                          onTimeout: @escaping @Sendable () -> Void) async -> Bool {
+        let fired = LockedFlag()
+        let watchdog = Task {
+            try await Task.sleep(for: limit)
+            fired.set()
+            onTimeout()
+        }
         var succeeded = true
         for future in futures where (try? await future.get()) == nil { succeeded = false }
-        return succeeded
+        watchdog.cancel()
+        return succeeded && !fired.isSet
     }
 }
 

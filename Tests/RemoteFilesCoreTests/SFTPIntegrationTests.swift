@@ -1467,14 +1467,15 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertEqual(metrics.sftpChannels, 1, "No close failed, so the first channel stayed in use")
     }
 
-    /// A channel stays reusable only if every deferred close succeeded.
-    func testDeferredClosesSucceedOnlyIfAllOfThemDid() async throws {
+    /// A channel stays reusable only if every deferred close succeeded, within a deadline.
+    func testDeferredClosesSucceedOnlyIfAllOfThemDidInTime() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         addTeardownBlock { try? await group.shutdownGracefully() }
         let loop = group.next()
         struct Refused: Error {}
+        let unexpected: @Sendable () -> Void = { XCTFail("Nothing was left unanswered") }
         let empty = DeferredCloses()
-        let none = await DeferredCloses.succeeded(empty.take())
+        let none = await DeferredCloses.succeeded(empty.take(), within: .seconds(60), onTimeout: unexpected)
         XCTAssertTrue(none)
         let closes = DeferredCloses()
         closes.add(loop.makeSucceededFuture(()))
@@ -1482,10 +1483,30 @@ final class SFTPIntegrationTests: XCTestCase {
         let mixed = closes.take()
         XCTAssertEqual(mixed.count, 2)
         XCTAssertTrue(closes.take().isEmpty, "Taken once")
-        let failed = await DeferredCloses.succeeded(mixed)
+        let failed = await DeferredCloses.succeeded(mixed, within: .seconds(60), onTimeout: unexpected)
         XCTAssertFalse(failed)
-        let succeeded = await DeferredCloses.succeeded([loop.makeSucceededFuture(()), loop.makeSucceededFuture(())])
+        let succeeded = await DeferredCloses.succeeded([loop.makeSucceededFuture(()), loop.makeSucceededFuture(())], within: .seconds(60), onTimeout: unexpected)
         XCTAssertTrue(succeeded)
+
+        // A close the server never answers: closing the channel is what ends the wait.
+        let unanswered = loop.makePromise(of: Void.self)
+        let closed = LockedCount()
+        let timedOut = await DeferredCloses.succeeded([unanswered.futureResult], within: .milliseconds(50)) {
+            closed.increment()
+            unanswered.fail(Refused())
+        }
+        XCTAssertFalse(timedOut)
+        XCTAssertEqual(closed.value, 1)
+
+        // An answer after the channel was closed doesn't make it reusable again.
+        let late = loop.makePromise(of: Void.self)
+        let lateClosed = LockedCount()
+        let lateResult = await DeferredCloses.succeeded([late.futureResult], within: .milliseconds(50)) {
+            lateClosed.increment()
+            late.succeed(())
+        }
+        XCTAssertFalse(lateResult)
+        XCTAssertEqual(lateClosed.value, 1)
     }
 
     /// A very large folder may outlast one deadline, but only while replies keep coming.
