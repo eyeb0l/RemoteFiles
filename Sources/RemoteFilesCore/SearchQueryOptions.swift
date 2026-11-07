@@ -13,9 +13,14 @@ public struct SearchQueryOptions: Sendable, Equatable {
         self.fileExtension = fileExtension
     }
 
-    public func accepts(_ entry: RemoteEntry) -> Bool {
-        let suffix = fileExtension.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// The extension to match, without surrounding space or dots; empty for any.
+    public var normalizedFileExtension: String {
+        fileExtension.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+    }
+
+    public func accepts(_ entry: RemoteEntry) -> Bool {
+        let suffix = normalizedFileExtension
         guard !suffix.isEmpty else { return true }
         guard entry.kind == .file else { return false }
         return (entry.name as NSString).pathExtension.lowercased() == suffix

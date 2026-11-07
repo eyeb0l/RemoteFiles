@@ -6,9 +6,17 @@ public protocol BackgroundFolderListing: Sendable {
     func listDirectoryInBackground(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot?
 }
 
+/// Lists a folder and also hands over what has arrived so far, so that a person can start on a large or
+/// distant folder before all of it is here. Each `partial` holds every entry so far, in the server's
+/// order, with symbolic links not yet resolved.
+public protocol ProgressiveFolderListing: Sendable {
+    func listDirectory(profile: ConnectionProfile, path: String,
+                       partial: @escaping @Sendable (DirectorySnapshot) -> Void) async throws -> DirectorySnapshot
+}
+
 /// Shares an in-flight request for the same resource. Cancellation retires the shared request;
 /// all its waiters observe cancellation, and the next explicit request starts fresh work.
-public actor CoalescingFileService: RemoteFileService {
+public actor CoalescingFileService: RemoteFileService, ProgressiveFolderListing {
     private struct Key: Hashable { let profile: ConnectionProfile; let path: String; let limit: Int }
     private struct VersionedKey: Hashable { let read: Key; let allowedRoot: String?; let since: RemoteFileVersion? }
     /// The wrapped service, for background work that must neither join nor cancel others' requests.
@@ -23,6 +31,19 @@ public actor CoalescingFileService: RemoteFileService {
         if let (_, task) = lists[key], !task.isCancelled { return try await waiting(task) }
         let id = UUID()
         let task = Task { try await base.listDirectory(profile: profile, path: path) }
+        lists[key] = (id, task)
+        defer { if lists[key]?.0 == id { lists[key] = nil } }
+        return try await waiting(task)
+    }
+    /// Whoever joins a listing already under way gets only its result.
+    public func listDirectory(profile: ConnectionProfile, path: String,
+                              partial: @escaping @Sendable (DirectorySnapshot) -> Void) async throws -> DirectorySnapshot {
+        try Task.checkCancellation()
+        let key = Key(profile: profile, path: path, limit: 0)
+        if let (_, task) = lists[key], !task.isCancelled { return try await waiting(task) }
+        guard let progressive = base as? any ProgressiveFolderListing else { return try await listDirectory(profile: profile, path: path) }
+        let id = UUID()
+        let task = Task { try await progressive.listDirectory(profile: profile, path: path, partial: partial) }
         lists[key] = (id, task)
         defer { if lists[key]?.0 == id { lists[key] = nil } }
         return try await waiting(task)

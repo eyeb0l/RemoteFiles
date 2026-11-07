@@ -73,6 +73,26 @@ public final class SFTPFile {
         return attributes.attributes
     }
 
+    /// RemoteFiles: queues FSTAT at once and returns without waiting, so that it travels ahead of the next
+    /// request. It describes the opened object, whatever has since happened to the path.
+    public func sendReadAttributes() -> EventLoopFuture<SFTPFileAttributes> {
+        guard isActive else { return client.eventLoop.makeFailedFuture(SFTPError.fileHandleInvalid) }
+        return client.sendRequestFuture(.fstat(.init(requestId: client.allocateRequestId(), handle: handle))).flatMapThrowing { response in
+            guard case .attributes(let attributes) = response else { throw SFTPError.invalidResponse }
+            return attributes.attributes
+        }
+    }
+
+    /// RemoteFiles: queues CLOSE at once and returns without waiting. The result fails unless the status is `ok`.
+    public func sendClose() -> EventLoopFuture<Void> {
+        guard isActive else { return client.eventLoop.makeFailedFuture(SFTPError.fileHandleInvalid) }
+        isActive = false
+        return client.sendRequestFuture(.closeFile(.init(requestId: client.allocateRequestId(), handle: handle))).flatMapThrowing { response in
+            guard case .status(let status) = response else { throw SFTPError.invalidResponse }
+            guard status.errorCode == .ok else { throw SFTPError.errorStatus(status) }
+        }
+    }
+
     /// Sets the attributes on the file handle represented by this `SFTPFile`.
     ///
     /// - Parameter attributes: The new file attributes to set (such as permissions, size, or timestamps).

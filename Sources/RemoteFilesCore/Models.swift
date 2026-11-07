@@ -60,27 +60,28 @@ public struct RemoteEntry: Identifiable, Hashable, Sendable {
     public var id: String { path }
     public let name: String
     public let path: String
-    public let kind: Kind
     public let size: UInt64?
+    public let kind: Kind
     public let modifiedAt: Date?
+    /// What only a few entries have, kept apart so that a folder's rows stay small to hold and to sort.
+    private let rare: Rare?
     /// Present only for a user-tapped document link; rechecked by every reader fetch.
-    public let navigationRoot: String?
+    public var navigationRoot: String? { rare?.navigationRoot }
     /// For saved search results, retain the exact canonical folder used to build the index.
-    public let canonicalRoot: String?
+    public var canonicalRoot: String? { rare?.canonicalRoot }
     /// The tapped alias name, retained for exporting the original after canonical resolution.
-    public let exportFilename: String?
+    public var exportFilename: String? { rare?.exportFilename }
     /// A user-tapped heading link; never part of the remote filesystem path.
-    public let headingFragment: String?
+    public var headingFragment: String? { rare?.headingFragment }
     /// One-based PDF page from a search result, opened once instead of the saved reading position.
-    public let openingPage: Int?
+    public var openingPage: Int? { rare?.openingPage }
     /// For a symbolic link resolved while listing; nil when it was not resolved.
-    public let link: LinkResolution?
+    public var link: LinkResolution? { rare?.link }
     public init(name: String, path: String, kind: Kind, size: UInt64? = nil, modifiedAt: Date? = nil, navigationRoot: String? = nil,
                 exportFilename: String? = nil, link: LinkResolution? = nil, canonicalRoot: String? = nil) {
         self.name = name; self.path = path; self.kind = kind; self.size = size; self.modifiedAt = modifiedAt
-        self.navigationRoot = navigationRoot; self.exportFilename = exportFilename
-        self.canonicalRoot = canonicalRoot
-        self.headingFragment = nil; self.openingPage = nil; self.link = link
+        rare = Rare(navigationRoot: navigationRoot, canonicalRoot: canonicalRoot, exportFilename: exportFilename,
+                    headingFragment: nil, openingPage: nil, link: link)
     }
     public func openingHeading(_ fragment: String) -> RemoteEntry {
         RemoteEntry(copying: self, headingFragment: fragment, openingPage: nil, canonicalRoot: canonicalRoot)
@@ -92,9 +93,29 @@ public struct RemoteEntry: Identifiable, Hashable, Sendable {
     }
     private init(copying entry: RemoteEntry, headingFragment: String?, openingPage: Int?, canonicalRoot: String?) {
         name = entry.name; path = entry.path; kind = entry.kind; size = entry.size; modifiedAt = entry.modifiedAt
-        navigationRoot = entry.navigationRoot; exportFilename = entry.exportFilename; link = entry.link
-        self.canonicalRoot = canonicalRoot
-        self.headingFragment = headingFragment; self.openingPage = openingPage
+        rare = Rare(navigationRoot: entry.navigationRoot, canonicalRoot: canonicalRoot, exportFilename: entry.exportFilename,
+                    headingFragment: headingFragment, openingPage: openingPage, link: entry.link)
+    }
+    /// One immutable box, shared between copies and absent when every field is nil, so that an
+    /// entry with and without an empty box still compare equal.
+    private final class Rare: Hashable, Sendable {
+        let navigationRoot: String?, canonicalRoot: String?, exportFilename: String?, headingFragment: String?
+        let openingPage: Int?, link: LinkResolution?
+        init?(navigationRoot: String?, canonicalRoot: String?, exportFilename: String?, headingFragment: String?,
+              openingPage: Int?, link: LinkResolution?) {
+            guard navigationRoot != nil || canonicalRoot != nil || exportFilename != nil || headingFragment != nil
+                    || openingPage != nil || link != nil else { return nil }
+            self.navigationRoot = navigationRoot; self.canonicalRoot = canonicalRoot; self.exportFilename = exportFilename
+            self.headingFragment = headingFragment; self.openingPage = openingPage; self.link = link
+        }
+        static func == (lhs: Rare, rhs: Rare) -> Bool {
+            lhs.navigationRoot == rhs.navigationRoot && lhs.canonicalRoot == rhs.canonicalRoot && lhs.exportFilename == rhs.exportFilename
+                && lhs.headingFragment == rhs.headingFragment && lhs.openingPage == rhs.openingPage && lhs.link == rhs.link
+        }
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(navigationRoot); hasher.combine(canonicalRoot); hasher.combine(exportFilename)
+            hasher.combine(headingFragment); hasher.combine(openingPage); hasher.combine(link)
+        }
     }
     /// The boundary for a file the user explicitly chose to download, keep offline or save:
     /// a saved-search result keeps its index's canonical root, and anything else its own
@@ -252,15 +273,18 @@ public enum RemoteFileError: LocalizedError, Sendable {
 }
 
 public enum RemotePath {
-    public static func appending(_ name: String, to parent: String) -> String {
-        parent == "/" ? "/" + name : parent.trimmingCharacters(in: CharacterSet(charactersIn: "/")) .withLeadingSlash(if: parent.hasPrefix("/")) + "/" + name
+    public static func appending(_ name: String, to parent: String) -> String { childPrefix(of: parent) + name }
+    /// What goes before a child's name. Work out once when building many paths under one parent.
+    public static func childPrefix(of parent: String) -> String {
+        if parent == "/" { return "/" }
+        let bytes = parent.utf8
+        let start = bytes.firstIndex { $0 != 0x2F } ?? bytes.endIndex
+        let end = bytes[start...].lastIndex { $0 != 0x2F }.map(bytes.index(after:)) ?? start
+        return (parent.hasPrefix("/") ? "/" : "") + parent[start..<end] + "/"
     }
     public static func parent(of path: String) -> String {
         let parts = path.split(separator: "/").dropLast()
         return "/" + parts.joined(separator: "/")
     }
     public static func name(of path: String) -> String { path.split(separator: "/").last.map(String.init) ?? "/" }
-}
-private extension String {
-    func withLeadingSlash(if condition: Bool) -> String { condition ? "/" + self : self }
 }

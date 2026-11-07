@@ -167,7 +167,9 @@ public final class SFTPClient: Sendable {
         resolvingPath: Bool = true,
         concurrentReads: Int = 1,
         maximumEntries: Int = 10_000,
-        maximumMetadataBytes: Int = 16 * 1024 * 1024
+        maximumMetadataBytes: Int = 16 * 1024 * 1024,
+        onBatch: (@Sendable ([SFTPPathComponent]) async throws -> Void)? = nil,
+        deferringClose: (@Sendable (EventLoopFuture<Void>) -> Void)? = nil
     ) async throws -> [SFTPMessage.Name] {
         guard maximumEntries >= 0 else {
             throw SFTPError.directoryListingEntryLimitExceeded(maximumEntries)
@@ -209,7 +211,10 @@ public final class SFTPClient: Sendable {
         var failure: Error?
         var entryCount = 0
         var metadataBytes = 0
-        func append(_ name: SFTPMessage.Name) throws {
+        // RemoteFiles: with `onBatch`, each batch's attributes and longnames are released as soon as the
+        // caller has them. Filenames stay, for the rare server that answers after EOF.
+        var deliveredFilenames = [String]()
+        func append(_ name: SFTPMessage.Name) async throws {
             let nextEntryCount = entryCount.addingReportingOverflow(name.components.count)
             guard !nextEntryCount.overflow, nextEntryCount.partialValue <= maximumEntries else {
                 throw SFTPError.directoryListingEntryLimitExceeded(maximumEntries)
@@ -224,9 +229,14 @@ public final class SFTPClient: Sendable {
                 }
                 nextMetadataBytes = sum.partialValue
             }
-            names.append(name)
             entryCount = nextEntryCount.partialValue
             metadataBytes = nextMetadataBytes
+            if let onBatch {
+                deliveredFilenames.append(contentsOf: name.components.lazy.map(\.filename))
+                try await onBatch(name.components)
+            } else {
+                names.append(name)
+            }
         }
         func fill() {
             while failure == nil, closing == nil, inFlight.count < window {
@@ -241,15 +251,17 @@ public final class SFTPClient: Sendable {
                 guard failure == nil else { continue }
                 switch response {
                 case .name(let name) where closing == nil:
-                    try append(name)
-                    fill()
+                    try await append(name)
+                    // Any request sent now keeps the listing waiting a round trip for its reply, even if the
+                    // next answer is the EOF. Half a window still keeps the server busy, so top up from there.
+                    if inFlight.count <= window / 2 { fill() }
                 case .name(let name):
                     // Only a server that reorders one handle's requests, or rewinds after EOF, answers names
                     // after EOF. Keep those not already returned, so no entry is lost or repeated.
-                    var seen = returned ?? Set(names.flatMap { $0.components.map(\.filename) })
+                    var seen = returned ?? Set(names.flatMap { $0.components.map(\.filename) } + deliveredFilenames)
                     let fresh = name.components.filter { seen.insert($0.filename).inserted }
                     returned = seen
-                    if !fresh.isEmpty { try append(.init(requestId: name.requestId, components: fresh)) }
+                    if !fresh.isEmpty { try await append(.init(requestId: name.requestId, components: fresh)) }
                 case .status(let status) where status.errorCode == .eof && closing == nil:
                     closing = self.sendRequestFuture(.closeFile(.init(requestId: self.allocateRequestId(), handle: handle.handle)))
                 case .status(let status) where status.errorCode == .eof:
@@ -271,6 +283,14 @@ public final class SFTPClient: Sendable {
         // RemoteFiles: close the directory handle so a reused SFTP channel does not accumulate handles.
         // The inbound handler passes `.eof` statuses through as responses, so require `.ok` explicitly.
         let close = closing ?? self.sendRequestFuture(.closeFile(.init(requestId: self.allocateRequestId(), handle: handle.handle)))
+        if let deferringClose {
+            // The listing is complete. The caller retires the channel if this fails.
+            deferringClose(close.flatMapThrowing { response in
+                guard case .status(let status) = response else { throw SFTPError.invalidResponse }
+                guard status.errorCode == .ok else { throw SFTPError.errorStatus(status) }
+            })
+            return names
+        }
         guard case .status(let status) = try await close.get() else {
             throw SFTPError.invalidResponse
         }
@@ -281,6 +301,32 @@ public final class SFTPClient: Sendable {
         return names
     }
     
+    /// RemoteFiles: queues REALPATH at once and returns without waiting, so that it travels with the next
+    /// request. Event-loop tasks run in submission order, so requests reach the server in the order issued.
+    public func sendRealPath(atPath path: String) -> EventLoopFuture<String> {
+        sendRequestFuture(.realpath(.init(requestId: allocateRequestId(), path: path))).flatMapThrowing { response in
+            guard case .name(let name) = response else { throw SFTPError.invalidResponse }
+            return name.path
+        }
+    }
+
+    /// RemoteFiles: queues STAT at once and returns without waiting.
+    public func sendAttributes(at filePath: String) -> EventLoopFuture<SFTPFileAttributes> {
+        sendRequestFuture(.stat(.init(requestId: allocateRequestId(), path: filePath))).flatMapThrowing { response in
+            guard case .attributes(let attributes) = response else { throw SFTPError.invalidResponse }
+            return attributes.attributes
+        }
+    }
+
+    /// RemoteFiles: queues OPEN for reading at once and returns without waiting.
+    public func sendOpenFile(filePath: String, flags: SFTPOpenFileFlags) -> EventLoopFuture<SFTPFile> {
+        sendRequestFuture(.openFile(.init(requestId: allocateRequestId(), filePath: filePath, pFlags: flags, attributes: .none)))
+            .flatMapThrowing { response in
+                guard case .handle(let handle) = response else { throw SFTPError.invalidResponse }
+                return SFTPFile(client: self, path: filePath, handle: handle.handle)
+            }
+    }
+
     /// Get the attributes of a file on the SFTP server.
     ///
     /// - Parameter filePath: Path to the file

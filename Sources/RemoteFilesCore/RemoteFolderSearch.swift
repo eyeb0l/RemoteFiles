@@ -1,5 +1,11 @@
 import Foundation
 
+/// Listings for a walk over many folders, which needs names and kinds and not where links lead.
+protocol FolderWalking: Sendable {
+    func listDirectoryForWalk(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot
+    func resolvingLinks(in entries: [RemoteEntry], profile: ConnectionProfile) async throws -> [RemoteEntry]
+}
+
 /// Finds names below a folder with optional read-only server assistance, falling back to the
 /// ordinary file service when command access is unavailable. Links are matched by name but never followed, which
 /// keeps the walk inside the folder and free of loops. Depth, folders listed, matches and time are
@@ -12,11 +18,17 @@ public enum RemoteFolderSearch {
         public var maxMatches: Int
         /// No new folder is listed after this; listings already sent finish within their own deadline.
         public var timeLimit: Duration
+        /// Folders listed at once to begin with.
         public var concurrentListings: Int
-        public init(maxDepth: Int = 16, maxFolders: Int = 1_000, maxMatches: Int = 500,
-                    timeLimit: Duration = .seconds(30), concurrentListings: Int = 4) {
+        /// The most folders listed at once while the server keeps answering quickly. Over a distant
+        /// connection a folder takes about three round trips whatever the server does, so this is what
+        /// decides how long a search takes.
+        public var concurrentListingLimit: Int
+        public init(maxDepth: Int = 16, maxFolders: Int = 1_000, maxMatches: Int = 500, timeLimit: Duration = .seconds(30),
+                    concurrentListings: Int = 8, concurrentListingLimit: Int = 64) {
             self.maxDepth = maxDepth; self.maxFolders = maxFolders; self.maxMatches = maxMatches
             self.timeLimit = timeLimit; self.concurrentListings = max(1, concurrentListings)
+            self.concurrentListingLimit = max(self.concurrentListings, concurrentListingLimit)
         }
     }
 
@@ -76,6 +88,20 @@ public enum RemoteFolderSearch {
     private struct Listing: Sendable {
         let index: Int
         let result: Result<DirectorySnapshot, Error>
+        let elapsed: Duration
+    }
+
+    /// Lists more folders at once while the server answers quickly, and backs off when answers slow:
+    /// every listing has to finish within its own deadline, including the time it queues at the server.
+    struct ListingPacing {
+        static let quick: Duration = .seconds(2), slow: Duration = .seconds(5)
+        private(set) var window: Int
+        private let floor: Int, limit: Int
+        init(limits: Limits) { window = limits.concurrentListings; floor = limits.concurrentListings; limit = limits.concurrentListingLimit }
+        mutating func finished(after elapsed: Duration) {
+            if elapsed < Self.quick { window = min(limit, window + 1) }
+            else if elapsed > Self.slow { window = max(floor, window / 2) }
+        }
     }
 
     static func search(query: String, root: String, profile: ConnectionProfile, service: any RemoteFileService,
@@ -100,24 +126,38 @@ public enum RemoteFolderSearch {
         var started = 0, reported = 0, running = 0
         var finished: [Int: Result<DirectorySnapshot, Error>] = [:], retried: Set<Int> = []
         var progress = Update(), matched = 0
+        var pacing = ListingPacing(limits: limits)
+        let walker = service as? any FolderWalking
+        let list: @Sendable (Int, String) async -> Listing = { index, path in
+            let started = ContinuousClock.now
+            do {
+                let snapshot: DirectorySnapshot
+                if let walker {
+                    snapshot = try await walker.listDirectoryForWalk(profile: profile, path: path)
+                } else {
+                    snapshot = try await service.listDirectory(profile: profile, path: path)
+                }
+                return Listing(index: index, result: .success(snapshot), elapsed: started.duration(to: .now))
+            } catch {
+                return Listing(index: index, result: .failure(error), elapsed: started.duration(to: .now))
+            }
+        }
         try await withThrowingTaskGroup(of: Listing.self) { group in
             // Refill before polling, including after consuming the last child, and finish only
             // when there are no queued listings to start and no outstanding results to consume.
             while true {
                 try Task.checkCancellation()
-                while running < limits.concurrentListings, started < queue.count, progress.stop == nil {
+                while running < pacing.window, started < queue.count, progress.stop == nil {
                     guard started < limits.maxFolders else { progress.stop = .folderLimit; break }
                     guard ContinuousClock.now < deadline else { progress.stop = .timeLimit; break }
                     let index = started, path = queue[index].path
-                    group.addTask {
-                        do { return Listing(index: index, result: .success(try await service.listDirectory(profile: profile, path: path))) }
-                        catch { return Listing(index: index, result: .failure(error)) }
-                    }
+                    group.addTask { await list(index, path) }
                     running += 1; started += 1
                 }
                 guard running > 0, let listing = try await group.next() else { break }
                 let index = listing.index, result = listing.result
                 running -= 1
+                pacing.finished(after: listing.elapsed)
                 try Task.checkCancellation()
                 if case .failure(let error) = result, index > 0, endsConnection(error), retried.insert(index).inserted {
                     // A peer's deadline retires the shared SFTP channel and fails the listings on it;
@@ -129,10 +169,7 @@ public enum RemoteFolderSearch {
                         break
                     }
                     let path = queue[index].path
-                    group.addTask {
-                        do { return Listing(index: index, result: .success(try await service.listDirectory(profile: profile, path: path))) }
-                        catch { return Listing(index: index, result: .failure(error)) }
-                    }
+                    group.addTask { await list(index, path) }
                     running += 1
                     continue
                 }
@@ -164,6 +201,12 @@ public enum RemoteFolderSearch {
                             let kept = found.prefix(max(0, limits.maxMatches - matched))
                             matched += kept.count
                             update.matches = Array(kept)
+                            // A row says where a link leads, and only matches are shown. After the deadline
+                            // no new work starts, and a link left unresolved resolves when tapped.
+                            if let walker, ContinuousClock.now < deadline,
+                               let resolved = try? await walker.resolvingLinks(in: update.matches, profile: profile) {
+                                update.matches = resolved
+                            }
                             // At the limit, stop unless this was the last folder there is to list.
                             if matched == limits.maxMatches, kept.count < found.count || reported < queue.count {
                                 progress.stop = .matchLimit

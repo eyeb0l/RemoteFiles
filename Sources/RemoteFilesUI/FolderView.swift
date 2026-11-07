@@ -2,87 +2,6 @@
 import SwiftUI
 import RemoteFilesCore
 
-/// One symbol per kind of file, shared by folders, recents and the offline library.
-enum FileSymbol {
-    private static let code: Set<String> = [
-        "swift", "js", "jsx", "ts", "tsx", "py", "rb", "sh", "bash", "zsh", "c", "h", "cc", "cpp", "hpp", "m", "mm",
-        "rs", "go", "java", "kt", "kts", "php", "sql", "lua", "dart", "css", "scss", "less", "json", "jsonl", "yaml",
-        "yml", "toml", "xml", "diff", "patch", "graphql", "gql", "vue", "svelte",
-    ]
-    private static let archives: Set<String> = ["zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "dmg"]
-    static func name(forFilename filename: String) -> String {
-        switch DocumentPolicy.kind(filename: filename) {
-        case .markdown, .html, .pdf, .svg: return "doc.richtext"
-        case .image: return "photo"
-        case .video: return "film"
-        case .audio: return "waveform"
-        case .certificate: return "person.text.rectangle"
-        case .protectedCertificate: return "lock.doc"
-        case .plainText, .unsupported:
-            let suffix = (filename as NSString).pathExtension.lowercased()
-            if code.contains(suffix) { return "chevron.left.forwardslash.chevron.right" }
-            if archives.contains(suffix) { return "archivebox" }
-            return "doc.text"
-        }
-    }
-}
-
-struct FolderRow: Identifiable, Sendable {
-    let entry: RemoteEntry
-    /// What VoiceOver and search results say about the row.
-    let subtitle: String
-    let symbol: String
-    var id: String { entry.path }
-    /// A plain folder's icon already says "Folder", so its row shows only the name.
-    var visibleSubtitle: String? { subtitle == "Folder" ? nil : subtitle }
-
-    init(_ entry: RemoteEntry) {
-        self.entry = entry
-        switch entry.link {
-        case .target(let target):
-            // A resolved link looks like what it opens, and says it is a link.
-            let (symbol, details) = Self.describe(target)
-            self.symbol = symbol
-            subtitle = target.kind == .directory ? "Link to folder" : (["Link to file"] + details).joined(separator: " · ")
-        case .broken:
-            symbol = "link"; subtitle = "Broken link"
-        case nil:
-            let (symbol, details) = Self.describe(entry)
-            self.symbol = symbol
-            switch entry.kind {
-            case .directory: subtitle = "Folder"
-            case .symlink: subtitle = "Symbolic link"
-            case .file, .other: subtitle = details.isEmpty ? "File" : details.joined(separator: " · ")
-            }
-        }
-    }
-
-    private static func describe(_ entry: RemoteEntry) -> (symbol: String, details: [String]) {
-        switch entry.kind {
-        case .directory: return ("folder.fill", [])
-        case .symlink: return ("link", [])
-        case .file, .other:
-            let symbol = FileSymbol.name(forFilename: entry.name)
-            var details: [String] = []
-            if let size = entry.size { details.append(ByteCountFormatter.string(fromByteCount: Int64(clamping: size), countStyle: .file)) }
-            if let date = entry.modifiedAt { details.append(date.formatted(date: .abbreviated, time: .omitted)) }
-            return (symbol, details)
-        }
-    }
-}
-
-enum FolderSortOrder: String, CaseIterable, Sendable {
-    case name, modified, size, kind
-    var title: String {
-        switch self {
-        case .name: return "Name"
-        case .modified: return "Date Modified"
-        case .size: return "Size"
-        case .kind: return "Kind"
-        }
-    }
-}
-
 enum FolderSearchScope: Hashable { case folder, subfolders, contents }
 
 /// A name found by searching subfolders, described with the folder it was found in.
@@ -154,43 +73,31 @@ struct FolderSearchState {
     }
 }
 
-/// Prepared away from the main actor and retained for an immediate return to a folder.
-struct FolderListing: Sendable {
-    let path: String
-    let rows: [FolderRow]
-    let defaultRows: [FolderRow]
-    init(_ snapshot: DirectorySnapshot) {
-        path = snapshot.path
-        rows = snapshot.entries.sorted { Self.precedes($0, $1, by: .name) }.map(FolderRow.init)
-        defaultRows = rows.filter { !$0.entry.name.hasPrefix(".") }
-    }
-    func visible(query: String, showHidden: Bool, order: FolderSortOrder, options: SearchQueryOptions = .init()) -> [FolderRow] {
-        if query.isEmpty && order == .name && options == SearchQueryOptions() { return showHidden ? rows : defaultRows }
-        let result = (showHidden ? rows : defaultRows).filter {
-            options.accepts($0.entry) && (query.isEmpty || options.range(in: $0.entry.name, query: query) != nil)
+/// Hands each listing's partial rows to the screen one at a time, skipping any overtaken while the
+/// previous ones were being prepared.
+private final class PartialRowsUpdate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiting: DirectorySnapshot?
+    private var running = false
+    private let show: @MainActor (DirectorySnapshot) async -> Void
+    init(show: @escaping @MainActor (DirectorySnapshot) async -> Void) { self.show = show }
+    func submit(_ snapshot: DirectorySnapshot) {
+        lock.lock()
+        waiting = snapshot
+        let start = !running
+        running = true
+        lock.unlock()
+        guard start else { return }
+        Task { @MainActor in
+            while let next = self.next() { await self.show(next) }
         }
-        guard order != .name else { return result }
-        return result.sorted { Self.precedes($0.entry, $1.entry, by: order) }
     }
-
-    /// Folders, including links to folders, always come first. Size and date describe what a resolved
-    /// link opens; newest and largest come first, and entries without a value sort last. Ties fall
-    /// back to the name.
-    static func precedes(_ lhs: RemoteEntry, _ rhs: RemoteEntry, by order: FolderSortOrder) -> Bool {
-        let lhsFolder = lhs.effectiveKind == .directory, rhsFolder = rhs.effectiveKind == .directory
-        if lhsFolder != rhsFolder { return lhsFolder }
-        let left = lhs.linkTarget ?? lhs, right = rhs.linkTarget ?? rhs
-        switch order {
-        case .name: break
-        case .modified:
-            if left.modifiedAt != right.modifiedAt { return (left.modifiedAt ?? .distantPast) > (right.modifiedAt ?? .distantPast) }
-        case .size:
-            if !lhsFolder, left.size != right.size { return (left.size.map(Int64.init(clamping:)) ?? -1) > (right.size.map(Int64.init(clamping:)) ?? -1) }
-        case .kind:
-            let lhsKind = (lhs.name as NSString).pathExtension.lowercased(), rhsKind = (rhs.name as NSString).pathExtension.lowercased()
-            if !lhsFolder, lhsKind != rhsKind { return lhsKind.localizedStandardCompare(rhsKind) == .orderedAscending }
-        }
-        return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+    private func next() -> DirectorySnapshot? {
+        lock.lock(); defer { lock.unlock() }
+        let value = waiting
+        waiting = nil
+        if value == nil { running = false }
+        return value
     }
 }
 
@@ -282,7 +189,8 @@ struct FolderView: View {
                     await reload()
                     pullRefreshing = false
                 }) { row in
-                    link(for: row, subtitle: row.subtitle, visibleSubtitle: row.visibleSubtitle)
+                    let subtitle = row.subtitle
+                    link(for: row, subtitle: subtitle, visibleSubtitle: .some(subtitle == "Folder" ? nil : subtitle))
                 }
                 .equatable()
             }
@@ -464,37 +372,35 @@ struct FolderView: View {
         .scrollDismissesKeyboard(.immediately)
         }
     }
-    /// Only the selected row gets its own background and trait; the others are left exactly as before.
-    @ViewBuilder private func link(for row: FolderRow, subtitle: String, visibleSubtitle: String?? = nil, snippet: String? = nil, page: Int? = nil) -> some View {
-        if keyboardSelection == row.id {
-            rowLink(for: row, subtitle: subtitle, visibleSubtitle: visibleSubtitle, snippet: snippet, page: page)
-                .listRowBackground(Color.accentColor.opacity(0.18))
-                .accessibilityAddTraits(.isSelected)
-        } else {
-            rowLink(for: row, subtitle: subtitle, visibleSubtitle: visibleSubtitle, snippet: snippet, page: page)
-        }
-    }
-    @ViewBuilder private func rowLink(for row: FolderRow, subtitle: String, visibleSubtitle: String??, snippet: String?, page: Int?) -> some View {
-        let entry = row.entry
-        if let destination = entry.followingLink()?.openingPage(page) {
-            // Resolved while listing: open the target directly.
-            WorkspaceLink(route: route(destination)) { entryRow(row, subtitle: subtitle, visibleSubtitle: visibleSubtitle, snippet: snippet) }
-                .navigationLinkIndicatorVisibility(destination.kind == .directory ? .automatic : .hidden)
-                .contextMenu { OfflinePinActions(model: model, profile: profile, entry: destination, includeHidden: showHidden) }
-        } else if entry.kind == .symlink {
-            Button { resolve(entry, page: page) } label: {
+    /// Every row has one shape on purpose. A condition at the top of a List row, including one inside
+    /// a view such as a navigation link that picks its form from the environment, makes SwiftUI build
+    /// every row up front to count them: 530 ms of main-thread stall per 20,000 rows on iPhone 17 Pro,
+    /// against 25 ms with one shape. See docs/PERFORMANCE.md.
+    private func link(for row: FolderRow, subtitle: String, visibleSubtitle: String?? = nil, snippet: String? = nil, page: Int? = nil) -> some View {
+        let entry = row.entry, selected = keyboardSelection == row.id
+        let destination = destination(of: entry, page: page)
+        return Button { open(entry, page: page) } label: {
+            HStack(spacing: 8) {
                 entryRow(row, subtitle: subtitle, visibleSubtitle: visibleSubtitle, snippet: snippet)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .overlay(alignment: .trailing) { if resolving == entry.path { ProgressView() } }
+                if resolving == entry.path {
+                    ProgressView()
+                } else if destination?.kind == .directory, workspaceNavigate == nil {
+                    Image(systemName: "chevron.forward")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+                }
             }
-            .buttonStyle(.plain)
-            .disabled(resolving != nil)
-        } else {
-            WorkspaceLink(route: route(entry.openingPage(page))) { entryRow(row, subtitle: subtitle, visibleSubtitle: visibleSubtitle, snippet: snippet) }
-                .navigationLinkIndicatorVisibility(entry.kind == .directory ? .automatic : .hidden)
-                .contextMenu { OfflinePinActions(model: model, profile: profile, entry: entry, includeHidden: showHidden) }
+            .contentShape(Rectangle())
         }
+        .disabled(destination == nil && resolving != nil)
+        .contextMenu {
+            if let destination { OfflinePinActions(model: model, profile: profile, entry: destination, includeHidden: showHidden) }
+        }
+        .listRowBackground(selected ? Color.accentColor.opacity(0.18) : nil)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityAddTraits(workspaceNavigate != nil ? .isLink : [])
     }
     /// What a row opens, or nil for a link that must be resolved first.
     private func destination(of entry: RemoteEntry, page: Int?) -> RemoteEntry? {
@@ -522,12 +428,15 @@ struct FolderView: View {
     }
     private func openKeyboardSelection() {
         guard let selected = keyboardRows.first(where: { $0.row.id == keyboardSelection }) else { return }
-        if let destination = destination(of: selected.row.entry, page: selected.page) {
+        open(selected.row.entry, page: selected.page)
+    }
+    private func open(_ entry: RemoteEntry, page: Int?) {
+        if let destination = destination(of: entry, page: page) {
             let route = route(destination)
-            // A held Return repeats; the stack opens the row once.
+            // A second tap or a held Return while pushing opens the row once.
             if let workspaceNavigate { workspaceNavigate(route) } else if model.routes.last != route { model.routes.append(route) }
         } else if resolving == nil {
-            resolve(selected.row.entry, page: selected.page)
+            resolve(entry, page: page)
         }
     }
     private func entryRow(_ row: FolderRow, subtitle: String, visibleSubtitle: String??, snippet: String?) -> some View {
@@ -626,7 +535,7 @@ struct FolderView: View {
         // A check over a live connection isn't connecting again; don't flash the state on Home.
         if model.connectionStates[profile.id] != "Connected" { model.connectionStates[profile.id] = "Connecting…" }
         do {
-            let value = try await model.service.listDirectory(profile: profile, path: requestedPath)
+            let value = try await listShowingPartialRows(token: token)
             let prepared = await Task.detached(priority: .userInitiated) { FolderListing(value) }.value
             if !userChoseSort { sortOrder = model.folderSortOrder(profile.id, path: prepared.path) }
             let query = filter, hidden = showHidden, order = sortOrder, options = searchOptions
@@ -656,6 +565,32 @@ struct FolderView: View {
         }
         if token == requestID { loading = false }
     }
+    /// With nothing on screen yet, shows rows as they arrive rather than a spinner until the last one.
+    /// A folder already on screen keeps its complete rows until the new ones are complete.
+    private func listShowingPartialRows(token: UUID) async throws -> DirectorySnapshot {
+        guard listing == nil, let progressive = model.service as? any ProgressiveFolderListing else {
+            return try await model.service.listDirectory(profile: profile, path: requestedPath)
+        }
+        let gate = PartialListingGate()
+        let update = PartialRowsUpdate { snapshot in await showPartialRows(snapshot, token: token) }
+        return try await progressive.listDirectory(profile: profile, path: requestedPath) { snapshot in
+            if gate.shouldShow(count: snapshot.entries.count) { update.submit(snapshot) }
+        }
+    }
+    private func showPartialRows(_ snapshot: DirectorySnapshot, token: UUID) async {
+        let query = filter, hidden = showHidden, options = searchOptions
+        let order = userChoseSort ? sortOrder : model.folderSortOrder(profile.id, path: snapshot.path)
+        let (prepared, rows) = await Task.detached(priority: .userInitiated) { () -> (FolderListing, [FolderRow]) in
+            let value = FolderListing(snapshot)
+            return (value, value.visible(query: query, showHidden: hidden, order: order, options: options))
+        }.value
+        guard !Task.isCancelled, token == requestID, loading, !model.isDisconnecting, query == filter, hidden == showHidden,
+              options == searchOptions, prepared.rows.count > listing?.rows.count ?? 0 else { return }
+        if !userChoseSort { sortOrder = order }
+        sortID = UUID() // Supersede a filter task based on the previous rows.
+        listing = prepared; setVisible(rows)
+        appliedFilter = query; appliedShowHidden = hidden; appliedSortOrder = order; appliedSearchOptions = options
+    }
     /// Lists subfolders of the canonical folder once typing pauses; a new query, scope, refresh,
     /// disconnect or backgrounding cancels the walk.
     private func searchSubfolders() async {
@@ -674,9 +609,17 @@ struct FolderView: View {
                     contentLimits: .init(maxFileBytes: extraction.includePDF || extraction.includeOCR ? DocumentPolicy.previewByteLimit : 256 * 1_024),
                     options: searchOptions, extraction: extraction)
                 : RemoteFolderSearch.names(matching: query, below: root, profile: profile, service: model.searchService, includeHidden: showHidden, options: searchOptions)
-            for try await update in updates {
+            // The walk can report over a hundred folders a second, far more often than anyone can read
+            // and each report re-evaluates this view, so reports are gathered up between refreshes.
+            let batcher = FolderSearchBatcher { update in
                 guard !Task.isCancelled, model.sessionRevision == revision else { return }
                 search.apply(update, for: key)
+            }
+            // A failure still shows the matches found before it.
+            defer { batcher.flush() }
+            for try await update in updates {
+                guard !Task.isCancelled, model.sessionRevision == revision else { return }
+                batcher.add(update)
             }
         } catch {
             guard !Task.isCancelled, !(error is CancellationError), !model.isDisconnecting,

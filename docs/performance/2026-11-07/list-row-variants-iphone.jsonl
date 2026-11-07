@@ -1,0 +1,16 @@
+{"label":"exp2@iphone17pro","samples":[66.013791999999995,25.036999999999999,25.135957999999999],"scenario":"list.pathID.first.20000","unit":"ms"}
+{"label":"exp2@iphone17pro","samples":[65.975208301097155,24.99845833517611,25.100875063799322],"scenario":"list.pathID.stall.20000","unit":"ms"}
+{"label":"exp2@iphone17pro","samples":[55.457999999999998,51.965375000000002,53.345041999999999],"scenario":"list.listTextOnlyPathID.first.20000","unit":"ms"}
+{"label":"exp2@iphone17pro","samples":[55.420833406969905,51.939999917522073,53.304208326153457],"scenario":"list.listTextOnlyPathID.stall.20000","unit":"ms"}
+{"label":"exp2@iphone17pro","samples":[174.603375,263.241917,172.29733300000001],"scenario":"list.conditional.first.20000","unit":"ms"}
+{"label":"exp2@iphone17pro","samples":[174.58016669843346,263.21337500121444,172.28158330544829],"scenario":"list.conditional.stall.20000","unit":"ms"}
+{"label":"exp2@iphone17pro","samples":[548.49775,441.42000000000002,568.14054099999998],"scenario":"list.workspaceLink.first.20000","unit":"ms"}
+{"label":"exp2@iphone17pro","samples":[548.20008331444114,441.99812493752688,568.09345842339098],"scenario":"list.workspaceLink.stall.20000","unit":"ms"}
+{"label":"exp2@iphone17pro","samples":[19.931291000000002,18.219750000000001,18.062833000000001],"scenario":"list.contextMenu.first.20000","unit":"ms"}
+{"label":"exp2@iphone17pro","samples":[19.899583421647549,18.18316662684083,18.025583354756236],"scenario":"list.contextMenu.stall.20000","unit":"ms"}
+{"label":"exp2@iphone17pro","samples":[533.04341599999998,761.36587499999996,547.30516699999998],"scenario":"list.threeBranch.first.20000","unit":"ms"}
+{"label":"exp2@iphone17pro","samples":[532.99374994821846,761.3234167220071,547.25541663356125],"scenario":"list.threeBranch.stall.20000","unit":"ms"}
+{"label":"exp2@iphone17pro","samples":[736.41816700000004,523.48862499999996,746.36379199999999],"scenario":"list.structThreeBranch.first.20000","unit":"ms"}
+{"label":"exp2@iphone17pro","samples":[736.35216674301773,524.11570830736309,746.29916669800878],"scenario":"list.structThreeBranch.stall.20000","unit":"ms"}
+{"label":"exp2@iphone17pro","samples":[531.233791,766.18166599999995,554.61116700000002],"scenario":"list.modifierBranch.first.20000","unit":"ms"}
+{"label":"exp2@iphone17pro","samples":[531.8203333299607,766.11812505871058,555.18508341629058],"scenario":"list.modifierBranch.stall.20000","unit":"ms"}

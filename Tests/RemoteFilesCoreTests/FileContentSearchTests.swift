@@ -84,7 +84,7 @@ final class FileContentSearchTests: XCTestCase {
         }
         for window in [1, 4] {
             let service = ContentTreeService(tree, contents: data)
-            let result = try await search(service, limits: .init(concurrentListings: window))
+            let result = try await search(service, limits: .init(concurrentListings: window, concurrentListingLimit: window))
             XCTAssertEqual(result.matches.map(\.entry.path), expected)
             XCTAssertEqual(result.final.foldersSearched, tree.count)
             XCTAssertEqual(result.final.filesSearched, expected.count)
