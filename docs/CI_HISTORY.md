@@ -10,6 +10,33 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 7 November 2026: rejected offline transfer races the next folder save
+
+PR #84's [run 42335596504, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/42335596504/attempts/1)
+reported `OfflineFileError.busy` in
+`SFTPIntegrationTests.testExplicitTransfersOutsideTheStartingFolderStayWithinTheChosenItem`,
+at `pinFolder`'s occupied-slot guard. The
+[initial diagnosis](https://github.com/eyeb0l/RemoteFiles/pull/84#issuecomment-6701946374)
+identified a possible race between a rejected `pin` and the following `pinFolder`.
+
+**Reproduction.** A temporary two-second delay before `worker.cancelAndDrain()` in
+`pin`'s unstructured error-drain task reproduced `busy` at that guard in the unchanged
+test against the local OpenSSH fixture (one test, one unexpected failure). The store
+intentionally keeps its slot until the drain calls `finish`; throwing the boundary
+error does not mean another transfer can start.
+
+**Fix and validation.** The test supplies an explicit operation ID for the rejected
+`pin`, then joins `waitForCancelledTransfer` with that ID before calling `pinFolder`.
+The drain is installed before `pin` throws, and the join returns after `finish` has
+released the slot, or immediately if that operation has already finished. The same
+test passed with the two-second delay retained. The delay was then removed; no
+production behaviour or timeout changed. With the delay removed,
+`scripts/test-openssh.sh swift test --filter SFTPIntegrationTests` passed all 45 tests
+with no skips, including the changed method; `git diff --check` also passed. No full
+local lane or simulator tests were run. An audit of other rejected `pin` and
+`pinFolder` test sequences found no other instance requiring the same fix: they
+already drain, reject before acquiring a slot, or deliberately assert `busy`.
+
 ## 5 November 2026: nightly VoiceOver and playback failures
 
 Nightly run [42004987008](https://github.com/eyeb0l/RemoteFiles/actions/runs/42004987008) on
