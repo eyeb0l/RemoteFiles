@@ -100,7 +100,8 @@ drive with `throttling.iops-total=150` models a slow disk for cold-cache timings
 
 Seven tests passed with no failures or skips on such a guest: Ubuntu 24.04.5, Linux
 `6.8.0-147-generic`, OpenSSH `9.6p1`, Python `3.12.3`. Besides the five below, results arrive before
-the search finishes (200 content matches, all early, none twice, zero SFTP reads), and the match
+the search finishes (200 content matches, none twice, zero SFTP reads; they share a folder, so they
+arrive together, before the final line), and the match
 limit ends the helper with browsing and a further server search still working. The production-adapter
 tests also passed with `Subsystem sftp internal-sftp`. This was after the helper's setup became four
 pipelined round trips and its output a line per batch.

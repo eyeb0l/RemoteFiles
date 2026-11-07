@@ -333,6 +333,27 @@ final class ServerFolderSearchTests: XCTestCase {
         XCTAssertEqual(Set(decoded.flatMap(\.candidates).map(\.path)).count, decoded.flatMap(\.candidates).count, "No candidate twice")
     }
 
+    /// Lines arrive a folder at a time, so the app's order within a folder survives streaming, and the
+    /// helper walks folders in nearly the app's order: an accent or case doesn't move one past another.
+    func testHelperKeepsTheAppsOrderAcrossLinesAndAtTheMatchLimit() throws {
+        let root = try fixture()
+        for (path, text) in [("order/b.txt", "needle"), ("order/\u{E4}.txt", "needle"), ("order/B-2.txt", "needle")] {
+            try FileManager.default.createDirectory(at: root.appendingPathComponent("order"), withIntermediateDirectories: true)
+            try Data(text.utf8).write(to: root.appendingPathComponent(path))
+        }
+        let first = try runHelper(root: root.path + "/order", query: "needle", limits: .init(maxMatches: 1), content: .init())
+        XCTAssertEqual(first.contentMatches.map(\.entry.name), ["\u{E4}.txt"], "Foundation puts ä first, so it's the one kept")
+        let all = try runHelper(root: root.path + "/order", query: "needle", content: .init())
+        let names = all.contentMatches.map(\.entry.name)
+        XCTAssertEqual(names, names.sorted { $0.localizedStandardCompare($1) == .orderedAscending })
+        for folder in ["\u{C4}rger", "Zebra", "apfel"] {
+            try FileManager.default.createDirectory(at: root.appendingPathComponent("folders/\(folder)"), withIntermediateDirectories: true)
+            try Data("x".utf8).write(to: root.appendingPathComponent("folders/\(folder)/needle.txt"))
+        }
+        let walked = try runHelper(root: root.path + "/folders", query: "needle")
+        XCTAssertEqual(walked.matches.map { RemotePath.name(of: RemotePath.parent(of: $0.path)) }, ["apfel", "\u{C4}rger", "Zebra"])
+    }
+
     func testHelperTreatsAFilesTypeAsTheDirectoryReportsIt() throws {
         let root = try fixture()
         try FileManager.default.createDirectory(at: root.appendingPathComponent("needle-folder"), withIntermediateDirectories: true)

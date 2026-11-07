@@ -75,7 +75,7 @@ final class SearchReadAhead {
         func finish() { lock.lock(); done = true; lock.unlock() }
     }
     private let service: any RemoteFileService, profile: ConnectionProfile, root: String, limits: RemoteFolderSearch.ContentLimits
-    private var waiting: [RemoteEntry] = [], nextWaiting = 0
+    private var waiting: [RemoteEntry] = [], nextWaiting = 0, offered = 0
     private var taken = Set<Data>()
     private var reads: [Data: Read] = [:]
     private var expected = 0
@@ -84,9 +84,12 @@ final class SearchReadAhead {
         self.service = service; self.profile = profile; self.root = root; self.limits = limits
     }
 
-    /// Files the walk will read, in the order it will read them.
+    /// Files the walk will read, in the order it will read them. The walk reads no more than the file
+    /// limit, so no more than that are kept, however many folders an index lists before it reads.
     func offer(_ entries: some Sequence<RemoteEntry>) {
-        waiting.append(contentsOf: entries)
+        let kept = Array(entries.prefix(max(0, limits.maxFiles - offered)))
+        offered += kept.count
+        waiting.append(contentsOf: kept)
     }
 
     /// Starts what fits, given what the walk has charged and the files it has counted, including the one it

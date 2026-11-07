@@ -570,6 +570,7 @@ private actor ReadAheadService: RemoteFileService, FolderWalking {
     let readDelay: Duration
     let listingDelays: [String: Duration]
     private(set) var reads: [(path: String, limit: Int)] = []
+    private(set) var listed: [String] = []
     private(set) var mostAtOnce = 0
     private(set) var bytesRead = 0
     private var running = 0
@@ -578,6 +579,7 @@ private actor ReadAheadService: RemoteFileService, FolderWalking {
     }
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { .init(path: path, entries: folders[path] ?? []) }
     func listDirectoryForWalk(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
+        listed.append(path)
         if let delay = listingDelays[path] { try await Task.sleep(for: delay) }
         return .init(path: path, entries: folders[path] ?? [])
     }
@@ -735,6 +737,23 @@ final class SearchReadAheadTests: XCTestCase {
         XCTAssertTrue(snapshot.isPartial)
         let reads = await service.reads
         XCTAssertEqual(reads.map(\.path), ["/r/root.txt"])
+    }
+
+    /// An index lists before it reads, so it must not keep a broad tree in memory for files it will never
+    /// read: it keeps what the file limit allows and stops listing where the reads will stop.
+    func testAnIndexKeepsOnlyWhatItCanReadAndStopsListingThere() async throws {
+        let (folders, contents) = tree(folders: 30, files: 20)
+        let service = ReadAheadService(folders: folders, contents: contents)
+        let snapshot = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: service, includeHidden: false,
+                                                               contentLimits: .init(maxFiles: 10))
+        let plain = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: PlainTreeService(folders: folders, contents: contents),
+                                                            includeHidden: false, contentLimits: .init(maxFiles: 10))
+        XCTAssertEqual(snapshot.documents.map(\.entry.path), plain.documents.map(\.entry.path), "The same ten, as one at a time")
+        XCTAssertEqual(snapshot.documents.count, 10)
+        XCTAssertTrue(snapshot.isPartial)
+        let reads = await service.reads, listed = await service.listed
+        XCTAssertEqual(reads.count, 10)
+        XCTAssertLessThan(listed.count, 30, "Listing stops once the reads can't go further")
     }
 
     func testAFileThatGrewPastItsListingGetsAnOrdinaryRead() async throws {

@@ -63,7 +63,8 @@ def write_line(value):
         scanning = True
 
 def send_progress():
-    # The first results go at once, then ten lines a second at most, or sooner if they pile up.
+    # Called after each folder, so a folder's matches arrive together and the app orders them as it would
+    # have. The first results go at once, then ten lines a second at most, or sooner if they pile up.
     global last_line, last_folders, unsent_bytes
     now = time.monotonic()
     if not result['candidates'] and result['folders'] == last_folders:
@@ -98,8 +99,18 @@ candidates_sent = 0
 # translate deletes these and leaves only the control bytes that make a file binary.
 printable = bytes(byte for byte in range(256) if not ((byte < 32 and byte not in (9, 10, 13)) or byte == 127))
 
+try:
+    import unicodedata
+except ImportError:
+    unicodedata = None
+
 def natural(name):
-    return [(0, int(p)) if p.isdigit() else (1, p.lower()) for p in re.split(r'([0-9]+)', name)]
+    # Close to the app's localized order: digits by value, then accents and case set aside, so that
+    # folders reach the app in nearly the order it would have walked them. It still decides the order.
+    folded = name
+    if unicodedata is not None and not name.isascii():
+        folded = ''.join(c for c in unicodedata.normalize('NFKD', name) if not unicodedata.combining(c))
+    return ([(0, int(p)) if p.isdigit() else (1, p.casefold()) for p in re.split(r'([0-9]+)', folded)], name)
 
 def add(path, kind, info, data=None):
     global output_bytes, unsent_bytes, candidates_sent
@@ -173,7 +184,6 @@ def scan_file(fd, name, path):
             return
         if data and candidate(name, data):
             add(path, 'file', info, data)
-            send_progress()
     except OSError:
         result['unreadableFiles'] += 1
     finally:

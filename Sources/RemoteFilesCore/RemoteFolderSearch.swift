@@ -142,7 +142,8 @@ public enum RemoteFolderSearch {
         var finished: [Int: Result<DirectorySnapshot, Error>] = [:], retried: Set<Int> = []
         var progress = Update(), matched = delivered.count
         var pacing = ListingPacing(limits: limits)
-        var listedForIndex: [[RemoteEntry]] = []
+        // An index reads at most the file limit, so it keeps only the files it may read, and counts the rest.
+        var listedForIndex: [(files: [RemoteEntry], skipped: Int)] = [], readableForIndex = 0
         let walker = service as? any FolderWalking
         // Only where listings already overlap: the same transport can overlap its reads.
         let readAhead = walker != nil ? content.map { SearchReadAhead(service: service, profile: profile, root: root, limits: $0) } : nil
@@ -225,10 +226,14 @@ public enum RemoteFolderSearch {
                             if folder.depth < limits.maxDepth { queue.append(Folder(path: entry.path, depth: folder.depth + 1)) }
                             else { progress.skippedDeepFolders += 1 }
                         }
-                        if content != nil, query.isEmpty {
+                        if let content, query.isEmpty {
                             // Building an index, with no first match to hurry for. The walk stops listing
                             // while it reads, so list everything first and let every read overlap.
-                            listedForIndex.append(visible)
+                            let readable = visible.filter { scanReads($0, root: root, limits: content, options: options, extraction: extraction) }
+                            let skipped = visible.filter { $0.kind != .directory && options.accepts($0) }.count - readable.count
+                            let files = Array(readable.prefix(max(0, content.maxFiles + 1 - readableForIndex)))
+                            listedForIndex.append((files, skipped))
+                            readableForIndex += files.count
                         } else if let content {
                             let unreported = delivered.isEmpty ? visible : visible.filter { !delivered.contains(Data($0.path.utf8)) }
                             try await scan(unreported, query: query, root: root, profile: profile,
@@ -264,14 +269,18 @@ public enum RemoteFolderSearch {
                     update.stop = progress.stop
                     report(update)
                     if progress.stop == .matchLimit || (content != nil && stopsReading(progress.stop)) { break }
+                    // One file past the limit is enough for the reads to stop at it, as they would have.
+                    if let content, query.isEmpty, readableForIndex > content.maxFiles { break }
                 }
                 if progress.stop == .matchLimit || (content != nil && stopsReading(progress.stop)) { group.cancelAll(); break }
+                if let content, query.isEmpty, readableForIndex > content.maxFiles { group.cancelAll(); break }
             }
         }
         // Reads that finished before a deadline during listing are still collected; nothing new starts.
         if let content {
-            for visible in listedForIndex where !stopsReading(progress.stop) || progress.stop == .timeLimit {
-                try await scan(visible, query: query, root: root, profile: profile, service: service, limits: content,
+            for (files, skipped) in listedForIndex where !stopsReading(progress.stop) || progress.stop == .timeLimit {
+                progress.skippedFiles += skipped
+                try await scan(files, query: query, root: root, profile: profile, service: service, limits: content,
                     matchLimit: limits.maxMatches, deadline: deadline, matched: &matched, progress: &progress, options: options,
                     extraction: extraction, collect: collect, reusable: reusable, readAhead: readAhead, report: report)
             }
