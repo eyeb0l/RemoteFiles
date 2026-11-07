@@ -128,7 +128,7 @@ because Simulator filesystems do not report Data Protection classes; its actual
 protection assertion still requires a physical device. The three opt-in Face ID
 methods in `IdentityTests` also skip unless given the setup described in
 [KEY_SUPPORT.md](KEY_SUPPORT.md). Keychain tests must run.
-The opt-in latency benchmark's operations run once against the generated
+`PerformanceBenchmarkTests` runs once at its smallest size in the same lanes, asserting nothing about timing, so the [performance harness](PERFORMANCE.md) keeps working. The opt-in latency benchmark's operations run once against the generated
 loopback fixture on both platforms, with no latency proxy or performance
 threshold. These timings are smoke coverage, not network-latency evidence. The runner
 clears inherited real-server opt-in variables and never touches a real server.

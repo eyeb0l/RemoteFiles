@@ -1,0 +1,312 @@
+import XCTest
+import Foundation
+@testable import RemoteFilesCore
+@testable import RemoteFilesUI
+
+/// Candidate representations for sorting and filtering a folder, compared against the current code.
+final class FolderLayoutExperimentTests: XCTestCase {
+    func testCandidates() throws {
+        let env = ProcessInfo.processInfo.environment
+        let runs = Int(env["REMOTEFILES_BENCHMARK_RUNS"] ?? "") ?? 1
+        let recorder = BenchmarkRecorder(label: (env["REMOTEFILES_BENCHMARK_LABEL"] ?? "x") )
+        let sizes = (env["REMOTEFILES_BENCHMARK_SIZES"] ?? "1000").split(separator: ",").compactMap { Int($0) }
+        let locale = Locale.current
+        for size in sizes {
+            let entries = BenchmarkData.entries(count: size)
+            // Name sort.
+            var expected: [String] = []
+            try recorder.time("name.N0.aos.\(size)", runs: runs) {
+                expected = entries.sorted { FolderListing.precedes($0, $1, by: .name) }.map(\.name)
+            }
+            var out: [String] = []
+            struct Keyed { let folder: Bool; let name: String; let index: Int32 }
+            try recorder.time("name.N1.keyed-string.\(size)", runs: runs) {
+                let keys = entries.enumerated().map { Keyed(folder: $1.effectiveKind == .directory, name: $1.name, index: Int32($0)) }
+                let sorted = keys.sorted { $0.folder != $1.folder ? $0.folder : $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                out = sorted.map { entries[Int($0.index)].name }
+            }
+            XCTAssertEqual(out, expected)
+            struct KeyedNS { let folder: Bool; let name: NSString; let index: Int32 }
+            let options: NSString.CompareOptions = [.caseInsensitive, .numeric, .widthInsensitive, .forcedOrdering]
+            try recorder.time("name.N2.keyed-nsstring-locale.\(size)", runs: runs) {
+                let keys = entries.enumerated().map { KeyedNS(folder: $1.effectiveKind == .directory, name: $1.name as NSString, index: Int32($0)) }
+                let sorted = keys.sorted {
+                    if $0.folder != $1.folder { return $0.folder }
+                    return $0.name.compare($1.name as String, options: options, range: NSRange(location: 0, length: $0.name.length), locale: locale) == .orderedAscending
+                }
+                out = sorted.map { entries[Int($0.index)].name }
+            }
+            XCTAssertEqual(out, expected, "N2")
+            struct KeyedCF { let folder: Bool; let name: CFString; let length: CFIndex; let index: Int32 }
+            let flags: CFStringCompareFlags = [.compareCaseInsensitive, .compareNonliteral, .compareLocalized, .compareNumerically, .compareWidthInsensitive, .compareForcedOrdering]
+            let cfLocale = locale as CFLocale
+            try recorder.time("name.N3.keyed-cfstring.\(size)", runs: runs) {
+                let keys = entries.enumerated().map { (i, e) -> KeyedCF in
+                    let name = e.name as NSString as CFString
+                    return KeyedCF(folder: e.effectiveKind == .directory, name: name, length: CFStringGetLength(name), index: Int32(i))
+                }
+                let sorted = keys.sorted {
+                    if $0.folder != $1.folder { return $0.folder }
+                    return CFStringCompareWithOptionsAndLocale($0.name, $1.name, CFRange(location: 0, length: $0.length), flags, cfLocale) == .compareLessThan
+                }
+                out = sorted.map { entries[Int($0.index)].name }
+            }
+            XCTAssertEqual(out, expected, "N3")
+
+            // Date sort over name-ordered rows.
+            let listing = FolderListing(DirectorySnapshot(path: "/bench", entries: entries))
+            let rows = listing.rows
+            var dated: [String] = []
+            try recorder.time("date.D0.aos.\(size)", runs: runs) {
+                dated = rows.sorted { FolderListing.precedes($0.entry, $1.entry, by: .modified) }.map(\.entry.name)
+            }
+            var dated2: [String] = []
+            struct DateKey { let rank: UInt8; let date: Double; let index: Int32 }
+            try recorder.time("date.D1.keys.\(size)", runs: runs) {
+                let keys = rows.enumerated().map { (i, row) -> DateKey in
+                    let left = row.entry.linkTarget ?? row.entry
+                    return DateKey(rank: row.entry.effectiveKind == .directory ? 0 : 1,
+                                   date: -(left.modifiedAt ?? .distantPast).timeIntervalSinceReferenceDate, index: Int32(i))
+                }
+                let sorted = keys.sorted {
+                    if $0.rank != $1.rank { return $0.rank < $1.rank }
+                    if $0.date != $1.date { return $0.date < $1.date }
+                    return $0.index < $1.index
+                }
+                dated2 = sorted.map { rows[Int($0.index)].entry.name }
+            }
+            XCTAssertEqual(dated, dated2, "D1")
+
+            // Filter over every row.
+            for query in ["report", "zzzqq"] {
+                var f0 = 0
+                let plain = SearchQueryOptions()
+                try recorder.time("filter.\(query).F0.foundation.\(size)", runs: runs) {
+                    f0 = rows.filter { plain.range(in: $0.entry.name, query: query) != nil }.count
+                }
+                let needle = Array(query.utf8)
+                let first = needle[0], firstUpper = first >= 97 && first <= 122 ? first - 32 : first
+                var f1 = 0
+                func asciiContains(_ name: String) -> Bool? {
+                    var name = name
+                    return name.withUTF8 { bytes -> Bool? in
+                        var i = 0, found = false
+                        let n = bytes.count, m = needle.count
+                        while i < n {
+                            let byte = bytes[i]
+                            if byte >= 0x80 { return nil }
+                            if !found, (byte == first || byte == firstUpper), i + m <= n {
+                                var j = 1
+                                while j < m {
+                                    var c = bytes[i + j]
+                                    if c >= 65 && c <= 90 { c += 32 }
+                                    if c != needle[j] { break }
+                                    j += 1
+                                }
+                                if j == m { found = true }
+                            }
+                            i += 1
+                        }
+                        return found
+                    }
+                }
+                try recorder.time("filter.\(query).F1.ascii-string.\(size)", runs: runs) {
+                    f1 = rows.filter { asciiContains($0.entry.name) ?? (plain.range(in: $0.entry.name, query: query) != nil) }.count
+                }
+                XCTAssertEqual(f0, f1, "F1")
+                // One contiguous lowercase buffer, its offsets, and a list of non-ASCII rows left to Foundation.
+                var blob: [UInt8] = [], offsets: [Int32] = [], nonASCII: [Int32] = []
+                try recorder.time("filter.\(query).F2.blob-build.\(size)", runs: 1) {
+                    blob = []; offsets = []; nonASCII = []
+                    blob.reserveCapacity(rows.count * 24); offsets.reserveCapacity(rows.count + 1)
+                    for (i, row) in rows.enumerated() {
+                        offsets.append(Int32(blob.count))
+                        var ascii = true
+                        for byte in row.entry.name.utf8 {
+                            if byte >= 0x80 { ascii = false }
+                            blob.append(byte >= 65 && byte <= 90 ? byte + 32 : byte)
+                        }
+                        blob.append(0)
+                        if !ascii { nonASCII.append(Int32(i)) }
+                    }
+                    offsets.append(Int32(blob.count))
+                }
+                var f2 = 0
+                try recorder.time("filter.\(query).F2.blob-scan.\(size)", runs: runs) {
+                    var hits: [Int32] = []
+                    blob.withUnsafeBytes { raw in
+                        needle.withUnsafeBytes { n in
+                            let base = UnsafeRawPointer(raw.baseAddress!)
+                            var position = 0
+                            var row = 0
+                            while position < raw.count, let found = memmem(base + position, raw.count - position, n.baseAddress!, n.count) {
+                                let offset = Int32(UnsafeRawPointer(found) - base)
+                                while Int(row) + 1 < offsets.count, offsets[row + 1] <= offset { row += 1 }
+                                hits.append(Int32(row))
+                                position = Int(offsets[row + 1])
+                            }
+                        }
+                    }
+                    var count = 0
+                    let names = Set(nonASCII)
+                    count += hits.filter { !names.contains($0) }.count
+                    for i in nonASCII where plain.range(in: rows[Int(i)].entry.name, query: query) != nil { count += 1 }
+                    f2 = count
+                }
+                XCTAssertEqual(f0, f2, "F2")
+            }
+            // Formatting per row.
+            let dates = entries.compactMap(\.modifiedAt)
+            try recorder.time("format.bytes.classmethod.\(size)", runs: runs) {
+                var t = 0
+                for e in entries { t &+= ByteCountFormatter.string(fromByteCount: Int64(clamping: e.size ?? 0), countStyle: .file).utf8.count }
+                blackHole(t)
+            }
+            let shared = ByteCountFormatter(); shared.countStyle = .file
+            try recorder.time("format.bytes.shared.\(size)", runs: runs) {
+                var t = 0
+                for e in entries { t &+= shared.string(fromByteCount: Int64(clamping: e.size ?? 0)).utf8.count }
+                blackHole(t)
+            }
+            try recorder.time("format.date.formatted.\(size)", runs: runs) {
+                var t = 0
+                for d in dates { t &+= d.formatted(date: .abbreviated, time: .omitted).utf8.count }
+                blackHole(t)
+            }
+            try recorder.time("format.symbol.\(size)", runs: runs) {
+                var t = 0
+                for e in entries { t &+= FileSymbol.name(forFilename: e.name).utf8.count }
+                blackHole(t)
+            }
+            blackHole(MemoryLayout<RemoteEntry>.stride)
+            recorder.add("layout.RemoteEntry.stride", value: Double(MemoryLayout<RemoteEntry>.stride), unit: "bytes")
+            recorder.add("layout.FolderRow.stride", value: Double(MemoryLayout<FolderRow>.stride), unit: "bytes")
+        }
+        recorder.flush()
+    }
+}
+
+#if os(iOS)
+import SwiftUI
+import UIKit
+
+private struct LightRow: Identifiable { let id: Int64; let name: String }
+private enum ListVariant: String, CaseIterable { case pathID, listTextOnlyPathID, conditional, workspaceLink, contextMenu, threeBranch, structThreeBranch, modifierBranch }
+private struct ThreeBranch: View {
+    let row: FolderRow
+    let selection: String?
+    @ViewBuilder var body: some View {
+        if selection == row.id {
+            Text(row.entry.name).listRowBackground(Color.red)
+        } else if row.entry.kind == .symlink {
+            Button(row.entry.name) {}.disabled(true)
+        } else {
+            WorkspaceLink(route: .folder(UUID(), row.entry.path)) { Text(row.entry.name) }
+        }
+    }
+}
+
+private struct VariantView: View {
+    let variant: ListVariant
+    let rows: [FolderRow]
+    let light: [LightRow]
+    var selection: String? = nil
+    var body: some View {
+        switch variant {
+        case .pathID:
+            List { ForEach(rows) { row in NavigationLink(value: row.id) { LocationRow(name: row.entry.name, subtitle: row.subtitle, symbol: row.symbol, color: .secondary, visibleSubtitle: row.visibleSubtitle) }.listRowInsets(.vertical, 7) } }.listStyle(.plain)
+        case .listTextOnlyPathID:
+            List { ForEach(rows) { row in Text(row.entry.name) } }.listStyle(.plain)
+        case .conditional:
+            List { ForEach(rows) { row in
+                if selection == row.id { Text(row.entry.name).listRowBackground(Color.red) } else { Text(row.entry.name) }
+            } }.listStyle(.plain)
+        case .workspaceLink:
+            List { ForEach(rows) { row in WorkspaceLink(route: .folder(UUID(), row.entry.path)) { Text(row.entry.name) } } }.listStyle(.plain)
+        case .contextMenu:
+            List { ForEach(rows) { row in Text(row.entry.name).contextMenu { Button("A") {} } } }.listStyle(.plain)
+        case .threeBranch:
+            List { ForEach(rows) { row in
+                if selection == row.id {
+                    Text(row.entry.name).listRowBackground(Color.red)
+                } else if row.entry.kind == .symlink {
+                    Button(row.entry.name) {}.disabled(true)
+                } else {
+                    WorkspaceLink(route: .folder(UUID(), row.entry.path)) { Text(row.entry.name) }
+                }
+            } }.listStyle(.plain)
+        case .structThreeBranch:
+            List { ForEach(rows) { row in ThreeBranch(row: row, selection: selection) } }.listStyle(.plain)
+        case .modifierBranch:
+            List { ForEach(rows) { row in ThreeBranch(row: row, selection: selection).listRowInsets(.vertical, 7) } }.listStyle(.plain)
+        }
+    }
+}
+private struct RepresentedList: UIViewRepresentable {
+    let rows: [FolderRow]
+    func makeCoordinator() -> Coordinator { Coordinator(rows: rows) }
+    func makeUIView(context: Context) -> UICollectionView {
+        let layout = UICollectionViewCompositionalLayout.list(using: .init(appearance: .plain))
+        let view = UICollectionView(frame: .zero, collectionViewLayout: layout)
+        view.register(UICollectionViewListCell.self, forCellWithReuseIdentifier: "c")
+        view.dataSource = context.coordinator
+        return view
+    }
+    func updateUIView(_ view: UICollectionView, context: Context) {}
+    final class Coordinator: NSObject, UICollectionViewDataSource {
+        let rows: [FolderRow]
+        init(rows: [FolderRow]) { self.rows = rows }
+        func collectionView(_ c: UICollectionView, numberOfItemsInSection s: Int) -> Int { rows.count }
+        func collectionView(_ c: UICollectionView, cellForItemAt i: IndexPath) -> UICollectionViewCell {
+            let cell = c.dequeueReusableCell(withReuseIdentifier: "c", for: i) as! UICollectionViewListCell
+            let row = rows[i.item]
+            cell.contentConfiguration = UIHostingConfiguration { Text(row.entry.name) }
+            return cell
+        }
+    }
+}
+
+extension FolderLayoutExperimentTests {
+    @MainActor func testListVariants() async throws {
+        let env = ProcessInfo.processInfo.environment
+        let runs = Int(env["REMOTEFILES_BENCHMARK_RUNS"] ?? "") ?? 1
+        let recorder = BenchmarkRecorder(label: env["REMOTEFILES_BENCHMARK_LABEL"] ?? "x")
+        let sizes = (env["REMOTEFILES_BENCHMARK_SCREEN_SIZES"] ?? "100").split(separator: ",").compactMap { Int($0) }
+        for size in sizes {
+            let rows = BenchmarkData.entries(count: size).map(FolderRow.init)
+            let light = rows.map { LightRow(id: Int64($0.entry.path.hashValue), name: $0.entry.name) }
+            for _ in 0..<runs {
+                for variant in ListVariant.allCases {
+                    let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+                    let previous = scene.windows.first { $0.isKeyWindow }
+                    let window = UIWindow(windowScene: scene)
+                    var last = CACurrentMediaTime(), longest = 0.0
+                    let ticker = Timer(timeInterval: 0.002, repeats: true) { _ in
+                        let now = CACurrentMediaTime(); longest = max(longest, now - last); last = now
+                    }
+                    RunLoop.main.add(ticker, forMode: .common)
+                    let started = ContinuousClock.now
+                    window.rootViewController = UIHostingController(rootView: NavigationStack { VariantView(variant: variant, rows: rows, light: light) })
+                    window.makeKeyAndVisible()
+                    func cellsVisible() -> Bool {
+                        func find(_ view: UIView) -> Bool {
+                            if let list = view as? UICollectionView, !list.visibleCells.isEmpty { return true }
+                            return view.subviews.contains(where: find)
+                        }
+                        return find(window)
+                    }
+                    let deadline = ContinuousClock.now + .seconds(90)
+                    while !cellsVisible(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+                    recorder.add("list.\(variant.rawValue).first.\(size)", value: started.elapsedMilliseconds)
+                    try await Task.sleep(for: .milliseconds(300))
+                    ticker.invalidate()
+                    recorder.add("list.\(variant.rawValue).stall.\(size)", value: longest * 1000)
+                    window.isHidden = true; window.rootViewController = nil; previous?.makeKey()
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+            }
+        }
+        recorder.flush()
+    }
+}
+#endif

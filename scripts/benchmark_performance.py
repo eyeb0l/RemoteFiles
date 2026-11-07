@@ -3,6 +3,8 @@
 
   run      Builds optimized tests, starts an isolated loopback OpenSSH fixture with a generated tree, and
            records raw samples in a JSON Lines file. Never touches system network settings.
+  device   As run, for the transport scenarios on a physical iPhone over the local network: the fixture
+           gets a throwaway key and a listener on the Mac's LAN address, for as long as the run lasts.
   compare  Prints median, spread and difference between two or more recorded files.
 
 Nothing here passes or fails on a timing: shared machines are too noisy for that.
@@ -94,6 +96,57 @@ def inside_fixture(args):
         finally:
             if proxy:
                 proxy.terminate(); proxy.wait()
+
+
+def inside_device_fixture(args):
+    """Runs under scripts/test-openssh.sh. The phone can't reach the fixture's files, so it gets the keys by environment."""
+    fixture = pathlib.Path(os.environ["REMOTEFILES_SFTP_FIXTURE"])
+    bench = fixture / "files" / "bench"
+    generate_fixture(bench, False)
+    key = fixture / "device-key"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+    with open(fixture / "authorized_keys", "a") as handle:
+        handle.write(key.with_suffix(".pub").read_text())
+    output = pathlib.Path(args.output).resolve()
+    for rtt in [int(value) for value in args.rtt.split(",")]:
+        port = int(os.environ["REMOTEFILES_SFTP_PORT"]) + 1000
+        proxy = subprocess.Popen([sys.executable, "-B", str(ROOT / "scripts/latency_proxy.py"), "--bind", args.address, "--listen", str(port),
+                                  "--target", os.environ["REMOTEFILES_SFTP_PORT"], "--rtt-ms", str(rtt), "--mbit", str(args.mbit)],
+                                 stdout=subprocess.DEVNULL)
+        time.sleep(0.5)
+        env = dict(os.environ)
+        env.update(TEST_RUNNER_REMOTEFILES_BENCHMARK="1", TEST_RUNNER_REMOTEFILES_BENCHMARK_RUNS=str(args.runs),
+                   TEST_RUNNER_REMOTEFILES_BENCHMARK_ROOT=str(bench.resolve()),
+                   TEST_RUNNER_REMOTEFILES_BENCHMARK_LABEL=f"{args.label}@device+{rtt}ms",
+                   TEST_RUNNER_REMOTEFILES_BENCHMARK_PRIVATE_KEY=key.read_text(),
+                   TEST_RUNNER_REMOTEFILES_BENCHMARK_HOST_KEY=(fixture / "host.pub").read_text(),
+                   TEST_RUNNER_REMOTEFILES_SFTP_HOST=args.address, TEST_RUNNER_REMOTEFILES_SFTP_PORT=str(port),
+                   TEST_RUNNER_REMOTEFILES_SFTP_USER=os.environ["REMOTEFILES_SFTP_USER"])
+        if args.only:
+            env["TEST_RUNNER_REMOTEFILES_BENCHMARK_ONLY"] = args.only
+        try:
+            result = subprocess.run(["xcodebuild", "test-without-building", "-xctestrun", args.xctestrun, "-destination", f"id={args.udid}",
+                                     "-only-testing:RemoteFilesTests/PerformanceBenchmarkTests/testTransport", "-parallel-testing-enabled", "NO",
+                                     "-collect-test-diagnostics", "never"], env=env, capture_output=True, text=True, timeout=args.timeout)
+        finally:
+            proxy.terminate(); proxy.wait()
+        lines = [line.split("BENCHJSON ", 1)[1] for line in result.stdout.splitlines() if "BENCHJSON " in line]
+        with open(output, "a") as handle:
+            handle.writelines(line + "\n" for line in lines)
+        print(f"rtt {rtt}: exit {result.returncode}, {len(lines)} scenarios", file=sys.stderr, flush=True)
+        if result.returncode != 0:
+            print("\n".join(line for line in result.stdout.splitlines() if " error:" in line or "locked" in line)[:2000], file=sys.stderr)
+
+
+def device(args):
+    inner = [sys.executable, "-B", str(pathlib.Path(__file__).resolve()), "inside-device-fixture", "--output", str(pathlib.Path(args.output).resolve()),
+             "--label", args.label, "--runs", str(args.runs), "--rtt", args.rtt, "--mbit", str(args.mbit), "--xctestrun", args.xctestrun,
+             "--udid", args.udid, "--address", args.address, "--timeout", str(args.timeout)]
+    if args.only:
+        inner += ["--only", args.only]
+    env = dict(os.environ)
+    env["REMOTEFILES_TEST_PORT"] = str(args.port)
+    subprocess.run([str(ROOT / "scripts/test-openssh.sh"), *inner], env=env, check=True)
 
 
 def run(args):
@@ -200,10 +253,23 @@ def main():
             command.add_argument("--sizes", help="entry counts for local work, comma-separated")
             command.add_argument("--port", type=int, default=22322)
             command.add_argument("--skip-build", action="store_true")
+    for name in ("device", "inside-device-fixture"):
+        command = commands.add_parser(name)
+        command.add_argument("--output", required=True)
+        command.add_argument("--label", required=True)
+        command.add_argument("--xctestrun", required=True, help="from xcodebuild build-for-testing for the device; see docs/PERFORMANCE.md")
+        command.add_argument("--udid", required=True)
+        command.add_argument("--address", required=True, help="this Mac's address on the phone's network")
+        command.add_argument("--runs", type=int, default=3)
+        command.add_argument("--rtt", default="0,40", help="round trips to add to the network's own, in ms")
+        command.add_argument("--mbit", type=float, default=0)
+        command.add_argument("--only", help="comma-separated scenario prefixes")
+        command.add_argument("--port", type=int, default=22322)
+        command.add_argument("--timeout", type=int, default=900)
     comparison = commands.add_parser("compare")
     comparison.add_argument("files", nargs="+")
     args = parser.parse_args()
-    {"run": run, "inside-fixture": inside_fixture, "compare": compare}[args.command](args)
+    {"run": run, "inside-fixture": inside_fixture, "device": device, "inside-device-fixture": inside_device_fixture, "compare": compare}[args.command](args)
 
 
 if __name__ == "__main__":

@@ -81,11 +81,14 @@ final class PerformanceBenchmarkTests: XCTestCase {
     // MARK: - The real transport against OpenSSH
 
     func testTransport() async throws {
-        guard let dir = environment["REMOTEFILES_SFTP_FIXTURE"], let port = Int(environment["REMOTEFILES_SFTP_PORT"] ?? ""),
-              let user = environment["REMOTEFILES_SFTP_USER"] else {
+        // A physical device can't reach the fixture's files, so it is handed the keys it needs instead.
+        let dir = environment["REMOTEFILES_SFTP_FIXTURE"], handedKey = environment["REMOTEFILES_BENCHMARK_PRIVATE_KEY"]
+        guard dir != nil || handedKey != nil, let port = Int(environment["REMOTEFILES_SFTP_PORT"] ?? ""),
+              handedKey != nil || environment["REMOTEFILES_SFTP_USER"] != nil else {
             throw XCTSkip("Needs the OpenSSH fixture")
         }
-        let root = try environment["REMOTEFILES_BENCHMARK_ROOT"] ?? Self.makeSmokeTree(in: dir)
+        let user = environment["REMOTEFILES_SFTP_USER"] ?? NSUserName()
+        let root = try environment["REMOTEFILES_BENCHMARK_ROOT"] ?? Self.makeSmokeTree(in: dir ?? "")
         let recorder = BenchmarkRecorder(label: environment["REMOTEFILES_BENCHMARK_LABEL"] ?? "unlabelled")
         let host = environment["REMOTEFILES_SFTP_HOST"] ?? "127.0.0.1"
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -94,14 +97,19 @@ final class PerformanceBenchmarkTests: XCTestCase {
         let identity = IdentityStore(secretStore: BenchmarkSecrets())
         let metadata = try MetadataStore(fileURL: folder.appendingPathComponent("metadata.json"))
         let trust = try HostTrustStore(fileURL: folder.appendingPathComponent("trust.json"))
-        let key = try await identity.generate(name: "Benchmark")
-        let keys = try FileHandle(forWritingTo: URL(fileURLWithPath: dir + "/authorized_keys"))
-        try keys.seekToEnd(); try keys.write(contentsOf: Data((key.publicKey + "\n").utf8)); try keys.close()
+        let key: IdentityMetadata
+        if let handedKey {
+            key = try await identity.importKey(name: "Benchmark", openSSH: handedKey)
+        } else {
+            key = try await identity.generate(name: "Benchmark")
+            let keys = try FileHandle(forWritingTo: URL(fileURLWithPath: (dir ?? "") + "/authorized_keys"))
+            try keys.seekToEnd(); try keys.write(contentsOf: Data((key.publicKey + "\n").utf8)); try keys.close()
+        }
         let profile = ConnectionProfile(name: "Benchmark", host: host, port: port, username: user,
                                         identityID: key.id, startingDirectory: root)
         var value = AppMetadata(); value.identities = [key]; value.connections = [profile]
         try await metadata.save(value)
-        let hostKey = try String(contentsOfFile: dir + "/host.pub", encoding: .utf8)
+        let hostKey = try environment["REMOTEFILES_BENCHMARK_HOST_KEY"] ?? String(contentsOfFile: (dir ?? "") + "/host.pub", encoding: .utf8)
         try await trust.trustUnknown(endpoint: HostEndpoint(host: host, port: port),
                                      key: HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: hostKey)))
         func service() -> SFTPRemoteFileService {
@@ -165,7 +173,8 @@ final class PerformanceBenchmarkTests: XCTestCase {
         if measuring, selected("list.100000") {
             // Over the listing limit before this work: the time to the answer, whatever the answer is.
             try await recorder.timeAsync("list.100000", runs: min(runs, 3), tolerateFailure: true) {
-                blackHole(try await warm.listDirectory(profile: profile, path: root + "/d100000").entries.count)
+                let count = try await warm.listDirectory(profile: profile, path: root + "/d100000").entries.count
+                recorder.add("list.100000.entries", value: Double(count), unit: "entries")
             }
             try await recorder.peakFootprint("list.100000.peakMB", runs: 1) {
                 blackHole((try? await warm.listDirectory(profile: profile, path: root + "/d100000").entries.count) ?? 0)

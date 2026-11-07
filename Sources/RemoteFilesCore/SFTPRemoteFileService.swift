@@ -190,8 +190,8 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     static let directoryReadWindow = 16
     /// A walk lists many small folders at once, so each sends fewer surplus requests.
     static let walkReadWindow = 8
-    /// Entries a listing may hold before it fails. Each one held here costs about 180 bytes plus its
-    /// name and path, so even a full listing stays far below what the system allows the app.
+    /// Entries a listing may hold before it fails. A folder's rows take roughly 200 bytes an entry,
+    /// so even a full listing stays far below what the system allows the app.
     static let directoryEntryLimit = 250_000
     /// Decoded names, longnames and attributes that the same listing may hold in total.
     static let directoryMetadataLimit = 128 * 1024 * 1024

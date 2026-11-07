@@ -34,6 +34,7 @@ For a closer look at specific behavior, see [rich Markdown](MARKDOWN_RENDERING.m
 
 - [Project status](../PREVIEW_STATUS.md) records dated build and acceptance results; [roadmap](../ROADMAP.md) describes deferred work.
 - [SSH transport investigation](SSH_SPIKE.md) and [renderer investigation](RENDERER_SPIKE.md) document earlier dependency choices and their verification.
+- [Performance](PERFORMANCE.md): what limits each operation, measured results and how to benchmark a change.
 - [Reader performance](READER_PERFORMANCE.md) and [Markdown viewport rendering](markdown-viewport-rendering.md) explain specific performance and layout work.
 - [Citadel local maintenance and optional release migration](CITADEL_UPSTREAM.md).
 - Vendored dependency provenance: [Citadel](../Vendor/Citadel/UPSTREAM.md) and [Textual](../Vendor/Textual/UPSTREAM.md).

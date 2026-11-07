@@ -1468,6 +1468,31 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertEqual(metrics.sftpChannels, 1, "No close failed, so the first channel stayed in use")
     }
 
+    /// A very large folder may outlast one deadline, but only while replies keep coming.
+    func testDeadlineWaitsWhileAnOperationIsStillReceivingAndNotAfter() async throws {
+        let progress = DeadlineExtension(), started = ContinuousClock.now
+        let kept = try await SFTPRemoteFileService.detachedDeadline(seconds: 1, extending: progress, onTimeout: { XCTFail("Replies kept coming") }) { () -> Int in
+            for _ in 0..<12 {
+                try await Task.sleep(for: .milliseconds(200))
+                progress.record()
+            }
+            return 7
+        }
+        XCTAssertEqual(kept, 7)
+        XCTAssertGreaterThan(started.duration(to: .now), .seconds(2), "Well past one deadline")
+
+        let stalled = DeadlineExtension(), fired = LockedCount()
+        do {
+            _ = try await SFTPRemoteFileService.detachedDeadline(seconds: 1, extending: stalled, onTimeout: { fired.increment() }) { () -> Int in
+                stalled.record()
+                try await Task.sleep(for: .seconds(60))
+                return 0
+            }
+            XCTFail("Replies stopped, so the deadline must fire")
+        } catch RemoteFileError.timedOut {}
+        XCTAssertEqual(fired.value, 1)
+    }
+
     func testListingHandsOverPartialRowsAndCompletes() async throws {
         let fixture = try Fixture()
         let stores = try Stores(fixture: fixture)
@@ -2451,4 +2476,11 @@ private final class PartialSnapshots: @unchecked Sendable {
     private var stored: [DirectorySnapshot] = []
     var values: [DirectorySnapshot] { lock.lock(); defer { lock.unlock() }; return stored }
     func add(_ value: DirectorySnapshot) { lock.lock(); stored.append(value); lock.unlock() }
+}
+
+private final class LockedCount: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = 0
+    var value: Int { lock.lock(); defer { lock.unlock() }; return stored }
+    func increment() { lock.lock(); stored += 1; lock.unlock() }
 }

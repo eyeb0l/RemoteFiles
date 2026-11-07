@@ -10,6 +10,7 @@ def main():
     p.add_argument("--target", type=int, required=True)
     p.add_argument("--rtt-ms", type=float, required=True)
     p.add_argument("--mbit", type=float, default=0, help="per-direction bandwidth cap; 0 = unlimited")
+    p.add_argument("--bind", default="127.0.0.1", help="address to listen on; a physical device needs the Mac's LAN address")
     a = p.parse_args()
     delay, rate = a.rtt_ms / 2000.0, a.mbit * 125_000  # bytes per second
 
@@ -43,7 +44,7 @@ def main():
         await asyncio.gather(pipe(client_reader, server_writer), pipe(server_reader, client_writer), return_exceptions=True)
 
     async def serve():
-        server = await asyncio.start_server(handle, "127.0.0.1", a.listen)
+        server = await asyncio.start_server(handle, a.bind, a.listen)
         print(f"proxy ready {a.listen} -> {a.target} rtt={a.rtt_ms}ms mbit={a.mbit or 'unlimited'}", flush=True)
         async with server: await server.serve_forever()
     asyncio.run(serve())
