@@ -46,11 +46,11 @@ final class ServerFolderSearchTests: XCTestCase {
     }
 
     private func response(candidates: [[String: Any]], root: String = "/r", overrides: [String: Any] = [:]) throws -> Data {
-        var result: [String: Any] = ["version": 1, "root": root, "candidates": candidates,
+        var result: [String: Any] = ["version": 2, "root": root, "candidates": candidates,
             "folders": 1, "unreadableFolders": 0, "deepFolders": 0, "files": 0,
-            "skippedFiles": 0, "unreadableFiles": 0, "bytes": 0, "charged": 0]
+            "skippedFiles": 0, "unreadableFiles": 0, "bytes": 0, "charged": 0, "final": true]
         result.merge(overrides) { _, new in new }
-        return try JSONSerialization.data(withJSONObject: result)
+        return try JSONSerialization.data(withJSONObject: result) + Data("\n".utf8)
     }
 
     private func candidate(_ path: String, text: String? = nil) -> [String: Any] {
@@ -90,6 +90,131 @@ final class ServerFolderSearchTests: XCTestCase {
         }
         XCTAssertThrowsError(try ServerFolderSearch.command(query: "x", root: "/r", includeHidden: false,
             limits: .init(), content: .init(maxFiles: 501)), "Custom limits must not be silently tightened")
+    }
+
+    private func outputDecoder(query: String = "needle", limits: RemoteFolderSearch.Limits = .init(),
+                               content: RemoteFolderSearch.ContentLimits? = nil) -> ServerFolderSearch.OutputDecoder {
+        ServerFolderSearch.OutputDecoder(query: query, root: "/r", includeHidden: false, limits: limits, content: content)
+    }
+
+    func testLinesReportMatchesAsTheyArriveHoweverTheyAreSplit() throws {
+        let first = try response(candidates: [candidate("/r/needle-1")], overrides: ["final": false])
+        let second = try response(candidates: [candidate("/r/deep/needle-2")], overrides: ["folders": 2, "final": false])
+        let last = try response(candidates: [candidate("/r/deep/needle-3")], overrides: ["folders": 3])
+        let output = first + second + last
+        for size in [1, 3, 17, output.count] {
+            var decoder = outputDecoder()
+            var names: [String] = [], reports = 0
+            var offset = 0
+            while offset < output.count {
+                let end = min(offset + size, output.count)
+                for update in try decoder.consume(output[offset..<end]) {
+                    names += update.matches.map(\.name); reports += 1
+                    XCTAssertFalse(update.isFinished)
+                }
+                offset = end
+            }
+            let final = try decoder.finish()
+            XCTAssertEqual(reports, 2)
+            XCTAssertEqual(names, ["needle-1", "needle-2"])
+            XCTAssertEqual(final.matches.map(\.name), ["needle-3"])
+            XCTAssertEqual(final.foldersSearched, 3)
+            XCTAssertTrue(final.isFinished)
+        }
+    }
+
+    func testOutputWithoutAFinalLineOrWithAnythingAfterItIsRejected() throws {
+        var unfinished = outputDecoder()
+        _ = try unfinished.consume(try response(candidates: [candidate("/r/needle")], overrides: ["final": false]))
+        XCTAssertThrowsError(try unfinished.finish(), "A helper that dies part way isn't a finished search")
+        var cut = outputDecoder()
+        _ = try cut.consume(try response(candidates: []).dropLast(5))
+        XCTAssertThrowsError(try cut.finish())
+        var after = outputDecoder()
+        XCTAssertThrowsError(try after.consume(try response(candidates: []) + response(candidates: [candidate("/r/needle")])))
+        var version = outputDecoder()
+        XCTAssertThrowsError(try version.consume(try response(candidates: [], overrides: ["version": 1])))
+    }
+
+    func testLimitsAndDuplicatesHoldAcrossLines() throws {
+        let line = { (path: String) in try self.response(candidates: [self.candidate(path)], overrides: ["final": false]) }
+        var duplicate = outputDecoder()
+        _ = try duplicate.consume(try line("/r/needle"))
+        XCTAssertThrowsError(try duplicate.consume(try line("/r/needle")))
+        // One folder's two spellings of a name are two files on the server.
+        var spellings = outputDecoder(query: "caf")
+        _ = try spellings.consume(try line("/r/caf\u{E9}"))
+        XCTAssertNoThrow(try spellings.consume(try line("/r/cafe\u{301}")))
+        var many = outputDecoder(query: "zz")
+        let thousands = try response(candidates: (0..<(ServerFolderSearch.candidateLimit / 2 + 1)).map { candidate("/r/needle-\($0)") }, overrides: ["final": false])
+        _ = try many.consume(thousands)
+        let more = try response(candidates: (0..<(ServerFolderSearch.candidateLimit / 2 + 1)).map { candidate("/r/other-\($0)") }, overrides: ["final": false])
+        XCTAssertThrowsError(try many.consume(more), "The candidate limit covers the whole output")
+        var bytes = outputDecoder(query: "x", content: .init())
+        let text = "x"
+        _ = try bytes.consume(try response(candidates: [candidate("/r/a.txt", text: text)], overrides: ["files": 1, "bytes": 1, "charged": 1, "final": false]))
+        XCTAssertThrowsError(try bytes.consume(try response(candidates: [candidate("/r/b.txt", text: text)], overrides: ["files": 2, "bytes": 1, "charged": 1, "final": false])),
+                             "Bytes delivered can't exceed what the helper says it read, over all lines")
+    }
+
+    func testMatchLimitStopsListeningOnceExceededAndKeepsWhatTheLastLineFound() throws {
+        var decoder = outputDecoder(limits: .init(maxMatches: 2))
+        let output = try response(candidates: [candidate("/r/needle-1"), candidate("/r/needle-2")], overrides: ["final": false])
+            + response(candidates: [candidate("/r/needle-3")], overrides: ["folders": 2, "final": false])
+            + response(candidates: [candidate("/r/needle-4")], overrides: ["folders": 3])
+        var names: [String] = []
+        for update in try decoder.consume(output) { names += update.matches.map(\.name) }
+        XCTAssertEqual(names, ["needle-1", "needle-2"])
+        XCTAssertTrue(decoder.isAtMatchLimit)
+        let final = try decoder.finish()
+        XCTAssertEqual(final.stop, .matchLimit)
+        XCTAssertTrue(final.isFinished)
+        XCTAssertTrue(final.matches.isEmpty)
+
+        // The final line itself crossing the limit keeps the matches that fit.
+        var ending = outputDecoder(limits: .init(maxMatches: 2))
+        let found = try ending.consume(try response(candidates: [candidate("/r/needle-1"), candidate("/r/needle-2"), candidate("/r/needle-3")]))
+        XCTAssertTrue(found.isEmpty)
+        let last = try ending.finish()
+        XCTAssertEqual(last.matches.map(\.name), ["needle-1", "needle-2"])
+        XCTAssertEqual(last.stop, .matchLimit)
+
+        // Reaching the limit exactly isn't stopping early.
+        var exact = outputDecoder(limits: .init(maxMatches: 1))
+        _ = try exact.consume(try response(candidates: [candidate("/r/needle-1")]))
+        XCTAssertFalse(exact.isAtMatchLimit)
+        XCTAssertNil(try exact.finish().stop)
+    }
+
+    func testAWalkAfterAServerGivesUpPartWayRepeatsNothingAndCountsWhatItFound() async throws {
+        for (name, limit, expected) in [("no limit", 500, ["/r/needle-1.txt", "/r/needle-2.txt", "/r/needle-3.txt"]),
+                                        ("limit counts what was delivered", 2, ["/r/needle-1.txt", "/r/needle-2.txt"])] {
+            let service = SearchCapabilityService(available: false, partialPaths: ["/r/needle-1.txt"],
+                                                  listed: ["/r/needle-1.txt", "/r/needle-2.txt", "/r/needle-3.txt"])
+            var matches: [String] = [], finished = 0
+            for try await update in RemoteFolderSearch.names(matching: "needle", below: "/r", profile: profile, service: service,
+                                                             includeHidden: false, limits: .init(maxMatches: limit)) {
+                matches += update.matches.map(\.path)
+                if update.isFinished { finished += 1 }
+            }
+            XCTAssertEqual(matches, expected, name)
+            XCTAssertEqual(finished, 1, name)
+        }
+    }
+
+    func testAPartialReportIsKeptWhenTheServerThenFails() async throws {
+        let service = SearchCapabilityService(available: false, failure: .connectionEnded, partialPaths: ["/r/needle-1.txt"])
+        var matches: [String] = []
+        do {
+            for try await update in RemoteFolderSearch.names(matching: "needle", below: "/r", profile: profile,
+                                                             service: service, includeHidden: false) {
+                matches += update.matches.map(\.path)
+            }
+            XCTFail("Transport errors must surface")
+        } catch { XCTAssertTrue(error is RemoteFileError) }
+        XCTAssertEqual(matches, ["/r/needle-1.txt"])
+        let counts = await service.counts
+        XCTAssertEqual(counts.listings, 0)
     }
 
     func testContentCandidatesKeepLiteralUnicodeSnippetsAndBinaryPolicy() throws {
@@ -144,6 +269,12 @@ final class ServerFolderSearchTests: XCTestCase {
     private func runHelper(root: String, query: String, hidden: Bool = false,
                            limits: RemoteFolderSearch.Limits = .init(), content: RemoteFolderSearch.ContentLimits? = nil,
                            handleRoot: String? = nil, provideHandle: Bool = true) throws -> RemoteFolderSearch.Update {
+        let data = try helperOutput(root: root, query: query, content: content, hidden: hidden, limits: limits, handleRoot: handleRoot, provideHandle: provideHandle)
+        return try ServerFolderSearch.decode(data, query: query, root: root, includeHidden: hidden, limits: limits, content: content)
+    }
+
+    private func helperOutput(root: String, query: String, content: RemoteFolderSearch.ContentLimits? = nil, hidden: Bool = false,
+                              limits: RemoteFolderSearch.Limits = .init(), handleRoot: String? = nil, provideHandle: Bool = true) throws -> Data {
         let helper = try ServerFolderSearch.command(query: query, root: root, includeHidden: hidden, limits: limits, content: content,
                                                      rootHandle: provideHandle ? "/dev/fd/9" : nil)
         let command = "exec 9<" + ServerFolderSearch.quote(handleRoot ?? root) + "; " + helper
@@ -154,7 +285,7 @@ final class ServerFolderSearchTests: XCTestCase {
         let data = output.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         XCTAssertEqual(process.terminationStatus, 0, String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
-        return try ServerFolderSearch.decode(data, query: query, root: root, includeHidden: hidden, limits: limits, content: content)
+        return data
     }
 
     private func fixture() throws -> URL {
@@ -187,6 +318,47 @@ final class ServerFolderSearchTests: XCTestCase {
         let injection = try runHelper(root: root.path, query: "';$(touch INJECTION)\n", content: .init())
         XCTAssertTrue(injection.contentMatches.isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("INJECTION").path))
+    }
+
+    func testHelperWritesAsItGoesAndEveryLineStandsAlone() throws {
+        let root = try fixture()
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("sub/deeper"), withIntermediateDirectories: true)
+        for index in 0..<40 { try Data("needle \(index)".utf8).write(to: root.appendingPathComponent("sub/deeper/needle-\(index).txt")) }
+        let output = try helperOutput(root: root.path, query: "needle", content: .init())
+        let lines = output.split(separator: UInt8(ascii: "\n"))
+        XCTAssertGreaterThan(lines.count, 1, "The first results don't wait for the rest")
+        let decoded = try lines.map { try JSONDecoder().decode(ServerFolderSearch.Response.self, from: Data($0)) }
+        XCTAssertEqual(decoded.filter(\.final).count, 1)
+        XCTAssertTrue(try XCTUnwrap(decoded.last).final)
+        XCTAssertEqual(Set(decoded.flatMap(\.candidates).map(\.path)).count, decoded.flatMap(\.candidates).count, "No candidate twice")
+    }
+
+    func testHelperTreatsAFilesTypeAsTheDirectoryReportsIt() throws {
+        let root = try fixture()
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("needle-folder"), withIntermediateDirectories: true)
+        try Data("needle".utf8).write(to: root.appendingPathComponent("needle-folder/inner-needle.txt"))
+        let names = try runHelper(root: root.path, query: "needle")
+        XCTAssertEqual(names.matches.first { $0.name == "needle-folder" }?.kind, .directory)
+        XCTAssertEqual(names.matches.first { $0.name == "needle-link" }?.kind, .symlink)
+        XCTAssertEqual(names.matches.first { $0.name == "needle-2.txt" }?.kind, .file)
+        XCTAssertTrue(names.matches.contains { $0.name == "inner-needle.txt" })
+        XCTAssertNotNil(names.matches.first { $0.name == "needle-2.txt" }?.size)
+    }
+
+    func testHelperFindsTheSameBinaryFilesAsCheckingEveryByte() throws {
+        let root = try fixture()
+        for byte in UInt8(0)...UInt8(255) {
+            try (Data("needle ".utf8) + Data([byte])).write(to: root.appendingPathComponent("byte-\(byte).txt"))
+        }
+        let result = try helperOutput(root: root.path, query: "needle", content: .init(), hidden: false)
+        let paths = Set(result.split(separator: UInt8(ascii: "\n")).flatMap { line -> [String] in
+            ((try? JSONDecoder().decode(ServerFolderSearch.Response.self, from: Data(line)))?.candidates ?? []).map(\.path)
+        })
+        for byte in UInt8(0)...UInt8(127) {
+            // Bytes above ASCII here aren't valid UTF-8, so those files don't count as text.
+            let isControl = (byte < 32 && ![9, 10, 13].contains(byte)) || byte == 127
+            XCTAssertEqual(paths.contains(root.appendingPathComponent("byte-\(byte).txt").path), !isControl, "Byte \(byte)")
+        }
     }
 
     func testHelperNeverReturnsTheContentsOfCertificateFilesEvenHidden() throws {
@@ -275,13 +447,21 @@ private actor SearchCapabilityService: RemoteFileService, ServerFolderSearching 
     let available: Bool
     let failure: RemoteFileError?
     let delay: Duration
+    let partialPaths: [String]
+    let listed: [String]
     var counts = (attempts: 0, listings: 0)
-    init(available: Bool, failure: RemoteFileError? = nil, delay: Duration = .zero) {
-        self.available = available; self.failure = failure; self.delay = delay
+    init(available: Bool, failure: RemoteFileError? = nil, delay: Duration = .zero, partialPaths: [String] = [], listed: [String] = ["/r/needle.txt"]) {
+        self.available = available; self.failure = failure; self.delay = delay; self.partialPaths = partialPaths; self.listed = listed
     }
     func searchFolders(query: String, root: String, profile: ConnectionProfile, includeHidden: Bool,
-                       limits: RemoteFolderSearch.Limits, content: RemoteFolderSearch.ContentLimits?) async throws -> RemoteFolderSearch.Update? {
+                       limits: RemoteFolderSearch.Limits, content: RemoteFolderSearch.ContentLimits?,
+                       partial: @escaping @Sendable (RemoteFolderSearch.Update) -> Void) async throws -> RemoteFolderSearch.Update? {
         counts.attempts += 1
+        if !partialPaths.isEmpty {
+            var update = RemoteFolderSearch.Update()
+            update.matches = partialPaths.map { RemoteEntry(name: RemotePath.name(of: $0), path: $0, kind: .file) }
+            partial(update)
+        }
         if delay > .zero { try await Task.sleep(for: delay) }
         if let failure { throw failure }
         guard available else { return nil }
@@ -292,7 +472,7 @@ private actor SearchCapabilityService: RemoteFileService, ServerFolderSearching 
     }
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
         counts.listings += 1
-        return .init(path: path, entries: [RemoteEntry(name: "needle.txt", path: "/r/needle.txt", kind: .file)])
+        return .init(path: path, entries: listed.map { RemoteEntry(name: RemotePath.name(of: $0), path: $0, kind: .file) })
     }
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
     func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.unsupportedFile }

@@ -110,13 +110,28 @@ public enum RemoteFolderSearch {
                                collect: ((SearchIndexDocument) -> Void)? = nil,
                                reusable: ((RemoteEntry) -> SearchIndexDocument?)? = nil, report: (Update) -> Void) async throws {
         try Task.checkCancellation()
+        // Paths already reported if the server gives up part way, which the walk then doesn't repeat.
+        var delivered = Set<Data>()
         if options == SearchQueryOptions(), extraction == SearchExtractionOptions(), collect == nil,
-           let server = service as? any ServerFolderSearching,
-           let update = try await server.searchFolders(query: query, root: root, profile: profile,
-                                                       includeHidden: includeHidden, limits: limits, content: content) {
-            try Task.checkCancellation()
-            report(update)
-            return
+           let server = service as? any ServerFolderSearching {
+            let (partials, sink) = AsyncStream.makeStream(of: Update.self)
+            let running = Task {
+                defer { sink.finish() }
+                return try await server.searchFolders(query: query, root: root, profile: profile, includeHidden: includeHidden,
+                                                      limits: limits, content: content, partial: { sink.yield($0) })
+            }
+            await withTaskCancellationHandler {
+                for await partial in partials {
+                    delivered.formUnion(partial.matches.map { Data($0.path.utf8) })
+                    delivered.formUnion(partial.contentMatches.map { Data($0.entry.path.utf8) })
+                    report(partial)
+                }
+            } onCancel: { running.cancel() }
+            if let update = try await running.value {
+                try Task.checkCancellation()
+                report(update)
+                return
+            }
         }
         try Task.checkCancellation()
         let deadline = ContinuousClock.now + limits.timeLimit
@@ -125,7 +140,7 @@ public enum RemoteFolderSearch {
         // folders always come first and count first towards the match limit.
         var started = 0, reported = 0, running = 0
         var finished: [Int: Result<DirectorySnapshot, Error>] = [:], retried: Set<Int> = []
-        var progress = Update(), matched = 0
+        var progress = Update(), matched = delivered.count
         var pacing = ListingPacing(limits: limits)
         let walker = service as? any FolderWalking
         let list: @Sendable (Int, String) async -> Listing = { index, path in
@@ -191,13 +206,14 @@ public enum RemoteFolderSearch {
                             else { progress.skippedDeepFolders += 1 }
                         }
                         if let content {
-                            try await scan(visible, query: query, root: root, profile: profile,
+                            let unreported = delivered.isEmpty ? visible : visible.filter { !delivered.contains(Data($0.path.utf8)) }
+                            try await scan(unreported, query: query, root: root, profile: profile,
                                 service: service, limits: content, matchLimit: limits.maxMatches, deadline: deadline,
                                 matched: &matched, progress: &progress, options: options, extraction: extraction, collect: collect,
                                 reusable: reusable, report: report)
                             if matched >= limits.maxMatches, reported < queue.count { progress.stop = .matchLimit }
                         } else {
-                            let found = visible.filter { options.accepts($0) && options.range(in: $0.name, query: query) != nil }
+                            let found = visible.filter { options.accepts($0) && options.range(in: $0.name, query: query) != nil && !delivered.contains(Data($0.path.utf8)) }
                             let kept = found.prefix(max(0, limits.maxMatches - matched))
                             matched += kept.count
                             update.matches = Array(kept)

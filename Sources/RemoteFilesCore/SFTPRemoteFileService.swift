@@ -45,56 +45,29 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     func setProgressInterval(_ interval: Duration) { progressInterval = interval }
 
     func searchFolders(query: String, root: String, profile: ConnectionProfile, includeHidden: Bool,
-                       limits: RemoteFolderSearch.Limits, content: RemoteFolderSearch.ContentLimits?) async throws -> RemoteFolderSearch.Update? {
+                       limits: RemoteFolderSearch.Limits, content: RemoteFolderSearch.ContentLimits?,
+                       partial: @escaping @Sendable (RemoteFolderSearch.Update) -> Void) async throws -> RemoteFolderSearch.Update? {
         do {
             _ = try ServerFolderSearch.command(query: query, root: root, includeHidden: includeHidden,
                                                      limits: limits, content: content)
         } catch ServerFolderSearch.Failure.unsupported { return nil }
         let session = try await session(for: profile)
         guard !session.serverSearchUnavailable else { return nil }
-        // Canonical strings alone cannot bind SFTP and exec namespaces. The dedicated SFTP
-        // channel below pins the directory while the helper verifies its kernel mount/inode identity.
-        let canonical = try await perform(session: session) { sftp in
-            try await sftp.getRealPath(atPath: Self.validated(root))
-        }
-        guard canonical.utf8.elementsEqual(root.utf8) else { throw RemoteDocumentLinkError.outsideConnection }
         measurements.serverSearchAttempts += 1
         do {
             let timeout = UInt64(limits.timeLimit.components.seconds + 1) + timeoutSeconds
-            let output = try await performOnDedicatedChannel(session: session, timeout: timeout) { sftp in
-                let proc = try await sftp.getRealPath(atPath: "/proc/self")
-                guard Self.searchProcessPath(proc) else { throw ServerFolderSearch.Failure.unsupported }
-                let namespace = try await sftp.readSymbolicLink(atPath: proc + "/ns/mnt")
-                let before = try await Self.searchDescriptors(sftp: sftp, process: proc)
-                let directory = try await sftp.openFile(filePath: root, flags: .read)
-                do {
-                    let after = try await Self.searchDescriptors(sftp: sftp, process: proc)
-                    let handle = try Self.searchRootHandle(process: proc, root: root, before: before, after: after)
-                    let info = try await sftp.openFile(filePath: handle.replacingOccurrences(of: "/fd/", with: "/fdinfo/"), flags: .read)
-                    let bytes: Data
-                    do {
-                        let read = try await BoundedPreviewReader.read(initialSize: nil, limit: 4096) { offset, amount in
-                            try await info.read(from: offset, length: amount)
-                        }
-                        bytes = read.0
-                        try await info.close()
-                    } catch { try? await info.close(); throw error }
-                    let identity = try ServerFolderSearch.RootIdentity(fdinfo: String(decoding: bytes, as: UTF8.self), namespace: namespace)
-                    let command = try ServerFolderSearch.command(query: query, root: root, includeHidden: includeHidden,
-                        limits: limits, content: content, identity: identity)
-                    let output = try await Self.executeSearchCommand(client: session.client, command: command, timeout: timeout)
-                    try await directory.close()
-                    return output
-                } catch {
-                    try? await directory.close()
-                    throw error
-                }
+            let (update, bytes) = try await performOnDedicatedChannel(session: session, timeout: timeout, closesInBackground: true) { sftp in
+                let identity = try await Self.searchIdentity(root: root, sftp: sftp)
+                // The root stays held until the helper has finished with it.
+                defer { _ = identity.directory.sendClose() }
+                let command = try ServerFolderSearch.command(query: query, root: root, includeHidden: includeHidden,
+                    limits: limits, content: content, identity: identity.value)
+                let decoder = ServerFolderSearch.OutputDecoder(query: query, root: root, includeHidden: includeHidden, limits: limits, content: content)
+                return try await Self.streamSearchCommand(client: session.client, command: command, timeout: timeout, decoder: decoder, partial: partial)
             }
             try Task.checkCancellation()
             guard session.client.isConnected else { throw RemoteFileError.connectionEnded }
-            measurements.bytesReceived += output.readableBytes
-            let update = try ServerFolderSearch.decode(Data(output.readableBytesView), query: query, root: root,
-                                                       includeHidden: includeHidden, limits: limits, content: content)
+            measurements.bytesReceived += bytes
             measurements.serverSearchOperations += 1
             return update
         } catch {
@@ -103,6 +76,8 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
             // Failed capability checks are remembered only for this authenticated session.
             // Connection loss, deadlines and trust errors are never disguised as unsupported search.
             switch error {
+            case let failure as SearchRootFailure:
+                throw Self.mapped(failure.underlying) // About this folder, not about what the server can do.
             case ServerFolderSearch.Failure.resourceLimit, CitadelError.commandOutputTooLarge:
                 return nil // A narrower subsequent search can still use this capable server.
             case is ServerFolderSearch.Failure, is SSHClient.CommandFailed, is TTYSTDError:
@@ -139,45 +114,116 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         return process + "/fd/" + descriptor.key
     }
 
-    /// The channel is private to this search. Resolve only descriptors that remain open after
-    /// READDIR closes its own handle; the sole new descriptor must be the requested directory.
-    nonisolated private static func searchDescriptors(sftp: SFTPClient, process: String) async throws -> [String: String] {
-        let entries = try await sftp.listDirectory(atPath: process + "/fd", resolvingPath: false)
-            .flatMap(\.components).map(\.filename).filter { !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }
-        guard entries.count <= 128 else { throw ServerFolderSearch.Failure.unsupported }
+    /// Descriptors looked for around the search root's OPEN, by number. The kernel gives out the lowest free
+    /// number, so a server with more than this many open can't show a new one and falls back to the walk.
+    static let searchDescriptorScan = 32
+
+    /// Canonical strings alone cannot bind SFTP and exec namespaces. This private channel opens the search
+    /// root and holds it, which pins its inode, and reads the kernel's mount and inode for that descriptor
+    /// through its own procfs entries, so the helper can check it is looking at the same directory.
+    ///
+    /// Requests go together wherever nothing depends on an earlier answer: four round trips, where asking in
+    /// turn took about thirty. Answers are still judged in the order that makes them safe, and a server that
+    /// answers out of order can only fail the "one new descriptor" check, which falls back to the walk.
+    nonisolated private static func searchIdentity(root: String, sftp: SFTPClient) async throws
+        -> (value: ServerFolderSearch.RootIdentity, directory: SFTPFile) {
+        let rootPath = sftp.sendRealPath(atPath: try validated(root))
+        let processPath = sftp.sendRealPath(atPath: "/proc/self")
+        do {
+            guard try await rootPath.get().utf8.elementsEqual(root.utf8) else { throw RemoteDocumentLinkError.outsideConnection }
+        } catch { throw SearchRootFailure(underlying: error) }
+        let process = try await processPath.get()
+        guard searchProcessPath(process) else { throw ServerFolderSearch.Failure.unsupported }
+        // The scans sit either side of OPEN, so the only descriptor that can appear between them is the root's.
+        let namespace = sftp.sendReadSymbolicLink(atPath: process + "/ns/mnt")
+        let scan = { (0..<searchDescriptorScan).map { ("\($0)", sftp.sendReadSymbolicLink(atPath: process + "/fd/\($0)")) } }
+        let scanBefore = scan()
+        let opening = sftp.sendOpenFile(filePath: root, flags: .read)
+        let scanAfter = scan()
+        let directory = try await opening.get()
+        do {
+            let mountNamespace = try await namespace.get()
+            let handle = try searchRootHandle(process: process, root: root, before: await searchDescriptors(scanBefore),
+                                              after: await searchDescriptors(scanAfter))
+            // READLINK proved the descriptor is live; REALPATH must agree on where it leads.
+            let target = sftp.sendRealPath(atPath: handle)
+            let openingInfo = sftp.sendOpenFile(filePath: handle.replacingOccurrences(of: "/fd/", with: "/fdinfo/"), flags: .read)
+            guard try await target.get().utf8.elementsEqual(root.utf8) else { throw ServerFolderSearch.Failure.unsupported }
+            let info = try await openingInfo.get()
+            defer { _ = info.sendClose() }
+            // One read. The helper compares these numbers with the kernel's, so a shorter answer can't pass.
+            let bytes = try await info.read(from: 0, length: 4_096)
+            let identity = try ServerFolderSearch.RootIdentity(fdinfo: String(buffer: bytes), namespace: mountNamespace)
+            return (identity, directory)
+        } catch {
+            _ = directory.sendClose()
+            throw error
+        }
+    }
+
+    /// Open file descriptors and where they lead. Pipes and sockets have no path, so they can't be a root.
+    nonisolated private static func searchDescriptors(_ scan: [(String, EventLoopFuture<String>)]) async throws -> [String: String] {
         var descriptors: [String: String] = [:]
-        for entry in entries {
+        for (number, link) in scan {
             do {
-                let path = process + "/fd/" + entry
-                // OpenSSH REALPATH permits a missing final component. READLINK must first prove
-                // this descriptor still exists after READDIR closed its temporary handle.
-                let target = try await sftp.readSymbolicLink(atPath: path)
-                guard target.hasPrefix("/") else { continue } // Pipes/sockets are not directory roots.
-                descriptors[entry] = try await sftp.getRealPath(atPath: path)
-            }
-            catch {
-                // READDIR's descriptor has already closed; pipes and sockets have no real path.
-                let mapped = Self.mapped(error)
-                switch mapped {
-                case RemoteFileError.notFound, RemoteFileError.permissionDenied: continue
-                default: throw mapped
+                let target = try await link.get()
+                if target.hasPrefix("/") { descriptors[number] = target }
+            } catch {
+                switch mapped(error) {
+                case RemoteFileError.notFound, RemoteFileError.permissionDenied: continue // Not open, or not ours to see.
+                case let mapped: throw mapped
                 }
             }
         }
         return descriptors
     }
 
+    /// Hands the helper's results on as they arrive. Decoding and matching happen here, off the actor and
+    /// the event loop, so neither browsing nor the channel waits for them. At the match limit it stops listening,
+    /// which ends the helper the next time it writes.
+    nonisolated private static func streamSearchCommand(client: SSHClient, command: String, timeout: UInt64,
+                                                        decoder: ServerFolderSearch.OutputDecoder,
+                                                        partial: @escaping @Sendable (RemoteFolderSearch.Update) -> Void) async throws -> (RemoteFolderSearch.Update, Int) {
+        // Unbuffered in effect: the whole output is capped by `outputLimit`, however fast it comes.
+        let (chunks, sink) = AsyncStream.makeStream(of: ByteBuffer.self)
+        let execution = Task {
+            defer { sink.finish() }
+            _ = try await executeSearchCommand(client: client, command: command, timeout: timeout, onOutput: { sink.yield($0) })
+        }
+        return try await withTaskCancellationHandler {
+            var decoder = decoder, bytes = 0
+            do {
+                for await chunk in chunks {
+                    bytes += chunk.readableBytes
+                    for update in try decoder.consume(chunk.readableBytesView) { partial(update) }
+                    if decoder.isAtMatchLimit {
+                        execution.cancel()
+                        return (try decoder.finish(), bytes)
+                    }
+                }
+                // Exit status, stderr, overflow and deadlines all surface here.
+                try await execution.value
+                return (try decoder.finish(), bytes)
+            } catch {
+                execution.cancel()
+                throw error
+            }
+        } onCancel: { execution.cancel() }
+    }
+
     /// A peer can defer acknowledging channel close until its process exits. Return cancellation
     /// and deadlines immediately while the owned child drains; late-created channels close too.
+    /// With `onOutput`, standard output goes there as it arrives instead of into the result.
     nonisolated static func executeSearchCommand(client: SSHClient, command: String, timeout: UInt64,
                                                  maxResponseSize: Int = ServerFolderSearch.outputLimit,
+                                                 onOutput: (@Sendable (ByteBuffer) -> Void)? = nil,
                                                  onChannelCreated: @escaping @Sendable () -> Void = {}) async throws -> ByteBuffer {
         let control = SocketControl()
         return try await withTaskCancellationHandler {
             defer { control.close() }
             return try await detachedDeadline(seconds: timeout, onTimeout: { control.close() }) {
                 try Task.checkCancellation()
-                return try await client.executeBoundedCommand(command, maxResponseSize: maxResponseSize, onChannelCreated: {
+                return try await client.executeBoundedCommand(command, maxResponseSize: maxResponseSize, onOutput: onOutput, onChannelCreated: {
                     control.install($0); onChannelCreated()
                 })
             }
@@ -826,16 +872,18 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
 
     /// Streaming transfers own a child SFTP channel. Cancelling or timing out closes it, releasing
     /// its handles without delaying browsing requests queued behind bulk reads.
-    private func performOnDedicatedChannel<T: Sendable>(session: LiveSession, timeout: UInt64,
+    private func performOnDedicatedChannel<T: Sendable>(session: LiveSession, timeout: UInt64, closesInBackground: Bool = false,
                                                         operation: @escaping @Sendable (SFTPClient) async throws -> T) async throws -> T {
-        try await performOnDedicatedChannel(session: session, budget: .total(timeout)) { sftp, _ in
+        try await performOnDedicatedChannel(session: session, budget: .total(timeout), closesInBackground: closesInBackground) { sftp, _ in
             try await operation(sftp)
         }
     }
 
     private enum DedicatedChannelBudget { case total(UInt64), idle(Duration) }
 
-    private func performOnDedicatedChannel<T: Sendable>(session: LiveSession, budget: DedicatedChannelBudget,
+    /// `closesInBackground` returns as soon as the operation has what its caller needs, instead of waiting a
+    /// round trip for the channel to close. Only for work that leaves nothing behind that a later write could hit.
+    private func performOnDedicatedChannel<T: Sendable>(session: LiveSession, budget: DedicatedChannelBudget, closesInBackground: Bool = false,
         operation: @escaping @Sendable (SFTPClient, TransferActivity) async throws -> T) async throws -> T {
         let channel = SFTPChannelControl()
         measurements.sftpChannels += 1
@@ -860,10 +908,10 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
             do {
                 try Task.checkCancellation()
                 let value = try await operation(sftp, activity)
-                try await sftp.close()
+                if closesInBackground { Task { try? await sftp.close() } } else { try await sftp.close() }
                 return value
             } catch {
-                try? await sftp.close()
+                if closesInBackground { Task { try? await sftp.close() } } else { try? await sftp.close() }
                 throw error
             }
         }
@@ -1042,6 +1090,9 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
 }
 
 /// Keeps an operation's deadline from expiring while it is still receiving what it asked for.
+/// The search root itself failed: the error belongs to the caller, and says nothing about server search.
+private struct SearchRootFailure: Error { let underlying: Error }
+
 final class DeadlineExtension: @unchecked Sendable {
     private let lock = NSLock()
     private var last: ContinuousClock.Instant?
