@@ -32,7 +32,7 @@ lexical resolution. `..` may reach a parent within that starting directory, but
 cannot leave it. Percent escapes decode exactly once. Unicode and spaces are
 preserved. The target is canonicalized again and must be a regular file within
 the canonical starting directory. Symlinks outside it fail before navigation.
-Markdown, supported UTF-8 text/source, images, PDFs and supported audio/video files are valid destinations.
+Markdown, supported UTF-8 text/source, images, PDFs, supported audio/video files and [certificate files](CERTIFICATE_PREVIEWS.md) are valid destinations.
 
 Linked entries carry their canonical navigation root. Text reads and refreshes
 recheck the target against that root through `readDocumentFile`, so replacing an

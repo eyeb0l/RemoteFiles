@@ -835,8 +835,8 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(nested.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(nested.label.contains("In Reports/2026"), nested.label)
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@ AND label CONTAINS %@", "Weekly review.md,", "In Reports")).firstMatch.exists)
-        let summary = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Searched 6 folders")).firstMatch
-        XCTAssertTrue(summary.waitForExistence(timeout: 10), "Projects, its four folders and Reports/2026; the link to Reports is not followed")
+        let summary = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Searched 7 folders")).firstMatch
+        XCTAssertTrue(summary.waitForExistence(timeout: 10), "Projects, its five folders and Reports/2026; the link to Reports is not followed")
         XCTAssertTrue(summary.isHittable, "The summary stays visible above the keyboard")
         search.typeText("\n")
         let capture = XCTAttachment(screenshot: app.screenshot()); capture.name = "Subfolder search results"; capture.lifetime = .keepAlways; add(capture)

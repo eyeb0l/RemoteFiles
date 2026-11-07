@@ -1,7 +1,10 @@
 import Foundation
 
 public enum DocumentKind: Equatable, Sendable {
-    case markdown, plainText, html, svg, image, pdf, video, audio, unsupported
+    case markdown, plainText, html, svg, image, pdf, video, audio, certificate, protectedCertificate, unsupported
+
+    /// Never text: these have no Source, Find or copy route, and no search reads them.
+    public var isCertificateFile: Bool { self == .certificate || self == .protectedCertificate }
 }
 
 public enum DocumentPreview: Equatable, Sendable {
@@ -28,8 +31,14 @@ public enum DocumentPolicy {
     static let searchExcludedExtensions: Set<String> = [
         "jpg", "jpeg", "png", "heic", "heif", "gif", "tif", "tiff", "webp", "bmp", "pdf",
         "mp4", "m4v", "mov", "3gp", "3g2", "mp3", "m4a", "m4b", "aac", "wav", "wave", "aif",
-        "aiff", "aifc", "caf", "flac", "ac3", "eac3"
+        "aiff", "aifc", "caf", "flac", "ac3", "eac3",
+        "pem", "crt", "cer", "der", "p7b", "p7c", "csr", "p12", "pfx"
     ]
+
+    /// Told apart by their content, since `.cer` and `.crt` are commonly either PEM or DER.
+    static let certificateExtensions: Set<String> = ["pem", "crt", "cer", "der", "p7b", "p7c", "csr"]
+    /// Password-protected PKCS #12 containers, which are never opened.
+    static let protectedCertificateExtensions: Set<String> = ["p12", "pfx"]
 
     public static func kind(filename: String) -> DocumentKind {
         let name = filename.split(separator: "/").last.map(String.init)?.lowercased() ?? ""
@@ -41,6 +50,12 @@ public enum DocumentPolicy {
         if ["mp3", "m4a", "m4b", "aac", "wav", "wave", "aif", "aiff", "aifc", "caf", "flac", "ac3", "eac3"].contains(suffix) { return .audio }
         if suffix == "svg" { return .svg }
         if ["html", "htm"].contains(suffix) { return .html }
+        // Ahead of the dotfile rule, which would otherwise show `.server.pem` as text. A file
+        // that is only named `pem` has no extension, so it stays a text candidate.
+        if name.contains(".") {
+            if certificateExtensions.contains(suffix) { return .certificate }
+            if protectedCertificateExtensions.contains(suffix) { return .protectedCertificate }
+        }
 
         // Extensionless names (including dotfiles) are candidates; byte validation remains mandatory.
         if !name.contains(".") || name.first == "." || searchTextExtensions.contains(suffix) { return .plainText }

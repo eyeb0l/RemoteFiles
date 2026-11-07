@@ -81,7 +81,7 @@ The helper has the same default depth, folder, file, byte and time budgets as SF
 
 ## Searching file contents
 
-Choose **Contents** after typing a phrase. By default, this searches supported text files on the server when available and otherwise reads them over SFTP. It searches Markdown, source code, configuration files, HTML and SVG source, and the reader's other text candidates, including extensionless files. Only valid UTF-8 without binary control bytes is searched. HTML and SVG remain source searches; scripts and linked resources are never loaded or executed.
+Choose **Contents** after typing a phrase. By default, this searches supported text files on the server when available and otherwise reads them over SFTP. It searches Markdown, source code, configuration files, HTML and SVG source, and the reader's other text candidates, including extensionless files. Only valid UTF-8 without binary control bytes is searched. [Certificate files](CERTIFICATE_PREVIEWS.md#search-and-private-keys) are never read for contents, even when hidden, because they can hold a private key. HTML and SVG remain source searches; scripts and linked resources are never loaded or executed.
 
 To search documents and scans, choose **Folder actions → Search Options**:
 

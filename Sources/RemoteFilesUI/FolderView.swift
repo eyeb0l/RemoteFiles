@@ -16,6 +16,8 @@ enum FileSymbol {
         case .image: return "photo"
         case .video: return "film"
         case .audio: return "waveform"
+        case .certificate: return "person.text.rectangle"
+        case .protectedCertificate: return "lock.doc"
         case .plainText, .unsupported:
             let suffix = (filename as NSString).pathExtension.lowercased()
             if code.contains(suffix) { return "chevron.left.forwardslash.chevron.right" }

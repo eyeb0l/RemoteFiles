@@ -24,7 +24,7 @@ Long-press a saved file (or swipe its row) to **Update Offline Copy** or **Remov
 
 ## Local previews and sharing
 
-Markdown, UTF-8 text/code, static HTML/SVG, images, PDF, audio and video reuse the existing preview policies and native media controls. Text previews remain limited to 2 MiB; images use bounded downsampling, and codec support depends on the device. Unsupported/binary files can still be saved and shared. **Share Original** shares the saved original bytes and filename, including files too large for a text preview.
+Markdown, UTF-8 text/code, static HTML/SVG, [certificates](CERTIFICATE_PREVIEWS.md), images, PDF, audio and video reuse the existing preview policies and native media controls. Text previews remain limited to 2 MiB; images use bounded downsampling, and codec support depends on the device. Unsupported/binary files can still be saved and shared. **Share Original** shares the saved original bytes and filename, including files too large for a text preview.
 
 Resolved links keep their selected filename for sharing and their canonical source format for previews.
 

@@ -2,6 +2,12 @@
 
 This is a dated record of feature work and validation, not a live test dashboard. Each result applies to the build, environment and date described with it; an installation or Simulator pass does not establish later physical-device acceptance. For current behavior, start with the [documentation index](docs/README.md). For checks still to perform, see [manual acceptance](docs/MANUAL_ACCEPTANCE.md) and the [roadmap](ROADMAP.md).
 
+**6 November 2026: certificate previews.**
+
+Tapping a `.pem`, `.crt`, `.cer`, `.der`, `.p7b`, `.p7c` or `.csr` file now shows a Settings-style summary instead of "preview unavailable", and `.p12`/`.pfx` files explain why they aren't opened. PEM and DER are told apart by content. A private key beside a certificate is reported and never shown, copied, searched or kept; these files have no Source or Find, and content search and saved indexes skip them, including hidden ones, which used to count as text. See [certificate previews](docs/CERTIFICATE_PREVIEWS.md).
+
+The certificate, search, policy, link and offline suites passed under `swift test` on macOS, with fields and fingerprints compared with OpenSSL's report. On an iPhone 18 Pro Simulator (iOS 27.2), `CertificatePreviewTests`, `CertificatePolicyTests` and `FolderBrowsingTests` passed in the signed iOS test host. A hands-on Demo pass covered the chain and its detail sheet, expired, not-yet-valid, private-key and protected states, the absence of Find and Source, hold-to-copy, light and dark appearance, the largest accessibility text size, and a saved `.pem` opened offline and after backgrounding. VoiceOver, iPad, Airplane Mode and physical-device acceptance are outstanding, and the UI lanes are left to CI.
+
 **4 November 2026: interface overhaul.**
 
 Home, folders, the reader, Downloads, Offline Files and the connection form were redesigned around less chrome and quieter status, with a shared bottom bar in readers. Up to six subfolders are listed ahead of need, and remembered folder names survive backgrounding, except those read with a passphrase-protected key. Source updates no longer scale with document size: a 2 MiB document went from 53.6 ms to 0.6 ms per SwiftUI update. A controlled whole-journey profile showed no change in potential-hang time, which the system keyboard's first setup dominates; see [reader performance](docs/READER_PERFORMANCE.md). Simulator UI, VoiceOver, hosted and OpenSSH results are in the pull request. Physical-device acceptance of the new interface is outstanding.

@@ -179,6 +179,24 @@ final class ServerFolderSearchTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("INJECTION").path))
     }
 
+    func testHelperNeverReturnsTheContentsOfCertificateFilesEvenHidden() throws {
+        let root = try fixture()
+        let before = try runHelper(root: root.path, query: "needle", hidden: true, content: .init())
+        // Built up so secret scanners don't flag this file. A dotfile counts as text by name alone.
+        let keyed = "-----BEGIN PRIVATE" + " KEY-----\nneedle\n-----END PRIVATE" + " KEY-----\n"
+        for name in ["server.pem", ".server.pem", ".a.crt", ".a.cer", ".a.der", ".a.p7b", ".a.p7c", ".a.csr", ".a.p12", ".a.pfx"] {
+            try Data(keyed.utf8).write(to: root.appendingPathComponent(name))
+        }
+        let contents = try runHelper(root: root.path, query: "needle", hidden: true, content: .init())
+        let suffixes = [".pem", ".crt", ".cer", ".der", ".p7b", ".p7c", ".csr", ".p12", ".pfx"]
+        for match in contents.contentMatches {
+            XCTAssertFalse(match.snippet.contains("PRIVATE"), match.entry.name)
+            XCTAssertFalse(suffixes.contains(where: match.entry.name.hasSuffix), match.entry.name)
+        }
+        XCTAssertFalse(contents.contentMatches.isEmpty, "The ordinary files still match")
+        XCTAssertEqual(contents.filesSearched, before.filesSearched, "The helper doesn't even send their bytes back to the app")
+    }
+
     func testHelperEnforcesDepthFolderFileByteAndTimeLimits() throws {
         let root = try fixture()
         let shallow = try runHelper(root: root.path, query: "needle", limits: .init(maxDepth: 0))
