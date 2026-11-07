@@ -343,37 +343,35 @@ struct FolderView: View {
         .scrollDismissesKeyboard(.immediately)
         }
     }
-    /// Only the selected row gets its own background and trait; the others are left exactly as before.
-    @ViewBuilder private func link(for row: FolderRow, subtitle: String, visibleSubtitle: String?? = nil, snippet: String? = nil, page: Int? = nil) -> some View {
-        if keyboardSelection == row.id {
-            rowLink(for: row, subtitle: subtitle, visibleSubtitle: visibleSubtitle, snippet: snippet, page: page)
-                .listRowBackground(Color.accentColor.opacity(0.18))
-                .accessibilityAddTraits(.isSelected)
-        } else {
-            rowLink(for: row, subtitle: subtitle, visibleSubtitle: visibleSubtitle, snippet: snippet, page: page)
-        }
-    }
-    @ViewBuilder private func rowLink(for row: FolderRow, subtitle: String, visibleSubtitle: String??, snippet: String?, page: Int?) -> some View {
-        let entry = row.entry
-        if let destination = entry.followingLink()?.openingPage(page) {
-            // Resolved while listing: open the target directly.
-            WorkspaceLink(route: route(destination)) { entryRow(row, subtitle: subtitle, visibleSubtitle: visibleSubtitle, snippet: snippet) }
-                .navigationLinkIndicatorVisibility(destination.kind == .directory ? .automatic : .hidden)
-                .contextMenu { OfflinePinActions(model: model, profile: profile, entry: destination, includeHidden: showHidden) }
-        } else if entry.kind == .symlink {
-            Button { resolve(entry, page: page) } label: {
+    /// Every row has one shape on purpose. A condition at the top of a List row, including one inside
+    /// a view such as a navigation link that picks its form from the environment, makes SwiftUI build
+    /// every row up front to count them: 530 ms of main-thread stall per 20,000 rows on iPhone 17 Pro,
+    /// against 25 ms with one shape. See docs/PERFORMANCE.md.
+    private func link(for row: FolderRow, subtitle: String, visibleSubtitle: String?? = nil, snippet: String? = nil, page: Int? = nil) -> some View {
+        let entry = row.entry, selected = keyboardSelection == row.id
+        let destination = destination(of: entry, page: page)
+        return Button { open(entry, page: page) } label: {
+            HStack(spacing: 8) {
                 entryRow(row, subtitle: subtitle, visibleSubtitle: visibleSubtitle, snippet: snippet)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .overlay(alignment: .trailing) { if resolving == entry.path { ProgressView() } }
+                if resolving == entry.path {
+                    ProgressView()
+                } else if destination?.kind == .directory, workspaceNavigate == nil {
+                    Image(systemName: "chevron.forward")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+                }
             }
-            .buttonStyle(.plain)
-            .disabled(resolving != nil)
-        } else {
-            WorkspaceLink(route: route(entry.openingPage(page))) { entryRow(row, subtitle: subtitle, visibleSubtitle: visibleSubtitle, snippet: snippet) }
-                .navigationLinkIndicatorVisibility(entry.kind == .directory ? .automatic : .hidden)
-                .contextMenu { OfflinePinActions(model: model, profile: profile, entry: entry, includeHidden: showHidden) }
+            .contentShape(Rectangle())
         }
+        .disabled(destination == nil && resolving != nil)
+        .contextMenu {
+            if let destination { OfflinePinActions(model: model, profile: profile, entry: destination, includeHidden: showHidden) }
+        }
+        .listRowBackground(selected ? Color.accentColor.opacity(0.18) : nil)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityAddTraits(workspaceNavigate != nil ? .isLink : [])
     }
     /// What a row opens, or nil for a link that must be resolved first.
     private func destination(of entry: RemoteEntry, page: Int?) -> RemoteEntry? {
@@ -401,12 +399,15 @@ struct FolderView: View {
     }
     private func openKeyboardSelection() {
         guard let selected = keyboardRows.first(where: { $0.row.id == keyboardSelection }) else { return }
-        if let destination = destination(of: selected.row.entry, page: selected.page) {
+        open(selected.row.entry, page: selected.page)
+    }
+    private func open(_ entry: RemoteEntry, page: Int?) {
+        if let destination = destination(of: entry, page: page) {
             let route = route(destination)
-            // A held Return repeats; the stack opens the row once.
+            // A second tap or a held Return while pushing opens the row once.
             if let workspaceNavigate { workspaceNavigate(route) } else if model.routes.last != route { model.routes.append(route) }
         } else if resolving == nil {
-            resolve(selected.row.entry, page: selected.page)
+            resolve(entry, page: page)
         }
     }
     private func entryRow(_ row: FolderRow, subtitle: String, visibleSubtitle: String??, snippet: String?) -> some View {

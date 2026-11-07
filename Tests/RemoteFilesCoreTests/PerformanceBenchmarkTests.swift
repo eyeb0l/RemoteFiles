@@ -497,12 +497,12 @@ private actor BenchmarkFolderService: RemoteFileService {
     private var link: CADisplayLink?
     private var last: CFTimeInterval = 0
     private var gaps: [Double] = []
-    private var nominal: Double = 1000.0 / 60
     func start() {
         let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
+        let fastest = Float(UIScreen.main.maximumFramesPerSecond)
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: fastest / 2, maximum: fastest, preferred: fastest)
         link.add(to: .main, forMode: .common)
         self.link = link
-        nominal = 1000.0 / Double(max(1, UIScreen.main.maximumFramesPerSecond))
     }
     func stop() { link?.invalidate(); link = nil }
     func reset() { gaps.removeAll(); last = 0 }
@@ -511,8 +511,11 @@ private actor BenchmarkFolderService: RemoteFileService {
         last = link.timestamp
     }
     var longestGapMilliseconds: Double { gaps.max() ?? 0 }
-    /// Frames that took more than twice the display's interval.
-    var hitches: Int { gaps.filter { $0 > nominal * 2 }.count }
+    /// Frames that took more than twice as long as most frames did.
+    var hitches: Int {
+        let typical = percentile(0.5)
+        return gaps.filter { $0 > typical * 2 + 1 }.count
+    }
     func percentile(_ value: Double) -> Double {
         guard !gaps.isEmpty else { return 0 }
         let sorted = gaps.sorted()
