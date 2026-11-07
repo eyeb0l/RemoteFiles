@@ -318,8 +318,12 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     private nonisolated static func linkResolution(for link: RemoteEntry, sftp: SFTPClient) async -> LinkResolution? {
         let canonical = sftp.sendRealPath(atPath: link.path)
         let attributes = sftp.sendAttributes(at: link.path)
+        // Wait for both answers: this returns normally on failure, and a request left unanswered must
+        // stay under the listing's deadline. REALPATH's error still comes first.
+        let stat: Result<SFTPFileAttributes, Error>
+        do { stat = .success(try await attributes.get()) } catch { stat = .failure(error) }
         do {
-            let (path, target) = (try await canonical.get(), try await attributes.get())
+            let path = try await canonical.get(), target = try stat.get()
             return .target(entry(name: RemotePath.name(of: path), path: path, attributes: target))
         } catch let status as SFTPMessage.Status where status.errorCode == .noSuchFile || status.errorCode == .failure {
             // A missing target, or a loop, which OpenSSH reports as a generic failure.
