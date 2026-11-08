@@ -927,7 +927,7 @@ final class SearchListingAheadTests: XCTestCase {
 
 /// `/r` holds `f0` and `f1`, which holds `c.txt`. `f1` is listed only once the read of `listedOnceStarted` in `f0` has
 /// started; `a.txt`'s read returns only once `f1` is listed; `held`'s read waits for `c.txt`'s to start, or gives up
-/// after a long while.
+/// after a minute, longer than the search's own 30-second deadline, so a loaded runner can't fail a correct walk.
 private actor GatedListingService: RemoteFileService, FolderWalking {
     private(set) var reads: [String] = []
     private(set) var heldReadReleasedByNextFolder = false
@@ -950,7 +950,7 @@ private actor GatedListingService: RemoteFileService, FolderWalking {
     }
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { .init(path: path, entries: folders[path] ?? []) }
     func listDirectoryForWalk(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
-        if path == "/r/f1" { _ = await until({ started.contains(listedOnceStarted) }, seconds: 30); f1Listed = true }
+        if path == "/r/f1" { _ = await until({ started.contains(listedOnceStarted) }, seconds: 60); f1Listed = true }
         return .init(path: path, entries: folders[path] ?? [])
     }
     func resolvingLinks(in entries: [RemoteEntry], profile: ConnectionProfile) async throws -> [RemoteEntry] { entries }
@@ -958,8 +958,8 @@ private actor GatedListingService: RemoteFileService, FolderWalking {
     func readSearchFile(profile: ConnectionProfile, path: String, canonicalRoot: String, limit: Int) async throws -> Data {
         try Task.checkCancellation()
         reads.append(path); started.insert(path)
-        if path == "/r/f0/a.txt" { _ = await until({ f1Listed }, seconds: 30) }
-        if path == held { heldReadReleasedByNextFolder = await until({ started.contains("/r/f1/c.txt") }, seconds: 10) }
+        if path == "/r/f0/a.txt" { _ = await until({ f1Listed }, seconds: 60) }
+        if path == held { heldReadReleasedByNextFolder = await until({ started.contains("/r/f1/c.txt") }, seconds: 60) }
         return Data("needle".utf8)
     }
     func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.notFound }
