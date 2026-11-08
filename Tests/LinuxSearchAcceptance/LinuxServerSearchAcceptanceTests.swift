@@ -56,6 +56,43 @@ final class LinuxServerSearchAcceptanceTests: XCTestCase {
         XCTAssertTrue(listing.entries.contains { $0.name == "source.md" })
     }
 
+    func testLinuxServerReportsResultsBeforeItFinishes() async throws {
+        let (service, profile, root) = try await connection()
+        var early = 0, matches: [String] = [], finished = 0
+        for try await update in RemoteFolderSearch.contents(matching: "needle", below: root + "/large", profile: profile, service: service, includeHidden: false, contentLimits: .init(maxFiles: 200)) {
+            if update.isFinished { finished += 1 } else if !update.contentMatches.isEmpty { early += 1 }
+            matches += update.contentMatches.map(\.entry.path)
+        }
+        let metrics = await service.metrics()
+        print("LINUX_STREAMING early=\(early) matches=\(matches.count) completed=\(metrics.serverSearchOperations) sftpReads=\(metrics.fileOperations)")
+        XCTAssertGreaterThan(early, 0, "The first results must not wait for the last")
+        XCTAssertEqual(finished, 1)
+        XCTAssertEqual(matches.count, 200)
+        XCTAssertEqual(Set(matches).count, 200, "No match reported twice")
+        XCTAssertEqual(metrics.serverSearchOperations, 1)
+        XCTAssertEqual(metrics.fileOperations, 0)
+    }
+
+    func testStoppingAtTheMatchLimitEndsTheSearchAndLeavesBrowsingUsable() async throws {
+        let (service, profile, root) = try await connection()
+        var matches = 0, stop: RemoteFolderSearch.Stop?
+        for try await update in RemoteFolderSearch.contents(matching: "needle", below: root + "/large", profile: profile, service: service, includeHidden: false, limits: .init(maxMatches: 3)) {
+            matches += update.contentMatches.count
+            if update.isFinished { stop = update.stop }
+        }
+        XCTAssertEqual(matches, 3)
+        XCTAssertEqual(stop, .matchLimit)
+        let listing = try await service.listDirectory(profile: profile, path: root + "/sub")
+        XCTAssertTrue(listing.entries.contains { $0.name == "source.md" })
+        var again: [String] = []
+        for try await update in RemoteFolderSearch.names(matching: "source", below: root + "/sub", profile: profile, service: service, includeHidden: false) { again += update.matches.map(\.name) }
+        XCTAssertEqual(again, ["source.md"])
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.serverSearchOperations, 2)
+        XCTAssertEqual(metrics.fileOperations, 0)
+        XCTAssertEqual(metrics.connections, 1)
+    }
+
     func testSFTPOnlyLinuxAccountFallsBackAndKeepsBrowsingConnected() async throws {
         let (service, profile, root) = try await connection(restricted: true)
         for _ in 0..<2 {
@@ -76,11 +113,13 @@ final class LinuxServerSearchAcceptanceTests: XCTestCase {
 
     func testLinuxServerRespectsLimitsAndNeverReadsEscapeLinks() async throws {
         let (service, profile, root) = try await connection()
-        var limited: RemoteFolderSearch.Update?
-        for try await update in RemoteFolderSearch.contents(matching: "needle", below: root + "/large", profile: profile, service: service, includeHidden: false, contentLimits: .init(maxFiles: 1)) { limited = update }
+        var limited: RemoteFolderSearch.Update?, limitedMatches = 0
+        for try await update in RemoteFolderSearch.contents(matching: "needle", below: root + "/large", profile: profile, service: service, includeHidden: false, contentLimits: .init(maxFiles: 1)) {
+            limited = update; limitedMatches += update.contentMatches.count
+        }
         XCTAssertEqual(limited?.stop, .fileLimit)
         XCTAssertEqual(limited?.filesSearched, 1)
-        XCTAssertEqual(limited?.contentMatches.count, 1)
+        XCTAssertEqual(limitedMatches, 1)
         var escapeMatches = 0
         for try await update in RemoteFolderSearch.contents(matching: "outside secret", below: root, profile: profile, service: service, includeHidden: false, limits: .init(maxDepth: 0)) { escapeMatches += update.contentMatches.count }
         XCTAssertEqual(escapeMatches, 0)

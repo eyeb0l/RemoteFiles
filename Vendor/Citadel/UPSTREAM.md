@@ -150,3 +150,13 @@ to emit READLINK (19), rather than SYMLINK (20). An OpenSSH regression verifies 
 relative target. Server search uses it to require live directory descriptors and obtain the
 SFTP process's mount namespace through its own procfs entries. No new SFTP write operations
 or protocol extensions are introduced.
+
+`SFTPClient.sendReadSymbolicLink` queues the same READLINK without waiting, like `sendRealPath`, so
+server search can look up the descriptors either side of the search root's OPEN in one round trip.
+
+### Streamed search output
+
+`executeBoundedCommand` takes an optional `onOutput`. With it, `TTYHandler` hands standard output on
+as it arrives instead of keeping it, so server search can show results before the helper finishes.
+What it hands on still counts towards `maxResponseSize`, with stderr, and overflow still closes the
+child channel. Without it, behaviour is unchanged.

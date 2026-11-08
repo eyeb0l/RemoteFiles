@@ -1,9 +1,11 @@
 import Foundation
 
 /// Returning nil is an explicit capability failure; transport, trust and cancellation errors throw.
+/// `partial` hears what has been found so far, and nil can follow it: the caller must not repeat those matches.
 protocol ServerFolderSearching: Sendable {
     func searchFolders(query: String, root: String, profile: ConnectionProfile, includeHidden: Bool,
-                       limits: RemoteFolderSearch.Limits, content: RemoteFolderSearch.ContentLimits?) async throws -> RemoteFolderSearch.Update?
+                       limits: RemoteFolderSearch.Limits, content: RemoteFolderSearch.ContentLimits?,
+                       partial: @escaping @Sendable (RemoteFolderSearch.Update) -> Void) async throws -> RemoteFolderSearch.Update?
 }
 
 /// The remote helper only rejects definite ASCII non-matches. Foundation remains the authority for
@@ -71,6 +73,7 @@ enum ServerFolderSearch {
 
     static func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'" }
 
+    /// One line of the helper's output: what it has found since the line before, with running totals.
     struct Response: Decodable {
         let version: Int
         let root: String
@@ -85,6 +88,7 @@ enum ServerFolderSearch {
         let charged: Int
         let stop: String?
         let error: String?
+        let final: Bool
     }
     struct Candidate: Decodable {
         let path: String
@@ -94,86 +98,152 @@ enum ServerFolderSearch {
         let data: String?
     }
 
+    /// The whole of an output at once, as one update.
     static func decode(_ data: Data, query: String, root: String, includeHidden: Bool,
                        limits: RemoteFolderSearch.Limits, content: RemoteFolderSearch.ContentLimits?) throws -> RemoteFolderSearch.Update {
         guard data.count <= outputLimit else { throw Failure.invalidResponse }
-        let value: Response
-        do { value = try JSONDecoder().decode(Response.self, from: data) }
-        catch { throw Failure.invalidResponse }
-        guard value.version == 1, value.root.utf8.elementsEqual(root.utf8), value.candidates.count <= candidateLimit else {
-            throw Failure.invalidResponse
+        var decoder = OutputDecoder(query: query, root: root, includeHidden: includeHidden, limits: limits, content: content)
+        var matches: [RemoteEntry] = [], contentMatches: [RemoteFolderSearch.ContentMatch] = []
+        for update in try decoder.consume(data) {
+            matches += update.matches; contentMatches += update.contentMatches
         }
-        switch value.error {
-        case nil: break
-        case "unsupported": throw Failure.unsupported
-        case "resourceLimit": throw Failure.resourceLimit
-        case "notFound": throw RemoteFileError.notFound
-        case "permissionDenied": throw RemoteFileError.permissionDenied
-        case "outsideRoot": throw RemoteDocumentLinkError.outsideConnection
-        default: throw Failure.invalidResponse
+        var final = try decoder.finish()
+        final.matches = matches + final.matches
+        final.contentMatches = contentMatches + final.contentMatches
+        return final
+    }
+
+    /// Reads the helper's lines as they arrive and judges each by itself. A server need not run the helper as
+    /// written, so nothing here trusts it: every candidate is checked and matched again, and limits are enforced
+    /// across lines. A line can be split anywhere between chunks.
+    struct OutputDecoder {
+        let query: String, root: String, includeHidden: Bool
+        let limits: RemoteFolderSearch.Limits, content: RemoteFolderSearch.ContentLimits?
+        private var unfinished = Data()
+        // Bytes, because two spellings of one name in Unicode are two files on the server.
+        private var seen = Set<Data>()
+        private var candidates = 0, transferred = 0, matched = 0
+        private var latest = RemoteFolderSearch.Update()
+        private var final: RemoteFolderSearch.Update?
+        /// More matches than the search keeps, so there's no need to hear the rest.
+        private(set) var isAtMatchLimit = false
+
+        init(query: String, root: String, includeHidden: Bool, limits: RemoteFolderSearch.Limits, content: RemoteFolderSearch.ContentLimits?) {
+            self.query = query; self.root = root; self.includeHidden = includeHidden; self.limits = limits; self.content = content
         }
-        guard (0...limits.maxFolders).contains(value.folders), (0...1_000).contains(value.unreadableFolders),
-              (0...100_000).contains(value.deepFolders), (0...(content?.maxFiles ?? 0)).contains(value.files),
-              (0...100_000).contains(value.skippedFiles), (0...500).contains(value.unreadableFiles),
-              (0...(content?.maxTotalBytes ?? 0)).contains(value.charged), (0...value.charged).contains(value.bytes) else {
-            throw Failure.invalidResponse
-        }
-        var update = RemoteFolderSearch.Update()
-        switch value.stop {
-        case nil: break
-        case "folderLimit": update.stop = .folderLimit
-        case "timeLimit": update.stop = .timeLimit
-        case "fileLimit": update.stop = .fileLimit
-        case "byteLimit": update.stop = .byteLimit
-        default: throw Failure.invalidResponse
-        }
-        var seen = Set<String>(), transferred = 0, matchCount = 0
-        // Re-establish breadth-first, localized natural ordering independently of the server locale.
-        let sorted = value.candidates.sorted {
-            let a = $0.path.split(separator: "/"), b = $1.path.split(separator: "/")
-            if a.count != b.count { return a.count < b.count }
-            for (x, y) in zip(a, b) where x != y {
-                return String(x).localizedStandardCompare(String(y)) == .orderedAscending
+
+        /// Updates for each line now complete. The final line's update waits for `finish`.
+        mutating func consume(_ bytes: some Sequence<UInt8>) throws -> [RemoteFolderSearch.Update] {
+            // Look for line ends only in what's new, so that a long line arriving in many chunks stays linear.
+            var searchFrom = unfinished.count
+            unfinished.append(contentsOf: bytes)
+            var updates: [RemoteFolderSearch.Update] = []
+            while !isAtMatchLimit, let end = unfinished[(unfinished.startIndex + searchFrom)...].firstIndex(of: UInt8(ascii: "\n")) {
+                let update = try decodeLine(Data(unfinished[unfinished.startIndex..<end]))
+                unfinished.removeSubrange(unfinished.startIndex...end)
+                searchFrom = 0
+                if let update { updates.append(update) }
             }
-            return false
+            return updates
         }
-        for candidate in sorted {
-            let path = candidate.path
-            let components = path.split(separator: "/", omittingEmptySubsequences: false)
-            guard path != root, RemoteResourcePath.contains(path, in: root), !path.contains("\0"),
-                  !components.dropFirst().contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }),
-                  seen.insert(path).inserted, let kind = RemoteEntry.Kind(rawValue: candidate.kind), candidate.modified.isFinite else {
+
+        /// What the search ended with: the final line, or where it stopped at the match limit.
+        mutating func finish() throws -> RemoteFolderSearch.Update {
+            if let final { return final }
+            guard isAtMatchLimit else { throw Failure.invalidResponse }
+            var last = latest
+            last.matches = []; last.contentMatches = []; last.isFinished = true
+            return last
+        }
+
+        private mutating func decodeLine(_ line: Data) throws -> RemoteFolderSearch.Update? {
+            guard final == nil else { throw Failure.invalidResponse } // Nothing may follow the final line.
+            let value: Response
+            do { value = try JSONDecoder().decode(Response.self, from: line) }
+            catch { throw Failure.invalidResponse }
+            candidates += value.candidates.count
+            guard value.version == 2, value.root.utf8.elementsEqual(root.utf8), candidates <= candidateLimit else {
                 throw Failure.invalidResponse
             }
-            let relative = path.dropFirst(root == "/" ? 1 : root.count + 1).split(separator: "/")
-            guard relative.count <= limits.maxDepth + 1,
-                  includeHidden || !relative.contains(where: { $0.hasPrefix(".") }) else { throw Failure.invalidResponse }
-            let entry = RemoteEntry(name: RemotePath.name(of: path), path: path, kind: kind, size: candidate.size,
-                                    modifiedAt: Date(timeIntervalSince1970: candidate.modified))
-            if let content {
-                guard kind == .file, let encoded = candidate.data, let bytes = Data(base64Encoded: encoded),
-                      bytes.count <= content.maxFileBytes else { throw Failure.invalidResponse }
-                transferred += bytes.count
-                guard transferred <= value.bytes else { throw Failure.invalidResponse }
-                if case .text(let text, _, _) = DocumentPolicy.decode(bytes, filename: entry.name, maxBytes: content.maxFileBytes),
-                   let match = RemoteFolderSearch.firstMatch(in: text, query: query, entry: entry) {
-                    matchCount += 1
-                    if update.contentMatches.count < limits.maxMatches { update.contentMatches.append(match) }
+            switch value.error {
+            case nil: break
+            case "unsupported": throw Failure.unsupported
+            case "resourceLimit": throw Failure.resourceLimit
+            case "notFound": throw RemoteFileError.notFound
+            case "permissionDenied": throw RemoteFileError.permissionDenied
+            case "outsideRoot": throw RemoteDocumentLinkError.outsideConnection
+            default: throw Failure.invalidResponse
+            }
+            guard (0...limits.maxFolders).contains(value.folders), (0...1_000).contains(value.unreadableFolders),
+                  (0...100_000).contains(value.deepFolders), (0...(content?.maxFiles ?? 0)).contains(value.files),
+                  (0...100_000).contains(value.skippedFiles), (0...500).contains(value.unreadableFiles),
+                  (0...(content?.maxTotalBytes ?? 0)).contains(value.charged), (0...value.charged).contains(value.bytes) else {
+                throw Failure.invalidResponse
+            }
+            var update = RemoteFolderSearch.Update()
+            switch value.stop {
+            case nil: break
+            case "folderLimit": update.stop = .folderLimit
+            case "timeLimit": update.stop = .timeLimit
+            case "fileLimit": update.stop = .fileLimit
+            case "byteLimit": update.stop = .byteLimit
+            default: throw Failure.invalidResponse
+            }
+            // Check every candidate before matching any, then order only what matched.
+            var matches: [(key: [Substring], entry: RemoteEntry, match: RemoteFolderSearch.ContentMatch?)] = []
+            for candidate in value.candidates {
+                let path = candidate.path
+                let components = path.split(separator: "/", omittingEmptySubsequences: false)
+                guard path != root, RemoteResourcePath.contains(path, in: root), !path.contains("\0"),
+                      !components.dropFirst().contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }),
+                      seen.insert(Data(path.utf8)).inserted, let kind = RemoteEntry.Kind(rawValue: candidate.kind), candidate.modified.isFinite else {
+                    throw Failure.invalidResponse
                 }
-            } else {
-                guard candidate.data == nil else { throw Failure.invalidResponse }
-                if entry.name.localizedCaseInsensitiveContains(query) {
-                    matchCount += 1
-                    if update.matches.count < limits.maxMatches { update.matches.append(entry) }
+                let relative = path.dropFirst(root == "/" ? 1 : root.count + 1).split(separator: "/")
+                guard relative.count <= limits.maxDepth + 1,
+                      includeHidden || !relative.contains(where: { $0.hasPrefix(".") }) else { throw Failure.invalidResponse }
+                let entry = RemoteEntry(name: RemotePath.name(of: path), path: path, kind: kind, size: candidate.size,
+                                        modifiedAt: Date(timeIntervalSince1970: candidate.modified))
+                let key = Array(components.dropFirst())
+                if let content {
+                    guard kind == .file, let encoded = candidate.data, let bytes = Data(base64Encoded: encoded),
+                          bytes.count <= content.maxFileBytes else { throw Failure.invalidResponse }
+                    transferred += bytes.count
+                    guard transferred <= value.bytes else { throw Failure.invalidResponse }
+                    if case .text(let text, _, _) = DocumentPolicy.decode(bytes, filename: entry.name, maxBytes: content.maxFileBytes),
+                       let match = RemoteFolderSearch.firstMatch(in: text, query: query, entry: entry) {
+                        matches.append((key, entry, match))
+                    }
+                } else {
+                    guard candidate.data == nil else { throw Failure.invalidResponse }
+                    if entry.name.localizedCaseInsensitiveContains(query) { matches.append((key, entry, nil)) }
                 }
             }
+            // Breadth-first, in localized natural order, independently of the server's locale.
+            matches.sort {
+                if $0.key.count != $1.key.count { return $0.key.count < $1.key.count }
+                for (x, y) in zip($0.key, $1.key) where x != y {
+                    return String(x).localizedStandardCompare(String(y)) == .orderedAscending
+                }
+                return false
+            }
+            for match in matches {
+                matched += 1
+                guard matched <= limits.maxMatches else { isAtMatchLimit = true; break }
+                if let found = match.match { update.contentMatches.append(found) } else { update.matches.append(match.entry) }
+            }
+            if isAtMatchLimit { update.stop = .matchLimit }
+            update.foldersSearched = value.folders; update.unreadableFolders = value.unreadableFolders
+            update.skippedDeepFolders = value.deepFolders; update.filesSearched = value.files
+            update.skippedFiles = value.skippedFiles; update.unreadableFiles = value.unreadableFiles
+            update.bytesRead = value.bytes; update.chargedBytes = value.charged
+            latest = update
+            if value.final {
+                update.isFinished = true
+                final = update
+                return nil
+            }
+            return update
         }
-        if matchCount > limits.maxMatches { update.stop = .matchLimit }
-        update.foldersSearched = value.folders; update.unreadableFolders = value.unreadableFolders
-        update.skippedDeepFolders = value.deepFolders; update.filesSearched = value.files
-        update.skippedFiles = value.skippedFiles; update.unreadableFiles = value.unreadableFiles
-        update.bytesRead = value.bytes; update.chargedBytes = value.charged
-        update.isFinished = true
-        return update
     }
 }

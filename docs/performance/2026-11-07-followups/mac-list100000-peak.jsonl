@@ -1,0 +1,15 @@
+{"label":"after@mac-linux","samples":[39.296897888183594],"scenario":"list.100000.lifetimePeakMB","unit":"MB"}
+{"label":"after@mac-linux","samples":[39.296897888183594],"scenario":"list.100000.afterMB","unit":"MB"}
+{"label":"after@mac-linux","samples":[100000],"scenario":"list.100000.entries","unit":"entries"}
+{"label":"after@mac-linux","samples":[259.25554199999999],"scenario":"list.100000","unit":"ms"}
+{"label":"after@mac-linux","samples":[12.082626342773438],"scenario":"list.100000.peakMB","unit":"MB"}
+{"label":"after@mac-linux","samples":[39.906295776367188],"scenario":"list.100000.lifetimePeakMB","unit":"MB"}
+{"label":"after@mac-linux","samples":[39.906295776367188],"scenario":"list.100000.afterMB","unit":"MB"}
+{"label":"after@mac-linux","samples":[100000],"scenario":"list.100000.entries","unit":"entries"}
+{"label":"after@mac-linux","samples":[276.44062500000001],"scenario":"list.100000","unit":"ms"}
+{"label":"after@mac-linux","samples":[12.008621215820312],"scenario":"list.100000.peakMB","unit":"MB"}
+{"label":"after@mac-linux","samples":[39.421920776367188],"scenario":"list.100000.lifetimePeakMB","unit":"MB"}
+{"label":"after@mac-linux","samples":[39.421920776367188],"scenario":"list.100000.afterMB","unit":"MB"}
+{"label":"after@mac-linux","samples":[100000],"scenario":"list.100000.entries","unit":"entries"}
+{"label":"after@mac-linux","samples":[223.65350000000001],"scenario":"list.100000","unit":"ms"}
+{"label":"after@mac-linux","samples":[12.008621215820312],"scenario":"list.100000.peakMB","unit":"MB"}

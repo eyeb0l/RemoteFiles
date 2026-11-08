@@ -76,6 +76,36 @@ configuration or a connection failure fails the suite. Preserve its log and
 source SHA. Stop only the fixture daemon identified by its temporary PID file,
 close the tunnel, and remove its synthetic tree and temporary keys afterward.
 
+### A disposable guest on a Mac
+
+Without a Linux host, a QEMU guest on Apple silicon works and needs no shared daemon. Verify the
+image against Ubuntu's `SHA256SUMS`, give it a NoCloud seed that authorizes a management key, and
+forward only to loopback:
+
+```sh
+hdiutil makehybrid -o seed.iso -iso -joliet -default-volume-name cidata seed   # meta-data, user-data
+qemu-img create -f qcow2 -F qcow2 -b ubuntu-24.04-minimal-cloudimg-arm64.img disk.qcow2 16G
+qemu-system-aarch64 -M virt -accel hvf -cpu host -smp 4 -m 2048 \
+  -drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-aarch64-code.fd \
+  -drive if=pflash,format=raw,file=vars.fd -drive if=virtio,format=qcow2,file=disk.qcow2 \
+  -drive if=virtio,format=raw,readonly=on,file=seed.iso \
+  -netdev user,id=n0,hostfwd=tcp:127.0.0.1:22400-:22,hostfwd=tcp:127.0.0.1:22401-:22401 \
+  -device virtio-net-pci,netdev=n0 -display none
+```
+
+Then start the fixture daemon on 22401 inside the guest as above; no tunnel is needed. A second
+drive with `throttling.iops-total=150` models a slow disk for cold-cache timings.
+
+## Recorded validation: 2026-11-07
+
+Seven tests passed with no failures or skips on such a guest: Ubuntu 24.04.5, Linux
+`6.8.0-147-generic`, OpenSSH `9.6p1`, Python `3.12.3`. Besides the five below, results arrive before
+the search finishes (200 content matches, none twice, zero SFTP reads; they share a folder, so they
+arrive together, before the final line), and the match
+limit ends the helper with browsing and a further server search still working. The production-adapter
+tests also passed with `Subsystem sftp internal-sftp`. This was after the helper's setup became four
+pipelined round trips and its output a line per batch.
+
 ## Recorded validation: 2026-10-22
 
 Five tests passed with no failures or skips on Ubuntu, Linux

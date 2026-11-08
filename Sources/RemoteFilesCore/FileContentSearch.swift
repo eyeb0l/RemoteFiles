@@ -46,22 +46,119 @@ public extension RemoteFolderSearch {
     }
 }
 
+/// Starts reading the files a content walk will reach next, because over a distant connection each read
+/// takes about four round trips and one at a time is what limits the walk. It only overlaps those round
+/// trips: each read makes its own confinement checks and the walk still handles files strictly in order.
+///
+/// Files are offered in the walk's order and started in that order, so a read under way is always for a
+/// file after the one the walk is on. Each read's limit is charged to the walk as it starts and stays
+/// charged even if the read is never used, so the file and byte limits hold for everything sent.
+/// Used from the walk's task alone.
+final class SearchReadAhead {
+    /// Reads started and not yet taken. Results wait here, so this also bounds what is held in memory.
+    static let window = 32
+    /// Expected bytes those reads may add up to. A read's deadline includes its wait behind the others,
+    /// so a window of large files over a slow link must not outlast it. There's always room for one.
+    static let bytesInFlight = 2 * 1024 * 1024
+    /// How far a file may grow past its listed size and still be read ahead. Beyond this it gets an ordinary read.
+    static let growthAllowance = 64 * 1024
+
+    /// A read that was started ahead, with the charge it was given when it started.
+    struct Taken { let result: Result<Data, Error>; let reservation: Int }
+    private final class Read: @unchecked Sendable {
+        let reservation: Int, expected: Int
+        var task: Task<Data, Error>?
+        private let lock = NSLock()
+        private var done = false
+        init(reservation: Int, expected: Int) { self.reservation = reservation; self.expected = expected }
+        var isFinished: Bool { lock.lock(); defer { lock.unlock() }; return done }
+        func finish() { lock.lock(); done = true; lock.unlock() }
+    }
+    private let service: any RemoteFileService, profile: ConnectionProfile, root: String, limits: RemoteFolderSearch.ContentLimits
+    private var waiting: [RemoteEntry] = [], nextWaiting = 0, offered = 0
+    private var taken = Set<Data>()
+    private var reads: [Data: Read] = [:]
+    private var expected = 0
+
+    init(service: any RemoteFileService, profile: ConnectionProfile, root: String, limits: RemoteFolderSearch.ContentLimits) {
+        self.service = service; self.profile = profile; self.root = root; self.limits = limits
+    }
+
+    /// Files the walk will read, in the order it will read them. The walk reads no more than the file
+    /// limit, so no more than that are kept, however many folders an index lists before it reads.
+    func offer(_ entries: some Sequence<RemoteEntry>) {
+        let kept = Array(entries.prefix(max(0, limits.maxFiles - offered)))
+        offered += kept.count
+        waiting.append(contentsOf: kept)
+    }
+
+    /// Starts what fits, given what the walk has charged and the files it has counted, including the one it
+    /// is on. Returns the bytes it reserved, which the walk must charge at once.
+    func fill(charged: Int, files: Int) -> Int {
+        // A read starts in a task of its own, which wouldn't inherit a cancellation that has already happened.
+        guard !Task.isCancelled else { return 0 }
+        var added = 0
+        while reads.count < Self.window, nextWaiting < waiting.count, files + reads.count < limits.maxFiles {
+            let entry = waiting[nextWaiting], key = Data(entry.path.utf8)
+            if taken.contains(key) || reads[key] != nil { nextWaiting += 1; continue }
+            // Nothing later may start before this one, so a file without a size, or one that doesn't fit,
+            // stops reading ahead until the walk has read it itself.
+            guard let listed = entry.size else { break }
+            let size = Int(clamping: listed), limit = min(limits.maxFileBytes, size + Self.growthAllowance)
+            guard charged + added + limit + 1 < limits.maxTotalBytes, reads.isEmpty || expected + size <= Self.bytesInFlight else { break }
+            let read = Read(reservation: limit + 1, expected: size)
+            let service = service, profile = profile, root = root, path = entry.path
+            read.task = Task {
+                defer { read.finish() }
+                return try await service.readSearchFile(profile: profile, path: path, canonicalRoot: root, limit: limit)
+            }
+            reads[key] = read
+            added += limit + 1; expected += size
+            nextWaiting += 1
+        }
+        // Don't let a long walk's handled entries pile up.
+        if nextWaiting > 4_096 { waiting.removeFirst(nextWaiting); nextWaiting = 0 }
+        return added
+    }
+
+    /// Whether this file's read has already finished, so using it starts no new work.
+    func hasFinished(_ entry: RemoteEntry) -> Bool {
+        reads[Data(entry.path.utf8)]?.isFinished == true
+    }
+
+    /// The file's read, if it was started ahead; nil if the walk must read it itself.
+    func take(_ entry: RemoteEntry) async -> Taken? {
+        let key = Data(entry.path.utf8)
+        taken.insert(key)
+        guard let read = reads.removeValue(forKey: key), let task = read.task else { return nil }
+        expected -= read.expected
+        let result = await withTaskCancellationHandler { await task.result } onCancel: { task.cancel() }
+        return Taken(result: result, reservation: read.reservation)
+    }
+
+    /// Reads not taken stay charged: they may already have transferred bytes.
+    func cancelAll() {
+        reads.values.forEach { $0.task?.cancel() }
+        reads.removeAll(); expected = 0; waiting.removeAll(); nextWaiting = 0
+    }
+}
+
 extension RemoteFolderSearch {
     static func scan(_ entries: [RemoteEntry], query: String, root: String, profile: ConnectionProfile,
                      service: any RemoteFileService, limits: ContentLimits, matchLimit: Int,
                      deadline: ContinuousClock.Instant, matched: inout Int, progress: inout Update, options: SearchQueryOptions, extraction: SearchExtractionOptions,
                      collect: ((SearchIndexDocument) -> Void)?, reusable: ((RemoteEntry) -> SearchIndexDocument?)? = nil,
-                     report: (Update) -> Void) async throws {
+                     readAhead: SearchReadAhead? = nil, report: (Update) -> Void) async throws {
         for entry in entries {
             try Task.checkCancellation()
             if entry.kind == .directory || !options.accepts(entry) { continue }
-            guard entry.kind == .file, RemoteResourcePath.contains(entry.path, in: root),
-                  SearchDocumentExtractor.supports(filename: entry.name, options: extraction), entry.size.map({ $0 <= UInt64(limits.maxFileBytes) }) ?? true else {
+            guard scanReads(entry, root: root, limits: limits, options: options, extraction: extraction) else {
                 progress.skippedFiles += 1; continue
             }
             guard matched < matchLimit else { progress.stop = .matchLimit; break }
             guard progress.filesSearched < limits.maxFiles else { progress.stop = .fileLimit; break }
-            guard ContinuousClock.now < deadline else { progress.stop = .timeLimit; break }
+            // After the deadline no new read starts, but one already finished is kept.
+            guard ContinuousClock.now < deadline || readAhead?.hasFinished(entry) == true else { progress.stop = .timeLimit; break }
             // An index update keeps the text of a file whose size and modification date are
             // unchanged, without reading it. It still counts towards the file and text limits.
             if let reused = reusable?(entry) {
@@ -80,20 +177,38 @@ extension RemoteFolderSearch {
                     continue
                 }
             }
-            var retried = false
+            var retried = false, counted = false, ahead = readAhead != nil
             while true {
                 try Task.checkCancellation()
-                guard ContinuousClock.now < deadline else { progress.stop = .timeLimit; return }
-                // Allow the transport its extra EOF byte even if a file grows after the listing.
-                let remaining = limits.maxTotalBytes - progress.chargedBytes
-                guard remaining > 1 else { progress.stop = .byteLimit; return }
-                let readLimit = min(limits.maxFileBytes, remaining - 1)
-                let reservation = readLimit + 1
-                if !retried { progress.filesSearched += 1 }
-                progress.chargedBytes += reservation
+                guard ContinuousClock.now < deadline || (ahead && readAhead?.hasFinished(entry) == true) else { progress.stop = .timeLimit; return }
+                if !counted { progress.filesSearched += 1; counted = true }
+                var outcome: Result<Data, Error>?, readLimit = 0, reservation = 0
+                if ahead, let readAhead {
+                    ahead = false
+                    if ContinuousClock.now < deadline {
+                        progress.chargedBytes += readAhead.fill(charged: progress.chargedBytes, files: progress.filesSearched)
+                    }
+                    // Its reservation was charged when it started. A file that grew past it gets an ordinary
+                    // read, with a charge of its own; the first one stays.
+                    if let taken = await readAhead.take(entry) {
+                        reservation = taken.reservation; readLimit = reservation - 1
+                        if case .failure(RemoteFileError.tooLarge) = taken.result {} else { outcome = taken.result }
+                    }
+                }
+                if outcome == nil {
+                    guard ContinuousClock.now < deadline else { progress.stop = .timeLimit; return }
+                    // Allow the transport its extra EOF byte even if a file grows after the listing.
+                    let remaining = limits.maxTotalBytes - progress.chargedBytes
+                    guard remaining > 1 else { progress.stop = .byteLimit; return }
+                    readLimit = min(limits.maxFileBytes, remaining - 1)
+                    reservation = readLimit + 1
+                    progress.chargedBytes += reservation
+                    do { outcome = .success(try await service.readSearchFile(profile: profile, path: entry.path, canonicalRoot: root, limit: readLimit)) }
+                    catch { outcome = .failure(error) }
+                }
                 let data: Data
                 do {
-                    data = try await service.readSearchFile(profile: profile, path: entry.path, canonicalRoot: root, limit: readLimit)
+                    data = try (outcome ?? .failure(CancellationError())).get()
                     try Task.checkCancellation()
                 } catch {
                     try Task.checkCancellation()
@@ -140,6 +255,13 @@ extension RemoteFolderSearch {
                 break
             }
         }
+    }
+
+    /// Whether `scan` would read this entry, leaving aside the limits it applies as it goes.
+    static func scanReads(_ entry: RemoteEntry, root: String, limits: ContentLimits, options: SearchQueryOptions, extraction: SearchExtractionOptions) -> Bool {
+        entry.kind == .file && options.accepts(entry) && RemoteResourcePath.contains(entry.path, in: root)
+            && SearchDocumentExtractor.supports(filename: entry.name, options: extraction)
+            && (entry.size.map { $0 <= UInt64(limits.maxFileBytes) } ?? true)
     }
 
     static func firstMatch(in text: String, query: String, entry: RemoteEntry,

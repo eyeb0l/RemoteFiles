@@ -310,6 +310,14 @@ public final class SFTPClient: Sendable {
         }
     }
 
+    /// RemoteFiles: queues READLINK at once and returns without waiting.
+    public func sendReadSymbolicLink(atPath path: String) -> EventLoopFuture<String> {
+        sendRequestFuture(.readlink(.init(requestId: allocateRequestId(), path: path))).flatMapThrowing { response in
+            guard case .name(let target) = response, target.components.count == 1 else { throw SFTPError.invalidResponse }
+            return target.path
+        }
+    }
+
     /// RemoteFiles: queues STAT at once and returns without waiting.
     public func sendAttributes(at filePath: String) -> EventLoopFuture<SFTPFileAttributes> {
         sendRequestFuture(.stat(.init(requestId: allocateRequestId(), path: filePath))).flatMapThrowing { response in

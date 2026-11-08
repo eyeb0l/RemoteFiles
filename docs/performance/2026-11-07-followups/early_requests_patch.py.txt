@@ -1,0 +1,38 @@
+# Probe only: lets openSFTP return as soon as INIT is written, so that requests follow it without waiting for VERSION.
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+p = root/'Vendor/Citadel/Sources/Citadel/SFTP/Client/SFTPClient.swift'
+s = p.read_text()
+s = s.replace('''        logger: Logger = .init(label: "nl.orlandos.citadel.sftp")
+    ) async throws -> SFTPClient {
+        try await eventLoop.flatSubmit {''','''        logger: Logger = .init(label: "nl.orlandos.citadel.sftp"),
+        probeReturnsBeforeVersion: Bool = false
+    ) async throws -> SFTPClient {
+        try await eventLoop.flatSubmit {''')
+s = s.replace('''                return client.channel.writeAndFlush(initializeMessage).flatMap {
+                    return client.responses.sftpVersion.futureResult
+                }.flatMapThrowing { serverVersion in''','''                if probeReturnsBeforeVersion {
+                    client.channel.writeAndFlush(initializeMessage, promise: nil)
+                    return eventLoop.makeSucceededFuture(client)
+                }
+                return client.channel.writeAndFlush(initializeMessage).flatMap {
+                    return client.responses.sftpVersion.futureResult
+                }.flatMapThrowing { serverVersion in''')
+assert 'probeReturnsBeforeVersion: Bool' in s and 'if probeReturnsBeforeVersion' in s
+p.write_text(s)
+t = root/'Tests/RemoteFilesCoreTests/SFTPServerCompatibilityProbeTests.swift'
+s = t.read_text()
+s = s.replace('try await client.openSFTP(sendingInitializeWithSubsystem: mode)', 'try await client.openSFTP(probeReturnsBeforeVersion: mode)')
+s = s.replace('''                            let elapsed = started.duration(to: .now)
+                            let listing = try await sftp.listDirectory(atPath: listPath, resolvingPath: false)
+                            entries = listing.flatMap(\\.components).count
+''','''                            let listing = try await SFTPRemoteFileService.detachedDeadline(seconds: 20, onTimeout: {}) {
+                                let path = sftp.sendRealPath(atPath: listPath)
+                                let listing = try await sftp.listDirectory(atPath: listPath, resolvingPath: false)
+                                _ = try await path.get()
+                                return listing
+                            }
+                            let elapsed = started.duration(to: .now)
+                            entries = listing.flatMap(\\.components).count
+''')
+t.write_text(s)

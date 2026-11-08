@@ -5,6 +5,8 @@
            records raw samples in a JSON Lines file. Never touches system network settings.
   device   As run, for the transport scenarios on a physical iPhone over the local network: the fixture
            gets a throwaway key and a listener on the Mac's LAN address, for as long as the run lasts.
+  server   The transport scenarios against a server you already run, such as a Linux guest for the search
+           helper, alternating checkouts. Asked-for scenarios such as `assisted` and `bulk` need their folders.
   compare  Prints median, spread and difference between two or more recorded files.
 
 Nothing here passes or fails on a timing: shared machines are too noisy for that.
@@ -184,6 +186,39 @@ def run(args):
         subprocess.run([str(ROOT / "scripts/test-openssh.sh"), *inner], env=env, check=True)
 
 
+def server(args):
+    """Alternates checkouts within each pass and condition, reversing the order every other pass."""
+    checkouts = [pair.split("=", 1) for pair in args.checkout]
+    output = str(pathlib.Path(args.output).resolve())
+    for index in range(args.passes):
+        for rtt in [int(value) for value in args.rtt.split(",")]:
+            for label, checkout in (checkouts if index % 2 == 0 else list(reversed(checkouts))):
+                port, proxy = args.port, None
+                if rtt or args.mbit:
+                    port = args.port + 1000
+                    proxy = subprocess.Popen([sys.executable, "-B", str(ROOT / "scripts/latency_proxy.py"), "--listen", str(port), "--target",
+                                              str(args.port), "--rtt-ms", str(rtt), "--mbit", str(args.mbit)], stdout=subprocess.DEVNULL)
+                    time.sleep(0.5)
+                env = dict(os.environ)
+                env.update(REMOTEFILES_PERFORMANCE_BENCHMARK="1", REMOTEFILES_BENCHMARK_RUNS=str(args.runs), REMOTEFILES_BENCHMARK_ROOT=args.root,
+                           REMOTEFILES_BENCHMARK_LABEL=f"{label}@rtt{rtt}" + (f"-{args.mbit:g}mbit" if args.mbit else ""),
+                           REMOTEFILES_BENCHMARK_OUTPUT=output, REMOTEFILES_BENCHMARK_ONLY=args.only,
+                           REMOTEFILES_BENCHMARK_PRIVATE_KEY=pathlib.Path(args.key).read_text(),
+                           REMOTEFILES_BENCHMARK_HOST_KEY=pathlib.Path(args.host_key).read_text(),
+                           REMOTEFILES_SFTP_HOST="127.0.0.1", REMOTEFILES_SFTP_PORT=str(port), REMOTEFILES_SFTP_USER=args.user)
+                if args.cold_command:
+                    env["REMOTEFILES_BENCHMARK_COLD_COMMAND"] = args.cold_command
+                try:
+                    result = subprocess.run(["swift", "test", *SWIFT_FLAGS, "--skip-build", "--filter", "PerformanceBenchmarkTests/testTransport"],
+                                            cwd=str(pathlib.Path(checkout).resolve()), env=env, capture_output=True, text=True)
+                finally:
+                    if proxy:
+                        proxy.terminate(); proxy.wait()
+                print(f"pass {index} rtt {rtt} {label}: exit {result.returncode}", file=sys.stderr, flush=True)
+                if result.returncode:
+                    print("\n".join(line for line in result.stdout.splitlines() if " error:" in line)[:2000], file=sys.stderr)
+
+
 def load(path):
     results = {}
     for line in open(path):
@@ -266,10 +301,25 @@ def main():
         command.add_argument("--only", help="comma-separated scenario prefixes")
         command.add_argument("--port", type=int, default=22322)
         command.add_argument("--timeout", type=int, default=900)
+    remote = commands.add_parser("server", description=server.__doc__)
+    remote.add_argument("--output", required=True)
+    remote.add_argument("--checkout", action="append", required=True, help="LABEL=PATH of a checkout built with `swift build -c release "
+                        "-Xswiftc -enable-testing --build-tests`; repeat to alternate")
+    remote.add_argument("--port", type=int, required=True, help="the server's loopback port; a delaying proxy listens 1000 above it")
+    remote.add_argument("--user", required=True)
+    remote.add_argument("--key", required=True, help="private key file the server accepts")
+    remote.add_argument("--host-key", required=True, help="the server's public host key file")
+    remote.add_argument("--root", required=True, help="the server's copy of the generated tree")
+    remote.add_argument("--only", required=True, help="comma-separated scenario prefixes, such as assisted,bulk")
+    remote.add_argument("--rtt", default="0,40")
+    remote.add_argument("--mbit", type=float, default=0)
+    remote.add_argument("--runs", type=int, default=3)
+    remote.add_argument("--passes", type=int, default=2)
+    remote.add_argument("--cold-command", help="run before each assisted sample, to empty the server's caches")
     comparison = commands.add_parser("compare")
     comparison.add_argument("files", nargs="+")
     args = parser.parse_args()
-    {"run": run, "inside-fixture": inside_fixture, "device": device, "inside-device-fixture": inside_device_fixture, "compare": compare}[args.command](args)
+    {"run": run, "inside-fixture": inside_fixture, "device": device, "inside-device-fixture": inside_device_fixture, "compare": compare, "server": server}[args.command](args)
 
 
 if __name__ == "__main__":

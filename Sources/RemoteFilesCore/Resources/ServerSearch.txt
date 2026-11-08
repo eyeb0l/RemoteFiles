@@ -1,13 +1,18 @@
-# RemoteFiles read-only search helper, protocol 1. Executed in memory with Python -I -S -B.
+# RemoteFiles read-only search helper, protocol 2. Executed in memory with Python -I -S -B.
+# Writes one JSON object a line as it goes: what it has found since the last line, with running
+# totals. The last line has final set, and only that one can carry an error.
 import base64, collections, errno, json, os, re, signal, stat, sys, time
 
 r = json.loads(base64.b64decode(sys.argv[1]))
 root = r['root']
-result = dict(version=1, root=root, candidates=[], folders=0, unreadableFolders=0,
+result = dict(version=2, root=root, candidates=[], folders=0, unreadableFolders=0,
               deepFolders=0, files=0, skippedFiles=0, unreadableFiles=0, bytes=0,
-              charged=0, stop=None, error=None)
+              charged=0, stop=None, error=None, final=False)
 started = time.monotonic()
 output_bytes = 0
+unsent_bytes = 0
+last_line = None
+last_folders = 0
 entries_seen = 0
 expired = False
 scanning = True
@@ -47,34 +52,90 @@ def open_directory(parts, absolute=False):
             pass
         raise
 
+def write_line(value):
+    # A deadline in the middle of a write would cut the line in half. check_time sees it afterwards.
+    global scanning
+    scanning = False
+    try:
+        sys.stdout.write(json.dumps(value, ensure_ascii=True, separators=(',', ':')) + '\n')
+        sys.stdout.flush()
+    finally:
+        scanning = True
+
+def send_progress():
+    # Called after each folder, so a folder's matches arrive together and the app orders them as it would
+    # have. The first results go at once, then ten lines a second at most, or sooner if they pile up.
+    global last_line, last_folders, unsent_bytes
+    now = time.monotonic()
+    if not result['candidates'] and result['folders'] == last_folders:
+        return
+    if last_line is not None and now - last_line < 0.1 and unsent_bytes < 65536:
+        return
+    if last_line is None and not result['candidates']:
+        return
+    write_line(result)
+    last_line, last_folders, unsent_bytes = now, result['folders'], 0
+    result['candidates'] = []
+
+query_lower = r['query'].lower()
+query_ascii = r['query'].isascii()
+query_bytes = query_lower.encode('ascii') if query_ascii else b''
+
 def candidate(name, data):
     # Unicode is always a candidate: the app applies its exact Foundation matching semantics.
-    query = r['query']
-    if not query.isascii() or not name.isascii():
+    if not query_ascii or not name.isascii():
         return True
     if data is None:
-        return query.lower() in name.lower()
-    if any(byte >= 128 for byte in data):
+        return query_lower in name.lower()
+    if not data.isascii():
         return True
-    return query.lower().encode('ascii') in data.lower()
+    return query_bytes in data.lower()
+
+def surrogate(name):
+    # Unrepresentable filesystem bytes cannot be safely mapped to Swift paths.
+    return not name.isascii() and any(0xD800 <= ord(c) <= 0xDFFF for c in name)
+
+candidates_sent = 0
+# translate deletes these and leaves only the control bytes that make a file binary.
+printable = bytes(byte for byte in range(256) if not ((byte < 32 and byte not in (9, 10, 13)) or byte == 127))
+
+try:
+    import unicodedata
+except ImportError:
+    unicodedata = None
 
 def natural(name):
-    return [(0, int(p)) if p.isdigit() else (1, p.lower()) for p in re.split(r'([0-9]+)', name)]
+    # Close to the app's localized order: digits by value, then accents and case set aside, so that
+    # folders reach the app in nearly the order it would have walked them. It still decides the order.
+    folded = name
+    if unicodedata is not None and not name.isascii():
+        folded = ''.join(c for c in unicodedata.normalize('NFKD', name) if not unicodedata.combining(c))
+    return ([(0, int(p)) if p.isdigit() else (1, p.casefold()) for p in re.split(r'([0-9]+)', folded)], name)
 
 def add(path, kind, info, data=None):
-    global output_bytes
+    global output_bytes, unsent_bytes, candidates_sent
     item = dict(path=path, kind=kind, size=info.st_size, modified=info.st_mtime)
     if data is not None:
         item['data'] = base64.b64encode(data).decode('ascii')
-    output_bytes += len(json.dumps(item)) + 2
-    if len(result['candidates']) >= 10000 or output_bytes > 23 * 1024 * 1024:
+    size = len(json.dumps(item)) + 2
+    output_bytes += size
+    unsent_bytes += size
+    candidates_sent += 1
+    if candidates_sent > 10000 or output_bytes > 23 * 1024 * 1024:
         raise ResourceLimit()
     result['candidates'].append(item)
 
-def scan_file(fd, name, path, info):
+def scan_file(fd, name, path):
     suffix = name.lower().rsplit('.', 1)[-1]
     text = suffix in r['textExtensions'] or suffix in ('md', 'markdown') or '.' not in name or name.startswith('.')
-    if suffix in r['excludedExtensions'] or not text or info.st_size > r['fileBytes']:
+    if suffix in r['excludedExtensions'] or not text:
+        result['skippedFiles'] += 1
+        return
+    try:
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+    except OSError:
+        return
+    if info.st_size > r['fileBytes']:
         result['skippedFiles'] += 1
         return
     if result['files'] >= r['files']:
@@ -113,7 +174,7 @@ def scan_file(fd, name, path, info):
         data = b''.join(chunks)
         result['charged'] -= limit + 1 - count
         result['bytes'] += count
-        if any((byte < 32 and byte not in (9, 10, 13)) or byte == 127 for byte in data):
+        if data.translate(None, printable):
             result['skippedFiles'] += 1
             return
         try:
@@ -172,46 +233,62 @@ try:
             try:
                 relative = path[len(root):].strip('/')
                 fd = open_directory(relative.split('/') if relative else [])
-                names = []
+                entries = []
                 with os.scandir(fd) as listing:
                     for entry in listing:
                         check_time()
                         entries_seen += 1
                         if entries_seen > 100000:
                             raise ResourceLimit()
-                        names.append(entry.name)
-                names.sort(key=natural)
+                        if r['hidden'] or not entry.name.startswith('.'):
+                            entries.append(entry)
                 result['folders'] += 1
-                for name in names:
-                    check_time()
-                    if not r['hidden'] and name.startswith('.'):
-                        continue
-                    # Unrepresentable filesystem bytes cannot be safely mapped to Swift paths.
-                    if any(0xD800 <= ord(c) <= 0xDFFF for c in name):
-                        raise Unsupported()
-                    child = os.path.join(path, name)
-                    try:
-                        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
-                    except OSError:
-                        continue
-                    mode = info.st_mode
-                    kind = 'directory' if stat.S_ISDIR(mode) else 'file' if stat.S_ISREG(mode) else 'symlink' if stat.S_ISLNK(mode) else 'other'
-                    if kind == 'directory':
-                        if depth < r['depth']:
-                            # Do not retain an unbounded queue even for a very wide directory.
-                            if len(queue) < r['folders']:
-                                queue.append((child, depth + 1))
-                        else:
-                            result['deepFolders'] += 1
-                    if r.get('files') is None:
-                        if candidate(name, None):
-                            add(child, kind, info)
-                    elif kind == 'file':
-                        scan_file(fd, name, child, info)
-                    elif kind != 'directory':
-                        result['skippedFiles'] += 1
-                    if result['stop']:
-                        break
+                subfolders = []
+                if r.get('files') is None:
+                    # The directory already says what each entry is, so a name that doesn't match takes
+                    # no system call. On a cold disk each stat can be a read. The app orders the matches.
+                    for entry in entries:
+                        name = entry.name
+                        if surrogate(name):
+                            raise Unsupported()
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                subfolders.append(name)
+                            if candidate(name, None):
+                                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                                mode = info.st_mode
+                                kind = 'directory' if stat.S_ISDIR(mode) else 'file' if stat.S_ISREG(mode) else 'symlink' if stat.S_ISLNK(mode) else 'other'
+                                add(os.path.join(path, name), kind, info)
+                        except OSError:
+                            continue
+                else:
+                    # Which files fit the limits depends on their order.
+                    entries.sort(key=lambda entry: natural(entry.name))
+                    for entry in entries:
+                        name = entry.name
+                        if surrogate(name):
+                            raise Unsupported()
+                        check_time()
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                subfolders.append(name)
+                            elif entry.is_file(follow_symlinks=False):
+                                scan_file(fd, name, os.path.join(path, name))
+                            else:
+                                result['skippedFiles'] += 1
+                        except OSError:
+                            continue
+                        if result['stop']:
+                            break
+                subfolders.sort(key=natural)
+                for name in subfolders:
+                    if depth < r['depth']:
+                        # Do not retain an unbounded queue even for a very wide directory.
+                        if len(queue) < r['folders']:
+                            queue.append((os.path.join(path, name), depth + 1))
+                    else:
+                        result['deepFolders'] += 1
+                send_progress()
             except OSError as error:
                 if depth == 0:
                     result['error'] = 'permissionDenied' if error.errno == errno.EACCES else 'notFound' if error.errno == errno.ENOENT else 'outsideRoot'
@@ -226,6 +303,8 @@ except Unsupported:
     result['error'] = 'unsupported'
 except ResourceLimit:
     result['error'] = 'resourceLimit'
+except BrokenPipeError:
+    os._exit(0) # The app stopped listening, so there's no one to finish for.
 except (AttributeError, NotImplementedError):
     result['error'] = 'unsupported'
 finally:
@@ -241,4 +320,8 @@ finally:
 
 if result['error']:
     result['candidates'] = []
-print(json.dumps(result, ensure_ascii=True, separators=(',', ':')))
+result['final'] = True
+try:
+    write_line(result)
+except BrokenPipeError:
+    os._exit(0) # The app stopped listening.

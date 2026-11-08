@@ -1,0 +1,10 @@
+{"label":"after@iphone-tailscale+0ms","samples":[37.031272888183594],"scenario":"list.100000.lifetimePeakMB","unit":"MB"}
+{"label":"after@iphone-tailscale+0ms","samples":[37.046897888183594],"scenario":"list.100000.afterMB","unit":"MB"}
+{"label":"after@iphone-tailscale+0ms","samples":[100000],"scenario":"list.100000.entries","unit":"entries"}
+{"label":"after@iphone-tailscale+0ms","samples":[2344.6429170000001],"scenario":"list.100000","unit":"ms"}
+{"label":"after@iphone-tailscale+0ms","samples":[31.467437744140625],"scenario":"list.100000.peakMB","unit":"MB"}
+{"label":"after@iphone-tailscale+0ms","samples":[66.468795776367188],"scenario":"list.100000.lifetimePeakMB","unit":"MB"}
+{"label":"after@iphone-tailscale+0ms","samples":[66.500045776367188],"scenario":"list.100000.afterMB","unit":"MB"}
+{"label":"after@iphone-tailscale+0ms","samples":[100000],"scenario":"list.100000.entries","unit":"entries"}
+{"label":"after@iphone-tailscale+0ms","samples":[2278.189625],"scenario":"list.100000","unit":"ms"}
+{"label":"after@iphone-tailscale+0ms","samples":[6.8879852294921875],"scenario":"list.100000.peakMB","unit":"MB"}

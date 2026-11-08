@@ -20,12 +20,17 @@ final class TTYHandler: ChannelDuplexHandler {
     let done: EventLoopPromise<ByteBuffer>
     /// Buffer to store error messages from stderr
     private var errorBuffer = ByteBuffer()
+    /// RemoteFiles: receives stdout as it arrives instead of buffering it. It still counts towards the limit.
+    let onOutput: (@Sendable (ByteBuffer) -> Void)?
+    private var delivered = 0
     
     init(
         maxResponseSize: Int,
+        onOutput: (@Sendable (ByteBuffer) -> Void)? = nil,
         done: EventLoopPromise<ByteBuffer>
     ) {
         self.maxResponseSize = maxResponseSize
+        self.onOutput = onOutput
         self.done = done
     }
     
@@ -61,7 +66,7 @@ final class TTYHandler: ChannelDuplexHandler {
             return
         }
 
-        guard bytes.readableBytes <= maxResponseSize - response.readableBytes - errorBuffer.readableBytes else {
+        guard bytes.readableBytes <= maxResponseSize - response.readableBytes - errorBuffer.readableBytes - delivered else {
             isIgnoringInput = true
             done.fail(CitadelError.commandOutputTooLarge)
             context.close(promise: nil)
@@ -71,7 +76,12 @@ final class TTYHandler: ChannelDuplexHandler {
         switch data.type {
         case .channel:
             // Channel data is forwarded on, the pipe channel will handle it.
-            response.writeBuffer(&bytes)
+            if let onOutput {
+                delivered += bytes.readableBytes
+                onOutput(bytes)
+            } else {
+                response.writeBuffer(&bytes)
+            }
             return
         case .stdErr:
             errorBuffer.writeBuffer(&bytes)
@@ -112,6 +122,7 @@ extension SSHClient {
     /// Bounded stdout and stderr, with child-channel ownership for cancellation and deadlines.
     /// The callback runs before the exec request, including for channels opened after cancellation.
     public func executeBoundedCommand(_ command: String, maxResponseSize: Int,
+                                      onOutput: (@Sendable (ByteBuffer) -> Void)? = nil,
                                       onChannelCreated: @escaping @Sendable (Channel) -> Void) async throws -> ByteBuffer {
         let promise = eventLoop.makePromise(of: ByteBuffer.self)
         
@@ -125,6 +136,7 @@ extension SSHClient {
                     return channel.pipeline.addHandlers(
                         TTYHandler(
                             maxResponseSize: maxResponseSize,
+                            onOutput: onOutput,
                             done: promise
                         )
                     )

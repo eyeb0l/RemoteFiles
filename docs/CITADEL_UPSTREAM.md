@@ -84,7 +84,10 @@ also relies on these changes, or verified replacements with equivalent behavior:
   and RSA SHA-512/SHA-256 authentication without SHA-1 signatures.
 - A combined stdout/stderr limit and exec-child closure on output overflow.
 - `readSymbolicLink`, request wiring and the correct READLINK packet identifier,
-  used by server search for read-only descriptor and namespace checks.
+  used by server search for read-only descriptor and namespace checks, and
+  `sendReadSymbolicLink`, which queues it without waiting.
+- An optional `onOutput` on `executeBoundedCommand` that streams stdout within
+  the same combined limit.
 
 Citadel's manifest also uses the local `../swift-nio-ssh` package for its distinct
 authentication and public-key encoding identifiers. That dependency has its own
