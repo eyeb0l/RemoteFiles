@@ -586,6 +586,7 @@ final class PerformanceBenchmarkTests: XCTestCase {
                     let channels = await service.metrics().sftpChannels
                     let counter = OfflineProgressCounter()
                     var saved = (files: 0, bytes: 0)
+                    OfflineListingMetrics.shared.reset()
                     try await recorder.peakFootprint(key + ".heapMB", runs: 1) {
                         let started = ContinuousClock.now
                         saved = try await Self.saveOffline(tree: tree, profile: profile, service: service, folder: folder, counter: counter)
@@ -601,6 +602,12 @@ final class PerformanceBenchmarkTests: XCTestCase {
                     recorder.add(key + ".channels", value: Double(metrics.sftpChannels - channels), unit: "channels")
                     recorder.add(key + ".peakFiles", value: Double(metrics.lastBatchPeakFiles), unit: "files")
                     recorder.add(key + ".peakInFlightMiB", value: Double(metrics.lastBatchPeakBytes) / 1_048_576, unit: "MiB")
+                    // Time the save spent waiting for its listings, with nothing else able to start meanwhile.
+                    let listing = OfflineListingMetrics.shared.last
+                    recorder.add(key + ".listingWait", value: Double(listing.waited.components.seconds) * 1000
+                                 + Double(listing.waited.components.attoseconds) / 1e15)
+                    recorder.add(key + ".listings", value: Double(listing.listings), unit: "listings")
+                    recorder.add(key + ".peakListings", value: Double(listing.mostAtOnce), unit: "listings")
                 }
             }
             // Taps, cancellation and interruption, unless `REMOTEFILES_BENCHMARK_OFFLINE_EXTRAS=0`.
@@ -1040,7 +1047,15 @@ private final class OfflineProgressCounter: @unchecked Sendable {
 /// channel per file (`dedicated`) or one shared channel (`shared`), followed by how many files run at once.
 enum OfflineBenchmarkArm {
     static func apply(_ name: String) throws {
-        if name == "current" { OfflineFolderDownload.sharesChannel = true; OfflineFolderDownload.concurrentFiles = 16; return }
+        if name == "current" {
+            OfflineFolderDownload.sharesChannel = true; OfflineFolderDownload.concurrentFiles = 16; OfflineFolderDownload.listingsAhead = 4
+            return
+        }
+        // Folders listed ahead of the walk, with files as shipped.
+        if name.hasPrefix("ahead"), let count = Int(name.dropFirst(5)), count >= 0 {
+            OfflineFolderDownload.sharesChannel = true; OfflineFolderDownload.concurrentFiles = 16; OfflineFolderDownload.listingsAhead = count
+            return
+        }
         for (prefix, shares) in [("dedicated", false), ("shared", true)] where name.hasPrefix(prefix) {
             guard let count = Int(name.dropFirst(prefix.count)), count > 0 else { break }
             OfflineFolderDownload.sharesChannel = shares; OfflineFolderDownload.concurrentFiles = count

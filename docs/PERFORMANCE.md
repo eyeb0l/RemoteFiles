@@ -2,7 +2,7 @@
 
 [Documentation](README.md) · [Build and test](DEVELOPMENT.md)
 
-What limits each operation, what was measured on 7 November 2026, and how to benchmark a change. Measured on iPhone means a physical iPhone 17 Pro; measured on Mac means the same code on a Mac, which says little about absolute speed on a phone. Raw samples are in [`performance/2026-11-07`](performance/2026-11-07), for the [follow-ups](#follow-ups-7-november) in [`performance/2026-11-07-followups`](performance/2026-11-07-followups), for [the phone's download cap](#the-phones-download-cap-not-the-client) in [`performance/2026-11-07-download-cap`](performance/2026-11-07-download-cap), for [offline folders](#offline-folders-one-channel-sixteen-files-at-a-time) and [the follow-up report](#follow-up-report-8-november) in [`performance/2026-11-08-offline`](performance/2026-11-08-offline), for [live content searches](#live-content-searches-listing-ahead-while-reading) in [`performance/2026-11-08-search`](performance/2026-11-08-search), and for [read-window pacing on the phone](#read-window-pacing-on-the-phone-at-150-ms-keep-transferpacing) in [`performance/2026-11-08-phone-window`](performance/2026-11-08-phone-window).
+What limits each operation, what was measured on 7 November 2026, and how to benchmark a change. Measured on iPhone means a physical iPhone 17 Pro; measured on Mac means the same code on a Mac, which says little about absolute speed on a phone. Raw samples are in [`performance/2026-11-07`](performance/2026-11-07), for the [follow-ups](#follow-ups-7-november) in [`performance/2026-11-07-followups`](performance/2026-11-07-followups), for [the phone's download cap](#the-phones-download-cap-not-the-client) in [`performance/2026-11-07-download-cap`](performance/2026-11-07-download-cap), for [offline folders](#offline-folders-one-channel-sixteen-files-at-a-time) and [the follow-up report](#follow-up-report-8-november) in [`performance/2026-11-08-offline`](performance/2026-11-08-offline), for [live content searches](#live-content-searches-listing-ahead-while-reading) in [`performance/2026-11-08-search`](performance/2026-11-08-search), for [read-window pacing on the phone](#read-window-pacing-on-the-phone-at-150-ms-keep-transferpacing) in [`performance/2026-11-08-phone-window`](performance/2026-11-08-phone-window), and for [offline folders' listings](#offline-folders-listing-ahead-while-files-run) in [`performance/2026-11-08-offline-listing`](performance/2026-11-08-offline-listing).
 
 ## What limits what
 
@@ -12,7 +12,7 @@ What limits each operation, what was measured on 7 November 2026, and how to ben
 | Recursive search with the Linux helper | Round trips to set it up, then the server's disk | About 9 round trips before the first line, from about 35. On a cold, slow disk the server's reads take the rest (Mac) |
 | Saved indexes | Round trips per file | About 4.4 each; reads overlap, up to 32 at a time |
 | Contents search over SFTP | Round trips per file, overlapped across folders, as for an index | 500 files in 144 folders at 40 ms: 3.4 s, from 22.9 s; an index of the same files takes 3.7 s (Mac). [Details](#live-content-searches-listing-ahead-while-reading) |
-| Offline folders | Round trips per file, overlapped; then listing, a folder at a time | About 5 each on one shared channel, 16 files at once, where it was 11 each in turn. 50 small files at 40 ms: 1.5 s, from 22.1 s (Mac). [Details](#offline-folders-one-channel-sixteen-files-at-a-time) |
+| Offline folders | Round trips per file, overlapped, with folders listed four ahead | About 5 each on one shared channel, 16 files at once, where it was 11 each in turn. 50 small files at 40 ms: 1.4 s, from 22.1 s; 400 tiny files in 25 folders at 150 ms: 21.9 s, from 25.5 s with folders listed in turn (Mac). [Details](#offline-folders-one-channel-sixteen-files-at-a-time), [listings](#offline-folders-listing-ahead-while-files-run) |
 | Opening a connection | The protocol | 9 round trips at 40 ms to the first rows, all but one fixed by SSH, the server or SFTP. [The ledger](#connection-setup) |
 | Opening a file or small folder | Round trips | 3.5 to 10 round trips each before this work |
 | Opening a very large folder (first frame) | SwiftUI on the main thread | 2.6 s stall at 50,000 rows (iPhone); none of it in sorting, the network or layout of the data |
@@ -381,6 +381,59 @@ Where the link isn't full, growth reaches 64 and taps cost nothing; where it is,
 
 **3. Keeping a verified Linux search root between searches: not recommended yet.** No Linux guest ran this session, so nothing was measured. From the 7 November trace, a repeated search of one folder spends about six of its nine round trips proving the root, 240 ms at 40 ms. Keeping that would mean holding a directory descriptor open in a helper or channel between searches, and then trusting it later: the folder can be renamed, replaced or unmounted meanwhile, and the descriptor still names the old inode, so results would come from a folder the path no longer leads to unless every search re-proves the path against the held inode, which costs most of what it saves. It also holds a server process and descriptor per folder searched, across reconnects, host-key changes and key changes, each of which would have to drop it. Re-proving only by `REALPATH` and `stat` over SFTP (two of the nine) is the variant worth measuring, on the guest, with the existing acceptance suite and a test that replaces the folder between searches.
 
+## Offline folders: listing ahead while files run
+
+8 November, the offline folders' listings from [the remaining opportunities](#remaining-opportunities). Before is the offline-folder change (#94) with the new measurement added; after is this change. Both ran on the Mac mini against the loopback OpenSSH fixture through `latency_proxy.py`, alternating processes and reversing the order on the second pass, with taps, cancellation and interruption at 40 ms on both passes ([driver](performance/2026-11-08-offline-listing/paired.sh.txt)). No phone was used: these are proxy measurements on a Mac, not iPhone results.
+
+**What limited it.** A save listed its folders one at a time, each only once every file found so far had started, and while it waited for a listing it could neither commit a finished file nor start another. The estimate by round trips was 7.5 s of the 25.5 s that 400 tiny files in 25 folders take at 150 ms; measured, the save waited 7.9 s for its listings. Removing the wait doesn't remove the time, though: files then set the pace.
+
+**What changed.** Once a folder has been taken up, the save lists up to four of the folders queued after it, and takes each one up exactly where it would have listed it, with the same checks and limits, in the same order. Only queued folders are listed ahead, so the 16-level, 256-folder and 10,000-entry limits bound the listings too. A listing made ahead is used only if it succeeded; one that failed is listed again, alone, once every file before it has finished, so a failure among those files is reported first, as it would have been, and the error reported is the one a save listing one folder at a time reports. Listings ahead use the session's walk channel and never open a session: when the connection drops, the files in flight fail and the save says so at once, instead of waiting for an early listing to connect again. A transport that can't list that way (Demo, older adapters) lists one folder at a time, as before. They hold nothing of the save, so a save that ends cancels them without waiting.
+
+**The candidates.** How far ahead, rotating in one process with listings on the browsing channel, two passes ([raw](performance/2026-11-08-offline-listing/sweep-listings-ahead-40-150ms.jsonl)):
+
+| Listed ahead | 0 (before) | 2 | 4 | 8 |
+|---|---:|---:|---:|---:|
+| 400 tiny, 40 ms: total / waiting for listings | 7.37 s / 2.28 s | 6.58 s / 0.36 s | 6.54 s / 0.27 s | 6.46 s / 0.27 s |
+| 400 tiny, 150 ms | 25.4 s / 7.88 s | 22.0 s / 1.24 s | 21.9 s / 0.94 s | 21.8 s / 0.96 s |
+| 50 small, 40 ms | 1.43 s / 0.97 s | 1.35 s / 0.43 s | 1.38 s / 0.18 s | 1.38 s / 0.19 s |
+| 50 small, 150 ms | 4.89 s / 3.43 s | 4.59 s / 1.55 s | 4.61 s / 0.64 s | 4.60 s / 0.63 s |
+| Mixed, 40 / 150 ms | 3.05 s / 10.2 s | 2.98 s / 10.2 s | 3.00 s / 10.2 s | 2.99 s / 10.2 s |
+
+Four takes nearly all the wait away for both trees and eight adds nothing. Which channel: the batch's own, which the opportunity suggested, was rejected without measuring, because a listing that timed out there would close the channel under every file in flight and report a file's failure instead of the listing's. On the browsing channel, two paired runs ([first](performance/2026-11-08-offline-listing/paired-browsing-channel.jsonl), [second](performance/2026-11-08-offline-listing/paired-browsing-channel-relist-fix.jsonl)) showed the gain but also a save interrupted by a dropped connection returning 1.1 to 1.2 s late in four of six `small50` samples, against 2 to 8 ms, with one baseline sample at 0.5 s: first because a failed early listing was listed again at once, which connected again, and then because a listing started ahead after the drop connected by itself. Listing again only once the files before it are done fixed the first, and listing ahead only over an open session the second.
+
+### Results
+
+Medians of four samples, two per process, ranges in brackets ([raw](performance/2026-11-08-offline-listing/paired-final.jsonl)).
+
+| Save | Added | Before | After | Change |
+|---|---:|---:|---:|---:|
+| 400 tiny files, 25 folders | 0 | 509 ms (500-513) | 432 ms (430-442) | −15% |
+| | 5 ms | 1.36 s (1.29-1.38) | 1.06 s (1.03-1.17) | −22% |
+| | 40 ms | 7.71 s (7.66-7.74) | 6.81 s (6.69-6.92) | −12% |
+| | 150 ms | 25.5 s (25.5-25.7) | 21.9 s (21.9-21.9) | −14% |
+| 50 small files, 11 folders | 0 | 84 ms (82-95) | 78 ms (73-80) | −7% |
+| | 5 ms | 245 ms (236-256) | 253 ms (236-269) | +3% |
+| | 40 ms | 1.51 s (1.50-1.51) | 1.52 s (1.44-1.60) | +1%; 1.44 s with the walk channel open, 1.60 s opening it |
+| | 150 ms | 4.95 s (4.91-4.96) | 4.91 s (4.64-5.15) | −1%; 4.66 s open, 5.14 s opening it |
+| 40 small and 6 larger files, 5 folders | 40 ms | 3.12 s (3.09-3.15) | 3.21 s (3.10-3.32) | +3%; 3.12 s open, 3.29 s opening it |
+| | 150 ms | 10.20 s | 10.23 s | 0% |
+
+The save waited for its listings 0.95 s instead of 7.89 s for the 400 files at 150 ms, 0.35 s instead of 2.35 s at 40 ms. The first finished file came a quarter to a third sooner there (2.53 s against 3.79 s at 150 ms, 0.82 s against 1.14 s at 40 ms). On the first save of a session whose walk channel nothing had opened yet, which the benchmark has and the app rarely does (prefetch and searches open it when a folder opens), the listings ahead waited for it, three to four round trips, and the first file of the small trees came a fifth later or more. Every save stored the same 400, 50 and 46 files.
+
+**Browsing meanwhile.** A folder tap during a save at 40 ms took 91 to 93 ms after against 92 to 95 ms before, ten taps per tree.
+
+**Stopping a save.** Cancellation returned within 5 ms after and 8 ms before, and the slot was free within 160 ms either way. When the connection dropped, the save returned within 11 ms either way, but for one sample of 2.0 s for the 400 files; every sample needed one new connection afterwards, before and after.
+
+**Resources.** Up to four listings in flight, from one. The 50 small files overlapped more, so their reads in flight rose from 0.66 to 1.08 MiB, within the 4 MiB pool, and the heap's peak above its start from 0.67 to 0.87 MB. Opening the walk channel, if nothing had, adds one channel to the session for as long as it lasts, as a search does.
+
+### Correctness
+
+- `OfflineFolderConcurrencyTests`, against a save listing one folder at a time: folders listed ahead while files run, at most four at once, committed in walk order with the same bytes, whatever order listings come back in; a listing that failed ahead listed again at its turn and the save succeeding; one that fails every time, with and without an earlier file failing slowly, reporting the same error as one at a time, starting nothing after it, publishing nothing, and not listed again when the earlier file's failure comes first; the directory, depth and entry limits failing the same way and listing only what the walk queued; no session, no listings ahead; and a cancelled save starting no listing after it returns. Disabling listing ahead fails the first, and listing again while files run fails the second.
+- Against OpenSSH: a member replaced by a link after its folder was listed; a folder replaced before any listing of it, ahead or not; and, new, a folder replaced after it was listed ahead and before its files start, which each file's own checks refuse; each fails the save with nothing published and the connection kept, five runs in a row. One channel per save once the session's walk channel is open. All 501 macOS tests pass with OpenSSH, with `LatencyBenchmarkTests` skipped as usual.
+- Not run: the iOS simulator, the UI journeys and VoiceOver (no view changed), a physical iPhone, and servers other than OpenSSH. A server that refuses a further channel gets the walk's usual fallback to the browsing channel; not tested here.
+
+*Cost:* up to four listings ahead on the walk channel, which a running search shares; listings ahead of a save that then fails are wasted and cancelled; with no walk channel open, the save opens it and its first file comes a few round trips later. *Rejected:* listing on the batch's channel, which would change the error a timed-out listing reports; listing ahead on the browsing channel, which after a dropped connection connected again by itself and delayed the save's failure by up to 1.2 s; eight ahead, which added nothing. *Would reverse it:* searches slowed by a save's listings on their channel, or a server that limits channels refusing the walk channel and the fallback queuing listings behind browsing.
+
 ## Live content searches: listing ahead while reading
 
 8 November, the first item of [the follow-up report](#follow-up-report-8-november). Before is the offline-folder change (#94) with the new measurements added, the only commit both builds share; after is this change. Both ran on the Mac mini against the loopback OpenSSH fixture through `latency_proxy.py`, alternating processes and reversing the order on the second pass ([driver](performance/2026-11-08-search/paired.sh.txt), [summary](performance/2026-11-08-search/pair.py.txt)). No phone was used: these are proxy measurements on a Mac, not iPhone results.
@@ -469,10 +522,9 @@ A live search now takes about as long as an index build of the same files (3.67 
 
 Theoretical until measured, most promising first.
 
-1. **Offline folders' listings.** With files overlapped, the save's folders are listed one at a time, about two round trips each: by that count about 7.5 s of the 25.5 s that 400 tiny files in 25 folders take at 150 ms, not measured separately. Listing a few ahead, as searches do, on the batch's channel.
-2. **Repeated server searches of one folder.** About six of nine round trips, but see the risks above before keeping anything open.
-3. **The first requests with `INIT`.** One round trip per channel, measured on seven implementations; see [why it was left out](#connection-setup-nothing-to-adopt).
-4. **Read-window growth on a long phone path.** At 150 ms on a free link it reaches 87% of a fixed 64 on the phone, the price of starting at 16 on every transfer. Starting a transfer at the window the last one on the same connection settled at might close it without queueing more on a full link; not tried. See [the phone measurements](#read-window-pacing-on-the-phone-at-150-ms-keep-transferpacing).
+1. **Repeated server searches of one folder.** About six of nine round trips, but see the risks above before keeping anything open.
+2. **The first requests with `INIT`.** One round trip per channel, measured on seven implementations; see [why it was left out](#connection-setup-nothing-to-adopt).
+3. **Read-window growth on a long phone path.** At 150 ms on a free link it reaches 87% of a fixed 64 on the phone, the price of starting at 16 on every transfer. Starting a transfer at the window the last one on the same connection settled at might close it without queueing more on a full link; not tried. See [the phone measurements](#read-window-pacing-on-the-phone-at-150-ms-keep-transferpacing).
 
 ## Run it
 

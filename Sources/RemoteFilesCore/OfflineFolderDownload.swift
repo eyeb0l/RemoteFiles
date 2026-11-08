@@ -1,5 +1,26 @@
 import Foundation
 
+/// Benchmarks only: how long the last offline folder save waited for its listings, how many it made and the most
+/// it had under way at once. Saves run one at a time in the benchmark.
+final class OfflineListingMetrics: @unchecked Sendable {
+    struct Record: Sendable { var waited: Duration = .zero, listings = 0, mostAtOnce = 0 }
+    static let shared = OfflineListingMetrics()
+    private let lock = NSLock()
+    private var record = Record(), running = 0
+    var last: Record { lock.lock(); defer { lock.unlock() }; return record }
+    func reset() { lock.lock(); record = Record(); running = 0; lock.unlock() }
+    func waited(_ duration: Duration) { lock.lock(); record.waited += duration; lock.unlock() }
+    func began() { lock.lock(); record.listings += 1; running += 1; record.mostAtOnce = max(record.mostAtOnce, running); lock.unlock() }
+    func ended() { lock.lock(); running -= 1; lock.unlock() }
+    /// Lists, counting the listing and how long the walk waited for it.
+    static func listing(_ list: () async throws -> DirectorySnapshot) async throws -> DirectorySnapshot {
+        let started = ContinuousClock.now
+        shared.began()
+        defer { shared.ended(); shared.waited(started.duration(to: .now)) }
+        return try await list()
+    }
+}
+
 struct PreparedOfflineFolder: Sendable {
     var files: [OfflinePin] = []
     var directories: [String] = []
@@ -15,6 +36,9 @@ actor OfflineFolderDownload {
     nonisolated(unsafe) static var concurrentFiles = 16
     /// Benchmarks only: false gives each file a channel of its own.
     nonisolated(unsafe) static var sharesChannel = true
+    /// Folders listed ahead of the walk, beyond the one it is taking up. Benchmarks and tests change it; see
+    /// docs/PERFORMANCE.md for why it is this.
+    nonisolated(unsafe) static var listingsAhead = 4
     /// The largest listed size that may overlap other files: one starting read window. Larger files, and files
     /// of unknown size, go alone.
     static let overlappedFileBytes = SFTPRemoteFileService.transferReadWindow * 64 * 1024
@@ -139,12 +163,52 @@ actor OfflineFolderDownload {
         // Space is reserved from a file's start until it's committed, since until then its bytes are staged.
         var running: [Int: (job: FileJob, limit: Int)] = [:], reserved = 0, alone = false, pooled = 0
         var finished: [Int: (job: FileJob, limit: Int, outcome: FileOutcome)] = [:]
+        // Listings started early, by queue position. Each is taken up only where the walk would have listed that
+        // folder, and only if it succeeded. One that failed is listed again, alone, once every file before it has
+        // finished: a failure among those comes first in walk order and is reported without listing anything more,
+        // so the walk's outcome and the error it reports are those of listing one folder at a time. Nothing is
+        // listed ahead that isn't already queued, so the depth and directory limits hold for listings as for the walk.
+        var ahead: [Int: Task<DirectorySnapshot, Error>] = [:], failedAhead = Set<Int>()
+        // They hold nothing of the save, so they're cancelled rather than waited for. They go over a session that
+        // is already open and never open one: after the connection drops, the files in flight fail and that is
+        // reported at once, rather than after an early listing connected again. They also keep off the channel
+        // folders open on. A transport that can't list that way lists one folder at a time, as before.
+        defer { ahead.values.forEach { $0.cancel() } }
+        let service = service, profile = profile, background = service as? any BackgroundFolderListing
+        func listAhead() {
+            guard stopped == nil, let background else { return }
+            for position in index..<min(queue.count, index + max(0, Self.listingsAhead)) where ahead[position] == nil {
+                let path = queue[position].0
+                ahead[position] = Task {
+                    OfflineListingMetrics.shared.began()
+                    defer { OfflineListingMetrics.shared.ended() }
+                    guard let listing = try await background.listDirectoryInBackground(profile: profile, path: path) else {
+                        throw RemoteFileError.connectionEnded
+                    }
+                    return listing
+                }
+            }
+        }
 
-        /// Lists the next folder and queues its files, or records why the walk stops.
-        func listNext() async throws {
-            let (current, depth) = queue[index]; index += 1
+        /// Lists the next folder and queues its files, or records why the walk stops. Returns false, having done
+        /// nothing, if the folder must wait to be listed again until the files running now have finished.
+        func listNext() async throws -> Bool {
+            let position = index, (current, depth) = queue[index]
             do {
-                let listing = try await service.listDirectory(profile: profile, path: current)
+                var early: DirectorySnapshot?
+                if let task = ahead.removeValue(forKey: position) {
+                    let waited = ContinuousClock.now
+                    do { early = try await withTaskCancellationHandler(operation: { try await task.value }, onCancel: { task.cancel() }) }
+                    catch { failedAhead.insert(position) }
+                    OfflineListingMetrics.shared.waited(waited.duration(to: .now))
+                    try Task.checkCancellation()
+                }
+                if early == nil, failedAhead.contains(position), !running.isEmpty { return false }
+                index += 1
+                let listing: DirectorySnapshot
+                if let early { listing = early } else {
+                    listing = try await OfflineListingMetrics.listing { try await service.listDirectory(profile: profile, path: current) }
+                }
                 try Task.checkCancellation()
                 guard listing.path.utf8.elementsEqual(current.utf8) else { throw RemoteDocumentLinkError.outsideConnection }
                 guard listing.entries.count <= limits.entries - scanned else { throw OfflineFileError.folderLimit("10,000 entry") }
@@ -172,11 +236,13 @@ actor OfflineFolderDownload {
                         waiting.append(FileJob(index: found, entry: entry)); found += 1
                     }
                 }
+                listAhead()
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
                 stopped = error
             }
+            return true
         }
 
         return try await withThrowingTaskGroup(of: (Int, FileOutcome).self) { group in
@@ -191,8 +257,7 @@ actor OfflineFolderDownload {
                 try Task.checkCancellation()
                 while running.count < window {
                     if waiting.isEmpty {
-                        guard stopped == nil, index < queue.count else { break }
-                        try await listNext()
+                        guard stopped == nil, index < queue.count, try await listNext() else { break }
                         continue
                     }
                     let job = waiting[0]
