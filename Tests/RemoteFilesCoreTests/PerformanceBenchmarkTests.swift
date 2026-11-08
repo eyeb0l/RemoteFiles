@@ -331,8 +331,13 @@ final class PerformanceBenchmarkTests: XCTestCase {
             let roots = (environment["REMOTEFILES_BENCHMARK_PIPELINE_ROOTS"] ?? environment["REMOTEFILES_BENCHMARK_PIPELINE_ROOT"] ?? "tree,texts")
                 .split(separator: ",").map(String.init)
             let searches = roots.flatMap { tree in (tree == "texts" ? ["kestrel", "zzzqq"] : ["zzzqq"]).map { (tree, $0) } }
-            func contents(_ tree: String, _ query: String) async throws {
-                let key = "pipeline.\(tree == "tree" ? "contents" : tree + "." + query)"
+            // `REMOTEFILES_BENCHMARK_PIPELINE_LOOKAHEADS=8,16,64` rotates how far a live search lists ahead, in one process.
+            let lookaheads = (environment["REMOTEFILES_BENCHMARK_PIPELINE_LOOKAHEADS"] ?? "").split(separator: ",").compactMap { Int($0) }
+            let shipped = RemoteFolderSearch.liveLookahead
+            defer { RemoteFolderSearch.liveLookahead = shipped }
+            func contents(_ tree: String, _ query: String, lookahead: Int? = nil) async throws {
+                let key = "pipeline.\(tree == "tree" ? "contents" : tree + "." + query)" + (lookahead.map { ".ahead\($0)" } ?? "")
+                RemoteFolderSearch.liveLookahead = lookahead ?? shipped
                 SearchPipelineMetrics.shared.reset()
                 let started = ContinuousClock.now
                 var last = RemoteFolderSearch.Update(), first: Double?, matches = 0
@@ -354,8 +359,14 @@ final class PerformanceBenchmarkTests: XCTestCase {
                     recorder.add(key + "." + name, value: Double(value), unit: unit)
                 }
             }
-            for _ in 0..<runs {
-                for (tree, query) in searches { try await contents(tree, query) }
+            for pass in 0..<runs {
+                for (tree, query) in searches {
+                    guard !lookaheads.isEmpty else { try await contents(tree, query); continue }
+                    for offset in lookaheads.indices {
+                        try await contents(tree, query, lookahead: lookaheads[(offset + pass) % lookaheads.count])
+                    }
+                }
+                guard lookaheads.isEmpty else { continue }
                 for tree in roots {
                     try await recorder.timeAsync("pipeline.\(tree == "tree" ? "" : tree + ".")index.total", runs: 1) {
                         var last = RemoteFolderSearch.Update()
@@ -367,7 +378,7 @@ final class PerformanceBenchmarkTests: XCTestCase {
                 }
             }
             // Unless `REMOTEFILES_BENCHMARK_PIPELINE_EXTRAS=0`.
-            for (tree, query) in searches where environment["REMOTEFILES_BENCHMARK_PIPELINE_EXTRAS"] != "0" {
+            for (tree, query) in searches where environment["REMOTEFILES_BENCHMARK_PIPELINE_EXTRAS"] != "0" && lookaheads.isEmpty {
                 let key = "pipeline.\(tree == "tree" ? "contents" : tree + "." + query)"
                 let searching = Task { [profile] in
                     for try await _ in RemoteFolderSearch.contents(matching: query, below: root + "/" + tree, profile: profile, service: warm,

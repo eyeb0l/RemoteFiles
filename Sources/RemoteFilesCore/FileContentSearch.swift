@@ -46,6 +46,44 @@ public extension RemoteFolderSearch {
     }
 }
 
+/// What a walk waits for: results posted by its listings, and reads ahead finishing. Its one task waits for
+/// whichever comes first, and takes the results without waiting.
+final class SearchWalkEvents<Result: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var results: [Result] = []
+    private var events = 0
+    private var waiter: CheckedContinuation<Void, Never>?
+    /// How many events there have been; pass it to `wait(after:)` so none that comes after it is missed.
+    var count: Int { lock.lock(); defer { lock.unlock() }; return events }
+    func post(_ result: Result) { signal { results.append(result) } }
+    /// Something finished that left nothing to take.
+    func nudge() { signal {} }
+    func take() -> [Result] {
+        lock.lock(); let taken = results; results = []; lock.unlock()
+        return taken
+    }
+    /// Returns once there has been an event after `count`, or the task is cancelled.
+    func wait(after count: Int) async {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                guard events == count, !Task.isCancelled else { lock.unlock(); continuation.resume(); return }
+                waiter = continuation
+                lock.unlock()
+            }
+        } onCancel: {
+            lock.lock(); let waiter = self.waiter; self.waiter = nil; lock.unlock()
+            waiter?.resume()
+        }
+    }
+    private func signal(_ change: () -> Void) {
+        lock.lock(); change(); events += 1
+        let waiter = self.waiter; self.waiter = nil
+        lock.unlock()
+        waiter?.resume()
+    }
+}
+
 /// Starts reading the files a content walk will reach next, because over a distant connection each read
 /// takes about four round trips and one at a time is what limits the walk. It only overlaps those round
 /// trips: each read makes its own confinement checks and the walk still handles files strictly in order.
@@ -75,13 +113,16 @@ final class SearchReadAhead {
         func finish() { lock.lock(); done = true; lock.unlock() }
     }
     private let service: any RemoteFileService, profile: ConnectionProfile, root: String, limits: RemoteFolderSearch.ContentLimits
+    private let events: (any SearchWalkSignal)?
     private var waiting: [RemoteEntry] = [], nextWaiting = 0, offered = 0
     private var taken = Set<Data>()
     private var reads: [Data: Read] = [:]
     private var expected = 0
 
-    init(service: any RemoteFileService, profile: ConnectionProfile, root: String, limits: RemoteFolderSearch.ContentLimits) {
-        self.service = service; self.profile = profile; self.root = root; self.limits = limits
+    /// `events` hears of every read that finishes, so a walk waiting for one can do other work meanwhile.
+    init(service: any RemoteFileService, profile: ConnectionProfile, root: String, limits: RemoteFolderSearch.ContentLimits,
+         events: (any SearchWalkSignal)? = nil) {
+        self.service = service; self.profile = profile; self.root = root; self.limits = limits; self.events = events
     }
 
     /// Files the walk will read, in the order it will read them. The walk reads no more than the file
@@ -107,9 +148,9 @@ final class SearchReadAhead {
             let size = Int(clamping: listed), limit = min(limits.maxFileBytes, size + Self.growthAllowance)
             guard charged + added + limit + 1 < limits.maxTotalBytes, reads.isEmpty || expected + size <= Self.bytesInFlight else { break }
             let read = Read(reservation: limit + 1, expected: size)
-            let service = service, profile = profile, root = root, path = entry.path
+            let service = service, profile = profile, root = root, path = entry.path, events = events
             read.task = Task {
-                defer { read.finish() }
+                defer { read.finish(); events?.nudge() }
                 return try await service.readSearchFile(profile: profile, path: path, canonicalRoot: root, limit: limit)
             }
             reads[key] = read
@@ -121,6 +162,11 @@ final class SearchReadAhead {
         SearchPipelineMetrics.shared.note(reads: reads.count, expectedBytes: expected,
                                           reservedBytes: reads.values.reduce(0) { $0 + $1.reservation })
         return added
+    }
+
+    /// Whether this file's read was started ahead and is still under way.
+    func isUnderWay(_ entry: RemoteEntry) -> Bool {
+        reads[Data(entry.path.utf8)].map { !$0.isFinished } ?? false
     }
 
     /// Whether this file's read has already finished, so using it starts no new work.
@@ -172,12 +218,21 @@ final class SearchPipelineMetrics: @unchecked Sendable {
     }
 }
 
+/// Lets a walk wait for anything to finish: a listing, or a read ahead.
+protocol SearchWalkSignal: AnyObject, Sendable {
+    var count: Int { get }
+    func nudge()
+    func wait(after count: Int) async
+}
+extension SearchWalkEvents: SearchWalkSignal {}
+
 extension RemoteFolderSearch {
     static func scan(_ entries: [RemoteEntry], query: String, root: String, profile: ConnectionProfile,
                      service: any RemoteFileService, limits: ContentLimits, matchLimit: Int,
                      deadline: ContinuousClock.Instant, matched: inout Int, progress: inout Update, options: SearchQueryOptions, extraction: SearchExtractionOptions,
                      collect: ((SearchIndexDocument) -> Void)?, reusable: ((RemoteEntry) -> SearchIndexDocument?)? = nil,
-                     readAhead: SearchReadAhead? = nil, report: (Update) -> Void) async throws {
+                     readAhead: SearchReadAhead? = nil, events: (any SearchWalkSignal)? = nil,
+                     between: (inout Update) -> Void = { _ in }, report: (Update) -> Void) async throws {
         for entry in entries {
             try Task.checkCancellation()
             if entry.kind == .directory || !options.accepts(entry) { continue }
@@ -211,11 +266,24 @@ extension RemoteFolderSearch {
                 try Task.checkCancellation()
                 guard ContinuousClock.now < deadline || (ahead && readAhead?.hasFinished(entry) == true) else { progress.stop = .timeLimit; return }
                 if !counted { progress.filesSearched += 1; counted = true }
+                // The walk accepts listings that finished meanwhile, so their files can be read ahead too.
+                between(&progress)
                 var outcome: Result<Data, Error>?, readLimit = 0, reservation = 0
                 if ahead, let readAhead {
                     ahead = false
                     if ContinuousClock.now < deadline {
                         progress.chargedBytes += readAhead.fill(charged: progress.chargedBytes, files: progress.filesSearched)
+                    }
+                    // While its read is under way, the walk goes on accepting listings as they finish, so that later
+                    // folders' files start reading meanwhile.
+                    if let events {
+                        while true {
+                            let seen = events.count
+                            guard readAhead.isUnderWay(entry) else { break }
+                            await events.wait(after: seen)
+                            try Task.checkCancellation()
+                            between(&progress)
+                        }
                     }
                     // Its reservation was charged when it started. A file that grew past it gets an ordinary
                     // read, with a charge of its own; the first one stays.
