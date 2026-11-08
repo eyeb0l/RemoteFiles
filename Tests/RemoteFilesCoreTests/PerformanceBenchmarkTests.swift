@@ -292,6 +292,68 @@ final class PerformanceBenchmarkTests: XCTestCase {
             }
             await warm.setTransferWindow(floor: low, limit: high)
         }
+        // By name: browsing during a download under each read-window policy, rotating in one process. Use with --mbit,
+        // or a fast link finishes the file before the taps begin.
+        if measuring, environment["REMOTEFILES_BENCHMARK_ONLY"]?.contains("windowtaps") == true {
+            let temp = folder.appendingPathComponent("windowtaps.bin"), file = root + "/big-64m.bin"
+            let low = SFTPRemoteFileService.transferReadWindow, high = SFTPRemoteFileService.transferReadWindowLimit
+            let arms = [("fixed\(low)", low, low), ("growing", low, high), ("fixed\(high)", high, high), ("growing\(high * 2)", low, high * 2)]
+            for pass in 0..<runs {
+                for index in arms.indices {
+                    let (name, floor, limit) = arms[(index + pass) % arms.count]
+                    await warm.setTransferWindow(floor: floor, limit: limit)
+                    let started = ContinuousClock.now
+                    let transfer = Task { [profile] in
+                        try await warm.downloadManagedFile(profile: profile, path: file, allowedRoot: root, destination: temp, limit: 1 << 30) { _ in }
+                    }
+                    try await Task.sleep(for: .milliseconds(500))
+                    for _ in 0..<5 {
+                        try await recorder.timeAsync("windowtaps.\(name).tap", runs: 1) {
+                            blackHole(try await warm.listDirectory(profile: profile, path: root + "/d10").entries.count)
+                        }
+                        try await Task.sleep(for: .milliseconds(100))
+                    }
+                    _ = try await transfer.value
+                    let elapsed = started.elapsedMilliseconds, metrics = await warm.metrics()
+                    recorder.add("windowtaps.\(name).MiBps", value: 64 / (elapsed / 1000), unit: "MiB/s")
+                    recorder.add("windowtaps.\(name).peakWindow", value: Double(metrics.lastTransferPeakWindow), unit: "reads")
+                }
+            }
+            await warm.setTransferWindow(floor: low, limit: high)
+        }
+        // By name: a live content search over SFTP against a saved index of the same tree, whose listings all come
+        // before its reads, so its reads overlap across folders; and a folder tap during the live search.
+        if measuring, environment["REMOTEFILES_BENCHMARK_ONLY"]?.contains("pipeline") == true {
+            let walk = SearchQueryOptions(fileExtension: " "), tree = root + "/" + (environment["REMOTEFILES_BENCHMARK_PIPELINE_ROOT"] ?? "tree")
+            for _ in 0..<runs {
+                try await recorder.timeAsync("pipeline.contents.total", runs: 1) {
+                    var last = RemoteFolderSearch.Update()
+                    for try await update in RemoteFolderSearch.contents(matching: "zzzqq", below: tree, profile: profile, service: warm,
+                                                                        includeHidden: false, options: walk) { last = update }
+                    recorder.add("pipeline.contents.folders", value: Double(last.foldersSearched), unit: "folders")
+                    recorder.add("pipeline.contents.files", value: Double(last.filesSearched), unit: "files")
+                }
+                try await recorder.timeAsync("pipeline.index.total", runs: 1) {
+                    var last = RemoteFolderSearch.Update()
+                    let snapshot = try await RemoteFolderSearch.buildIndex(below: tree, profile: profile, service: warm, includeHidden: false,
+                                                                           extraction: .init()) { last = $0 }
+                    recorder.add("pipeline.index.documents", value: Double(snapshot.documents.count), unit: "documents")
+                    recorder.add("pipeline.index.files", value: Double(last.filesSearched), unit: "files")
+                }
+            }
+            let searching = Task { [profile] in
+                for try await _ in RemoteFolderSearch.contents(matching: "zzzqq", below: tree, profile: profile, service: warm,
+                                                               includeHidden: false, options: walk) {}
+            }
+            try await Task.sleep(for: .milliseconds(300))
+            for _ in 0..<5 {
+                try await recorder.timeAsync("pipeline.contents.tap", runs: 1) {
+                    blackHole(try await warm.listDirectory(profile: profile, path: root + "/d10").entries.count)
+                }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            searching.cancel(); _ = await searching.result
+        }
         // By name: the same link without SSH or SFTP. `REMOTEFILES_BENCHMARK_RAW_PORTS` lists ports on the server's
         // host that send the 64 MiB file over plain TCP; `REMOTEFILES_BENCHMARK_SFTP_PORTS` lists other ports of this
         // server, such as one without the proxy. Every arm takes its turn in a rotating order.
@@ -461,7 +523,8 @@ final class PerformanceBenchmarkTests: XCTestCase {
         let arms = (environment["REMOTEFILES_BENCHMARK_OFFLINE_ARMS"] ?? "current").split(separator: ",").map(String.init)
         for name in trees {
             let tree = name == "smoke" ? root + "/tree" : root + "/offline/" + name
-            for pass in 0..<runs {
+            // `REMOTEFILES_BENCHMARK_OFFLINE_SAVES=0` keeps only the extras below.
+            for pass in 0..<(environment["REMOTEFILES_BENCHMARK_OFFLINE_SAVES"] == "0" ? 0 : runs) {
                 for index in arms.indices {
                     let arm = arms[(index + pass) % arms.count]
                     try OfflineBenchmarkArm.apply(arm)
@@ -480,10 +543,14 @@ final class PerformanceBenchmarkTests: XCTestCase {
                     if let first = counter.firstFile { recorder.add(key + ".first", value: first) }
                     recorder.add(key + ".files", value: Double(saved.files), unit: "files")
                     recorder.add(key + ".progressUpdates", value: Double(counter.updates), unit: "updates")
-                    recorder.add(key + ".channels", value: Double(await service.metrics().sftpChannels - channels), unit: "channels")
+                    let metrics = await service.metrics()
+                    recorder.add(key + ".channels", value: Double(metrics.sftpChannels - channels), unit: "channels")
+                    recorder.add(key + ".peakFiles", value: Double(metrics.lastBatchPeakFiles), unit: "files")
+                    recorder.add(key + ".peakInFlightMiB", value: Double(metrics.lastBatchPeakBytes) / 1_048_576, unit: "MiB")
                 }
             }
-            guard measuring else { continue }
+            // Taps, cancellation and interruption, unless `REMOTEFILES_BENCHMARK_OFFLINE_EXTRAS=0`.
+            guard measuring, environment["REMOTEFILES_BENCHMARK_OFFLINE_EXTRAS"] != "0" else { continue }
             for arm in arms {
                 try OfflineBenchmarkArm.apply(arm)
                 let key = "offline.\(name).\(arm)"
@@ -508,15 +575,16 @@ final class PerformanceBenchmarkTests: XCTestCase {
                         let saving = Task { [profile] in try await Self.saveOffline(tree: tree, profile: profile, service: service, store: store,
                                                                                     operationID: id, counter: counter) }
                         while counter.firstFile == nil, !counter.finished { try await Task.sleep(for: .milliseconds(2)) }
-                        let started = ContinuousClock.now
+                        let started = ContinuousClock.now, connections = await service.metrics().connections
                         if stop { await service.closeSessionPreservingUnlockedIdentities() } else { saving.cancel() }
                         let result = await saving.result
                         recorder.add("\(key).\(outcome).returned", value: started.elapsedMilliseconds)
                         await store.waitForCancelledTransfer(id)
                         recorder.add("\(key).\(outcome).drained", value: started.elapsedMilliseconds)
                         if case .success = result { recorder.add("\(key).\(outcome).finishedFirst", value: 1, unit: "saves") }
-                        // The next save may connect again.
+                        // The next save may connect again: whether it had to says what the stop closed.
                         _ = try await service.listDirectory(profile: profile, path: root + "/d10")
+                        recorder.add("\(key).\(outcome).reconnected", value: Double(await service.metrics().connections - connections), unit: "connections")
                     }
                 }
             }
@@ -914,10 +982,17 @@ private final class OfflineProgressCounter: @unchecked Sendable {
     func finish() { lock.lock(); done = true; lock.unlock() }
 }
 
-/// Offline transfer policies a benchmark can switch between in one process. Only the shipped one exists here.
+/// Offline transfer policies a benchmark can switch between in one process: `current` as shipped, or a
+/// channel per file (`dedicated`) or one shared channel (`shared`), followed by how many files run at once.
 enum OfflineBenchmarkArm {
     static func apply(_ name: String) throws {
-        guard name == "current" else { throw XCTSkip("No offline arm called \(name)") }
+        if name == "current" { OfflineFolderDownload.sharesChannel = true; OfflineFolderDownload.concurrentFiles = 16; return }
+        for (prefix, shares) in [("dedicated", false), ("shared", true)] where name.hasPrefix(prefix) {
+            guard let count = Int(name.dropFirst(prefix.count)), count > 0 else { break }
+            OfflineFolderDownload.sharesChannel = shares; OfflineFolderDownload.concurrentFiles = count
+            return
+        }
+        throw XCTSkip("No offline arm called \(name)")
     }
 }
 

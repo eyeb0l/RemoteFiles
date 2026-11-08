@@ -1,0 +1,21 @@
+import json,statistics,sys
+from collections import defaultdict
+d=defaultdict(list)
+for path in sys.argv[1:]:
+    for l in open(path):
+        r=json.loads(l)
+        if r['scenario'].startswith('#'): continue
+        who,cond=r['label'].split('@')
+        d[(cond,r['scenario'].replace('.current',''),who)].extend(r['samples'])
+def q(v):
+    v=sorted(v); return statistics.median(v), v[0], v[-1]
+conds=sorted({k[0] for k in d}, key=lambda c:int(c[3:]))
+metrics=['total','cancel.reconnected','interrupt.reconnected','first','channels','peakFiles','peakInFlightMiB','heapMB','progressUpdates','MiBps','tap','cancel.returned','cancel.drained','interrupt.returned','interrupt.drained','interrupt.finishedFirst']
+for c in conds:
+  for t in ['small50','tiny400','mixed']:
+    for m in metrics:
+      b=d.get((c,f'offline.{t}.{m}','base')); a=d.get((c,f'offline.{t}.{m}','cand'))
+      if not b or not a: continue
+      (bm,bl,bh),(am,al,ah)=q(b),q(a)
+      ch=f"{(am-bm)/bm*100:+.0f}%" if bm else '-'
+      print(f"{c} {t} {m} base {bm:.4g} [{bl:.4g}-{bh:.4g}] n={len(b)} | cand {am:.4g} [{al:.4g}-{ah:.4g}] n={len(a)} | {ch}")
