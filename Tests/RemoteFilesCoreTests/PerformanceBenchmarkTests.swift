@@ -321,38 +321,81 @@ final class PerformanceBenchmarkTests: XCTestCase {
             }
             await warm.setTransferWindow(floor: low, limit: high)
         }
-        // By name: a live content search over SFTP against a saved index of the same tree, whose listings all come
-        // before its reads, so its reads overlap across folders; and a folder tap during the live search.
+        // By name: live content searches over SFTP against a saved index of the same tree, whose listings all come
+        // before its reads, so its reads overlap across folders. `tree` holds empty files; `texts` holds text, about
+        // one file in six from its third level down holding "kestrel". Each search records its first match, total,
+        // what it examined and the most it had in flight; then come folder taps during a search, and how soon a
+        // cancelled one ends and browsing goes on. `REMOTEFILES_BENCHMARK_PIPELINE_ROOTS` narrows the trees.
         if measuring, environment["REMOTEFILES_BENCHMARK_ONLY"]?.contains("pipeline") == true {
-            let walk = SearchQueryOptions(fileExtension: " "), tree = root + "/" + (environment["REMOTEFILES_BENCHMARK_PIPELINE_ROOT"] ?? "tree")
+            let walk = SearchQueryOptions(fileExtension: " ")
+            let roots = (environment["REMOTEFILES_BENCHMARK_PIPELINE_ROOTS"] ?? environment["REMOTEFILES_BENCHMARK_PIPELINE_ROOT"] ?? "tree,texts")
+                .split(separator: ",").map(String.init)
+            let searches = roots.flatMap { tree in (tree == "texts" ? ["kestrel", "zzzqq"] : ["zzzqq"]).map { (tree, $0) } }
+            func contents(_ tree: String, _ query: String) async throws {
+                let key = "pipeline.\(tree == "tree" ? "contents" : tree + "." + query)"
+                SearchPipelineMetrics.shared.reset()
+                let started = ContinuousClock.now
+                var last = RemoteFolderSearch.Update(), first: Double?, matches = 0
+                try await recorder.peakFootprint(key + ".heapMB", runs: 1) {
+                    for try await update in RemoteFolderSearch.contents(matching: query, below: root + "/" + tree, profile: profile, service: warm,
+                                                                        includeHidden: false, options: walk) {
+                        if first == nil, !update.contentMatches.isEmpty { first = started.elapsedMilliseconds }
+                        matches += update.contentMatches.count; last = update
+                    }
+                }
+                recorder.add(key + ".total", value: started.elapsedMilliseconds)
+                if let first { recorder.add(key + ".first", value: first) }
+                let peaks = SearchPipelineMetrics.shared.current
+                for (name, value, unit) in [("matches", matches, "matches"), ("folders", last.foldersSearched, "folders"),
+                                            ("files", last.filesSearched, "files"), ("readKB", last.bytesRead / 1024, "KB"),
+                                            ("peakReads", peaks.reads, "reads"), ("peakReadKB", peaks.expectedBytes / 1024, "KB"),
+                                            ("peakReservedKB", peaks.reservedBytes / 1024, "KB"), ("peakListings", peaks.listings, "listings"),
+                                            ("peakFoldersAhead", peaks.foldersAhead, "folders")] {
+                    recorder.add(key + "." + name, value: Double(value), unit: unit)
+                }
+            }
             for _ in 0..<runs {
-                try await recorder.timeAsync("pipeline.contents.total", runs: 1) {
-                    var last = RemoteFolderSearch.Update()
-                    for try await update in RemoteFolderSearch.contents(matching: "zzzqq", below: tree, profile: profile, service: warm,
-                                                                        includeHidden: false, options: walk) { last = update }
-                    recorder.add("pipeline.contents.folders", value: Double(last.foldersSearched), unit: "folders")
-                    recorder.add("pipeline.contents.files", value: Double(last.filesSearched), unit: "files")
-                }
-                try await recorder.timeAsync("pipeline.index.total", runs: 1) {
-                    var last = RemoteFolderSearch.Update()
-                    let snapshot = try await RemoteFolderSearch.buildIndex(below: tree, profile: profile, service: warm, includeHidden: false,
-                                                                           extraction: .init()) { last = $0 }
-                    recorder.add("pipeline.index.documents", value: Double(snapshot.documents.count), unit: "documents")
-                    recorder.add("pipeline.index.files", value: Double(last.filesSearched), unit: "files")
+                for (tree, query) in searches { try await contents(tree, query) }
+                for tree in roots {
+                    try await recorder.timeAsync("pipeline.\(tree == "tree" ? "" : tree + ".")index.total", runs: 1) {
+                        var last = RemoteFolderSearch.Update()
+                        let snapshot = try await RemoteFolderSearch.buildIndex(below: root + "/" + tree, profile: profile, service: warm, includeHidden: false,
+                                                                               extraction: .init()) { last = $0 }
+                        recorder.add("pipeline.\(tree == "tree" ? "" : tree + ".")index.documents", value: Double(snapshot.documents.count), unit: "documents")
+                        recorder.add("pipeline.\(tree == "tree" ? "" : tree + ".")index.files", value: Double(last.filesSearched), unit: "files")
+                    }
                 }
             }
-            let searching = Task { [profile] in
-                for try await _ in RemoteFolderSearch.contents(matching: "zzzqq", below: tree, profile: profile, service: warm,
-                                                               includeHidden: false, options: walk) {}
-            }
-            try await Task.sleep(for: .milliseconds(300))
-            for _ in 0..<5 {
-                try await recorder.timeAsync("pipeline.contents.tap", runs: 1) {
-                    blackHole(try await warm.listDirectory(profile: profile, path: root + "/d10").entries.count)
+            // Unless `REMOTEFILES_BENCHMARK_PIPELINE_EXTRAS=0`.
+            for (tree, query) in searches where environment["REMOTEFILES_BENCHMARK_PIPELINE_EXTRAS"] != "0" {
+                let key = "pipeline.\(tree == "tree" ? "contents" : tree + "." + query)"
+                let searching = Task { [profile] in
+                    for try await _ in RemoteFolderSearch.contents(matching: query, below: root + "/" + tree, profile: profile, service: warm,
+                                                                   includeHidden: false, options: walk) {}
                 }
-                try await Task.sleep(for: .milliseconds(100))
+                try await Task.sleep(for: .milliseconds(300))
+                for _ in 0..<5 {
+                    try await recorder.timeAsync(key + ".tap", runs: 1) {
+                        blackHole(try await warm.listDirectory(profile: profile, path: root + "/d10").entries.count)
+                    }
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+                searching.cancel(); _ = await searching.result
+                // Cancelling part way: how soon the stream ends, and how soon a folder opens afterwards.
+                for _ in 0..<3 {
+                    let running = Task { [profile] in
+                        for try await _ in RemoteFolderSearch.contents(matching: query, below: root + "/" + tree, profile: profile, service: warm,
+                                                                       includeHidden: false, options: walk) {}
+                    }
+                    try await Task.sleep(for: .milliseconds(500))
+                    let cancelled = ContinuousClock.now
+                    running.cancel(); _ = await running.result
+                    recorder.add(key + ".cancel", value: cancelled.elapsedMilliseconds)
+                    try await recorder.timeAsync(key + ".tapAfterCancel", runs: 1) {
+                        blackHole(try await warm.listDirectory(profile: profile, path: root + "/d10").entries.count)
+                    }
+                }
             }
-            searching.cancel(); _ = await searching.result
         }
         // By name: the same link without SSH or SFTP. `REMOTEFILES_BENCHMARK_RAW_PORTS` lists ports on the server's
         // host that send the 64 MiB file over plain TCP; `REMOTEFILES_BENCHMARK_SFTP_PORTS` lists other ports of this

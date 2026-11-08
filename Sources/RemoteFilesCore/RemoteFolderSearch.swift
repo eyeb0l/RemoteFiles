@@ -174,6 +174,7 @@ public enum RemoteFolderSearch {
                     group.addTask { await list(index, path) }
                     running += 1; started += 1
                 }
+                SearchPipelineMetrics.shared.note(listings: running, foldersAhead: started - reported)
                 guard running > 0, let listing = try await group.next() else { break }
                 let index = listing.index, result = listing.result
                 running -= 1

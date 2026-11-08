@@ -118,6 +118,8 @@ final class SearchReadAhead {
         }
         // Don't let a long walk's handled entries pile up.
         if nextWaiting > 4_096 { waiting.removeFirst(nextWaiting); nextWaiting = 0 }
+        SearchPipelineMetrics.shared.note(reads: reads.count, expectedBytes: expected,
+                                          reservedBytes: reads.values.reduce(0) { $0 + $1.reservation })
         return added
     }
 
@@ -140,6 +142,33 @@ final class SearchReadAhead {
     func cancelAll() {
         reads.values.forEach { $0.task?.cancel() }
         reads.removeAll(); expected = 0; waiting.removeAll(); nextWaiting = 0
+    }
+}
+
+/// Benchmarks only: the most a content search has had in flight at once since `reset()`. Searches run one at a
+/// time in the benchmark, so one shared record is enough. Costs a lock each time a search starts work.
+final class SearchPipelineMetrics: @unchecked Sendable {
+    struct Peaks: Sendable {
+        /// Reads started ahead and not yet taken, their listed sizes and what they were charged.
+        var reads = 0, expectedBytes = 0, reservedBytes = 0
+        /// Listings under way, and folders listed or being listed that the walk hasn't reported yet.
+        var listings = 0, foldersAhead = 0
+    }
+    static let shared = SearchPipelineMetrics()
+    private let lock = NSLock()
+    private var peaks = Peaks()
+    var current: Peaks { lock.lock(); defer { lock.unlock() }; return peaks }
+    func reset() { lock.lock(); peaks = Peaks(); lock.unlock() }
+    func note(reads: Int, expectedBytes: Int, reservedBytes: Int) {
+        lock.lock()
+        peaks.reads = max(peaks.reads, reads); peaks.expectedBytes = max(peaks.expectedBytes, expectedBytes)
+        peaks.reservedBytes = max(peaks.reservedBytes, reservedBytes)
+        lock.unlock()
+    }
+    func note(listings: Int, foldersAhead: Int) {
+        lock.lock()
+        peaks.listings = max(peaks.listings, listings); peaks.foldersAhead = max(peaks.foldersAhead, foldersAhead)
+        lock.unlock()
     }
 }
 
