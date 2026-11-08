@@ -51,6 +51,27 @@ No production file, dependency pin, test deadline or allowed skip changed. Both
 Logs, before/after xcresults, the diagnostic baseline trace and exact commands are
 retained in `/private/tmp/remotefiles-offline-back-fa81c951/`.
 
+## 8 November 2026: deterministic offline-folder overlap assertions
+
+The supplied failure from [main run 42513803390, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/42513803390/attempts/1),
+`macos-openssh` job `128832543907`, reported a peak of 15 instead of 16 in
+`OfflineFolderConcurrencyTests.testOverlappingFilesCommitInWalkOrderWithinTheWindow`
+on `f8a73c2934c5d99e1da9c1abf6227b036e107730`; the unchanged retry passed.
+Its 0–18 ms fixture delays could expire before every scheduled transfer started.
+The pool-bound test used the same mechanism with 20 ms delays, and the byte/count-limit
+cases also asserted overlap without ensuring the transfers stayed active together.
+
+The fixture now gates transfers until the expected set has started, then acknowledges
+each controlled completion. The window and pool tests finish files in a specified
+reverse order while retaining exact peak, pool-bound, saved-order and byte assertions.
+The byte/count cases hold their first two transfers until both start. Teardown releases
+every gate before draining cancelled work; the existing cancellation-ignoring transport
+checks remain. No production scheduling, sleeps, retries or timeout increases are added.
+
+The locked-version portable focused suite passed all 15 methods with no failures or
+skips. Isolated scheduling mutations failed for serial execution, a 17-file window,
+an unchecked read pool and commits made in completion order; the restored suite passed.
+
 ## 7 November 2026: folder-row reader landing
 
 The demo Markdown journey failed on PR #89's [run 42404712919, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/42404712919/attempts/1)
