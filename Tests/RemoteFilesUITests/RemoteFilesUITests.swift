@@ -393,7 +393,10 @@ final class RemoteFilesUITests: XCTestCase {
             closed.expectationDescription = "An overlaid library closes once it opens a folder"
             wait(for: [closed], timeout: 10)
         }
-        revealFolderRow(report, in: app).tap()
+        // Opening the first reader adds a bottom toolbar shared by the content/detail
+        // columns. Keep the tapped row away from that new bar so its hittability tests
+        // column visibility rather than whether the last row is now below the viewport.
+        revealFolderRow(report, in: app, keepingNearCentre: usesWorkspace && isPad).tap()
         let reader = app.scrollViews["Rendered Markdown document"]
         XCTAssertTrue(reader.waitForExistence(timeout: 15))
         if usesWorkspace {
@@ -1678,7 +1681,7 @@ final class RemoteFilesUITests: XCTestCase {
     /// drag in short, momentum-free steps until the whole row lies inside the list and above it.
     @discardableResult
     private func revealFolderRow(_ row: XCUIElement, in app: XCUIApplication,
-                                 searchingDown: Bool = true) -> XCUIElement {
+                                 searchingDown: Bool = true, keepingNearCentre: Bool = false) -> XCUIElement {
         // iPad keeps a separate sidebar list and puts search above the folder. Scroll
         // the folder's own viewport; only a bottom search bar obscures its lower rows.
         let list = app.collectionViews.matching(NSPredicate(format: "identifier != %@", "workspace-library")).firstMatch
@@ -1686,8 +1689,12 @@ final class RemoteFilesUITests: XCTestCase {
         for _ in 0..<16 {
             let search = app.searchFields.firstMatch
             let bottomSearch = search.exists && search.frame.minY > list.frame.midY
-            let top = search.exists && !bottomSearch ? max(list.frame.minY, search.frame.maxY) : list.frame.minY
-            let bottom = bottomSearch ? min(list.frame.maxY, search.frame.minY - 16) : list.frame.maxY
+            var top = search.exists && !bottomSearch ? max(list.frame.minY, search.frame.maxY) : list.frame.minY
+            var bottom = bottomSearch ? min(list.frame.maxY, search.frame.minY - 16) : list.frame.maxY
+            if keepingNearCentre {
+                let inset = (bottom - top) / 4
+                top += inset; bottom -= inset
+            }
             if row.exists, row.isHittable, row.frame.minY >= top, row.frame.maxY <= bottom { return row }
             let down = row.exists ? row.frame.maxY > bottom : searchingDown
             let from = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.65 : 0.35))

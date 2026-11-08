@@ -72,6 +72,42 @@ The locked-version portable focused suite passed all 15 methods with no failures
 skips. Isolated scheduling mutations failed for serial execution, a 17-file window,
 an unchecked read pool and commits made in completion order; the restored suite passed.
 
+## 8 November 2026: complete iPad workspace journey
+
+On unchanged `main` at `f8a73c2`, the complete
+`RemoteFilesUITests/testAdaptiveWorkspaceKeepsLibraryFolderAndReaderOnIPad`
+failed at “Opening a preview keeps its folder visible”. A diagnostic run with
+all assertions enabled reproduced it. Screenshots show the library, folder and
+reader still tiled: the tapped Latest report row was at the bottom of the
+folder, where opening the first reader adds a bottom toolbar shared by the
+content/detail columns and covers that row. The list's accessibility frame still
+covers the whole column, including the toolbar area, so being inside that frame
+alone did not keep the row hittable.
+
+The test now scrolls its selected row into the middle half of the folder viewport
+before opening the first preview. All original assertions, deadlines and later
+navigation steps remain enabled; no production layout change was needed. The
+complete method passed (1 test, 0 failures, 0 skips, 233.804 seconds) on a dedicated
+local iPad Pro 11-inch (M5), iOS 27.2, Xcode 27.2 (27B52), with ad-hoc signing and
+locked package resolution. The passing run separately reported an app event-loop
+idle notification stall; its retained app sample was waiting in the main run loop.
+No timeout or idle-wait setting was changed.
+
+Local evidence is outside the checkout at
+`/private/tmp/remotefiles-audit-4317/`: `workspace-baseline.xcresult`,
+`workspace-diagnostic.xcresult`, `workspace-fixed.xcresult`, matching logs,
+exported screenshots/recording and process samples. The narrower VoiceOver check
+from PR #91 was not used as proof of this journey, and no VoiceOver lane was run.
+
+The PR #66 portrait library-overlay/alert/Tab report remains unresolved. The
+production callers and focus router were inspected, but T3 discovery omitted the
+new local iPad even though `simctl` marked it available. `device_open` returned
+“No device E3ECD011-1FB1-4ECA-A13A-23D25096B7A6 on 'This machine'”; following its
+advice to refresh discovery and opening again produced the same error. Interactive
+device work stopped there. There is no new real-input or physical-keyboard evidence,
+and the keyboard router was not changed on an unproved hypothesis. Physical iPad
+touch/gesture feel, hardware keys and real window resizing remain untested.
+
 ## 7 November 2026: folder-row reader landing
 
 The demo Markdown journey failed on PR #89's [run 42404712919, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/42404712919/attempts/1)
