@@ -1,0 +1,12 @@
+{"label":"smoke@phone+150ms","samples":[336.26045800000003,478.64208300000001,822.62008300000002,550.94200000000001,421.111875],"scenario":"windowtaps.fixed16.tap","unit":"ms"}
+{"label":"smoke@phone+150ms","samples":[4.3746891524891636],"scenario":"windowtaps.fixed16.MiBps","unit":"MiB\/s"}
+{"label":"smoke@phone+150ms","samples":[16],"scenario":"windowtaps.fixed16.peakWindow","unit":"reads"}
+{"label":"smoke@phone+150ms","samples":[348.35158300000001,357.45949999999999,411.261167,454.77208400000001,561.07741599999997],"scenario":"windowtaps.growing.tap","unit":"ms"}
+{"label":"smoke@phone+150ms","samples":[5.8835689510425029],"scenario":"windowtaps.growing.MiBps","unit":"MiB\/s"}
+{"label":"smoke@phone+150ms","samples":[40],"scenario":"windowtaps.growing.peakWindow","unit":"reads"}
+{"label":"smoke@phone+150ms","samples":[345.21433300000001,530.96225000000004,1032.0206250000001,978.72241699999995,1039.961708],"scenario":"windowtaps.fixed64.tap","unit":"ms"}
+{"label":"smoke@phone+150ms","samples":[6.6642366791044507],"scenario":"windowtaps.fixed64.MiBps","unit":"MiB\/s"}
+{"label":"smoke@phone+150ms","samples":[64],"scenario":"windowtaps.fixed64.peakWindow","unit":"reads"}
+{"label":"smoke@phone+150ms","samples":[350.614417,343.44170800000001,447.55470800000001,519.02366600000005,524.41370900000004],"scenario":"windowtaps.growing128.tap","unit":"ms"}
+{"label":"smoke@phone+150ms","samples":[6.0271351276279406],"scenario":"windowtaps.growing128.MiBps","unit":"MiB\/s"}
+{"label":"smoke@phone+150ms","samples":[40],"scenario":"windowtaps.growing128.peakWindow","unit":"reads"}

@@ -2,7 +2,7 @@
 
 [Documentation](README.md) · [Build and test](DEVELOPMENT.md)
 
-What limits each operation, what was measured on 7 November 2026, and how to benchmark a change. Measured on iPhone means a physical iPhone 17 Pro; measured on Mac means the same code on a Mac, which says little about absolute speed on a phone. Raw samples are in [`performance/2026-11-07`](performance/2026-11-07), for the [follow-ups](#follow-ups-7-november) in [`performance/2026-11-07-followups`](performance/2026-11-07-followups), for [the phone's download cap](#the-phones-download-cap-not-the-client) in [`performance/2026-11-07-download-cap`](performance/2026-11-07-download-cap), for [offline folders](#offline-folders-one-channel-sixteen-files-at-a-time) and [the follow-up report](#follow-up-report-8-november) in [`performance/2026-11-08-offline`](performance/2026-11-08-offline), and for [live content searches](#live-content-searches-listing-ahead-while-reading) in [`performance/2026-11-08-search`](performance/2026-11-08-search).
+What limits each operation, what was measured on 7 November 2026, and how to benchmark a change. Measured on iPhone means a physical iPhone 17 Pro; measured on Mac means the same code on a Mac, which says little about absolute speed on a phone. Raw samples are in [`performance/2026-11-07`](performance/2026-11-07), for the [follow-ups](#follow-ups-7-november) in [`performance/2026-11-07-followups`](performance/2026-11-07-followups), for [the phone's download cap](#the-phones-download-cap-not-the-client) in [`performance/2026-11-07-download-cap`](performance/2026-11-07-download-cap), for [offline folders](#offline-folders-one-channel-sixteen-files-at-a-time) and [the follow-up report](#follow-up-report-8-november) in [`performance/2026-11-08-offline`](performance/2026-11-08-offline), for [live content searches](#live-content-searches-listing-ahead-while-reading) in [`performance/2026-11-08-search`](performance/2026-11-08-search), and for [read-window pacing on the phone](#read-window-pacing-on-the-phone-at-150-ms-keep-transferpacing) in [`performance/2026-11-08-phone-window`](performance/2026-11-08-phone-window).
 
 ## What limits what
 
@@ -18,7 +18,7 @@ What limits each operation, what was measured on 7 November 2026, and how to ben
 | Opening a very large folder (first frame) | SwiftUI on the main thread | 2.6 s stall at 50,000 rows (iPhone); none of it in sorting, the network or layout of the data |
 | Listing 10,000 names on OpenSSH | The server | 850 ms, of which about 18 ms is client CPU (Mac) or 80 ms (iPhone). `sftp-server` looks up the owner and group of every entry |
 | Preparing rows | Formatting, then sorting | 127 ms per 10,000 rows on iPhone, over half of it formatting sizes and dates no one was looking at |
-| Downloads over a fast, distant link | The read window | Fixed at 16 reads, at most 1 MiB per round trip. On iPhone from a wired Mac at 150 ms added, 5.3 MiB/s fixed at 16, 11.9 growing, 14.3 fixed at 64 |
+| Downloads over a fast, distant link | The read window | Fixed at 16 reads, at most 1 MiB per round trip. On iPhone from a wired Mac at 150 ms added, 5.3 MiB/s fixed at 16, 13.2 growing, 15.2 fixed at 64; on a full link a fixed 64 gains 4% and makes folder taps 1.7 times slower. [Details](#read-window-pacing-on-the-phone-at-150-ms-keep-transferpacing) |
 | Downloads from the MacBook Air to this phone | The mesh node forwarding between two of its wireless clients | Plain TCP from the Air is no faster than SFTP, 7 to 14 MiB/s. From the wired Mac mini the same phone reads 77 MiB/s of plain TCP and 58 to 67 MiB/s by SFTP, and the Air sends the mini 95 MiB/s. The client used 7% of one core. [Details](#the-phones-download-cap-not-the-client) |
 | Scrolling | Nothing that grows with the folder | At 120 Hz, 8 to 10% of frames miss one refresh, and none misses two, at 100 rows as at 50,000 (iPhone) |
 
@@ -377,7 +377,7 @@ Measured where the fixture allows, on the Mac through the proxy, with the candid
 | 40 ms, 100 Mbit/s | 11.0 MiB/s, 168 ms | 11.0 MiB/s, 170 ms | 11.0 MiB/s, 672 ms | 11.0 MiB/s, 169 ms |
 | 150 ms, 100 Mbit/s | 5.5 MiB/s, 316 ms | 9.1 MiB/s, 375 ms | 9.4 MiB/s, 671 ms | 9.1 MiB/s, 381 ms |
 
-Where the link isn't full, growth reaches 64 and taps cost nothing; where it is, a fixed 64 gains at most 3% and makes taps wait four times as long, and the growing window stops at 16 to 47. A larger limit adds 4% at 150 ms and nothing elsewhere. The one open gap, 11% below a fixed 64 at 150 ms on a free link, is the price of stopping at 1.5 times the round trip, which is what keeps the capped rows fast; it needs the phone at 150 ms from the wired mini, the only path fast enough, before changing anything.
+Where the link isn't full, growth reaches 64 and taps cost nothing; where it is, a fixed 64 gains at most 3% and makes taps wait four times as long, and the growing window stops at 16 to 47. A larger limit adds 4% at 150 ms and nothing elsewhere. The one open gap, 11% below a fixed 64 at 150 ms on a free link, is the price of stopping at 1.5 times the round trip, which is what keeps the capped rows fast; it needs the phone at 150 ms from the wired mini, the only path fast enough, before changing anything. *Measured: [keep it](#read-window-pacing-on-the-phone-at-150-ms-keep-transferpacing).*
 
 **3. Keeping a verified Linux search root between searches: not recommended yet.** No Linux guest ran this session, so nothing was measured. From the 7 November trace, a repeated search of one folder spends about six of its nine round trips proving the root, 240 ms at 40 ms. Keeping that would mean holding a directory descriptor open in a helper or channel between searches, and then trusting it later: the folder can be renamed, replaced or unmounted meanwhile, and the descriptor still names the old inode, so results would come from a folder the path no longer leads to unless every search re-proves the path against the held inode, which costs most of what it saves. It also holds a server process and descriptor per folder searched, across reconnects, host-key changes and key changes, each of which would have to drop it. Re-proving only by `REALPATH` and `stat` over SFTP (two of the nine) is the variant worth measuring, on the guest, with the existing acceptance suite and a test that replaces the folder between searches.
 
@@ -447,6 +447,24 @@ A live search now takes about as long as an index build of the same files (3.67 
 
 *Cost:* reads and listings compete on the search's channel, so on a slow server listings may wait longer behind reads (`ListingPacing` halves the listings at once when they take over 5 s); when the match limit stops a search early, up to 32 folders' listings and 32 reads may already be under way, and those reads stay charged; with nothing added, the first match comes a few milliseconds later and the walk wakes for every finished read. *Rejected:* listing ahead by 4 or 8 folders, which left most of the gain, and by 64 or more, which only delayed the first match; taking listings only between files (A), which delayed the first match by a third. *Would reverse it:* listings timing out on a slow server that the previous walk listed in time.
 
+## Read-window pacing on the phone at 150 ms: keep `TransferPacing`
+
+8 November, the second item of [the follow-up report](#follow-up-report-8-november), on the physical iPhone 17 Pro (iOS 27.2, Release with testability, a separate bundle ID, uninstalled afterwards) against a throwaway OpenSSH fixture on the Mac mini's loopback. The mini is on gigabit Ethernet; the phone reached it over the home Wi-Fi through an `nc` relay on the mini's LAN address, because Little Snitch lets `nc` take LAN connections but not the fixture, and `latency_proxy.py` on loopback added the delay ([runner](performance/2026-11-08-phone-window/phone_run.py.txt)). The arms rotate within one process: fixed at 16, growing to 64 (shipped), fixed at 64 and, in `windowtaps`, growing to 128, each a 64 MiB download with five folder taps during it.
+
+**The path first.** With nothing added, the first attempt read only 8.8 to 9.8 MiB/s, with the phone further from the Wi-Fi. Moved closer, it read 68 to 80 MiB/s ([raw](performance/2026-11-08-phone-window/relay-only.jsonl)), so at 150 ms nothing below the window limits a download. A fixed 64 can carry about 26 MiB/s there.
+
+| iPhone ← mini, 150 ms added | Fixed 16 | Growing to 64 (shipped) | Fixed 64 | Growing to 128 |
+|---|---:|---:|---:|---:|
+| Free link, `windowpairs`, 9 each | 5.29 MiB/s (5.27-5.33) | 13.2 MiB/s (13.0-13.5) | 15.2 MiB/s (14.4-15.6) | |
+| Free link, `windowtaps`, 9 each | 5.29 MiB/s | 13.3 MiB/s (12.9-13.5) | 15.4 MiB/s (14.6-15.6) | 13.9 MiB/s (13.2-14.2), grew to 99-122 |
+| A folder tap meanwhile, 45 each | 339 ms (327-353) | 336 ms (328-409) | 338 ms (325-464) | 339 ms (328-429) |
+| Capped at 100 Mbit/s, 4 each | 5.24 MiB/s | 8.99 MiB/s, grew to 48-63 | 9.34 MiB/s | 9.00 MiB/s |
+| A folder tap meanwhile, 20 each | 339 ms (325-372) | 400 ms (334-577) | 674 ms (334-739) | 379 ms (328-515) |
+
+([free link](performance/2026-11-08-phone-window/phone-150ms.jsonl), [capped](performance/2026-11-08-phone-window/phone-150ms-100mbit.jsonl).) On the free link a fixed 64 is 15% faster and taps don't notice, since nothing queues. The growing window does reach 64, but it holds 57 reads in flight on average against 62: what it loses is the climb from 16 at the start of every transfer, which on a 64 MiB file at 150 ms is about four round trips. A limit of 128 doesn't help, for the same reason. On a full link a fixed 64 gains 4% and makes taps wait 1.7 times as long, as on the Mac. The first, weak-signal pass said the same in one sample: fixed 64 at 6.7 MiB/s with taps at 979 ms, growing at 5.9 MiB/s with taps at 411 ms ([raw](performance/2026-11-08-phone-window/phone-150ms-weak-wifi-smoke.jsonl)).
+
+**Decision.** Nothing changed. The phone shows a real gain for a fixed 64 only where the link has room to spare, and the same setting costs browsing wherever the link is full. Which of the two a person is on can't be known before the transfer starts, and the growing window keeps taps fast on both. *Would reverse it:* a rule that starts nearer 64 where the link has room, without queueing more where it is full; carrying the last settled window between transfers on one connection is the candidate, not tried.
+
 ## Remaining opportunities
 
 Theoretical until measured, most promising first.
@@ -454,7 +472,7 @@ Theoretical until measured, most promising first.
 1. **Offline folders' listings.** With files overlapped, the save's folders are listed one at a time, about two round trips each: by that count about 7.5 s of the 25.5 s that 400 tiny files in 25 folders take at 150 ms, not measured separately. Listing a few ahead, as searches do, on the batch's channel.
 2. **Repeated server searches of one folder.** About six of nine round trips, but see the risks above before keeping anything open.
 3. **The first requests with `INIT`.** One round trip per channel, measured on seven implementations; see [why it was left out](#connection-setup-nothing-to-adopt).
-4. **Read-window growth on a long phone path.** At 150 ms on a free link it reaches 89% of a fixed 64; measure on the phone from the mini before trading queue depth for it.
+4. **Read-window growth on a long phone path.** At 150 ms on a free link it reaches 87% of a fixed 64 on the phone, the price of starting at 16 on every transfer. Starting a transfer at the window the last one on the same connection settled at might close it without queueing more on a full link; not tried. See [the phone measurements](#read-window-pacing-on-the-phone-at-150-ms-keep-transferpacing).
 
 ## Run it
 
