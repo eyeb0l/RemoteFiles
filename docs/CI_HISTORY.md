@@ -148,6 +148,16 @@ logging was removed. Local logs and xcresults are retained under
 `/private/tmp/remotefiles-reader-landing-20261107/`; no physical device, real server or
 new hosted CI run has been used for this investigation.
 
+PR #91's first [hosted run 42429957070](https://github.com/eyeb0l/RemoteFiles/actions/runs/42429957070)
+failed Repository checks before the Mac lanes ran. The runner regression
+`test_voiceover_builds_its_generated_targets_in_the_real_project_and_shared_caches`
+still expected nine VoiceOver methods; the two new row checks make eleven. The same
+`11 != 9` failure reproduced locally. Its expected count was updated to eleven,
+preserving the exact source-inventory comparison and no-skips assertion. CI gate
+correctly failed because Repository checks had failed before producing lane selections;
+there was no independent gate defect. The complete 145-test Python repository suite
+then passed locally. The fix is a new commit and CI run, not a retry of that failed run.
+
 ## 7 November 2026: rejected offline transfer races the next folder save
 
 PR #84's [run 42335596504, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/42335596504/attempts/1)

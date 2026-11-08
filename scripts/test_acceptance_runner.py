@@ -505,7 +505,7 @@ class LaneSelectionTests(unittest.TestCase):
         self.assertEqual(execution[execution.index("-maximum-test-execution-time-allowance") + 1], "240")
         self.assertEqual(execution[execution.index("-resultBundlePath") + 1], run.output / "voiceover.xcresult")
         self.assertEqual(run.inventories[0], acceptance.expected_tests(run.root, "iOS", ["Tests/VoiceOverFixtures"]))
-        self.assertEqual(len(run.inventories[0]), 9)
+        self.assertEqual(len(run.inventories[0]), 11)
         self.assertEqual(run.skips[0], set(), "No VoiceOver method may skip")
 
     def test_voiceover_shares_the_compilation_cache_with_the_other_lanes(self):
