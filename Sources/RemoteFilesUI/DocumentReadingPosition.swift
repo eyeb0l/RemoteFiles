@@ -29,7 +29,8 @@ import UIKit
     @ObservationIgnored private var store: ReadingPositionStore?
     @ObservationIgnored private var connectionID: UUID?
     @ObservationIgnored private var path: String?
-    @ObservationIgnored private var revision: String?
+    // HTML representables observe preparation even when their displayed bytes stay unchanged.
+    private(set) var revision: String?
     @ObservationIgnored private var pendingSave: Task<Void, Never>?
     @ObservationIgnored private var preparing = false
     @ObservationIgnored private var preparationID = UUID()

@@ -1,5 +1,6 @@
 #if os(iOS)
 import XCTest
+import SwiftUI
 import UIKit
 import WebKit
 import RemoteFilesCore
@@ -354,6 +355,123 @@ import RemoteFilesCore
         XCTAssertEqual(saved?.sourceAnchor, position.sourceAnchor)
     }
 
+    func testKeptHTMLViewResumesTrackingAfterDiscardedPreparationAndReopensNewPosition() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("positions.json"), connectionID = UUID()
+        let store = ReadingPositionStore(fileURL: file)
+        let position = DocumentReadingPosition()
+        await position.prepare(text: prose, store: store, connectionID: connectionID, path: "/report.html")
+        position.source = CGPoint(x: 0, y: 310)
+        position.sourceAnchor = .init(kind: "source", character: 170, viewportY: 22)
+        let fixture = try await hostReader(position, text: prose)
+        addTeardownBlock { @MainActor in fixture.close() }
+        let coordinator = try XCTUnwrap(fixture.view.navigationDelegate as? StaticHTMLWebView.Coordinator)
+        try await waitUntil(timeout: .seconds(30)) { coordinator.finishedLoading && position.htmlAnchor != nil }
+        fixture.view.scrollView.setContentOffset(CGPoint(x: 0, y: 850), animated: false)
+        try await waitUntil { abs(try await self.number("window.scrollY", in: fixture.view) - 850) < 2 }
+        await position.flush()
+        let oldSession = try XCTUnwrap(position.htmlSessionID)
+        let oldAnchor = try XCTUnwrap(position.htmlAnchor)
+
+        // ReaderView prepares decoded bytes before publication. A generation change
+        // discards them and prepares the still-visible preview again, without remounting it.
+        await position.prepare(text: "<h1>Discarded replacement</h1>" + prose,
+                               store: store, connectionID: connectionID, path: "/report.html")
+        XCTAssertNil(position.htmlSessionID)
+        XCTAssertNil(position.captureHTMLPosition)
+        await position.prepare(text: prose, store: store, connectionID: connectionID,
+                               path: "/report.html", discardingCurrent: true)
+        try await waitUntil { position.captureHTMLPosition != nil }
+        XCTAssertNotEqual(position.htmlSessionID, oldSession)
+        XCTAssertTrue(fixture.view.navigationDelegate === coordinator, "The same renderer must survive the discarded read")
+        XCTAssertTrue(coordinator.finishedLoading)
+        XCTAssertEqual(fixture.view.scrollView.contentOffset.y, 850, accuracy: 2)
+
+        fixture.view.scrollView.setContentOffset(CGPoint(x: 0, y: 1200), animated: false)
+        try await waitUntil {
+            abs(position.rendered.y - 1200) < 2 && position.htmlAnchor?.kind == "html-text" && position.htmlAnchor != oldAnchor
+        }
+        await position.flush()
+        let reopened = DocumentReadingPosition()
+        await reopened.prepare(text: prose, store: ReadingPositionStore(fileURL: file),
+                               connectionID: connectionID, path: "/report.html")
+        XCTAssertEqual(reopened.rendered.y, 1200, accuracy: 2)
+        XCTAssertEqual(reopened.htmlAnchor, position.htmlAnchor)
+        XCTAssertEqual(reopened.source.y, 310)
+        XCTAssertEqual(reopened.sourceAnchor, position.sourceAnchor)
+        fixture.close()
+        let replacement = try await hostReader(reopened, text: prose)
+        addTeardownBlock { @MainActor in replacement.close() }
+        try await waitUntil { abs(replacement.view.scrollView.contentOffset.y - 1200) < 3 }
+    }
+
+    func testLateDOMReplyAndOldDetachCannotAffectReplacementSessions() async throws {
+        let connectionID = UUID(), position = DocumentReadingPosition()
+        await position.prepare(text: prose, store: nil, connectionID: connectionID, path: "/report.html")
+        let fixture = try await host()
+        addTeardownBlock { @MainActor in fixture.close() }
+        let staleAnchor = SavedReadingPosition.Anchor(kind: "html-text", character: 100, viewportY: 8)
+        let freshAnchor = SavedReadingPosition.Anchor(kind: "html-text", character: 500, viewportY: 12)
+        var reply: CheckedContinuation<SavedReadingPosition.Anchor?, Never>?
+        var heldFirstReply = false
+        let coordinator = StaticHTMLWebView.Coordinator(readingPosition: position,
+            onFinish: { _ in }, onFailure: { XCTFail($0) }, openExternalLink: { _ in },
+            captureAnchor: { _ in
+                if !heldFirstReply {
+                    heldFirstReply = true
+                    return await withCheckedContinuation { reply = $0 }
+                }
+                return freshAnchor
+            })
+        coordinator.attach(fixture.view)
+        coordinator.beginLoading(prose)
+        coordinator.finishedLoading = true
+        defer { if coordinator.active { coordinator.detach() } }
+        let oldSession = position.htmlSessionID
+        // Keep a DOM response in flight without timing WebKit or cancelling this task.
+        // Renewing the session must invalidate it even when the native offset is unchanged.
+        let pendingCapture = Task { await coordinator.capturePosition() }
+        defer { reply?.resume(returning: nil) }
+        try await waitUntil { reply != nil }
+        await position.prepare(text: "<h1>Replacement</h1>" + prose, store: nil,
+                               connectionID: connectionID, path: "/report.html")
+        coordinator.resumeTrackingIfNeeded()
+        XCTAssertNil(position.htmlSessionID, "The old document cannot claim a changed revision")
+        XCTAssertNil(position.captureHTMLPosition)
+        await position.prepare(text: prose, store: nil, connectionID: connectionID,
+                               path: "/report.html", discardingCurrent: true)
+        coordinator.resumeTrackingIfNeeded()
+        XCTAssertNotNil(position.htmlSessionID)
+        XCTAssertNotEqual(position.htmlSessionID, oldSession)
+        position.htmlAnchor = freshAnchor
+        reply?.resume(returning: staleAnchor); reply = nil
+        await pendingCapture.value
+        XCTAssertFalse(pendingCapture.isCancelled)
+        XCTAssertEqual(position.htmlAnchor, freshAnchor, "A pre-discard DOM reply must not enter the rebound session")
+
+        let replacementFixture = try await host()
+        addTeardownBlock { @MainActor in replacementFixture.close() }
+        let replacement = StaticHTMLWebView.Coordinator(readingPosition: position,
+            onFinish: { _ in }, onFailure: { XCTFail($0) }, openExternalLink: { _ in },
+            captureAnchor: { _ in freshAnchor })
+        // Teardown's asynchronous capture/cleanup runs after the new renderer attaches.
+        let detached = coordinator.detach()
+        replacement.attach(replacementFixture.view)
+        replacement.beginLoading(prose)
+        replacement.finishedLoading = true
+        defer { replacement.detach() }
+        let replacementSession = position.htmlSessionID
+        await detached.value
+        coordinator.resumeTrackingIfNeeded()
+        await coordinator.capturePosition()
+        XCTAssertEqual(position.htmlSessionID, replacementSession)
+        XCTAssertNotNil(position.captureHTMLPosition, "Old detach must not clear the replacement's lifecycle callback")
+        position.htmlAnchor = nil
+        await position.flush()
+        XCTAssertEqual(position.htmlAnchor, freshAnchor)
+    }
+
     func testReusedCoordinatorCapturesTheChangedRevisionAfterPreparationResetsItsSession() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
@@ -438,6 +556,24 @@ import RemoteFilesCore
             window.rootViewController = nil
             previous?.makeKey()
         }
+    }
+
+    /// Mount the production representable so preparation must reach updateUIView itself.
+    private func hostReader(_ position: DocumentReadingPosition, text: String) async throws -> Fixture {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        let rules = try await SVGResourceBlocker.rules()
+        let controller = UIHostingController(rootView: StaticHTMLWebView(text: text, filename: "report.html",
+            rules: rules, readingPosition: position, onFinish: { XCTAssertFalse($0) },
+            onFailure: { XCTFail($0) }, openExternalLink: { _ in XCTFail("Unexpected external link") })
+            .frame(width: 360, height: 400))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        func views(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(views) }
+        try await waitUntil { views(controller.view).contains { $0 is AnchoredHTMLWebView } }
+        let view = try XCTUnwrap(views(controller.view).compactMap { $0 as? AnchoredHTMLWebView }.first)
+        return Fixture(view: view, window: window, previous: previous)
     }
 
     private func host(width: CGFloat = 360, bottomSafeArea: CGFloat? = nil) async throws -> Fixture {

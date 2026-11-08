@@ -110,6 +110,7 @@ struct StaticHTMLWebView: UIViewRepresentable {
     }
     func updateUIView(_ view: WKWebView, context: Context) {
         let coordinator = context.coordinator
+        coordinator.resumeTrackingIfNeeded()
         if coordinator.text.map({ sameBytes($0, text) }) != true {
             coordinator.beginLoading(text)
             coordinator.textScale = fontScale; coordinator.loadedTextScale = fontScale
@@ -134,6 +135,7 @@ struct StaticHTMLWebView: UIViewRepresentable {
         var finishedLoading = false
         var active = true
         weak var view: AnchoredHTMLWebView?
+        private var revision: String?
         private var sessionID = UUID()
         private var generation = UUID()
         private var captureTask: Task<Void, Never>?
@@ -148,10 +150,13 @@ struct StaticHTMLWebView: UIViewRepresentable {
         let onFinish: (Bool) -> Void
         let onFailure: (String) -> Void
         let openExternalLink: (URL) -> Void
+        private let captureAnchor: (WKWebView) async throws -> SavedReadingPosition.Anchor?
         init(readingPosition: DocumentReadingPosition, onFinish: @escaping (Bool) -> Void,
-             onFailure: @escaping (String) -> Void, openExternalLink: @escaping (URL) -> Void) {
+             onFailure: @escaping (String) -> Void, openExternalLink: @escaping (URL) -> Void,
+             captureAnchor: @escaping (WKWebView) async throws -> SavedReadingPosition.Anchor? = { try await HTMLReadingAnchor.capture(in: $0) }) {
             self.readingPosition = readingPosition; self.onFinish = onFinish
             self.onFailure = onFailure; self.openExternalLink = openExternalLink
+            self.captureAnchor = captureAnchor
         }
         func attach(_ view: AnchoredHTMLWebView) {
             self.view = view
@@ -161,21 +166,34 @@ struct StaticHTMLWebView: UIViewRepresentable {
             view.userScrolled = { [weak self] in self?.cancelRestoration() }
         }
         func beginLoading(_ text: String) {
-            generation = UUID()
-            captureTask?.cancel(); restorationTask?.cancel()
-            sessionID = UUID()
-            readingPosition.htmlSessionID = sessionID
-            readingPosition.captureHTMLPosition = { [weak self] in await self?.capturePosition() }
+            renewSession()
+            revision = SavedReadingPosition.revision(for: text)
             self.text = text; initialNavigation = true; finishedLoading = false; restoring = false
             geometryObservation = nil
         }
-        func detach() {
+        /// Preparation may discard replacement bytes and return to this loaded document.
+        /// Reclaim only an unowned session for our revision, keeping the live viewport.
+        func resumeTrackingIfNeeded() {
+            let preparedRevision = readingPosition.revision
+            guard active, finishedLoading, readingPosition.htmlSessionID == nil,
+                  let revision, revision == preparedRevision else { return }
+            renewSession()
+        }
+        private func renewSession() {
+            generation = UUID()
+            captureTask?.cancel(); restorationTask?.cancel(); restoring = false
+            sessionID = UUID()
+            readingPosition.htmlSessionID = sessionID
+            readingPosition.captureHTMLPosition = { [weak self] in await self?.capturePosition() }
+        }
+        @discardableResult
+        func detach() -> Task<Void, Never> {
             active = false
             restorationTask?.cancel(); captureTask?.cancel(); geometryObservation = nil
             view?.layoutChanged = nil; view?.userScrolled = nil
             // Keep only this final capture alive through representable teardown. Session
             // and generation checks prevent it writing into a replacement reader.
-            Task { [self, view] in
+            return Task { [self, view] in
                 await capturePosition()
                 withExtendedLifetime(view) {} // Final DOM capture has a one-second deadline.
                 if readingPosition.htmlSessionID == sessionID {
@@ -192,7 +210,7 @@ struct StaticHTMLWebView: UIViewRepresentable {
             let offset = view.scrollView.contentOffset
             recordCoordinateFallback(offset)
             let anchor: SavedReadingPosition.Anchor?
-            do { anchor = try await HTMLReadingAnchor.capture(in: view) }
+            do { anchor = try await captureAnchor(view) }
             catch {
                 // A newly launched web process may miss the short inspection deadline.
                 // Retry only while this renderer still owns the same live session.
@@ -316,6 +334,7 @@ struct StaticHTMLWebView: UIViewRepresentable {
                     self.afterNativeGeometry(of: view, token: token) { [weak self] in
                         guard let self else { return }
                         self.finishedLoading = true
+                        self.resumeTrackingIfNeeded()
                         self.restorePosition()
                         self.onFinish(needsScripts)
                     }
