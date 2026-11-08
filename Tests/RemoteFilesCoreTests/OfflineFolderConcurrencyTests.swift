@@ -19,7 +19,7 @@ private actor BatchFolderFixture: RemoteFileService, SnapshotBatchDownloading, B
     private var active = 0, pooled = 0
     private(set) var mostActive = 0, mostPooled = 0
     // Listings: how long each takes, how many times each fails before it answers, and which one each waits to see
-    // started before it answers (or gives up after a long while).
+    // started before it answers (or gives up after a minute, longer than a listing's own deadline).
     private var listingDelays: [String: Duration] = [:], listingFailures: [String: (error: Error, times: Int)] = [:]
     private var listingHolds: [String: String] = [:]
     private(set) var listings: [String] = []
@@ -64,7 +64,7 @@ private actor BatchFolderFixture: RemoteFileService, SnapshotBatchDownloading, B
         listingActive += 1; mostListings = max(mostListings, listingActive)
         defer { listingActive -= 1 }
         if let other = listingHolds[path] {
-            let end = ContinuousClock.now + .seconds(10)
+            let end = ContinuousClock.now + .seconds(60)
             while !listings.contains(other), ContinuousClock.now < end { try? await Task.sleep(for: .milliseconds(2)) }
             heldListingReleased[path] = listings.contains(other)
         }
