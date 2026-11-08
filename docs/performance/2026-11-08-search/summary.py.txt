@@ -1,0 +1,11 @@
+import json,statistics,sys,re
+from collections import defaultdict
+d=defaultdict(list)
+pat=re.compile(sys.argv[1])
+for path in sys.argv[2:]:
+    for l in open(path):
+        r=json.loads(l)
+        if r['scenario'].startswith('#') or not pat.search(r['scenario']): continue
+        d[(r['label'],r['scenario'])].extend(r['samples'])
+for (lab,sc),v in sorted(d.items()):
+    v=sorted(v); print(f"{lab:22} {sc:48} med {statistics.median(v):9.4g}  [{v[0]:.4g}-{v[-1]:.4g}] n={len(v)}")

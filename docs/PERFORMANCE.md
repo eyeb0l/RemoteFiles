@@ -2,7 +2,7 @@
 
 [Documentation](README.md) · [Build and test](DEVELOPMENT.md)
 
-What limits each operation, what was measured on 7 November 2026, and how to benchmark a change. Measured on iPhone means a physical iPhone 17 Pro; measured on Mac means the same code on a Mac, which says little about absolute speed on a phone. Raw samples are in [`performance/2026-11-07`](performance/2026-11-07), for the [follow-ups](#follow-ups-7-november) in [`performance/2026-11-07-followups`](performance/2026-11-07-followups), for [the phone's download cap](#the-phones-download-cap-not-the-client) in [`performance/2026-11-07-download-cap`](performance/2026-11-07-download-cap), and for [offline folders](#offline-folders-one-channel-sixteen-files-at-a-time) and [the follow-up report](#follow-up-report-8-november) in [`performance/2026-11-08-offline`](performance/2026-11-08-offline).
+What limits each operation, what was measured on 7 November 2026, and how to benchmark a change. Measured on iPhone means a physical iPhone 17 Pro; measured on Mac means the same code on a Mac, which says little about absolute speed on a phone. Raw samples are in [`performance/2026-11-07`](performance/2026-11-07), for the [follow-ups](#follow-ups-7-november) in [`performance/2026-11-07-followups`](performance/2026-11-07-followups), for [the phone's download cap](#the-phones-download-cap-not-the-client) in [`performance/2026-11-07-download-cap`](performance/2026-11-07-download-cap), for [offline folders](#offline-folders-one-channel-sixteen-files-at-a-time) and [the follow-up report](#follow-up-report-8-november) in [`performance/2026-11-08-offline`](performance/2026-11-08-offline), and for [live content searches](#live-content-searches-listing-ahead-while-reading) in [`performance/2026-11-08-search`](performance/2026-11-08-search).
 
 ## What limits what
 
@@ -11,7 +11,7 @@ What limits each operation, what was measured on 7 November 2026, and how to ben
 | Recursive search, without the Linux helper | Round trips | 330 ms with no added latency, 12.8 s at 40 ms, on the same 364 folders (Mac) |
 | Recursive search with the Linux helper | Round trips to set it up, then the server's disk | About 9 round trips before the first line, from about 35. On a cold, slow disk the server's reads take the rest (Mac) |
 | Saved indexes | Round trips per file | About 4.4 each; reads overlap, up to 32 at a time |
-| Contents search over SFTP | Its walk, which reads ahead only about a folder at a time | 500 files in 144 folders at 40 ms: 22.6 s, against 3.7 s for an index of the same files (Mac). [Details](#follow-up-report-8-november) |
+| Contents search over SFTP | Round trips per file, overlapped across folders, as for an index | 500 files in 144 folders at 40 ms: 3.4 s, from 22.9 s; an index of the same files takes 3.7 s (Mac). [Details](#live-content-searches-listing-ahead-while-reading) |
 | Offline folders | Round trips per file, overlapped; then listing, a folder at a time | About 5 each on one shared channel, 16 files at once, where it was 11 each in turn. 50 small files at 40 ms: 1.5 s, from 22.1 s (Mac). [Details](#offline-folders-one-channel-sixteen-files-at-a-time) |
 | Opening a connection | The protocol | 9 round trips at 40 ms to the first rows, all but one fixed by SSH, the server or SFTP. [The ledger](#connection-setup) |
 | Opening a file or small folder | Round trips | 3.5 to 10 round trips each before this work |
@@ -366,7 +366,7 @@ The first finished file comes no sooner, since it still takes its own round trip
 
 Measured where the fixture allows, on the Mac through the proxy, with the candidate; not implemented.
 
-**1. Live content searches across folder boundaries: the largest remaining gain.** A contents search over SFTP of the fixture's `tree` (500 files in 144 folders, the search's file limit) took 22.6 s at 40 ms and 3.8 s at 5 ms. An index of the same files, which lists every folder before it reads and keeps 32 reads in flight, took 3.7 s and 0.66 s ([raw](performance/2026-11-08-offline/content-search-vs-index.jsonl)), so letting the walk list ahead while it reads is worth up to six times. A folder tap during the search took 94 ms at 40 ms, as with nothing running. The design: one window of folders listed ahead (as name searches already do, 8 to 64) feeding the existing read-ahead in the walk's order, with each read charged to the limits as it starts, as now. Results and their order don't change, since matches are still handled in walk order; what changes is that a folder's reads can start while an earlier folder's are still out. *Costs:* listings and reads now compete on the walk's one channel, more work is wasted when the match limit stops a search early, and time to the first match may rise slightly if listings queue ahead of the first reads; read them first when both are ready. Time to first match wasn't measured: the fixture's files are empty.
+**1. Live content searches across folder boundaries: the largest remaining gain.** *Done: [listing ahead while reading](#live-content-searches-listing-ahead-while-reading).* A contents search over SFTP of the fixture's `tree` (500 files in 144 folders, the search's file limit) took 22.6 s at 40 ms and 3.8 s at 5 ms. An index of the same files, which lists every folder before it reads and keeps 32 reads in flight, took 3.7 s and 0.66 s ([raw](performance/2026-11-08-offline/content-search-vs-index.jsonl)), so letting the walk list ahead while it reads is worth up to six times. A folder tap during the search took 94 ms at 40 ms, as with nothing running. The design: one window of folders listed ahead (as name searches already do, 8 to 64) feeding the existing read-ahead in the walk's order, with each read charged to the limits as it starts, as now. Results and their order don't change, since matches are still handled in walk order; what changes is that a folder's reads can start while an earlier folder's are still out. *Costs:* listings and reads now compete on the walk's one channel, more work is wasted when the match limit stops a search early, and time to the first match may rise slightly if listings queue ahead of the first reads; read them first when both are ready. Time to first match wasn't measured: the fixture's files are empty.
 
 **2. Read-window pacing: keep `TransferPacing`.** Rotating four policies in one process, three 64 MiB downloads each, five folder taps during each ([raw](performance/2026-11-08-offline/window-policies-taps.jsonl)):
 
@@ -381,15 +381,80 @@ Where the link isn't full, growth reaches 64 and taps cost nothing; where it is,
 
 **3. Keeping a verified Linux search root between searches: not recommended yet.** No Linux guest ran this session, so nothing was measured. From the 7 November trace, a repeated search of one folder spends about six of its nine round trips proving the root, 240 ms at 40 ms. Keeping that would mean holding a directory descriptor open in a helper or channel between searches, and then trusting it later: the folder can be renamed, replaced or unmounted meanwhile, and the descriptor still names the old inode, so results would come from a folder the path no longer leads to unless every search re-proves the path against the held inode, which costs most of what it saves. It also holds a server process and descriptor per folder searched, across reconnects, host-key changes and key changes, each of which would have to drop it. Re-proving only by `REALPATH` and `stat` over SFTP (two of the nine) is the variant worth measuring, on the guest, with the existing acceptance suite and a test that replaces the folder between searches.
 
+## Live content searches: listing ahead while reading
+
+8 November, the first item of [the follow-up report](#follow-up-report-8-november). Before is the offline-folder change (#94) with the new measurements added, the only commit both builds share; after is this change. Both ran on the Mac mini against the loopback OpenSSH fixture through `latency_proxy.py`, alternating processes and reversing the order on the second pass ([driver](performance/2026-11-08-search/paired.sh.txt), [summary](performance/2026-11-08-search/pair.py.txt)). No phone was used: these are proxy measurements on a Mac, not iPhone results.
+
+**What limited it.** The walk took finished listings one at a time from its task group and offered the read-ahead only the files of folders it had taken. While it read a folder's files it took no listings, so folders listed meanwhile waited unseen, and reads went about a folder at a time: at 40 ms the read-ahead never held more than 10 to 24 of its 32 files, and 500 files took 22.9 s where an index of them takes 3.7 s. The fixture's `tree` holds empty files, so it can't show a first match; `pipeline` now also searches `texts`, the same 364 folders with 1 to 6 KB of text in each file, about one in six from the third level down holding "kestrel", and records time to the first match, what was examined, and the most each search had in flight.
+
+**What changed.** Listings post their results to the walk, which takes them without waiting, accepts every folder now next in queue order (its subfolders join the queue and its files are offered to the read-ahead, in the walk's order), and starts more listings. A live contents search does this before each file, and while it waits for a file's read it wakes for any listing or read that finishes, so a later folder's files start reading while an earlier one's are still out. It sends reads before new listings when both are ready, since the first match waits for reads. It lists at most 32 folders ahead of the folder it is reporting. Folders are still reported strictly in queue order, after their files have been read, and every read is still charged to the limits as it starts. Name searches and index builds keep their order exactly: a walk that isn't a live contents search starts listings only after reporting, so a limit reached in a folder starts nothing after it.
+
+**The candidates**, in one process, two passes each ([raw](performance/2026-11-08-search/lookahead-sweep.jsonl)). How far to list ahead:
+
+| Folders listed ahead | 4 | 8 | 16 | 32 | 64 | 128 |
+|---|---:|---:|---:|---:|---:|---:|
+| `tree`, 5 ms | 1.59 s | 1.00 s | 0.67 s | 0.70 s | 0.68 s | 0.70 s |
+| `tree`, 40 ms | 10.8 s | 6.16 s | 3.62 s | 3.49 s | 3.59 s | 3.66 s |
+| `tree`, 150 ms | 30.1 s, stopped | 21.5 s | 12.8 s | **12.2 s** | 12.3 s | 12.4 s |
+| `texts` "kestrel", 40 ms, first match / total | 650 ms / 6.31 s | 642 ms / 3.71 s | 658 ms / 3.27 s | 672 ms / 3.29 s | 684 ms / 3.32 s | 679 ms / 3.41 s |
+| `texts` "kestrel", 150 ms, first match / total | 2.20 s / 22.2 s | 2.21 s / 13.4 s | 2.23 s / 11.6 s | 2.25 s / 11.6 s | 2.26 s / 11.7 s | 2.25 s / 11.7 s |
+
+Thirty-two is within 5% of the best in every row and the fastest for `tree` at 150 ms, and it matches the read-ahead's 32 files, so even a tree with one readable file per folder can fill it. Then whether to take listings only between files (A) or also while waiting for a read, sending reads first (B), at 32, alternating within one process, three samples each ([raw](performance/2026-11-08-search/arms-ab.jsonl); recorded with a switch since removed):
+
+| | A, between files | B, also while waiting (shipped) |
+|---|---:|---:|
+| `tree`, 0 / 5 / 40 / 150 ms | 275 ms / 712 ms / 3.56 s / 12.3 s | 326 ms / 622 ms / 3.27 s / 11.5 s |
+| "kestrel" first match, 0 / 5 / 40 / 150 ms | 72 ms / 137 ms / 687 ms / 2.24 s | 69 ms / 111 ms / 459 ms / 1.57 s |
+| "kestrel" total, 40 / 150 ms | 3.30 s / 11.6 s | 3.26 s / 11.2 s |
+
+B brings the first match a fifth to a third sooner from 5 ms up and is a little faster overall; with nothing added it wakes more often and `tree` took 50 ms longer, still a third less than before.
+
+### Results
+
+Medians of four samples, two per process; ranges in brackets ([raw](performance/2026-11-08-search/paired-0-5-40-150.jsonl)). A search stops at 500 files or 30 seconds.
+
+| Search | Added | Before | After | Change |
+|---|---:|---:|---:|---:|
+| `tree`, 500 empty files, nothing matches | 0 | 442 ms (349-596) | 290 ms (240-342) | −34% |
+| | 5 ms | 3.94 s (3.73-4.04) | 0.64 s (0.58-0.66) | −84% |
+| | 40 ms | 22.9 s (22.9-23.2) | 3.36 s (3.27-3.48) | −85% |
+| | 150 ms | 30.2 s, stopped at 217 to 240 files | 11.8 s (11.5-12.0), all 500 | −61%, and finished |
+| `texts`, "kestrel", first match | 0 | 47 ms (44-51) | 54 ms (45-67) | +13% |
+| | 5 ms | 212 ms (195-222) | 116 ms (109-129) | −45% |
+| | 40 ms | 1.03 s (0.97-1.14) | 0.47 s (0.46-0.47) | −55% |
+| | 150 ms | 3.32 s (2.86-4.44) | 1.58 s (1.58-1.59) | −52% |
+| `texts`, "kestrel", all 79 matches | 0 | 531 ms (524-543) | 258 ms (248-272) | −51% |
+| | 5 ms | 2.35 s (2.23-2.59) | 0.54 s (0.53-0.55) | −77% |
+| | 40 ms | 11.2 s (10.4-12.8) | 3.23 s (3.20-3.24) | −71% |
+| | 150 ms | 30.4 s, stopped at 51 to 70 matches | 11.5 s (11.2-11.6), all 79 | −62%, and finished |
+| `texts`, nothing matches | 40 ms | 12.4 s (11.7-12.7) | 3.23 s (3.22-3.27) | −74% |
+| | 150 ms | 30.6 s, stopped at 354 to 396 files | 11.3 s (11.2-11.6), all 500 | −63%, and finished |
+
+A live search now takes about as long as an index build of the same files (3.67 s at 40 ms, 12.7 s at 150 ms). Index builds didn't change: 3.69 s against 3.67 s at 40 ms, 12.67 s against 12.65 s at 150 ms; at 5 ms two outliers in the first run were noise, ten samples each giving 588 ms before and 589 ms after ([raw](performance/2026-11-08-search/index-recheck-5ms.jsonl)). With nothing added the first match came 6 ms later, within the spread; reads and listings then compete for one server process, and the walk wakes for each. Wherever both finished, the folders reported (144 and 84), files read (500), bytes read (1,680 KB) and matches (79) were identical.
+
+**Browsing meanwhile.** A folder tap during each search at 40 ms took 87-90 ms after against 90-95 ms before, five taps each, and 84-85 ms against 93-95 ms just after cancelling one. The search's listings and reads stay on its own channel.
+
+**Resources.** At most 32 reads in flight, the read-ahead's window, which before was rarely reached (10 to 24); their reservations peaked at 2.0 to 2.1 MiB, against 0.6 to 1.6, within the read-ahead's existing bounds of 32 files and 2 MiB of listed bytes (reservations add each file's 64 KB growth allowance). Listings in flight fell from 64 to 21, and folders listed ahead of the one reported from 65 to 32. The heap's peak above its start was 1.8 to 2.0 MB against 1.6 to 2.0 MB.
+
+**Stopping a search.** Cancelling one half a second in ends its stream within 0.2 ms either way, and a folder tap straight afterwards takes one listing's time on the same connection.
+
+### Correctness
+
+- `SearchListingAheadTests` compares live searches against a walk listing one folder at a time with no read-ahead, over a three-level tree with listing delays drawn at random so later folders often answer first, three times each: with no limits and with the match, file, folder and depth limits, an unreadable folder and a failing one. Matches and their order, the stop, files, bytes, folders, unreadable and deep folders, and the error are equal each time, and so are charged bytes when every read was used. Two gated transports show a later folder's read starting while an earlier one's is under way, between files and while the walk waits for its only read; disabling the wait fails the second, and #94's walk fails both. Another shows the walk lists no more than its lookahead ahead of the folder it is reading; ignoring the bound fails it.
+- The existing search, read-ahead and index suites pass unchanged, including `testLimitsStopTheWalkAndKeepWhatWasFound`, which caught a first version that started listings before a name search's report could stop them.
+- Against OpenSSH, the twelve search, index and saved-result integration tests pass, including links that escape, a root redirected after listing, and recovery of listings interrupted by a peer's deadline. All 500 macOS tests pass with OpenSSH, with `LatencyBenchmarkTests` skipped as usual.
+- Not run: the iOS simulator, the UI journeys and VoiceOver (no view changed), a physical iPhone, the Linux helper (server searches are unchanged and taken before the walk) and servers other than OpenSSH. Every read keeps its own confinement checks, and only files of folders inside the search root are offered; what is read, and in what order it is reported, is unchanged.
+
+*Cost:* reads and listings compete on the search's channel, so on a slow server listings may wait longer behind reads (`ListingPacing` halves the listings at once when they take over 5 s); when the match limit stops a search early, up to 32 folders' listings and 32 reads may already be under way, and those reads stay charged; with nothing added, the first match comes a few milliseconds later and the walk wakes for every finished read. *Rejected:* listing ahead by 4 or 8 folders, which left most of the gain, and by 64 or more, which only delayed the first match; taking listings only between files (A), which delayed the first match by a third. *Would reverse it:* listings timing out on a slow server that the previous walk listed in time.
+
 ## Remaining opportunities
 
 Theoretical until measured, most promising first.
 
-1. **Live content searches over SFTP** read ahead only about a folder at a time; an index of the same files is six times faster at 40 ms. See [the follow-up report](#follow-up-report-8-november).
-2. **Offline folders' listings.** With files overlapped, the save's folders are listed one at a time, about two round trips each: by that count about 7.5 s of the 25.5 s that 400 tiny files in 25 folders take at 150 ms, not measured separately. Listing a few ahead, as searches do, on the batch's channel.
-3. **Repeated server searches of one folder.** About six of nine round trips, but see the risks above before keeping anything open.
-4. **The first requests with `INIT`.** One round trip per channel, measured on seven implementations; see [why it was left out](#connection-setup-nothing-to-adopt).
-5. **Read-window growth on a long phone path.** At 150 ms on a free link it reaches 89% of a fixed 64; measure on the phone from the mini before trading queue depth for it.
+1. **Offline folders' listings.** With files overlapped, the save's folders are listed one at a time, about two round trips each: by that count about 7.5 s of the 25.5 s that 400 tiny files in 25 folders take at 150 ms, not measured separately. Listing a few ahead, as searches do, on the batch's channel.
+2. **Repeated server searches of one folder.** About six of nine round trips, but see the risks above before keeping anything open.
+3. **The first requests with `INIT`.** One round trip per channel, measured on seven implementations; see [why it was left out](#connection-setup-nothing-to-adopt).
+4. **Read-window growth on a long phone path.** At 150 ms on a free link it reaches 89% of a fixed 64; measure on the phone from the mini before trading queue depth for it.
 
 ## Run it
 

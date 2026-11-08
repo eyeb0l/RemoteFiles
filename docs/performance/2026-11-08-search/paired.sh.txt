@@ -1,0 +1,21 @@
+#!/bin/bash
+# Usage: paired-pipeline.sh OUTPUT RTTS RUNS PORT
+# Alternates the baseline checkout (#94 + harness) with the candidate, reversing each pass. Taps and cancellation
+# (the extras) run on the first pass at 40 ms only.
+set -u
+CAND=${CAND:?the candidate checkout}
+BASE=${BASE:?a worktree of the baseline, harness commit included}
+out=$1; rtts=$2; runs=$3; port=$4
+for pass in 0 1; do
+  for rtt in ${rtts//,/ }; do
+    if [ $pass = 0 ]; then order="base cand"; else order="cand base"; fi
+    for which in $order; do
+      if [ $which = base ]; then checkout=$BASE; else checkout=$CAND; fi
+      extras=0; if [ $pass = 0 ] && [ $rtt = 40 ]; then extras=1; fi
+      echo "$(date +%T) pass $pass rtt $rtt $which extras $extras" >&2
+      REMOTEFILES_BENCHMARK_PIPELINE_EXTRAS=$extras \
+        python3 -B $CAND/scripts/benchmark_performance.py run --kind transport --skip-build --checkout $checkout \
+        --output $out --label $which --rtt $rtt --runs $runs --only pipeline --port $port >/dev/null 2>&1 || echo "FAILED $which $rtt" >&2
+    done
+  done
+done
