@@ -20,20 +20,32 @@ final class PerformanceBenchmarkTests: XCTestCase {
         var found: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(host, String(port), &hints, &found) == 0, let info = found else { throw POSIXError(.EHOSTUNREACH) }
         defer { freeaddrinfo(info) }
-        let socket = Darwin.socket(info.pointee.ai_family, info.pointee.ai_socktype, info.pointee.ai_protocol)
-        guard socket >= 0 else { throw POSIXError(.EIO) }
-        defer { close(socket) }
-        if var size = receiveBuffer {
-            guard setsockopt(socket, SOL_SOCKET, SO_RCVBUF, &size, socklen_t(MemoryLayout<Int32>.size)) == 0 else { throw POSIXError(.EINVAL) }
+        // A sender that serves one connection at a time, such as a loop of `nc -l`, refuses briefly between them.
+        var socket: Int32 = -1
+        for attempt in 0..<100 {
+            socket = Darwin.socket(info.pointee.ai_family, info.pointee.ai_socktype, info.pointee.ai_protocol)
+            guard socket >= 0 else { throw POSIXError(.EIO) }
+            if var size = receiveBuffer {
+                guard setsockopt(socket, SOL_SOCKET, SO_RCVBUF, &size, socklen_t(MemoryLayout<Int32>.size)) == 0 else { close(socket); throw POSIXError(.EINVAL) }
+            }
+            if connect(socket, info.pointee.ai_addr, info.pointee.ai_addrlen) == 0 { break }
+            let failure = errno
+            close(socket); socket = -1
+            guard failure == ECONNREFUSED, attempt < 99 else { throw POSIXError(POSIXErrorCode(rawValue: failure) ?? .ECONNREFUSED) }
+            usleep(10_000)
         }
-        guard connect(socket, info.pointee.ai_addr, info.pointee.ai_addrlen) == 0 else { throw POSIXError(.ECONNREFUSED) }
+        defer { close(socket) }
         var buffer = [UInt8](repeating: 0, count: 1 << 16), total = 0
         while true {
             let count = buffer.withUnsafeMutableBytes { read(socket, $0.baseAddress, $0.count) }
-            guard count > 0 else { break }
+            if count == 0 { return total }
+            if count < 0 {
+                // A reset sender must fail the sample, not record a short one as complete.
+                if errno == EINTR { continue }
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
             total += count
         }
-        return total
     }
 
     private var environment: [String: String] { ProcessInfo.processInfo.environment }
@@ -304,12 +316,13 @@ final class PerformanceBenchmarkTests: XCTestCase {
             }
             let temp = folder.appendingPathComponent("baseline.bin"), file = root + "/big-64m.bin"
             for other in [port] + ports("REMOTEFILES_BENCHMARK_SFTP_PORTS") {
-                let endpointProfile = ConnectionProfile(name: "Benchmark \(other)", host: host, port: other, username: user,
-                                                        identityID: key.id, startingDirectory: root)
-                try await trust.trustUnknown(endpoint: HostEndpoint(host: host, port: other),
-                                             key: HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: hostKey)))
+                // The main port reuses the warmed profile: a new profile would open a new connection inside the first sample.
+                let endpointProfile = other == port ? profile : ConnectionProfile(name: "Benchmark \(other)", host: host, port: other, username: user,
+                                                                                  identityID: key.id, startingDirectory: root)
                 let client = other == port ? warm : service()
                 if other != port {
+                    try await trust.trustUnknown(endpoint: HostEndpoint(host: host, port: other),
+                                                 key: HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: hostKey)))
                     value.connections.append(endpointProfile); try await metadata.save(value)
                     _ = try await client.listDirectory(profile: endpointProfile, path: root + "/d10")
                     addTeardownBlock { await client.disconnect() }
