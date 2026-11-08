@@ -2273,6 +2273,19 @@ final class BoundedPreviewReaderTests: XCTestCase {
         XCTAssertLessThanOrEqual(peak, 8)
     }
 
+    func testStreamReportsItsWindowAndReadsInFlightForEachReply() async throws {
+        let bytes = (0..<300_000).map { UInt8(truncatingIfNeeded: $0 &* 17) }
+        let file = PipelinedPreviewFile(bytes)
+        var observations: [(window: Int, inFlight: Int)] = []
+        let result = try await BoundedPreviewReader.stream(initialSize: UInt64(bytes.count), limit: 2_097_152, chunkSize: 16 * 1024, window: 4,
+                                                           observe: { observations.append(($0, $1)) }, readChunk: { offset, amount in
+            await file.read(offset: offset, length: amount)
+        }) { _ in }
+        XCTAssertEqual(observations.count, result.requests, "One report per reply")
+        XCTAssertTrue(observations.allSatisfy { $0.window == 4 && (1...4).contains($0.inFlight) })
+        XCTAssertEqual(observations.first?.inFlight, 4, "The first reply finds the whole window in flight")
+    }
+
     func testServerReadCapFillsGapsAndShrinksLaterRequests() async throws {
         let bytes = (0..<200_000).map { UInt8(truncatingIfNeeded: $0 &* 7) }
         let file = PipelinedPreviewFile(bytes, maximumRead: 10_000)
