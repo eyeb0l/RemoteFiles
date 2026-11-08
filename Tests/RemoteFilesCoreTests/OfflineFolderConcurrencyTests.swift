@@ -5,7 +5,7 @@ import XCTest
 /// A transport that shares one channel between a folder's files, as `SFTPRemoteFileService` does. Like the real
 /// one it refuses more bytes than the limit; it records how many files overlapped, what each was given, and how
 /// much a save had staged on disk whenever a file started.
-private actor BatchFolderFixture: RemoteFileService, SnapshotBatchDownloading {
+private actor BatchFolderFixture: RemoteFileService, SnapshotBatchDownloading, BackgroundFolderListing {
     struct Start: Sendable { let path: String; let limit: Int; let overlapped: Bool; let alongside: Int; let staged: Int }
     var tree: [String: [RemoteEntry]] = [:]
     var contents: [String: Data] = [:]
@@ -18,6 +18,17 @@ private actor BatchFolderFixture: RemoteFileService, SnapshotBatchDownloading {
     private(set) var batchesEnded = 0
     private var active = 0, pooled = 0
     private(set) var mostActive = 0, mostPooled = 0
+    // Listings: how long each takes, how many times each fails before it answers, and which one each waits to see
+    // started before it answers (or gives up after a long while).
+    private var listingDelays: [String: Duration] = [:], listingFailures: [String: (error: Error, times: Int)] = [:]
+    private var listingHolds: [String: String] = [:]
+    private(set) var listings: [String] = []
+    /// Whether a session is open for listings that must not open one. Lists made that way, by path.
+    var sessionOpen = true
+    private(set) var backgroundListings: [String] = []
+    private(set) var mostListings = 0
+    private(set) var heldListingReleased: [String: Bool] = [:]
+    private var listingActive = 0
 
     /// Folders of files, each `size` bytes unless `sizes` says otherwise, listed with `hints` where given.
     func make(root: String, folders: Int, files: Int, size: Int = 64, sizes: [String: Int] = [:], hints: [String: UInt64?] = [:]) {
@@ -40,15 +51,37 @@ private actor BatchFolderFixture: RemoteFileService, SnapshotBatchDownloading {
     func configure(delays: [String: Duration] = [:], failures: [String: Error] = [:], hold: Bool = false) {
         self.delays = delays; self.failures = failures; self.hold = hold
     }
+    func configureListings(delays: [String: Duration] = [:], failures: [String: (error: Error, times: Int)] = [:], holds: [String: String] = [:]) {
+        listingDelays = delays; listingFailures = failures; listingHolds = holds
+    }
     func setContents(_ path: String, _ data: Data) { contents[path] = data }
     func setEntries(_ path: String, _ entries: [RemoteEntry]) { tree[path] = entries }
     func waitingCount() -> Int { waiters.count }
     func release() { hold = false; let pending = waiters; waiters = []; pending.forEach { $0.resume() } }
 
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
+        listings.append(path)
+        listingActive += 1; mostListings = max(mostListings, listingActive)
+        defer { listingActive -= 1 }
+        if let other = listingHolds[path] {
+            let end = ContinuousClock.now + .seconds(10)
+            while !listings.contains(other), ContinuousClock.now < end { try? await Task.sleep(for: .milliseconds(2)) }
+            heldListingReleased[path] = listings.contains(other)
+        }
+        if let delay = listingDelays[path] { try? await Task.sleep(for: delay) }
+        if let failure = listingFailures[path], failure.times > 0 {
+            listingFailures[path] = (failure.error, failure.times - 1)
+            throw failure.error
+        }
         guard let entries = tree[path] else { throw RemoteFileError.notFound }
         return .init(path: path, entries: entries)
     }
+    func listDirectoryInBackground(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot? {
+        guard sessionOpen else { return nil }
+        backgroundListings.append(path)
+        return try await listDirectory(profile: profile, path: path)
+    }
+    func setSessionOpen(_ open: Bool) { sessionOpen = open }
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
     func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.unsupportedFile }
     func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
@@ -334,6 +367,162 @@ final class OfflineFolderConcurrencyTests: XCTestCase {
         do { _ = try await saving.value; XCTFail("The whole save has a deadline") }
         catch OfflineFileError.folderLimit { }
         await service.release(); await store.cancelAndDrain()
+        let saved = await store.librarySnapshot()
+        XCTAssertTrue(saved.files.isEmpty); XCTAssertTrue(saved.folders.isEmpty)
+    }
+
+    // MARK: Listing ahead
+
+    private func savedPaths(_ store: OfflineFileStore, _ folder: OfflineFolderPin) async -> [String] {
+        let pins = await store.snapshot()
+        return folder.fileIDs.compactMap { id in pins.first { $0.id == id }?.path }
+    }
+    /// Runs `body` with the walk listing `ahead` folders ahead, as shipped afterwards.
+    private func listing<T>(ahead: Int, _ body: () async throws -> T) async rethrows -> T {
+        let shipped = OfflineFolderDownload.listingsAhead
+        OfflineFolderDownload.listingsAhead = ahead
+        defer { OfflineFolderDownload.listingsAhead = shipped }
+        return try await body()
+    }
+
+    func testFoldersAreListedAheadWhileFilesRunAndTakenUpInWalkOrder() async throws {
+        var outcomes: [(paths: [String], bytes: [String: Data])] = []
+        for ahead in [0, 4] {
+            let (store, service) = try setup()
+            await service.make(root: root, folders: 6, files: 3)
+            // Later folders answer first. Listing ahead, folder 0 answers only once folder 1 is being listed too.
+            let delays = Dictionary(uniqueKeysWithValues: (0..<6).map { (root + "/folder \($0)", Duration.milliseconds(30 - 5 * $0)) })
+            await service.configureListings(delays: delays, holds: ahead > 0 ? [root + "/folder 0": root + "/folder 1"] : [:])
+            let folder = try await listing(ahead: ahead) { try await store.pinFolder(profile: profile, path: root, service: service) }
+            outcomes.append((await savedPaths(store, folder), try await savedBytes(store, folder)))
+            XCTAssertEqual(folder.directories.count, 7)
+            let listings = await service.listings, most = await service.mostListings
+            XCTAssertEqual(listings.count, 7, "Each folder once")
+            if ahead > 0 {
+                let released = await service.heldListingReleased[root + "/folder 0"]
+                XCTAssertEqual(released, true, "The next folder was being listed before this one was taken up")
+                XCTAssertGreaterThan(most, 1)
+                XCTAssertLessThanOrEqual(most, ahead, "No more than that many at once")
+            } else {
+                XCTAssertEqual(most, 1, "One at a time, as before")
+            }
+        }
+        XCTAssertEqual(outcomes[1].paths, outcomes[0].paths, "Committed in the same order")
+        XCTAssertEqual(outcomes[1].paths, walkOrder(folders: 6, files: 3))
+        XCTAssertEqual(outcomes[1].bytes, outcomes[0].bytes)
+    }
+
+    /// A listing that failed ahead of its turn isn't reported: the folder is listed again when the walk reaches
+    /// it, alone, and that answer is the one that counts, as when listing one folder at a time.
+    func testAListingThatFailedAheadIsListedAgainAtItsTurn() async throws {
+        let failing = root + "/folder 2"
+        // Once only: the second listing, at its turn, succeeds.
+        do {
+            let (store, service) = try setup()
+            await service.make(root: root, folders: 4, files: 2)
+            await service.configureListings(failures: [failing: (RemoteFileError.connectionEnded, 1)])
+            let folder = try await listing(ahead: 4) { try await store.pinFolder(profile: profile, path: root, service: service) }
+            XCTAssertEqual(folder.fileIDs.count, 8)
+            let listings = await service.listings
+            XCTAssertEqual(listings.filter { $0 == failing }.count, 2, "Listed ahead, then again at its turn")
+        }
+        // Always, with an earlier file failing slowly: as one at a time, the file's failure comes first in walk
+        // order and is the one reported; and with only the listing failing, it is reported after the files before it.
+        for fileFails in [true, false] {
+            var errors: [String] = []
+            for ahead in [0, 4] {
+                let (store, service) = try setup()
+                await service.make(root: root, folders: 4, files: 2)
+                let file = root + "/folder 1/file-1.txt"
+                await service.configure(delays: [file: .milliseconds(100)], failures: fileFails ? [file: RemoteFileError.permissionDenied] : [:])
+                await service.configureListings(failures: [failing: (RemoteFileError.notFound, .max)])
+                do {
+                    _ = try await listing(ahead: ahead) { try await store.pinFolder(profile: profile, path: root, service: service) }
+                    XCTFail("The save must fail")
+                } catch {
+                    errors.append(String(describing: error))
+                }
+                let starts = await service.starts, listings = await service.listings
+                XCTAssertFalse(starts.contains { $0.path.hasPrefix(failing + "/") || $0.path.hasPrefix(root + "/folder 3/") },
+                               "Nothing after the folder that couldn't be listed starts")
+                if ahead > 0 {
+                    // A connection that dropped fails the files in flight: that is reported without listing again.
+                    XCTAssertEqual(listings.filter { $0 == failing }.count, fileFails ? 1 : 2,
+                                   fileFails ? "Not listed again: an earlier file's failure comes first" : "Listed again once the files before it were done")
+                }
+                await store.cancelAndDrain()
+                let saved = await store.librarySnapshot()
+                XCTAssertTrue(saved.files.isEmpty); XCTAssertTrue(saved.folders.isEmpty)
+            }
+            XCTAssertEqual(errors[1], errors[0], "The error a save one folder at a time reports")
+            XCTAssertEqual(errors[0], String(describing: fileFails ? RemoteFileError.permissionDenied : RemoteFileError.notFound))
+        }
+    }
+
+    /// Only folders the walk has queued are listed ahead, so its limits bound the listings too, and it fails
+    /// where and how it did.
+    func testListingAheadKeepsTheWalksLimits() async throws {
+        let cases: [(String, OfflineFolderLimits, maxListed: Int)] = [
+            ("directories", .init(directories: 3), 3),
+            ("depth", .init(depth: 1), 9),
+            ("entries", .init(entries: 9), 9),
+        ]
+        for (name, limits, maxListed) in cases {
+            var errors: [String] = []
+            for ahead in [0, 4] {
+                let (store, service) = try setup()
+                await service.make(root: root, folders: 4, files: 2)
+                // A level below each folder, for the depth limit.
+                for folder in 0..<4 {
+                    let path = root + "/folder \(folder)"
+                    var entries = await service.tree[path] ?? []
+                    entries.append(.init(name: "inner", path: path + "/inner", kind: .directory))
+                    await service.setEntries(path, entries)
+                    await service.setEntries(path + "/inner", [])
+                }
+                do {
+                    _ = try await listing(ahead: ahead) { try await store.pinFolder(profile: profile, path: root, service: service, limits: limits) }
+                    XCTFail("\(name) must fail")
+                } catch {
+                    errors.append(String(describing: error))
+                }
+                let listings = await service.listings
+                XCTAssertLessThanOrEqual(Set(listings).count, maxListed, "\(name): listed only what the walk queued")
+                await store.cancelAndDrain()
+            }
+            XCTAssertEqual(errors[1], errors[0], name)
+        }
+    }
+
+    /// Listings made ahead never open a session: without one, each folder is listed at its turn, as before.
+    func testListingsAheadNeverOpenASession() async throws {
+        let (store, service) = try setup()
+        await service.make(root: root, folders: 4, files: 3)
+        await service.setSessionOpen(false)
+        let folder = try await listing(ahead: 4) { try await store.pinFolder(profile: profile, path: root, service: service) }
+        let saved = await savedPaths(store, folder)
+        XCTAssertEqual(saved, walkOrder(folders: 4, files: 3))
+        let listings = await service.listings, background = await service.backgroundListings
+        XCTAssertTrue(background.isEmpty)
+        XCTAssertEqual(listings.count, 5, "Each folder once, at its turn")
+    }
+
+    func testACancelledSaveListsNothingMoreOnceItReturns() async throws {
+        let (store, service) = try setup()
+        await service.make(root: root, folders: 8, files: 2)
+        await service.configure(hold: true)
+        await service.configureListings(delays: Dictionary(uniqueKeysWithValues: (0..<8).map { (root + "/folder \($0)", Duration.milliseconds(50)) }))
+        let id = UUID()
+        let saving = Task { try await self.listing(ahead: 4) { try await store.pinFolder(profile: self.profile, path: self.root, service: service, operationID: id) } }
+        try await waitFor { await service.waitingCount() > 0 }
+        saving.cancel()
+        do { _ = try await saving.value; XCTFail("Cancelled") } catch is CancellationError { }
+        let listed = await service.listings.count
+        await service.release()
+        await store.waitForCancelledTransfer(id)
+        try await Task.sleep(for: .milliseconds(200))
+        let after = await service.listings.count
+        XCTAssertEqual(after, listed, "No listing starts after the save has returned")
         let saved = await store.librarySnapshot()
         XCTAssertTrue(saved.files.isEmpty); XCTAssertTrue(saved.folders.isEmpty)
     }

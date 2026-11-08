@@ -1047,7 +1047,15 @@ private final class OfflineProgressCounter: @unchecked Sendable {
 /// channel per file (`dedicated`) or one shared channel (`shared`), followed by how many files run at once.
 enum OfflineBenchmarkArm {
     static func apply(_ name: String) throws {
-        if name == "current" { OfflineFolderDownload.sharesChannel = true; OfflineFolderDownload.concurrentFiles = 16; return }
+        if name == "current" {
+            OfflineFolderDownload.sharesChannel = true; OfflineFolderDownload.concurrentFiles = 16; OfflineFolderDownload.listingsAhead = 4
+            return
+        }
+        // Folders listed ahead of the walk, with files as shipped.
+        if name.hasPrefix("ahead"), let count = Int(name.dropFirst(5)), count >= 0 {
+            OfflineFolderDownload.sharesChannel = true; OfflineFolderDownload.concurrentFiles = 16; OfflineFolderDownload.listingsAhead = count
+            return
+        }
         for (prefix, shares) in [("dedicated", false), ("shared", true)] where name.hasPrefix(prefix) {
             guard let count = Int(name.dropFirst(prefix.count)), count > 0 else { break }
             OfflineFolderDownload.sharesChannel = shares; OfflineFolderDownload.concurrentFiles = count

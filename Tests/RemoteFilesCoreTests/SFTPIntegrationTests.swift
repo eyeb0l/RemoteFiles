@@ -65,6 +65,8 @@ final class SFTPIntegrationTests: XCTestCase {
         try Data(repeating: 9, count: OfflineFolderDownload.overlappedFileBytes).write(to: URL(fileURLWithPath: tree + "/folder 1/edge.bin"))
         try Data().write(to: URL(fileURLWithPath: tree + "/folder 2/empty.txt"))
         let canonical = try await service.listDirectory(profile: profile, path: tree).path
+        // Folders listed ahead of the walk use the session's walk channel, which prefetch has normally opened by now.
+        _ = try await service.listDirectoryInBackground(profile: profile, path: canonical)
         let local = FileManager.default.temporaryDirectory.appendingPathComponent("offline-batch-" + UUID().uuidString)
         addTeardownBlock { try? FileManager.default.removeItem(at: local) }
         let store = try OfflineFileStore(directory: local)
@@ -88,7 +90,8 @@ final class SFTPIntegrationTests: XCTestCase {
         }
     }
 
-    /// A file or folder that becomes a link while the save runs fails it, on the shared channel as on a file's own.
+    /// A file or folder that becomes a link while the save runs fails it, on the shared channel as on a file's own,
+    /// and whether the folder was replaced before it was listed or after it was listed ahead of the walk.
     func testOfflineFolderFailsClosedWhenMembersAreReplacedByLinksDuringTheSave() async throws {
         let fixture = try Fixture(), stores = try Stores(fixture: fixture)
         let identity = try await stores.identity.generate(name: "Offline replaced")
@@ -97,17 +100,29 @@ final class SFTPIntegrationTests: XCTestCase {
         try await stores.trustFixtureHost()
         let base = stores.service()
         addTeardownBlock { await base.disconnect() }
-        for replacesFolder in [false, true] {
+        // Outside the saved folder, with the same names, so that a file's own checks are what refuse it.
+        let decoy = try Self.offlineTree(in: fixture, folders: 1, files: 6) + "/folder 0"
+        for replaced in ["file", "folder before listing", "folder after listing"] {
             let tree = try Self.offlineTree(in: fixture, folders: 3, files: 6)
             let canonical = try await base.listDirectory(profile: profile, path: tree).path
             let hook = OfflineSaveHook()
-            hook.onStart = { call, path in
-                // A folder before the walk lists it; a file after its folder was listed, before it starts.
-                // Files start in the walk's order, so file-3 hasn't when file-0 does.
-                guard replacesFolder ? call == 1 : path.hasSuffix("/folder 1/file-0.txt") else { return }
-                let target = replacesFolder ? tree + "/folder 2" : tree + "/folder 1/file-3.txt"
+            @Sendable func replace(_ target: String, with destination: String) {
                 try? FileManager.default.moveItem(atPath: target, toPath: target + "-moved")
-                try? FileManager.default.createSymbolicLink(atPath: target, withDestinationPath: replacesFolder ? fixture.files : fixture.files + "/report.md")
+                try? FileManager.default.createSymbolicLink(atPath: target, withDestinationPath: destination)
+            }
+            switch replaced {
+            case "file":
+                // After its folder was listed, before it starts. Files start in the walk's order, so file-3 hasn't
+                // when file-0 does.
+                hook.onStart = { _, path in
+                    if path.hasSuffix("/folder 1/file-0.txt") { replace(tree + "/folder 1/file-3.txt", with: fixture.files + "/report.md") }
+                }
+            case "folder before listing":
+                // Once the folder holding it is listed, before any listing of it, ahead or not: its listing refuses it.
+                hook.onListed = { path in if path == canonical { replace(tree + "/folder 2", with: fixture.files) } }
+            default:
+                // Once listed, perhaps ahead of the walk, before its files start: each file's own checks refuse it.
+                hook.onListed = { path in if path == canonical + "/folder 2" { replace(tree + "/folder 2", with: decoy) } }
             }
             let local = FileManager.default.temporaryDirectory.appendingPathComponent("offline-replaced-" + UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: local) }
@@ -2077,6 +2092,8 @@ private final class OfflineSaveHook: @unchecked Sendable {
     private var calls = 0
     /// Set before the save starts.
     var onStart: (@Sendable (Int, String) async -> Void)?
+    /// After a folder's listing has come back, before the save sees it.
+    var onListed: (@Sendable (String) async -> Void)?
     var onFirstProgress: (@Sendable (Int) async -> Void)?
     func next() -> Int { lock.lock(); defer { lock.unlock() }; calls += 1; return calls }
 }
@@ -2092,11 +2109,18 @@ private final class SavingTask: @unchecked Sendable {
     func cancel() { lock.lock(); cancelled = true; let value = task; lock.unlock(); value?.cancel() }
 }
 
-private struct HookedOfflineService: RemoteFileService, SnapshotBatchDownloading {
+private struct HookedOfflineService: RemoteFileService, SnapshotBatchDownloading, BackgroundFolderListing {
     let base: SFTPRemoteFileService
     let hook: OfflineSaveHook
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
-        try await base.listDirectory(profile: profile, path: path)
+        let listing = try await base.listDirectory(profile: profile, path: path)
+        await hook.onListed?(path)
+        return listing
+    }
+    func listDirectoryInBackground(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot? {
+        let listing = try await base.listDirectoryInBackground(profile: profile, path: path)
+        if listing != nil { await hook.onListed?(path) }
+        return listing
     }
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data {
         try await base.readFile(profile: profile, path: path, limit: limit)
