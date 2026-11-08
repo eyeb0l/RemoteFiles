@@ -208,6 +208,80 @@ final class FolderBrowsingTests: XCTestCase {
         XCTAssertEqual(listings.filter { $0 == "/r" }.count, 2, "The search made its own request instead of sharing one")
     }
 
+    @MainActor func testSortChosenBeforeInitialListingIsSavedUnderItsCanonicalPath() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "FolderBrowsingTests-" + UUID().uuidString
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { try? FileManager.default.removeItem(at: directory); preferences.removePersistentDomain(forName: suite) }
+        let model = try AppModel(directory: directory, fileService: DemoRemoteFileService(delayNanoseconds: 0), preferences: preferences)
+        let id = UUID(), other = UUID()
+        let canonical = "/home/reader/Projects", requested = "/project-alias"
+        var sort = FolderSortSelection(model: model, connectionID: id, canonicalPath: nil)
+
+        sort.choose(.size, canonicalPath: nil)
+        XCTAssertEqual(sort.orderForListing(at: canonical), .size, "An early choice controls the arriving rows")
+        XCTAssertNil(preferences.array(forKey: "folderSortOrders-v1"), "Do not save against an unresolved alias")
+        // A newer choice can arrive while rows are being prepared off the main actor.
+        sort.choose(.kind, canonicalPath: nil)
+        sort.receiveListing(at: canonical)
+        XCTAssertEqual(sort.order, .kind)
+        XCTAssertEqual(model.folderSortOrder(id, path: canonical), .kind)
+        XCTAssertEqual(model.folderSortOrder(id, path: requested), .name)
+        XCTAssertEqual(model.folderSortOrder(other, path: canonical), .name)
+
+        let relaunched = try AppModel(directory: directory, fileService: DemoRemoteFileService(delayNanoseconds: 0), preferences: preferences)
+        let reopened = FolderSortSelection(model: relaunched, connectionID: id, canonicalPath: canonical)
+        XCTAssertEqual(reopened.order, .kind, "The choice survives leaving the view and relaunching")
+        sort.choose(.name, canonicalPath: canonical)
+        sort.receiveListing(at: canonical)
+        XCTAssertNil(preferences.array(forKey: "folderSortOrders-v1"), "Choosing Name still removes the saved choice")
+    }
+
+    @MainActor func testSortAfterPartialListingPersistsAndCompleteListingKeepsTheLatestChoice() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "FolderBrowsingTests-" + UUID().uuidString
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { try? FileManager.default.removeItem(at: directory); preferences.removePersistentDomain(forName: suite) }
+        let model = try AppModel(directory: directory, fileService: DemoRemoteFileService(delayNanoseconds: 0), preferences: preferences)
+        let id = UUID(), path = "/Projects"
+        model.setFolderSortOrder(.size, id: id, path: path)
+        var sort = FolderSortSelection(model: model, connectionID: id, canonicalPath: nil)
+        XCTAssertEqual(sort.orderForListing(at: path), .size, "Without a user choice, restore the canonical folder's preference")
+        XCTAssertEqual(sort.order, .name, "Preparing a cancelled listing must not commit its state")
+        sort.receiveListing(at: path) // The first accepted partial rows resolve the folder.
+        XCTAssertEqual(sort.order, .size)
+        sort.choose(.modified, canonicalPath: path)
+        XCTAssertEqual(model.folderSortOrder(id, path: path), .modified, "Choices after partial rows save immediately")
+        model.setFolderSortOrder(.kind, id: id, path: "/Other")
+        sort.receiveListing(at: path) // The complete listing must retain the later choice.
+        XCTAssertEqual(sort.order, .modified)
+        XCTAssertEqual(model.folderSortOrder(id, path: path), .modified)
+        XCTAssertEqual((preferences.array(forKey: "folderSortOrders-v1") as? [[String]])?.last?.first,
+                       id.uuidString + "|/Other", "Repeated partial/final listings must not rewrite choices or change their eviction order")
+        // A quiet refresh can update the accepted listing's canonical path. The binding
+        // always supplies that current path, rather than retaining an older one.
+        sort.choose(.kind, canonicalPath: "/Retargeted")
+        XCTAssertEqual(model.folderSortOrder(id, path: "/Retargeted"), .kind)
+        XCTAssertEqual(model.folderSortOrder(id, path: path), .modified)
+    }
+
+    @MainActor func testEarlySortChoiceInDemoRemainsTemporary() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "FolderBrowsingTests-" + UUID().uuidString
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { try? FileManager.default.removeItem(at: directory); preferences.removePersistentDomain(forName: suite) }
+        let model = try AppModel(directory: directory, fileService: DemoRemoteFileService(delayNanoseconds: 0), preferences: preferences)
+        await model.setDemo(true)
+        let id = UUID(), path = "/Projects"
+        var sort = FolderSortSelection(model: model, connectionID: id, canonicalPath: nil)
+        sort.choose(.size, canonicalPath: nil)
+        sort.receiveListing(at: path)
+        XCTAssertEqual(sort.order, .size, "Demo still applies the user's current choice")
+        XCTAssertEqual(model.folderSortOrder(id, path: path), .name)
+        XCTAssertNil(preferences.array(forKey: "folderSortOrders-v1"), "Resolving a Demo listing must not write preferences")
+        XCTAssertEqual(FolderSortSelection(model: model, connectionID: id, canonicalPath: path).order, .name)
+    }
+
     @MainActor func testSortChoicesAreRememberedPerFolderBoundedAndNeverInDemo() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let suite = "FolderBrowsingTests-" + UUID().uuidString

@@ -112,6 +112,42 @@ enum FolderKeyboardSelection {
     }
 }
 
+/// Keeps a user's sort choice while an initial listing is still resolving its canonical path.
+@MainActor struct FolderSortSelection {
+    private let model: AppModel
+    private let connectionID: UUID
+    private var userChoseSort = false
+    private var pendingChoice: FolderSortOrder?
+    private(set) var order: FolderSortOrder
+
+    init(model: AppModel, connectionID: UUID, canonicalPath: String?) {
+        self.model = model; self.connectionID = connectionID
+        order = canonicalPath.map { model.folderSortOrder(connectionID, path: $0) } ?? .name
+    }
+
+    mutating func choose(_ order: FolderSortOrder, canonicalPath: String?) {
+        self.order = order; userChoseSort = true
+        if let canonicalPath {
+            model.setFolderSortOrder(order, id: connectionID, path: canonicalPath)
+            pendingChoice = nil
+        } else { pendingChoice = order }
+    }
+
+    /// Preparing a listing does not commit its path: the request may still be cancelled.
+    func orderForListing(at path: String) -> FolderSortOrder {
+        userChoseSort ? order : model.folderSortOrder(connectionID, path: path)
+    }
+
+    /// Called only once the view accepts a partial or complete listing from its current request.
+    mutating func receiveListing(at path: String) {
+        if !userChoseSort { order = model.folderSortOrder(connectionID, path: path) }
+        if let pendingChoice {
+            model.setFolderSortOrder(pendingChoice, id: connectionID, path: path)
+            self.pendingChoice = nil
+        }
+    }
+}
+
 struct FolderView: View {
     @Environment(\.workspaceNavigation) private var workspaceNavigate
     @Bindable var model: AppModel
@@ -128,9 +164,7 @@ struct FolderView: View {
     @State private var loading: Bool
     @State private var showHidden = false
     @State private var filter = ""
-    @State private var sortOrder: FolderSortOrder
-    /// Set once the user picks a sort here, so a listing that arrives later does not override it.
-    @State private var userChoseSort = false
+    @State private var sort: FolderSortSelection
     @State private var appliedFilter = ""
     @State private var appliedShowHidden = false
     @State private var appliedSearchOptions = SearchQueryOptions()
@@ -156,16 +190,16 @@ struct FolderView: View {
         self.profile = profile
         self.requestedPath = requestedPath
         let cached = model.cachedListing(profile.id, path: requestedPath)
-        let order = cached.map { model.folderSortOrder(profile.id, path: $0.path) } ?? .name
         _listing = State(initialValue: cached)
         _loading = State(initialValue: cached == nil)
         // Views are made often, so this stays constant time. Another sort follows away from the main actor.
         _visible = State(initialValue: cached?.defaultRows ?? [])
-        _sortOrder = State(initialValue: order)
+        _sort = State(initialValue: FolderSortSelection(model: model, connectionID: profile.id, canonicalPath: cached?.path))
         _appliedSortOrder = State(initialValue: .name)
         _lastSessionRevision = State(initialValue: model.sessionRevision)
     }
     var path: String { listing?.path ?? requestedPath }
+    private var sortOrder: FolderSortOrder { sort.order }
     private var folderEmpty: (title: String, symbol: String, detail: String) {
         filter.isEmpty ? ("This folder is empty", "folder", "Pull down to check for new files.")
             : ("No matching names", "magnifyingglass", "Filtering names in this folder only.")
@@ -326,8 +360,7 @@ struct FolderView: View {
     /// A user's choice is remembered for this folder once its canonical path is known.
     private var sortSelection: Binding<FolderSortOrder> {
         Binding(get: { sortOrder }, set: { order in
-            sortOrder = order; userChoseSort = true
-            if let listing { model.setFolderSortOrder(order, id: profile.id, path: listing.path) }
+            sort.choose(order, canonicalPath: listing?.path)
         })
     }
     private var searchQuery: String { filter.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -537,8 +570,7 @@ struct FolderView: View {
         do {
             let value = try await listShowingPartialRows(token: token)
             let prepared = await Task.detached(priority: .userInitiated) { FolderListing(value) }.value
-            if !userChoseSort { sortOrder = model.folderSortOrder(profile.id, path: prepared.path) }
-            let query = filter, hidden = showHidden, order = sortOrder, options = searchOptions
+            let query = filter, hidden = showHidden, order = sort.orderForListing(at: prepared.path), options = searchOptions
             let rows = await Task.detached(priority: .userInitiated) {
                 prepared.visible(query: query, showHidden: hidden, order: order, options: options)
             }.value
@@ -547,6 +579,7 @@ struct FolderView: View {
             // This connection failed verification while the listing was on its way.
             guard model.listingGeneration(profile.id) == generation else { loading = false; return }
             sortID = UUID() // Supersede a filter task based on the previous listing.
+            sort.receiveListing(at: prepared.path)
             listing = prepared; setVisible(rows)
             appliedFilter = query; appliedShowHidden = hidden; appliedSortOrder = order; appliedSearchOptions = options
             model.cache(prepared, id: profile.id, requestedPath: requestedPath)
@@ -579,17 +612,18 @@ struct FolderView: View {
     }
     private func showPartialRows(_ snapshot: DirectorySnapshot, token: UUID) async {
         let query = filter, hidden = showHidden, options = searchOptions
-        let order = userChoseSort ? sortOrder : model.folderSortOrder(profile.id, path: snapshot.path)
+        let order = sort.orderForListing(at: snapshot.path)
         let (prepared, rows) = await Task.detached(priority: .userInitiated) { () -> (FolderListing, [FolderRow]) in
             let value = FolderListing(snapshot)
             return (value, value.visible(query: query, showHidden: hidden, order: order, options: options))
         }.value
         guard !Task.isCancelled, token == requestID, loading, !model.isDisconnecting, query == filter, hidden == showHidden,
               options == searchOptions, prepared.rows.count > listing?.rows.count ?? 0 else { return }
-        if !userChoseSort { sortOrder = order }
+        sort.receiveListing(at: prepared.path)
         sortID = UUID() // Supersede a filter task based on the previous rows.
         listing = prepared; setVisible(rows)
         appliedFilter = query; appliedShowHidden = hidden; appliedSortOrder = order; appliedSearchOptions = options
+        if order != sortOrder { await updateVisible() }
     }
     /// Lists subfolders of the canonical folder once typing pauses; a new query, scope, refresh,
     /// disconnect or backgrounding cancels the walk.
