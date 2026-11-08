@@ -1,0 +1,23 @@
+"""Runs testTransport on the phone against the mini's loopback fixture, through the nc relay and the proxy; appends BENCHJSON lines.
+Usage: phone_run.py PORT RUNS ONLY LABEL OUTPUT"""
+import glob, os, subprocess, sys
+S = "SCRATCH"
+port, runs, only, label, output = sys.argv[1:6]
+env = dict(os.environ)
+env.update(TEST_RUNNER_REMOTEFILES_PERFORMANCE_BENCHMARK="1", TEST_RUNNER_REMOTEFILES_BENCHMARK_RUNS=runs,
+           TEST_RUNNER_REMOTEFILES_BENCHMARK_ROOT=f"{S}/mini/bench",
+           TEST_RUNNER_REMOTEFILES_BENCHMARK_LABEL=label, TEST_RUNNER_REMOTEFILES_BENCHMARK_ONLY=only,
+           TEST_RUNNER_REMOTEFILES_BENCHMARK_PRIVATE_KEY=open(f"{S}/mini/client").read(),
+           TEST_RUNNER_REMOTEFILES_BENCHMARK_HOST_KEY=open(f"{S}/mini/host.pub").read(),
+           TEST_RUNNER_REMOTEFILES_SFTP_HOST="MINI_LAN_ADDRESS", TEST_RUNNER_REMOTEFILES_SFTP_PORT=port,
+           TEST_RUNNER_REMOTEFILES_SFTP_USER="USER")
+xctestrun = glob.glob(f"{S}/phone-bench/DD/Build/Products/*.xctestrun")[0]
+result = subprocess.run(["xcodebuild", "test-without-building", "-xctestrun", xctestrun, "-destination", "id=DEVICE_UDID",
+                         "-only-testing:RemoteFilesTests/PerformanceBenchmarkTests/testTransport", "-parallel-testing-enabled", "NO",
+                         "-collect-test-diagnostics", "never"], env=env, capture_output=True, text=True, timeout=3600)
+lines = [line.split("BENCHJSON ", 1)[1] for line in result.stdout.splitlines() if "BENCHJSON " in line]
+with open(output, "a") as handle:
+    handle.writelines(line + "\n" for line in lines)
+print(f"{label}: exit {result.returncode}, {len(lines)} scenarios", flush=True)
+if result.returncode:
+    print("\n".join(l for l in result.stdout.splitlines() if "error" in l.lower() or "locked" in l.lower())[:3000])
