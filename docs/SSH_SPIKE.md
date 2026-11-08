@@ -50,6 +50,8 @@ Image, media and export transfers keep their own child channel, closed on
 completion, cancellation or timeout, so bulk reads never queue ahead of browsing requests.
 The files of one offline folder save share a single child channel instead, several at a time,
 closed when the save ends or on cancellation or timeout ([details](PERFORMANCE.md#offline-folders-one-channel-sixteen-files-at-a-time)).
+Its next few folders are listed ahead on the session's walk channel, over a session already open, and taken up in walk order
+([details](PERFORMANCE.md#offline-folders-listing-ahead-while-files-run)).
 A listing canonicalizes its path once and skips Citadel's repeated `realpath`, saving one round
 trip per folder. The application only exposes realpath, stat, readdir, and read operations; it
 does not issue remote writes or shell commands.
