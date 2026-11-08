@@ -586,6 +586,7 @@ final class PerformanceBenchmarkTests: XCTestCase {
                     let channels = await service.metrics().sftpChannels
                     let counter = OfflineProgressCounter()
                     var saved = (files: 0, bytes: 0)
+                    OfflineListingMetrics.shared.reset()
                     try await recorder.peakFootprint(key + ".heapMB", runs: 1) {
                         let started = ContinuousClock.now
                         saved = try await Self.saveOffline(tree: tree, profile: profile, service: service, folder: folder, counter: counter)
@@ -601,6 +602,12 @@ final class PerformanceBenchmarkTests: XCTestCase {
                     recorder.add(key + ".channels", value: Double(metrics.sftpChannels - channels), unit: "channels")
                     recorder.add(key + ".peakFiles", value: Double(metrics.lastBatchPeakFiles), unit: "files")
                     recorder.add(key + ".peakInFlightMiB", value: Double(metrics.lastBatchPeakBytes) / 1_048_576, unit: "MiB")
+                    // Time the save spent waiting for its listings, with nothing else able to start meanwhile.
+                    let listing = OfflineListingMetrics.shared.last
+                    recorder.add(key + ".listingWait", value: Double(listing.waited.components.seconds) * 1000
+                                 + Double(listing.waited.components.attoseconds) / 1e15)
+                    recorder.add(key + ".listings", value: Double(listing.listings), unit: "listings")
+                    recorder.add(key + ".peakListings", value: Double(listing.mostAtOnce), unit: "listings")
                 }
             }
             // Taps, cancellation and interruption, unless `REMOTEFILES_BENCHMARK_OFFLINE_EXTRAS=0`.

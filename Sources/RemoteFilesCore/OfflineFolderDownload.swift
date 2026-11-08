@@ -1,5 +1,26 @@
 import Foundation
 
+/// Benchmarks only: how long the last offline folder save waited for its listings, how many it made and the most
+/// it had under way at once. Saves run one at a time in the benchmark.
+final class OfflineListingMetrics: @unchecked Sendable {
+    struct Record: Sendable { var waited: Duration = .zero, listings = 0, mostAtOnce = 0 }
+    static let shared = OfflineListingMetrics()
+    private let lock = NSLock()
+    private var record = Record(), running = 0
+    var last: Record { lock.lock(); defer { lock.unlock() }; return record }
+    func reset() { lock.lock(); record = Record(); running = 0; lock.unlock() }
+    func waited(_ duration: Duration) { lock.lock(); record.waited += duration; lock.unlock() }
+    func began() { lock.lock(); record.listings += 1; running += 1; record.mostAtOnce = max(record.mostAtOnce, running); lock.unlock() }
+    func ended() { lock.lock(); running -= 1; lock.unlock() }
+    /// Lists, counting the listing and how long the walk waited for it.
+    static func listing(_ list: () async throws -> DirectorySnapshot) async throws -> DirectorySnapshot {
+        let started = ContinuousClock.now
+        shared.began()
+        defer { shared.ended(); shared.waited(started.duration(to: .now)) }
+        return try await list()
+    }
+}
+
 struct PreparedOfflineFolder: Sendable {
     var files: [OfflinePin] = []
     var directories: [String] = []
@@ -144,7 +165,7 @@ actor OfflineFolderDownload {
         func listNext() async throws {
             let (current, depth) = queue[index]; index += 1
             do {
-                let listing = try await service.listDirectory(profile: profile, path: current)
+                let listing = try await OfflineListingMetrics.listing { try await service.listDirectory(profile: profile, path: current) }
                 try Task.checkCancellation()
                 guard listing.path.utf8.elementsEqual(current.utf8) else { throw RemoteDocumentLinkError.outsideConnection }
                 guard listing.entries.count <= limits.entries - scanned else { throw OfflineFileError.folderLimit("10,000 entry") }
