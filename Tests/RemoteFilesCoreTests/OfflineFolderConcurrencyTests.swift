@@ -13,7 +13,12 @@ private actor BatchFolderFixture: RemoteFileService, SnapshotBatchDownloading, B
     var failures: [String: Error] = [:]
     var hold = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var gatedPaths: Set<String> = []
+    private var gatedTransfers: [String: CheckedContinuation<Void, Never>] = [:]
+    private var startObservers: [(paths: Set<String>, expectation: XCTestExpectation)] = []
+    private var completionObservers: [(paths: Set<String>, expectation: XCTestExpectation)] = []
     private(set) var starts: [Start] = []
+    private(set) var completions: [String] = []
     private(set) var plainDownloads = 0
     private(set) var batchesEnded = 0
     private var active = 0, pooled = 0
@@ -57,7 +62,36 @@ private actor BatchFolderFixture: RemoteFileService, SnapshotBatchDownloading, B
     func setContents(_ path: String, _ data: Data) { contents[path] = data }
     func setEntries(_ path: String, _ entries: [RemoteEntry]) { tree[path] = entries }
     func waitingCount() -> Int { waiters.count }
-    func release() { hold = false; let pending = waiters; waiters = []; pending.forEach { $0.resume() } }
+    /// Hold selected transfers until the test releases them, independent of executor speed. Unlike a delay,
+    /// this guarantees that every expected transfer has started before any of them can finish.
+    func gate(_ paths: [String]) { gatedPaths.formUnion(paths) }
+    func expectStarts(_ paths: [String], fulfilling expectation: XCTestExpectation) {
+        startObservers.append((Set(paths), expectation)); fulfilObservers()
+    }
+    func expectCompletions(_ paths: [String], fulfilling expectation: XCTestExpectation) {
+        completionObservers.append((Set(paths), expectation)); fulfilObservers()
+    }
+    private func fulfilObservers() {
+        let started = Set(starts.map(\.path)), completed = Set(completions)
+        startObservers.removeAll { observer in
+            guard observer.paths.isSubset(of: started) else { return false }
+            observer.expectation.fulfill(); return true
+        }
+        completionObservers.removeAll { observer in
+            guard observer.paths.isSubset(of: completed) else { return false }
+            observer.expectation.fulfill(); return true
+        }
+    }
+    func release(_ path: String) {
+        gatedPaths.remove(path)
+        gatedTransfers.removeValue(forKey: path)?.resume()
+    }
+    func release() {
+        hold = false; gatedPaths.removeAll()
+        let pending = waiters + Array(gatedTransfers.values)
+        waiters = []; gatedTransfers = [:]
+        pending.forEach { $0.resume() }
+    }
 
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
         listings.append(path)
@@ -106,8 +140,13 @@ private actor BatchFolderFixture: RemoteFileService, SnapshotBatchDownloading, B
         starts.append(.init(path: path, limit: limit, overlapped: overlapped, alongside: active, staged: Self.bytes(below: staging)))
         active += 1; mostActive = max(mostActive, active)
         if overlapped { pooled += limit; mostPooled = max(mostPooled, pooled) }
-        defer { active -= 1; if overlapped { pooled -= limit } }
+        fulfilObservers()
+        defer {
+            active -= 1; if overlapped { pooled -= limit }
+            completions.append(path); fulfilObservers()
+        }
         if hold { await withCheckedContinuation { waiters.append($0) } } // Ignores cancellation, as a stuck transport would.
+        if gatedPaths.contains(path) { await withCheckedContinuation { gatedTransfers[path] = $0 } }
         if let delay = delays[path] { try? await Task.sleep(for: delay) }
         if let failure = failures[path] { throw failure }
         guard let bytes = contents[path] else { throw RemoteFileError.notFound }
@@ -171,22 +210,65 @@ final class OfflineFolderConcurrencyTests: XCTestCase {
         return result
     }
 
+    private enum BarrierError: Error { case missingStarts([String]), missingCompletion(String) }
+
+    private func startSaving(_ store: OfflineFileStore, service: BatchFolderFixture) -> Task<OfflineFolderPin, Error> {
+        let saving = Task { try await store.pinFolder(profile: self.profile, path: self.root, service: service) }
+        // A failed barrier must also release the transport that deliberately ignores cancellation.
+        addTeardownBlock { saving.cancel(); await service.release(); _ = await saving.result }
+        return saving
+    }
+
+    private func waitForStarts(_ paths: [String], service: BatchFolderFixture) async throws {
+        let started = expectation(description: "Transfers started: \(paths)")
+        await service.expectStarts(paths, fulfilling: started)
+        await fulfillment(of: [started], timeout: 10)
+        let starts = await service.starts
+        guard Set(paths).isSubset(of: Set(starts.map(\.path))) else { throw BarrierError.missingStarts(paths) }
+    }
+
+    private func complete(_ path: String, service: BatchFolderFixture) async throws {
+        let completed = expectation(description: "Transfer completed: \(path)")
+        await service.expectCompletions([path], fulfilling: completed)
+        await service.release(path)
+        await fulfillment(of: [completed], timeout: 10)
+        let completions = await service.completions
+        guard completions.contains(path) else { throw BarrierError.missingCompletion(path) }
+    }
+
     func testOverlappingFilesCommitInWalkOrderWithinTheWindow() async throws {
         let (store, service) = try setup()
         await service.make(root: root, folders: 3, files: 10)
-        // Later files finish first, so an unordered commit would show.
-        var delays: [String: Duration] = [:]
-        for (position, path) in walkOrder(folders: 3, files: 10).enumerated() { delays[path] = .milliseconds((30 - position) % 7 * 3) }
-        await service.configure(delays: delays)
-        let folder = try await store.pinFolder(profile: profile, path: root, service: service)
+        let walk = walkOrder(folders: 3, files: 10), window = 16
+        await service.gate(walk)
+        let saving = startSaving(store, service: service)
+        try await waitForStarts(Array(walk.prefix(window)), service: service)
+        let initiallyCompleted = await service.completions
+        XCTAssertTrue(initiallyCompleted.isEmpty, "The whole window overlaps before any transfer finishes")
+        // Acknowledge each completion before releasing the next, so later files really do finish first.
+        // Keep subsequent files gated too, so a replacement cannot exceed the active-transfer bound unseen.
+        let completionOrder = Array(walk.prefix(window).reversed()) + Array(walk.dropFirst(window).reversed())
+        for (offset, path) in walk.prefix(window).reversed().enumerated() {
+            try await complete(path, service: service)
+            if window + offset < walk.count {
+                // A replacement starts only after the scheduler receives the completed file's outcome.
+                // Earlier files are still gated, so the walk-order assertion exercises buffered results.
+                try await waitForStarts([walk[window + offset]], service: service)
+            }
+        }
+        try await waitForStarts(walk, service: service)
+        for path in walk.dropFirst(window).reversed() { try await complete(path, service: service) }
+        let folder = try await saving.value
+        let completed = await service.completions
+        XCTAssertEqual(completed, completionOrder)
         let pins = await store.snapshot()
         let order = folder.fileIDs.compactMap { id in pins.first { $0.id == id }?.path }
-        XCTAssertEqual(order, walkOrder(folders: 3, files: 10), "Committed in the walk's order")
+        XCTAssertEqual(order, walk, "Committed in the walk's order despite reversed transfer completions")
         let expected = await service.contents
         let saved = try await savedBytes(store, folder)
         XCTAssertEqual(saved, expected)
         let most = await service.mostActive, ended = await service.batchesEnded, plain = await service.plainDownloads
-        XCTAssertEqual(most, OfflineFolderDownload.concurrentFiles, "Small files fill the window and never exceed it")
+        XCTAssertEqual(most, window, "Small files fill the 16-file window and never exceed it")
         XCTAssertEqual(ended, 1, "One batch, ended once")
         XCTAssertEqual(plain, 0)
         let starts = await service.starts
@@ -196,12 +278,24 @@ final class OfflineFolderConcurrencyTests: XCTestCase {
     func testOverlappingFilesShareAPoolNoLargerThanOneGrowingTransfer() async throws {
         let (store, service) = try setup()
         await service.make(root: root, folders: 2, files: 6, size: 900_000)
-        await service.configure(delays: Dictionary(uniqueKeysWithValues: walkOrder(folders: 2, files: 6).map { ($0, .milliseconds(20)) }))
-        let folder = try await store.pinFolder(profile: profile, path: root, service: service)
+        let walk = walkOrder(folders: 2, files: 6)
+        await service.gate(walk)
+        let saving = startSaving(store, service: service)
+        var completionOrder: [String] = []
+        for offset in stride(from: 0, to: walk.count, by: 4) {
+            let group = Array(walk[offset..<min(offset + 4, walk.count)])
+            try await waitForStarts(group, service: service)
+            for path in group.reversed() { try await complete(path, service: service) }
+            completionOrder.append(contentsOf: group.reversed())
+        }
+        let folder = try await saving.value
         XCTAssertEqual(folder.fileIDs.count, 12)
         let most = await service.mostActive, pooled = await service.mostPooled
         XCTAssertEqual(most, 4, "Four shares of 960 KiB fit in 4 MiB, a fifth doesn't")
+        XCTAssertEqual(pooled, 4 * 960 * 1_024, "The four shares were reserved together")
         XCTAssertLessThanOrEqual(pooled, OfflineFolderDownload.overlapPool)
+        let completed = await service.completions
+        XCTAssertEqual(completed, completionOrder)
     }
 
     func testFilesTooLargeToOverlapOrOfUnknownSizeRunAloneWithTheirWholeLimit() async throws {
@@ -278,8 +372,18 @@ final class OfflineFolderConcurrencyTests: XCTestCase {
         for item in cases {
             let (store, service) = try setup(fileLimit: 200, storageLimit: item.storage, countLimit: item.count)
             await service.make(root: root, folders: 1, files: item.files, size: item.size)
+            // These cases also assert overlap. Hold the first two until both have started instead of relying
+            // on an incidental suspension in the progress callback to keep the first alive.
+            let overlapping = item.files > 2 && item.expected != "tooLarge"
+            let firstTwo = Array(walkOrder(folders: 1, files: item.files).prefix(2))
+            if overlapping { await service.gate(firstTwo) }
+            let saving = startSaving(store, service: service)
+            if overlapping {
+                try await waitForStarts(firstTwo, service: service)
+                await service.release()
+            }
             do {
-                let folder = try await store.pinFolder(profile: profile, path: root, service: service)
+                let folder = try await saving.value
                 XCTAssertEqual(item.expected, "saved"); XCTAssertEqual(folder.fileIDs.count, item.files)
             } catch OfflineFileError.storageFull {
                 XCTAssertEqual(item.expected, "storageFull", "\(item)")
@@ -290,7 +394,7 @@ final class OfflineFolderConcurrencyTests: XCTestCase {
             }
             let starts = await service.starts, most = await service.mostActive
             XCTAssertTrue(starts.allSatisfy { $0.staged <= item.storage }, "Staging never holds more than the limit: \(item)")
-            if item.files > 2, item.expected != "tooLarge" { XCTAssertGreaterThan(most, 1, "These overlap: \(item)") }
+            if overlapping { XCTAssertGreaterThan(most, 1, "These overlap: \(item)") }
             await store.cancelAndDrain()
             if item.expected != "saved" {
                 let saved = await store.librarySnapshot()

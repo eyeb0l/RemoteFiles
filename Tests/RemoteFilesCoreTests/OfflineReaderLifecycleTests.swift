@@ -79,7 +79,9 @@ private struct OfflineReaderFixture: View {
         var web = try await reader(in: window, named: "README.md", timeout: .seconds(60))
         print("Offline reader first render after \(ContinuousClock.now - coldStart)")
         web.scrollView.setContentOffset(CGPoint(x: 0, y: 500), animated: false)
-        try await Task.sleep(for: .milliseconds(100))
+        let renderer = try XCTUnwrap(web.scrollView.delegate as? EnhancedMarkdownWebView.Coordinator)
+        XCTAssertEqual(renderer.parent.readingPosition.rendered.y, 500, accuracy: 1,
+                       "The initial scroll must be recorded before following a link")
         let originalURL = try XCTUnwrap(leaseURLs(directory).first)
         for hop in 1...12 {
             let previousWeb = web
@@ -146,6 +148,64 @@ private struct OfflineReaderFixture: View {
         try await waitUntil { self.leaseURLs(directory).isEmpty }
     }
 
+    func testReaderWaitsForRichMarkdownRestorationBeforeRecordingScroll() async throws {
+        let position = DocumentReadingPosition()
+        let scripts = try EnhancedMarkdownPolicy.rendererScripts(includingDiagrams: false) + ["""
+        // Hold the render completion after the DOM is laid out. This exposes the same
+        // readiness gap as a native geometry commit, without relying on host load.
+        const originalRender = RemoteFilesMarkdown.render;
+        RemoteFilesMarkdown.render = async function(source) {
+            const result = await originalRender(source);
+            await new Promise(resolve => { window.finishFixtureRender = resolve; });
+            return result;
+        };
+        """]
+        let rules = try await SVGResourceBlocker.rules()
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        var finished = false
+        let text = "# README.md\n\n$x$\n\n" +
+            (0..<80).map { "Paragraph \($0) of the saved document.\n\n" }.joined()
+        window.rootViewController = UIHostingController(rootView: EnhancedMarkdownWebView(text: text,
+            scripts: scripts, rules: rules, readingPosition: position, navigation: nil,
+            location: nil, resolver: nil, active: true, onFinish: { finished = true },
+            onFailure: { XCTFail($0) }, openExternalLink: { _ in }, openDocumentLink: nil,
+            openImage: { _, _ in }))
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKeyAndVisible() }
+
+        var candidate: WKWebView?
+        try await waitUntil(timeout: .seconds(60)) {
+            guard let web = self.webViews(in: window).last,
+                  web.scrollView.contentSize.height > web.bounds.height else { return false }
+            let pending = try? await web.evaluateJavaScript("typeof window.finishFixtureRender === 'function'",
+                in: nil, contentWorld: .defaultClient) as? Bool
+            guard pending == true else { return false }
+            candidate = web
+            return true
+        }
+        let web = try XCTUnwrap(candidate)
+        let title = try await web.evaluateJavaScript("document.querySelector('h1')?.textContent") as? String
+        XCTAssertEqual(title, "README.md")
+        XCTAssertFalse(finished)
+        XCTAssertFalse(readerIsReady(web, in: window),
+                       "A laid-out DOM without a spinner is not ready until restoration and scroll tracking start")
+
+        // Reproduce the failure mechanism: a premature native scroll is not recorded,
+        // and the renderer's pending restoration will correctly replace it with zero.
+        web.scrollView.setContentOffset(CGPoint(x: 0, y: 500), animated: false)
+        XCTAssertEqual(position.rendered.y, 0, accuracy: 1)
+        _ = try await web.evaluateJavaScript("window.finishFixtureRender()", in: nil, contentWorld: .defaultClient)
+        let ready = try await reader(in: window, named: "README.md")
+        XCTAssertTrue(ready === web)
+        XCTAssertTrue(finished)
+        XCTAssertEqual(ready.scrollView.contentOffset.y, 0, accuracy: 1,
+                       "The pending restoration replaces an unrecorded premature scroll")
+        ready.scrollView.setContentOffset(CGPoint(x: 0, y: 500), animated: false)
+        XCTAssertEqual(position.rendered.y, 500, accuracy: 1, "The reader must be recording its first scroll")
+    }
+
     private func leaseURLs(_ directory: URL) -> [URL] {
         let base = directory.appendingPathComponent(".leases")
         return (try? FileManager.default.contentsOfDirectory(at: base,
@@ -158,24 +218,24 @@ private struct OfflineReaderFixture: View {
         return view.subviews.flatMap { webViews(in: $0) }
     }
     /// Returns once the reader has finished: its document is rendered, its saved position is
-    /// applied and it records scrolling. Until then it shows a progress indicator, and an offset
-    /// set by the test would be replaced by the reader's own restoration.
+    /// applied and it records scrolling. Skeleton placeholders need not contain a spinner,
+    /// so readiness comes from the renderer itself; an early offset would be restored away.
     private func reader(in window: UIWindow, named name: String,
                         timeout: Duration = .seconds(15), line: UInt = #line) async throws -> WKWebView {
         var result: WKWebView?
         try await waitUntil(timeout: timeout, line: line) {
-            guard let web = self.webViews(in: window).last, web.scrollView.contentSize.height > web.bounds.height,
-                  !self.showsProgress(window) else { return false }
+            guard let web = self.webViews(in: window).last, self.readerIsReady(web, in: window) else { return false }
             let title = try? await web.evaluateJavaScript("document.querySelector('h1')?.textContent") as? String
-            guard title == name, !self.showsProgress(window) else { return false }
+            guard title == name, self.readerIsReady(web, in: window) else { return false }
             result = web
             return true
         }
         return try XCTUnwrap(result)
     }
-    private func showsProgress(_ view: UIView) -> Bool {
-        if let indicator = view as? UIActivityIndicatorView, indicator.isAnimating, !indicator.isHidden { return true }
-        return view.subviews.contains { showsProgress($0) }
+    private func readerIsReady(_ web: WKWebView, in window: UIWindow) -> Bool {
+        guard web.window === window,
+              let renderer = web.scrollView.delegate as? EnhancedMarkdownWebView.Coordinator else { return false }
+        return renderer.finished && web.scrollView.contentSize.height > web.bounds.height
     }
     private func waitUntil(timeout: Duration = .seconds(15), file: StaticString = #filePath, line: UInt = #line,
                            _ condition: () async throws -> Bool) async throws {

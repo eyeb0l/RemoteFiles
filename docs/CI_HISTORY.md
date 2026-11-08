@@ -10,6 +10,68 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 8 November 2026: offline reader Back readiness race
+
+Main [run 42513803390, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/42513803390/attempts/1),
+job 128832543913, failed
+`OfflineReaderLifecycleTests.testLinkedReadersReleaseCoveredLeasesAndReverifyOnBackAndForeground`
+at its Back assertion. The diagnostic reported `y=0`, height 3559, and one web view,
+still in the window and last in the hierarchy. This weakens the obsolete-view theory in
+[Offline reader's Back position](#offline-readers-back-position). The subsequent
+`InvalidTransition { phase: idle targetPhase: failed(deinit) }` remains untraced.
+
+A diagnostic-only local run on unchanged `f8a73c2` behaviour passed the journey, but
+logged hop 7 returning from `reader()` before that renderer's restoration callback.
+The helper checked the DOM title, native content height and absence of an animating
+`UIActivityIndicatorView`. `LoadingPlaceholder` initially displays skeleton lines;
+it adds a spinner only after 1.5 seconds. That placeholder replaced the immediate
+spinner in `2ce971d` (#80) on 5 November, before the #82 failure. A rendered document can therefore satisfy
+those checks before the Markdown coordinator applies its saved offset and starts
+recording scrolls. Setting the test's initial 500-point offset during that interval
+leaves the route's recorded position at zero, and restoration replaces the premature
+offset with zero. Back subsequently restores that recorded zero correctly.
+
+The helper now requires an attached web view whose actual Markdown coordinator has
+finished restoration and enabled scroll recording. It rechecks readiness after the
+asynchronous title lookup. The original 500-point Back assertion, twelve linked
+readers, lease limits and corruption check remain. A controlled renderer fixture
+holds render completion after the DOM is laid out, so the readiness regression does
+not depend on host load or a longer wait. Production lifecycle and restoration code
+are unchanged. The archived CI run has no coordinator trace, so the attribution of
+that particular failure to the demonstrated readiness race remains an inference.
+
+On a dedicated iPhone 18 Pro simulator, iOS 27.2 / Xcode 27.2 (27B52), the controlled
+regression failed the old readiness check once (one assertion, 16.577 seconds).
+With the check fixed, the original twelve-link lifecycle test passed in 32.106 seconds
+and the controlled regression passed in 2.408 seconds: **2 tests, 0 failures, 0 skips**.
+The controlled fixture also confirms that a premature native offset of 500 is not
+recorded, is restored to zero at completion, and is recorded as 500 once ready.
+No production file, dependency pin, test deadline or allowed skip changed. Both
+`python3 -B scripts/generate-project.py` and `git diff --check` passed.
+Logs, before/after xcresults, the diagnostic baseline trace and exact commands are
+retained in `/private/tmp/remotefiles-offline-back-fa81c951/`.
+
+## 8 November 2026: deterministic offline-folder overlap assertions
+
+The supplied failure from [main run 42513803390, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/42513803390/attempts/1),
+`macos-openssh` job `128832543907`, reported a peak of 15 instead of 16 in
+`OfflineFolderConcurrencyTests.testOverlappingFilesCommitInWalkOrderWithinTheWindow`
+on `f8a73c2934c5d99e1da9c1abf6227b036e107730`; the unchanged retry passed.
+Its 0–18 ms fixture delays could expire before every scheduled transfer started.
+The pool-bound test used the same mechanism with 20 ms delays, and the byte/count-limit
+cases also asserted overlap without ensuring the transfers stayed active together.
+
+The fixture now gates transfers until the expected set has started, then acknowledges
+each controlled completion. The window and pool tests finish files in a specified
+reverse order while retaining exact peak, pool-bound, saved-order and byte assertions.
+The byte/count cases hold their first two transfers until both start. Teardown releases
+every gate before draining cancelled work; the existing cancellation-ignoring transport
+checks remain. No production scheduling, sleeps, retries or timeout increases are added.
+
+The locked-version portable focused suite passed all 15 methods with no failures or
+skips. Isolated scheduling mutations failed for serial execution, a 17-file window,
+an unchecked read pool and commits made in completion order; the restored suite passed.
+
 ## 7 November 2026: folder-row reader landing
 
 The demo Markdown journey failed on PR #89's [run 42404712919, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/42404712919/attempts/1)
