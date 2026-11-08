@@ -168,7 +168,7 @@ private enum VoiceOverFocusLog {
                 let value = (element.accessibilityValue ?? "").prefix(24).replacingOccurrences(of: "\n", with: " ")
                 let label = (element.accessibilityLabel ?? "").prefix(24).replacingOccurrences(of: "\n", with: " ")
                 let line = String(format: "%.3f ", Date().timeIntervalSince1970)
-                    + "\(type(of: element)) value='\(value)' label='\(label)' frame=\(element.accessibilityFrame)\n"
+                    + "\(type(of: element)) value='\(value)' label='\(label)' header=\(element.accessibilityTraits.contains(.header)) frame=\(element.accessibilityFrame)\n"
                 file.seekToEndOfFile(); file.write(Data(line.utf8)); try? file.close()
             }
         }

@@ -19,6 +19,7 @@ struct ReaderView: View {
     /// Coming back to this reader checks it quietly, as coming back to a folder does.
     @State private var returning = false
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+    @State private var titleLanding = ReaderTitleLanding()
     @State private var error: String?
     @State private var refreshID = 0
     @State private var requestID = UUID()
@@ -111,6 +112,9 @@ struct ReaderView: View {
         .navigationTitle(entry.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                ReaderTitle(text: entry.name, landing: titleLanding, isActive: isFrontmost && model.isForeground)
+            }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Section {
@@ -148,6 +152,13 @@ struct ReaderView: View {
                                 headings: navigation.index?.headings.isEmpty == false ? { headingsPresented = true } : nil,
                                 source: hasRenderedMode ? $source : nil)
             }
+        }
+        .background {
+            ReaderAppearance(appeared: {
+                titleLanding.appeared = true
+                titleLanding.focusIfReady()
+            }, disappeared: { titleLanding.appeared = false })
+                .frame(width: 0, height: 0)
         }
         .sensoryFeedback(.success, trigger: copied) { _, now in now }
         .modifier(OriginalFileExportControl(profile: profile, entry: entry.selectedForTransfer, allowedRoot: entry.selectionRoot,
@@ -216,22 +227,19 @@ struct ReaderView: View {
         if hasRenderedMode { actions.toggleSource = { source.toggle() } }
         return actions
     }
-    /// Left to choose for itself when the placeholder goes, VoiceOver can stay on the row that
-    /// opened this reader, or be drawn to a line tall enough to cover the screen, skipping the
-    /// document's start. So name where to start, once the content is mounted and after the
-    /// navigation push's own screen change, which would otherwise replace this one.
-    ///
-    /// Syntax colours arrive after the text and replace the elements VoiceOver is resolving, which
-    /// sends it to that same tall line. So colours arriving soon after the document name the
-    /// start again. Later ones leave focus alone, because the reader has started by then.
-    /// See "Reader loading focus" in docs/CI_HISTORY.md.
+    /// Bounded source's syntax colours replace its accessibility elements and can send focus
+    /// to a tall later line. Keep its first-line correction, after the push and text layout.
+    /// Rendered content instead keeps the title as its stable opening target. An untargeted
+    /// screen change here can relocate focus to the opening row's old position in the toolbar.
     private func moveVoiceOverToArrivedDocument() async {
-        guard let documentArrivedAt, ContinuousClock.now < documentArrivedAt + .seconds(10),
+        guard showsSource, let documentArrivedAt, ContinuousClock.now < documentArrivedAt + .seconds(10),
               UIAccessibility.isVoiceOverRunning else { return }
         let settled = max(openedAt + .milliseconds(1500), .now + .milliseconds(250))
         try? await Task.sleep(until: settled, clock: .continuous)
         guard !Task.isCancelled, !showsLoadingPlaceholder else { return }
-        UIAccessibility.post(notification: .screenChanged, argument: readingPosition.sourceVoiceOverStart?())
+        if let start = readingPosition.sourceVoiceOverStart?() {
+            UIAccessibility.post(notification: .screenChanged, argument: start)
+        }
         await keepVoiceOverOnTheDocumentStart(arrivedAt: documentArrivedAt)
     }
     /// VoiceOver can land on a later line after that post, with nothing left to send it back. So
@@ -444,6 +452,100 @@ struct ReaderView: View {
             }
         }
         if token == requestID { loading = false }
+    }
+}
+
+/// The title survives replacement of the loading placeholder and document. The native label
+/// is a concrete accessibility target; a SwiftUI toolbar focus binding can be ignored even
+/// after viewDidAppear. Both the reader's appearance and the title's layout must be ready.
+@MainActor private final class ReaderTitleLanding {
+    weak var label: UILabel?
+    var appeared = false
+    var active = false
+    private var delivered = false
+    func focusIfReady() {
+        guard appeared, active, !delivered,
+              let label, label.window != nil, !label.bounds.isEmpty else { return }
+        // Decide once even in touch mode; enabling VoiceOver later must not hijack reading.
+        delivered = true
+        guard UIAccessibility.isVoiceOverRunning else { return }
+        UIAccessibility.post(notification: .screenChanged, argument: label)
+    }
+}
+
+private struct ReaderTitle: UIViewRepresentable {
+    let text: String
+    let landing: ReaderTitleLanding
+    let isActive: Bool
+    func makeUIView(context: Context) -> Label {
+        let label = Label()
+        label.font = .preferredFont(forTextStyle: .headline)
+        label.adjustsFontForContentSizeCategory = true
+        label.textColor = .label
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.isAccessibilityElement = true
+        label.accessibilityTraits.insert(.header)
+        label.landing = landing
+        return label
+    }
+    func updateUIView(_ label: Label, context: Context) {
+        label.text = text
+        landing.label = label
+        landing.active = isActive
+        landing.focusIfReady()
+    }
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: Label, context: Context) -> CGSize? {
+        let size = uiView.intrinsicContentSize
+        return CGSize(width: min(proposal.width ?? size.width, size.width), height: size.height)
+    }
+    static func dismantleUIView(_ label: Label, coordinator: ()) {
+        if label.landing?.label === label { label.landing?.label = nil }
+        label.landing = nil
+    }
+    final class Label: UILabel {
+        weak var landing: ReaderTitleLanding?
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            landing?.focusIfReady()
+        }
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            landing?.focusIfReady()
+        }
+    }
+}
+
+/// SwiftUI's onAppear precedes completion of a navigation push. UIKit's appearance
+/// callbacks gate the title hand-off, also for an inserted workspace detail with no push.
+private struct ReaderAppearance: UIViewControllerRepresentable {
+    var appeared: () -> Void
+    var disappeared: () -> Void
+    func makeUIViewController(context: Context) -> Controller { Controller() }
+    func updateUIViewController(_ controller: Controller, context: Context) {
+        controller.appeared = appeared
+        controller.disappeared = disappeared
+    }
+    static func dismantleUIViewController(_ controller: Controller, coordinator: ()) {
+        controller.disappeared?()
+        controller.appeared = nil
+        controller.disappeared = nil
+    }
+    final class Controller: UIViewController {
+        var appeared: (() -> Void)?
+        var disappeared: (() -> Void)?
+        override func loadView() {
+            view = UIView()
+            view.isUserInteractionEnabled = false
+        }
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            appeared?()
+        }
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            disappeared?()
+        }
     }
 }
 

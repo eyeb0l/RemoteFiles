@@ -17,7 +17,7 @@ failures and the original timing baselines are in [CI history](CI_HISTORY.md).
 | CI gate, Linux, no builds or test reruns | Requires successful repository checks and successful selected lanes; accepts unselected lanes only if successful or skipped | Every run, even after a dependency fails or skips |
 | Quick, two Mac jobs in parallel, about 15 minutes | **Quick / macos-openssh**: every inventoried macOS core test with the loopback OpenSSH and bastion fixtures. **Quick / simulator-core**: every inventoried hosted iOS core test, with the fixture, on a disposable simulator | Every change outside documentation |
 | UI, one Mac job, about 45 minutes | **Acceptance / simulator-ui**: the whole UI journey inventory on one disposable simulator | Every push to `main` with code, unless its exact tree already passed the UI journeys in a PR run; PRs that change UI journeys, `App/`, packages, vendored code, `Fixtures/` or demo resources; CI infrastructure; unknown paths; the `full-acceptance` label |
-| Extended, two Mac jobs, about 30 minutes | **Acceptance / voiceover**: nine `XCUIVoiceOverService` journeys against production views in the generated `RemoteFilesAccessibility` fixture app. **Acceptance / release-device-compile**: unsigned optimized device build | Nightly at 02:30 UTC on `main`; the label or a manual dispatch; VoiceOver fixture changes (VoiceOver only); CI infrastructure; unknown paths |
+| Extended, two Mac jobs, about 30 minutes | **Acceptance / voiceover**: eleven `XCUIVoiceOverService` journeys against production views in the generated `RemoteFilesAccessibility` fixture app. **Acceptance / release-device-compile**: unsigned optimized device build | Nightly at 02:30 UTC on `main`; the label or a manual dispatch; VoiceOver fixture changes (VoiceOver only); CI infrastructure; unknown paths |
 
 The quick tier finds logic, transport, Keychain, persistence and reader regressions
 within about fifteen minutes and rarely fails for environmental reasons. The UI and
@@ -291,11 +291,18 @@ busy to reply. So the first read after each enable waits up to 30 seconds and pr
 To reproduce one, pause `vot` with `SIGSTOP`; see
 [First VoiceOver speech](CI_HISTORY.md#first-voiceover-speech).
 
-Speech can lag focus, so do not use it to decide where VoiceOver went. The JSON, slow-load
-and SVG journeys print `VO FOCUS LOG`, each element VoiceOver focused, from
-`UIAccessibility.elementFocusedNotification`. The first two assert on it, and the SVG journey waits
-on it. See [Fast-load focus](CI_HISTORY.md#fast-load-focus) and
-[SVG placeholder focus](CI_HISTORY.md#svg-placeholder-focus).
+Speech can lag focus, so do not use it to decide where VoiceOver went. The JSON, slow-load,
+SVG, demo Markdown and focused row-opening journeys print the elements VoiceOver focused,
+from `UIAccessibility.elementFocusedNotification`. The Markdown and image-file row checks
+record the initial cursor and assert the completed, settled hand-off before traversal; a stale
+row or persistent bottom control fails as `VoiceOverReaderLanding`. The focused Markdown check also runs on an iPad workspace.
+JSON/SVG and the slow-load fixture use that recorder for the opening helper too: speech can
+still name the old row after the title has actually received focus. Their preview speech
+assertions remain unchanged.
+The JSON/SVG and focused row checks explicitly disable VoiceOver while staging rows in touch
+mode, even if the simulator started with it enabled; XCTest teardown restores that original state.
+See [Fast-load focus](CI_HISTORY.md#fast-load-focus), [SVG placeholder focus](CI_HISTORY.md#svg-placeholder-focus)
+and [Folder-row reader landing](CI_HISTORY.md#7-november-2026-folder-row-reader-landing).
 
 The local `scripts/test-voiceover.sh` launcher runs the same scheme with one
 `xcodebuild test`, and the scheme also runs from Xcode. It supports macOS’s stock Bash

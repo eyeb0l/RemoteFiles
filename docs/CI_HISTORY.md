@@ -10,6 +10,144 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 7 November 2026: folder-row reader landing
+
+The demo Markdown journey failed on PR #89's [run 42404712919, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/42404712919/attempts/1)
+and passed on rerun. Its supplied log started on the old `Weekly review.md` folder row,
+then read `Find in Document`. This investigation reproduced the app failure on unchanged
+`main` at `b9bdcd1`, independently of that PR's row-button implementation. The earlier
+`616a7a3` results supplied with the report were not rerun here.
+
+**Initial-focus diagnostic.** Eight fresh app launches of `VoiceOverChecks.testFolderRowReaderLanding`
+on iPhone 17 `98EBE9C6-A089-4506-B4F7-B6EC6EE19885`, iOS 27.2, Xcode 27.2 (27B52),
+Debug and ad-hoc signing gave **6/8 failures of an initial-focus assertion**. Each invocation used
+`scripts/test-voiceover.sh` with the same derived-data directory. Production code was
+unchanged; the fixture recorded actual focus and asserted the landing. The row was staged
+near the bottom in touch mode, then focused and double-tapped with VoiceOver enabled.
+
+| Baseline opening | Initial destination | Settled destination / result |
+|---|---|---|
+| 1 | Source | Bad |
+| 2 | No destination focus event within 30 s | Bad; recording confirms the reader loaded |
+| 3 | Back | Back; first content heading reached |
+| 4 | Source | Bad |
+| 5 | Reading document… | Source; bad |
+| 6 | Back | Back; first content heading reached |
+| 7 | Source | Bad |
+| 8 | No destination focus event within 30 s | Bad; recording confirms the reader loaded |
+
+The focus log placed the row at y=788 and Source at about y=799. In opening 5,
+Source followed the placeholder by 1.3 s. These observations are consistent with spatial
+relocation; they do not establish VoiceOver's internal selection algorithm. Speech was
+not used to classify the landing. The separate table traversal failure was outside this
+focused comparison.
+
+**Matched completed-hand-off comparison.** A fresh set of eight openings on unchanged
+`b9bdcd1`, followed by eight valid openings on the fix, used the same iPhone 17, runtime,
+Debug configuration, signed fixture scheme, derived-data directory and landing assertion.
+The assertion was byte-for-byte identical between these two cohorts and only observed
+focus until the hand-off; it did not send gestures to repair a bad landing.
+
+| Build | Completed at the top and reached the first content heading | Persistent wrong landing |
+|---|---|---|
+| Main, `b9bdcd1` | 2/8 | 6/8: four Source, one Rendered, one with no destination focus event |
+| Fix | 8/8 | 0/8 |
+
+The no-event failure's recording confirms the reader had loaded. Five of the eight valid
+fix openings briefly focused Source or Rendered before the title. With no intervening
+gesture, the app moved focus to the title within **0.86 s** in all five, and it stayed there
+through loading. This is evidence that the persistent focus loss is corrected; it is not a
+claim that VoiceOver never has an intermediate toolbar cursor during navigation. Main's
+bottom-control failures never completed that hand-off within the 30-second bound.
+
+The matching artefacts are `baseline-settled-1` through `8` and `fixed-settled-1`, `2`, `3`,
+`4`, `6`, `7`, `8`, `9`, under the retained output directory below. There were nine fix
+attempts for eight valid activations; the excluded pre-double-tap setup failure is described
+below. `comparison.json` records each initial, landing and settled event, the heading
+assertion, and the matching assertion hash. Earlier probes are separate from these rates.
+
+**Cause and rejected approaches.** The row or loading placeholder disappears without a
+stable, explicit destination target for rendered Markdown. The existing delayed
+`screenChanged` post had a first-line target only for bounded source; rendered documents
+received a nil target. It therefore still left VoiceOver to choose a destination. A
+SwiftUI title with `accessibilityDefaultFocus` and an `onAppear` focus request still
+landed on Source. A `viewDidAppear` callback with the SwiftUI toolbar focus binding also
+failed: temporary logging confirmed the callback ran with its view attached, but there
+was no title focus event. One natural Back landing in that variant was not counted as
+proof. Longer speech waits were not an app fix.
+
+Moving the concrete target post earlier, to `viewIsAppearing`, also failed: a trial stayed
+on Source after the placeholder disappeared. Waiting until completed appearance was retained.
+One of four later probes briefly focused Source, then the native title 0.8 s later. The
+completed hand-off and first cursor event are therefore measured separately, rather than
+claiming there can be no intermediate cursor during navigation.
+
+**Fix.** The principal title is a native header label that remains mounted while the
+placeholder becomes content. A per-reader hand-off waits for UIKit appearance completion
+and for that label to have a window and non-empty bounds, then posts `screenChanged`
+with the label itself. Both readiness orders are handled, with weak view references and
+an active-reader check. Disappearance closes the appearance gate, and the decision is
+consumed once, including when VoiceOver is off, so later layout or enabling VoiceOver
+does not pull focus back to the title. There is no new delay or retry window. Bounded
+source retains its existing first-line/highlighting watch, with posts only when a concrete
+first-line target exists; rendered content no longer sends the delayed nil-target post.
+
+**Regression.** The full demo journey and the focused row checks record the initial cursor,
+require the hand-off to reach the top, and assert settled focus before any traversal. Merely
+leaving the row is insufficient. A navigation cursor can briefly visit Source before the
+app's targeted post is delivered, so the matched completed-hand-off comparison is separate
+from the initial-focus diagnostic above. The focused Markdown check then requires an actual
+focus event for the first content heading; speech can omit it even when focus reaches it. An image-file row check exercises the production
+reader too; the existing inline image viewer journey is separate. Touch staging explicitly
+disables VoiceOver where needed, and teardown restores its original state. The iPad
+check waits for a real folder row before scrolling, because its first cold attempt stalled
+on a blank folder before any reader existed, exceeded the execution allowance, and was
+interrupted. The retained sample was in SwiftUI/CoreText font and symbol resolution;
+that sample does not prove a precise cause for the stall. A subsequent workspace check
+reached the title and content with the folder retained. No CoreSimulator restart was used.
+
+**Other journeys and speech synchronisation.** The scoped regression batch passed the
+full Markdown journey (including table traversal, mode changes, Refresh and Back), slow
+JSON, the image-file row and image-viewer failure/retry/share/return. Its JSON/SVG method
+passed JSON but reported that SVG stayed on the old row. A diagnostic repeat established
+that the native SVG title had actually received focus while `currentSpeech()` kept the
+row's phrase for 30 s. The recording also showed the rendered SVG. This was a false focus
+failure in the speech-based helper, not a missing title hand-off.
+
+The JSON/SVG and slow-load calls now use their existing focus recorder to wait for departure
+from the row/reading placeholder. Their existing preview speech, first-line, image and
+read-only assertions remain intact. With temporary production logging removed, the combined
+JSON/SVG journey passed in `json-svg-confirmation` (134.176 s). The full focus log is also
+printed on failure, so a speech/focus disagreement remains diagnosable. The production
+reader checksum is unchanged from the matched comparison. The slow-load check also passed
+with that helper in `slow-confirmation` (40.366 s). These local checks continued into
+8 November; they do not constitute hosted iOS 27.0 or physical-device evidence.
+
+The final iPad Pro 11-inch (M5), iOS 27.2 workspace check, `ipad-final`, passed
+`testFolderRowReaderLanding` in 146.720 s with the final app and fixture code. Its first
+destination and settled focus were the native title heading. Forward traversal reached
+`A little closer to home`, and the folder remained alongside the reader. Across the
+iPad investigation there were two passes and one interrupted cold-folder setup attempt;
+the interrupted attempt never opened a reader. Only one simulator was used at a time,
+and the final simulator was shut down after restoring its original VoiceOver state.
+
+![iPad workspace after forward traversal from the reader title](screenshots/voiceover-reader-landing-ipad.png)
+
+One matched-fix attempt, `fixed-settled-5`, failed in the existing `open` helper before
+its landing observation: the first tap had already opened the reader, so the named row
+no longer existed for the intended double-tap. The retained issue hierarchy shows the
+reader's navigation bar and rendered document at that point. This is consistent with the
+known VoiceOver-enable/touch-interception setup race; its precise cause was not proved.
+It is excluded from the focus rate and replaced by one additional valid activation, with
+both attempt results retained. No app failure after a valid activation is excluded.
+
+Exploratory full-demo attempts that misclassified Back's actual `Projects` label, or
+failed on stale SpringBoard speech before opening a file, are excluded from the rates.
+So are the failed candidates and the instrumented native-title trial. Temporary production
+logging was removed. Local logs and xcresults are retained under
+`/private/tmp/remotefiles-reader-landing-20261107/`; no physical device, real server or
+new hosted CI run has been used for this investigation.
+
 ## 7 November 2026: rejected offline transfer races the next folder save
 
 PR #84's [run 42335596504, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/42335596504/attempts/1)

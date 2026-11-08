@@ -111,10 +111,22 @@ double-taps the touch-staged row, and stays in VoiceOver to switch the SVG to
 Source. Opening a row first waits for VoiceOver to answer, then for it to speak the
 tapped row, because a tap before it answers is an ordinary tap. After the double-tap
 it waits for VoiceOver focus to leave the row and the `Reading document…` placeholder:
-a preview's elements can exist before VoiceOver handles the screen change. A separate
-journey opens a document that takes 3 seconds to load and requires reading to reach
+a preview's elements can exist before VoiceOver handles the screen change. JSON/SVG and
+the slow-load check observe actual focus events for that wait, since speech may still name
+the row after focus has moved. A separate journey opens a document that takes 3 seconds to load and requires reading to reach
 its first lines; see
 [Reader loading focus](CI_HISTORY.md#reader-loading-focus).
+
+The demo reader journey and `testFolderRowReaderLanding` assert the landing itself from
+`UIAccessibility.elementFocusedNotification`, including the header trait, before any
+forward traversal. The initial cursor is recorded separately: navigation can briefly
+relocate it before the app's targeted post is delivered. The hand-off must reach the
+loading placeholder, Back or the reader title; once loading settles, focus must remain
+on Back or the title. A stale row or persistent bottom-toolbar landing fails explicitly. The focused check stages the bottom Markdown
+row in touch mode, activates it with VoiceOver, and requires forward traversal to reach
+the first content heading. Run it on an iPad too: it exercises workspace detail selection
+while retaining the folder, rather than relying on a navigation push. Its six-second
+quiet check reuses the existing source-watch settling bound; it never moves focus.
 
 The first speech read after each enable waits up to 30 seconds for VoiceOver to
 answer, because `enable()` returns before it can; see
