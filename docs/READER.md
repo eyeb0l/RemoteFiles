@@ -5,6 +5,8 @@
 
 Select a file in a folder to open its preview. The reader does not edit the server file. Use **Refresh** to fetch the current version; **Updating…** appears if it takes more than a moment. If refresh fails, the previously loaded content stays visible and is labelled as such, with Retry and Dismiss. Coming back to a reader checks its file quietly.
 
+With VoiceOver, opening a file moves focus to the reader's title heading, on both the phone's navigation stack and the iPad workspace. The title remains available while the loading placeholder becomes the document, so swiping forwards reaches the content instead of starting at the bottom toolbar. Bounded source previews also keep their first-line correction when syntax colouring replaces their accessibility elements.
+
 <a id="reader-scope"></a>
 ## What can I open?
 

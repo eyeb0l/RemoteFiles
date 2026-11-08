@@ -14,6 +14,10 @@ extension XCUIApplication {
     func testLongJSONAndSVGHaveReadOnlyVoiceOverPreviews() throws {
         let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]
         let focusLog = recordFocus(of: app)
+        defer {
+            print("VO COMPLETE JSON SVG FOCUS\n\((try? String(contentsOfFile: focusLog, encoding: .utf8)) ?? "")VO COMPLETE JSON SVG FOCUS END")
+        }
+        try service.disable() // Touch-stage the rows even when the simulator originally had VoiceOver on.
         app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
@@ -32,7 +36,7 @@ extension XCUIApplication {
         // establishes focus. Rows are staged in touch mode, then a VoiceOver
         // tap focuses the row and a double-tap opens it.
         try withVoiceOver {
-            try open(json, app)
+            try open(json, app, focusLog: focusLog)
             XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 15))
             waitForFocusToSettle(focusLog)
             let utterances = try speech("LONG JSON", limit: 15)
@@ -56,7 +60,7 @@ extension XCUIApplication {
         XCTAssertTrue(svg.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(svg.isHittable, app.debugDescription)
         try withVoiceOver {
-            try open(svg, app)
+            try open(svg, app, focusLog: focusLog)
             XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "Rendered SVG image").firstMatch.waitForExistence(timeout: 15))
             // That element exists, hidden from VoiceOver, while the placeholder stands in for it. When the
             // placeholder goes, VoiceOver moves from it to the image, and a swipe before that move skips
@@ -132,6 +136,45 @@ extension XCUIApplication {
         }
         XCTAssertTrue(start, "VoiceOver must read the document from its first line: \(lines)", file: file, line: line)
     }
+    /// Assert the destination focus itself, without moving it or trusting stale speech.
+    private func assertReaderLanding(_ path: String, after offset: Int, title: String,
+                                     file: StaticString = #filePath, line: UInt = #line) throws {
+        func isTop(_ entry: String) -> Bool {
+            entry.contains("label='Reading document…'") || entry.contains("UIAccessibilityBackButtonElement")
+                || (entry.contains("label='\(title)'") && entry.contains("header=true"))
+        }
+        let deadline = Date().addingTimeInterval(30)
+        var first: String?, landed: String?
+        var latest = "no destination focus event"
+        while Date() < deadline {
+            let entries = ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "").split(separator: "\n")
+                .dropFirst(offset).map(String.init).filter { !$0.contains("label='\(title),") }
+            if first == nil { first = entries.first }
+            if let last = entries.last { latest = last }
+            // Navigation can briefly relocate focus before the app's targeted post is delivered.
+            // Require the actual hand-off to the top; merely leaving the old row is insufficient.
+            landed = entries.first(where: isTop)
+            if landed != nil { break }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        print("VO READER INITIAL \(title): \(first ?? "no destination focus event")")
+        print("VO READER LANDING \(title): \(landed ?? latest)")
+        guard landed != nil else {
+            XCTFail("Reader did not complete its hand-off to the top: \(latest)", file: file, line: line)
+            throw NSError(domain: "VoiceOverReaderLanding", code: 1)
+        }
+        waitForFocusToSettle(path, leaving: "Reading document…")
+        let settled = ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "")
+            .split(separator: "\n").last.map(String.init) ?? "no focus event"
+        print("VO READER SETTLED \(title): \(settled)")
+        guard isTop(settled), !settled.contains("label='Reading document…'") else {
+            XCTFail("Loaded reader must keep focus at its top, before traversal: \(settled)", file: file, line: line)
+            throw NSError(domain: "VoiceOverReaderLanding", code: 2)
+        }
+    }
+    private func focusEventCount(_ path: String) -> Int {
+        ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "").split(separator: "\n").count
+    }
     private func withVoiceOver(_ body: () throws -> Void) throws {
         let original = service.isEnabled
         print("VO ORIGINAL enabled=\(original)")
@@ -198,7 +241,7 @@ extension XCUIApplication {
         }
         throw NSError(domain: "VoiceOverTargetNotReached", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not reach \(contains) in bounded \(name) traversal"])
     }
-    private func open(_ row: XCUIElement, _ app: XCUIApplication) throws {
+    private func open(_ row: XCUIElement, _ app: XCUIApplication, landingLog: String? = nil, focusLog: String? = nil) throws {
         let label = row.label.components(separatedBy: ",").first ?? row.label
         // A tap before VoiceOver answers is an ordinary tap, which opens the row too soon. iOS 27.2
         // first says "VoiceOver on", before anything in the app has focus.
@@ -220,7 +263,30 @@ extension XCUIApplication {
             if !activated.localizedCaseInsensitiveContains(label) { Thread.sleep(forTimeInterval: 0.25) }
         }
         print("VO FOCUS open \(label): \(activated)")
+        let offset = (landingLog ?? focusLog).map(focusEventCount)
         row.doubleTap()
+        if let landingLog, let offset {
+            try assertReaderLanding(landingLog, after: offset, title: label)
+            return
+        }
+        if let focusLog, let offset {
+            let deadline = Date().addingTimeInterval(30)
+            var latest = "no destination focus event"
+            while Date() < deadline {
+                let events = ((try? String(contentsOfFile: focusLog, encoding: .utf8)) ?? "")
+                    .split(separator: "\n").dropFirst(offset).map(String.init)
+                if let event = events.last { latest = event }
+                let stillOnRow = latest.contains("label='\(label),")
+                    || (latest.contains("label='\(label)'") && latest.contains("header=false"))
+                if !events.isEmpty, !stillOnRow, !latest.contains("label='Reading document…'") {
+                    print("VO FOCUS moved from \(label), actual: \(latest)")
+                    return
+                }
+                Thread.sleep(forTimeInterval: 0.25)
+            }
+            throw NSError(domain: "VoiceOverFocusNotMoved", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Actual focus stayed on \(latest) after opening \(label)"])
+        }
         // The destination's elements can exist before VoiceOver handles its screen change.
         // Until then focus stays on the activated control, and traversal from there skips
         // the destination's first elements, so wait for the focus to move before speaking.
@@ -244,6 +310,8 @@ extension XCUIApplication {
     func testDemoReaderVoiceOverJourney() throws {
         continueAfterFailure = true
         let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]
+        let focusLog = recordFocus(of: app)
+        defer { print("VO MARKDOWN FOCUS LOG\n\((try? String(contentsOfFile: focusLog, encoding: .utf8)) ?? "")VO MARKDOWN FOCUS LOG END") }
         try withVoiceOver {
             // Launch with VoiceOver already enabled so the initial screen change
             // establishes focus.
@@ -255,8 +323,11 @@ extension XCUIApplication {
             XCTAssertTrue(report.waitForExistence(timeout: 10), app.debugDescription)
             print("VO FOLDER CURRENT: \(try service.currentSpeech().utterance)")
             try focus("Weekly review.md", name: "folder")
+            let landingOffset = focusEventCount(focusLog)
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly review.md")).firstMatch.doubleTap()
             XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 10))
+            try assertReaderLanding(focusLog, after: landingOffset, title: "Weekly review.md")
+            print("VO MARKDOWN LANDING at=\(Date().timeIntervalSince1970): \(((try? String(contentsOfFile: focusLog, encoding: .utf8)) ?? "").split(separator: "\n").last.map(String.init) ?? "none")")
             let read = try speech("MARKDOWN")
             capture("VoiceOver rendered report", app)
             XCTAssertTrue(read.contains { $0.contains("A little closer to home") && $0.contains("Heading") })
@@ -290,6 +361,60 @@ extension XCUIApplication {
             XCTAssertTrue(report.waitForExistence(timeout: 5))
             print("VO BACK CURRENT: \(try service.currentSpeech().utterance)")
             capture("VoiceOver folder after dismissal", app)
+        }
+    }
+    /// Also runs on iPad: the folder remains beside the detail, so no push can supply focus.
+    func testFolderRowReaderLanding() throws {
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]
+        let focusLog = recordFocus(of: app)
+        defer { print("VO ROW FOCUS LOG\n\((try? String(contentsOfFile: focusLog, encoding: .utf8)) ?? "")VO ROW FOCUS LOG END") }
+        // Stage the row in touch mode even if this simulator started with VoiceOver on.
+        // setUp's teardown still restores that original state.
+        try service.disable()
+        app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        let firstFolderRow = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports, Folder")).firstMatch
+        XCTAssertTrue(firstFolderRow.waitForExistence(timeout: 30), "Wait for the folder listing before staging its bottom row")
+        let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly review.md,")).firstMatch
+        let folder = app.descendants(matching: .any).matching(identifier: "workspace-folder").firstMatch
+        let scrollSurface = folder.exists ? folder : app
+        for _ in 0..<8 {
+            if row.exists && row.isHittable { break }
+            scrollSurface.swipeUp()
+        }
+        XCTAssertTrue(row.exists && row.isHittable, app.debugDescription)
+        let workspace = app.descendants(matching: .any).matching(identifier: "workspace-reader").firstMatch.exists
+        print("VO ROW LAYOUT workspace=\(workspace)")
+        try withVoiceOver {
+            try open(row, app, landingLog: focusLog)
+            XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
+            _ = try speech("ROW MARKDOWN", limit: 8)
+            let events = ((try? String(contentsOfFile: focusLog, encoding: .utf8)) ?? "").split(separator: "\n")
+            XCTAssertTrue(events.contains { $0.contains("label='A little closer to home'") && $0.contains("header=true") },
+                          "Forward traversal must focus the first content heading; speech can lag it")
+            if workspace { XCTAssertTrue(row.exists, "Opening the detail must retain its folder") }
+            capture("VoiceOver row reader landing", app)
+        }
+    }
+    func testImageFileRowReaderLanding() throws {
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]
+        let focusLog = recordFocus(of: app)
+        defer { print("VO IMAGE FILE FOCUS LOG\n\((try? String(contentsOfFile: focusLog, encoding: .utf8)) ?? "")VO IMAGE FILE FOCUS LOG END") }
+        try service.disable()
+        app.launch()
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
+        let samples = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Search samples, Folder")).firstMatch
+        XCTAssertTrue(samples.waitForExistence(timeout: 15)); samples.tap()
+        let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Image sample.png,")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 15))
+        try withVoiceOver {
+            try open(row, app, landingLog: focusLog)
+            _ = try speech("IMAGE FILE", limit: 8)
+            let log = (try? String(contentsOfFile: focusLog, encoding: .utf8)) ?? ""
+            XCTAssertTrue(log.contains("label='Open image Image sample."), "Forward traversal must focus the file's image control")
+            capture("VoiceOver image file reader landing", app)
         }
     }
     func testImageViewerFailureRetryShareAndReturn() throws {
@@ -359,7 +484,7 @@ extension XCUIApplication {
         let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Long lines.json")).firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 15))
         try withVoiceOver {
-            try open(row, app)
+            try open(row, app, focusLog: focusLog)
             XCTAssertTrue(app.textViews["Bounded source text"].waitForExistence(timeout: 15))
             waitForFocusToSettle(focusLog)
             let utterances = try speech("SLOW JSON", limit: 10)
