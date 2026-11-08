@@ -2659,22 +2659,25 @@ final class LinkResolutionSchedulingTests: XCTestCase {
     }
 
     func testCancelledListingStopsSchedulingLookups() async throws {
-        let lookups = LookupCounter()
+        let lookups = LookupCounter(), gate = LookupGate()
         let task = Task {
             try await SFTPRemoteFileService.resolvingLinks(in: links(300)) { link in
                 await lookups.started()
-                // Like Citadel's requests, a sent lookup ignores task cancellation.
-                await withCheckedContinuation { continuation in
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { continuation.resume() }
-                }
+                // Like Citadel's requests, a sent lookup ignores task cancellation. Each one waits until the
+                // listing has been cancelled, so the first wave is still out then however slow the machine.
+                await gate.wait()
                 return .target(RemoteEntry(name: "t", path: "/t/" + link.name, kind: .file))
             }
         }
-        try await Task.sleep(for: .milliseconds(30))
+        let window = SFTPRemoteFileService.linkResolutionWindow
+        let end = ContinuousClock.now + .seconds(60)
+        while await lookups.count < window, ContinuousClock.now < end { try await Task.sleep(for: .milliseconds(5)) }
         task.cancel()
+        // Every lookup sent then answers; one started after the cancellation would be counted too.
+        await gate.open()
         do { _ = try await task.value; XCTFail("A cancelled listing must not return") } catch is CancellationError { }
         let started = await lookups.count
-        XCTAssertEqual(started, SFTPRemoteFileService.linkResolutionWindow, "Only the first wave was sent before cancellation")
+        XCTAssertEqual(started, window, "Only the first wave was sent before cancellation, and none after it")
     }
 
     func testTimeBudgetLeavesLaterLinksUnresolvedWithoutFailingTheListing() async throws {
@@ -2696,6 +2699,21 @@ final class LinkResolutionSchedulingTests: XCTestCase {
 private actor LookupCounter {
     private(set) var count = 0
     func started() { count += 1 }
+}
+
+/// Holds lookups until it is opened, and lets any that arrive later straight through.
+private actor LookupGate {
+    private var isOpen = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+    func open() {
+        isOpen = true
+        let released = waiting; waiting = []
+        released.forEach { $0.resume() }
+    }
 }
 
 private final class LockedTestFlag: @unchecked Sendable {
