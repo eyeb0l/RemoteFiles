@@ -319,8 +319,11 @@ final class OfflineFolderConcurrencyTests: XCTestCase {
         XCTAssertTrue(values.contains { $0.files == 1 }, "The first finished file always shows")
         XCTAssertEqual(values.last?.files, 80, "So does the finished folder")
         XCTAssertEqual(values.last?.folders, 5)
-        let allowed = 3 + Int(elapsed / OfflineFolderDownload.reportInterval) + 1
-        XCTAssertLessThanOrEqual(values.count, allowed, "Not one report per file and chunk")
+        XCTAssertLessThan(values.count, 80, "Not one report per file, as before")
+        // A forced report resets the interval, and a trailing one already due can follow it, so at most two an
+        // interval, besides the first listing and the two forced ones. Before, it was three a file.
+        let intervals = Int((elapsed / OfflineFolderDownload.reportInterval).rounded(.up))
+        XCTAssertLessThanOrEqual(values.count, 3 + 2 * intervals, "At most ten others a second, give or take one")
     }
 
     func testTheFolderDeadlineEndsOverlappingTransfersAndPublishesNothing() async throws {
