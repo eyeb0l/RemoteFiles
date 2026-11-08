@@ -1,0 +1,15 @@
+{"label": "pipeline", "scenario": "#environment", "unit": "", "samples": [], "machine": "arm64", "os": "27.2", "git": "a24282a", "load": 1.80322265625, "time": "2026-11-08T04:43:08"}
+{"label":"pipeline@rtt5","samples":[144,144],"scenario":"pipeline.contents.folders","unit":"folders"}
+{"label":"pipeline@rtt5","samples":[500,500],"scenario":"pipeline.contents.files","unit":"files"}
+{"label":"pipeline@rtt5","samples":[3711.76125,3911.378792],"scenario":"pipeline.contents.total","unit":"ms"}
+{"label":"pipeline@rtt5","samples":[500,500],"scenario":"pipeline.index.documents","unit":"documents"}
+{"label":"pipeline@rtt5","samples":[500,500],"scenario":"pipeline.index.files","unit":"files"}
+{"label":"pipeline@rtt5","samples":[667.76187500000003,658.14920800000004],"scenario":"pipeline.index.total","unit":"ms"}
+{"label":"pipeline@rtt5","samples":[16.248291999999999,17.016959,16.649083000000001,16.660499999999999,15.847084000000001],"scenario":"pipeline.contents.tap","unit":"ms"}
+{"label":"pipeline@rtt40","samples":[144,144],"scenario":"pipeline.contents.folders","unit":"folders"}
+{"label":"pipeline@rtt40","samples":[500,500],"scenario":"pipeline.contents.files","unit":"files"}
+{"label":"pipeline@rtt40","samples":[21347.173291999999,23908.558583999999],"scenario":"pipeline.contents.total","unit":"ms"}
+{"label":"pipeline@rtt40","samples":[500,500],"scenario":"pipeline.index.documents","unit":"documents"}
+{"label":"pipeline@rtt40","samples":[500,500],"scenario":"pipeline.index.files","unit":"files"}
+{"label":"pipeline@rtt40","samples":[3674.9681660000001,3688.3483340000002],"scenario":"pipeline.index.total","unit":"ms"}
+{"label":"pipeline@rtt40","samples":[93.603042000000002,95.669042000000005,91.445042000000001,96.371250000000003,94.401540999999995],"scenario":"pipeline.contents.tap","unit":"ms"}

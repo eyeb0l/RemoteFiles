@@ -520,6 +520,17 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         try await download(profile: profile, path: path, allowedRoot: canonicalRoot, destination: destination, limit: limit,
                            progress: progress, canonicalPaths: true, managed: true, resumeVersion: resumeVersion, started: started)
     }
+    func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL, limit: Int,
+                              batch: SnapshotTransferBatch, overlapped: Bool, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        try await download(profile: profile, path: path, allowedRoot: canonicalRoot, destination: destination,
+                           limit: limit, progress: progress, canonicalPaths: true, batch: batch, overlapped: overlapped)
+    }
+    /// Closes the batch's channel without waiting for the server: nothing on it is still running.
+    func endSnapshotBatch(_ batch: SnapshotTransferBatch) {
+        measurements.lastBatchPeakFiles = batch.peakFiles; measurements.lastBatchPeakBytes = batch.peakBytes
+        batch.ended = true
+        batch.retire()
+    }
     /// Reads a preview keeps in flight. A foreground read has nothing to wait behind on its channel, and
     /// knowing the size means none of them is wasted, so a preview of 2 MiB takes one round trip.
     static let previewReadWindow = 32
@@ -531,11 +542,16 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     private func download(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL,
                           limit: Int, progress: @escaping DownloadProgressHandler, canonicalPaths: Bool,
                           managed: Bool = false, resumeVersion: RemoteFileVersion? = nil,
-                          started: @escaping ManagedDownloadStartHandler = { _, _ in }) async throws -> RemoteEntry {
+                          started: @escaping ManagedDownloadStartHandler = { _, _ in },
+                          batch: SnapshotTransferBatch? = nil, overlapped: Bool = false) async throws -> RemoteEntry {
         guard limit > 0, limit < Int.max else { throw RemoteFileError.tooLarge(limit) }
         let session = try await session(for: profile)
-        let reportInterval = progressInterval, windowLimit = transferWindowLimit, windowFloor = transferWindowFloor
-        let result = try await performOnDedicatedChannel(session: session, budget: managed ? .idle(managedTransferIdle) : .total(180)) { sftp, activity in
+        let reportInterval = progressInterval, windowFloor = transferWindowFloor
+        // Files that overlap keep the starting window, so together they hold no more in flight than one growing transfer.
+        let windowLimit = overlapped ? transferWindowFloor : transferWindowLimit
+        let operation: @Sendable (SFTPClient, TransferActivity) async throws -> (RemoteEntry, Int, WindowSample) = { sftp, activity in
+            batch?.fileStarted()
+            defer { batch?.fileEnded() }
             let rootPath = sftp.sendRealPath(atPath: try Self.validated(allowedRoot))
             let targetPath = sftp.sendRealPath(atPath: try Self.validated(path))
             let root = try await rootPath.get()
@@ -592,6 +608,8 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                 var window = WindowSample()
                 _ = try await BoundedPreviewReader.stream(initialSize: attributes.size, limit: limit, startOffset: start, window: windowFloor,
                                                           windowLimit: windowLimit, observe: { window.add(window: $0, inFlight: $1) }, readChunk: { offset, amount in
+                    batch?.requested(Int(amount))
+                    defer { batch?.answered(Int(amount)) }
                     let bytes = try await file.read(from: offset, length: amount)
                     activity.receivedBytes(bytes.readableBytes)
                     return bytes
@@ -614,6 +632,12 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                 try? await file.close()
                 throw error
             }
+        }
+        let result: (RemoteEntry, Int, WindowSample)
+        if let batch, batch.sharesChannel {
+            result = try await performOnBatchChannel(session: session, batch: batch, seconds: 180, operation: operation)
+        } else {
+            result = try await performOnDedicatedChannel(session: session, budget: managed ? .idle(managedTransferIdle) : .total(180), operation: operation)
         }
         measurements.fileOperations += 1; measurements.bytesReceived += result.1
         measurements.lastTransferPeakWindow = result.2.peak; measurements.lastTransferMeanInFlight = result.2.meanInFlight
@@ -934,6 +958,49 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         }
     }
 
+    /// As `performOnDedicatedChannel`, on the batch's channel instead of a new one: the operation keeps its own
+    /// deadline, its caller waits for it to drain, and a channel that hasn't drained within the grace period
+    /// closes the socket. A deadline or cancellation closes the channel for every file on it; the next file
+    /// opens another, as it does after the connection was replaced. Once the batch has ended nothing starts,
+    /// so a cancelled file arriving late can't open a channel only to close the connection.
+    ///
+    /// Unlike a file's own channel, one still opening isn't a reason to close the socket at once: the open is
+    /// shared, so a live connection finishes it and the grace period covers a dead one.
+    private func performOnBatchChannel<T: Sendable>(session: LiveSession, batch: SnapshotTransferBatch, seconds: UInt64,
+                                                    operation: @escaping @Sendable (SFTPClient, TransferActivity) async throws -> T) async throws -> T {
+        try Task.checkCancellation()
+        guard !batch.ended else { throw CancellationError() }
+        if batch.session !== session || batch.control.isClosed { batch.retire() }
+        let opening: Task<SFTPClient, Error>
+        if let existing = batch.opening {
+            opening = existing
+        } else {
+            let client = session.client
+            opening = Task { try await client.openSFTP(logger: Self.sftpLogger()) }
+            batch.session = session; batch.opening = opening
+            measurements.sftpChannels += 1
+        }
+        let control = batch.control, drained = LockedFlag(), grace = dedicatedCloseGrace
+        let close: @Sendable () -> Void = {
+            control.close()
+            Task {
+                try? await Task.sleep(for: grace)
+                if !drained.isSet { session.control.close() }
+            }
+        }
+        do {
+            return try await Self.deadline(seconds: seconds, close: close) {
+                defer { drained.set() }
+                let sftp = try await opening.value
+                control.install(sftp)
+                try Task.checkCancellation()
+                return try await operation(sftp, .ignored)
+            }
+        } catch {
+            throw Self.mapped(error)
+        }
+    }
+
     private func acquireSFTP(for session: LiveSession, role: SFTPChannelRole = .foreground) async throws -> SharedSFTPChannel {
         if let shared = session.sftp[role] {
             if !shared.retired, !shared.closing.isSet, shared.client.isActive { shared.users += 1; return shared }
@@ -1168,6 +1235,55 @@ public struct TransportMetrics: Sendable {
     /// The largest read window the last download reached, and the reads it had in flight on average when one returned.
     public fileprivate(set) var lastTransferPeakWindow = 0
     public fileprivate(set) var lastTransferMeanInFlight: Double = 0
+    /// The most files, and bytes of reads, the last snapshot batch had in flight at once.
+    public fileprivate(set) var lastBatchPeakFiles = 0
+    public fileprivate(set) var lastBatchPeakBytes = 0
+}
+
+/// Saves a folder's files over one SFTP channel of their own, several at a time. See `SnapshotTransferBatch`.
+protocol SnapshotBatchDownloading: RemoteFileService {
+    func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL, limit: Int,
+                              batch: SnapshotTransferBatch, overlapped: Bool, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry
+    func endSnapshotBatch(_ batch: SnapshotTransferBatch) async
+}
+
+extension SFTPRemoteFileService: SnapshotBatchDownloading {}
+
+/// The files of one offline folder share an SFTP channel, opened by the first of them and closed by
+/// `endSnapshotBatch`. Each file still sends every request it sent on a channel of its own, in the same order
+/// and judged the same way; what it saves is the channel's open, subsystem, version and close, four of about
+/// nine round trips. Files may overlap on it. One that fails closes only its own handle, so those beside it
+/// finish and the folder reports what a save of one file at a time would have.
+final class SnapshotTransferBatch: @unchecked Sendable {
+    /// Benchmarks only: false gives each file a channel of its own, as before.
+    let sharesChannel: Bool
+    // Actor-isolated to SFTPRemoteFileService.
+    fileprivate var session: LiveSession?
+    fileprivate var opening: Task<SFTPClient, Error>?
+    fileprivate var control = SFTPChannelControl()
+    fileprivate var ended = false
+    private let lock = NSLock()
+    private var files = 0, bytes = 0, mostFiles = 0, mostBytes = 0
+    init(sharesChannel: Bool = true) { self.sharesChannel = sharesChannel }
+    deinit { Self.close(control, opening: opening) }
+
+    var peakFiles: Int { lock.lock(); defer { lock.unlock() }; return mostFiles }
+    var peakBytes: Int { lock.lock(); defer { lock.unlock() }; return mostBytes }
+    func fileStarted() { lock.lock(); files += 1; mostFiles = max(mostFiles, files); lock.unlock() }
+    func fileEnded() { lock.lock(); files -= 1; lock.unlock() }
+    func requested(_ amount: Int) { lock.lock(); bytes += amount; mostBytes = max(mostBytes, bytes); lock.unlock() }
+    func answered(_ amount: Int) { lock.lock(); bytes -= amount; lock.unlock() }
+
+    /// Closes the channel, including one still opening, so that the next file opens another.
+    fileprivate func retire() {
+        Self.close(control, opening: opening)
+        session = nil; opening = nil; control = SFTPChannelControl()
+    }
+    private static func close(_ control: SFTPChannelControl, opening: Task<SFTPClient, Error>?) {
+        control.close()
+        guard let opening else { return }
+        Task { if let client = try? await opening.value { control.install(client) } }
+    }
 }
 
 private struct WindowSample {
@@ -1257,6 +1373,7 @@ private final class SFTPChannelControl: @unchecked Sendable {
     private var closing: LockedFlag?
     private var cancelled = false
     var hasClient: Bool { lock.lock(); defer { lock.unlock() }; return client != nil }
+    var isClosed: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
     /// `closing` is set synchronously on close, before the asynchronous channel close begins.
     func install(_ client: SFTPClient, closing: LockedFlag? = nil) {
         lock.lock()

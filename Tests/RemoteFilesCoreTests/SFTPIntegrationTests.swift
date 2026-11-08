@@ -50,6 +50,142 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: lease.url), Data("nested bytes".utf8))
     }
 
+    /// A folder's files share one channel, several at a time, and arrive exactly as the server holds them.
+    func testOfflineFolderFilesShareOneChannelAndKeepTheServersBytes() async throws {
+        let fixture = try Fixture(), stores = try Stores(fixture: fixture)
+        let identity = try await stores.identity.generate(name: "Offline batch")
+        try fixture.authorize(identity.publicKey)
+        let profile = try await stores.profile(identity: identity)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        let tree = try Self.offlineTree(in: fixture, folders: 3, files: 8)
+        // One file too large to overlap, one exactly at the share, and an empty one.
+        try Data((0..<(3 << 20)).map { UInt8(truncatingIfNeeded: $0 &* 7) }).write(to: URL(fileURLWithPath: tree + "/folder 0/large.bin"))
+        try Data(repeating: 9, count: OfflineFolderDownload.overlappedFileBytes).write(to: URL(fileURLWithPath: tree + "/folder 1/edge.bin"))
+        try Data().write(to: URL(fileURLWithPath: tree + "/folder 2/empty.txt"))
+        let canonical = try await service.listDirectory(profile: profile, path: tree).path
+        let local = FileManager.default.temporaryDirectory.appendingPathComponent("offline-batch-" + UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: local) }
+        let store = try OfflineFileStore(directory: local)
+        for round in 0..<2 {
+            let before = await service.metrics()
+            let folder = try await store.pinFolder(profile: profile, path: canonical, service: service)
+            let after = await service.metrics()
+            XCTAssertEqual(folder.fileIDs.count, 27)
+            XCTAssertEqual(after.sftpChannels - before.sftpChannels, 1, "Round \(round): one channel for every file")
+            XCTAssertEqual(after.connections, before.connections)
+            // Folder 0's eight small files start together; its large file then runs alone.
+            XCTAssertGreaterThanOrEqual(after.lastBatchPeakFiles, 8)
+            XCTAssertLessThanOrEqual(after.lastBatchPeakFiles, OfflineFolderDownload.concurrentFiles)
+            XCTAssertLessThanOrEqual(after.lastBatchPeakBytes, SFTPRemoteFileService.transferReadWindowLimit * 64 * 1024,
+                                     "No more in flight than one growing transfer")
+            for id in folder.fileIDs {
+                let lease = try await store.lease(id)
+                let original = try Data(contentsOf: URL(fileURLWithPath: tree + lease.pin.path.dropFirst(canonical.count)))
+                XCTAssertEqual(try Data(contentsOf: lease.url), original, lease.pin.path)
+            }
+        }
+    }
+
+    /// A file or folder that becomes a link while the save runs fails it, on the shared channel as on a file's own.
+    func testOfflineFolderFailsClosedWhenMembersAreReplacedByLinksDuringTheSave() async throws {
+        let fixture = try Fixture(), stores = try Stores(fixture: fixture)
+        let identity = try await stores.identity.generate(name: "Offline replaced")
+        try fixture.authorize(identity.publicKey)
+        let profile = try await stores.profile(identity: identity)
+        try await stores.trustFixtureHost()
+        let base = stores.service()
+        addTeardownBlock { await base.disconnect() }
+        for replacesFolder in [false, true] {
+            let tree = try Self.offlineTree(in: fixture, folders: 3, files: 6)
+            let canonical = try await base.listDirectory(profile: profile, path: tree).path
+            let hook = OfflineSaveHook()
+            hook.onStart = { call, path in
+                // A folder before the walk lists it; a file after its folder was listed, before it starts.
+                // Files start in the walk's order, so file-3 hasn't when file-0 does.
+                guard replacesFolder ? call == 1 : path.hasSuffix("/folder 1/file-0.txt") else { return }
+                let target = replacesFolder ? tree + "/folder 2" : tree + "/folder 1/file-3.txt"
+                try? FileManager.default.moveItem(atPath: target, toPath: target + "-moved")
+                try? FileManager.default.createSymbolicLink(atPath: target, withDestinationPath: replacesFolder ? fixture.files : fixture.files + "/report.md")
+            }
+            let local = FileManager.default.temporaryDirectory.appendingPathComponent("offline-replaced-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: local) }
+            let store = try OfflineFileStore(directory: local)
+            let before = await base.metrics()
+            do {
+                _ = try await store.pinFolder(profile: profile, path: canonical, service: HookedOfflineService(base: base, hook: hook))
+                XCTFail("A redirected member must not be saved")
+            } catch let error as RemoteDocumentLinkError {
+                XCTAssertEqual(error, .outsideConnection)
+            }
+            await store.cancelAndDrain()
+            let saved = await store.librarySnapshot()
+            XCTAssertTrue(saved.files.isEmpty); XCTAssertTrue(saved.folders.isEmpty)
+            _ = try await base.listDirectory(profile: profile, path: fixture.files)
+            let after = await base.metrics()
+            XCTAssertEqual(after.connections, before.connections, "A refused file closes only its handle")
+        }
+    }
+
+    /// The connection dropping mid-save fails it without publishing anything, and the next save connects again.
+    /// Cancelling one closes only its own channel: browsing carries on over the same connection.
+    func testInterruptedOrCancelledOfflineFolderSavesPublishNothingAndTheNextSucceeds() async throws {
+        let fixture = try Fixture(), stores = try Stores(fixture: fixture)
+        let identity = try await stores.identity.generate(name: "Offline interrupted")
+        try fixture.authorize(identity.publicKey)
+        let profile = try await stores.profile(identity: identity)
+        try await stores.trustFixtureHost()
+        let base = stores.service()
+        addTeardownBlock { await base.disconnect() }
+        let tree = try Self.offlineTree(in: fixture, folders: 2, files: 10)
+        let canonical = try await base.listDirectory(profile: profile, path: tree).path
+        let local = FileManager.default.temporaryDirectory.appendingPathComponent("offline-interrupted-" + UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: local) }
+        let store = try OfflineFileStore(directory: local)
+        for interrupts in [true, false] {
+            let hook = OfflineSaveHook(), saving = SavingTask()
+            // Its first report comes after the checks and before any read: that file, at least, is mid-transfer.
+            hook.onFirstProgress = { call in
+                guard call == 3 else { return }
+                if interrupts { await base.closeSessionPreservingUnlockedIdentities() } else { saving.cancel() }
+            }
+            let before = await base.metrics(), id = UUID()
+            let task = Task { try await store.pinFolder(profile: profile, path: canonical, service: HookedOfflineService(base: base, hook: hook), operationID: id) }
+            saving.set(task)
+            do {
+                _ = try await task.value
+                XCTFail("The save must not complete")
+            } catch RemoteFileError.connectionEnded {
+                XCTAssertTrue(interrupts)
+            } catch is CancellationError {
+                XCTAssertFalse(interrupts)
+            }
+            await store.waitForCancelledTransfer(id)
+            let saved = await store.librarySnapshot()
+            XCTAssertTrue(saved.files.isEmpty); XCTAssertTrue(saved.folders.isEmpty)
+            _ = try await base.listDirectory(profile: profile, path: fixture.files)
+            let after = await base.metrics()
+            XCTAssertEqual(after.connections - before.connections, interrupts ? 1 : 0, "Cancelling leaves the connection alone")
+            let folder = try await store.pinFolder(profile: profile, path: canonical, service: base)
+            XCTAssertEqual(folder.fileIDs.count, 20)
+            try await store.removeFolder(folder.id)
+        }
+    }
+
+    /// Folders of small files with distinct bytes, under the fixture's files.
+    private static func offlineTree(in fixture: Fixture, folders: Int, files: Int) throws -> String {
+        let tree = fixture.files + "/offline-batch-" + UUID().uuidString
+        for folder in 0..<folders {
+            try FileManager.default.createDirectory(atPath: tree + "/folder \(folder)", withIntermediateDirectories: true)
+            for file in 0..<files {
+                let bytes = Data((0..<(97 * (file + 1) + folder)).map { UInt8(truncatingIfNeeded: $0 &+ file &* 13 &+ folder) })
+                try bytes.write(to: URL(fileURLWithPath: tree + "/folder \(folder)/file-\(file).txt"))
+            }
+        }
+        return tree
+    }
+
     func testBoundedSearchExecClosesOnOutputOverflowCancellationAndDeadlineWithoutClosingSFTP() async throws {
         let fixture = try Fixture(), stores = try Stores(fixture: fixture)
         let identity = try await stores.identity.generate(name: "Exec lifecycle")
@@ -1933,6 +2069,59 @@ final class SFTPIntegrationTests: XCTestCase {
         let metrics = await service.metrics()
         XCTAssertEqual(metrics.connections, 0)
     }
+}
+
+/// Hooks into a folder save's file transfers: when each starts, numbered in start order, and at its first report.
+private final class OfflineSaveHook: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+    /// Set before the save starts.
+    var onStart: (@Sendable (Int, String) async -> Void)?
+    var onFirstProgress: (@Sendable (Int) async -> Void)?
+    func next() -> Int { lock.lock(); defer { lock.unlock() }; calls += 1; return calls }
+}
+
+private final class SavingTask: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: Task<OfflineFolderPin, Error>?
+    private var cancelled = false
+    func set(_ value: Task<OfflineFolderPin, Error>) {
+        lock.lock(); task = value; let cancel = cancelled; lock.unlock()
+        if cancel { value.cancel() }
+    }
+    func cancel() { lock.lock(); cancelled = true; let value = task; lock.unlock(); value?.cancel() }
+}
+
+private struct HookedOfflineService: RemoteFileService, SnapshotBatchDownloading {
+    let base: SFTPRemoteFileService
+    let hook: OfflineSaveHook
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
+        try await base.listDirectory(profile: profile, path: path)
+    }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data {
+        try await base.readFile(profile: profile, path: path, limit: limit)
+    }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { try await base.resolveEntry(profile: profile, path: path) }
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
+        try await base.downloadFile(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination, limit: limit)
+    }
+    func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL,
+                              limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        XCTFail("A batch save uses its batch"); throw RemoteFileError.unsupportedFile
+    }
+    func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL, limit: Int,
+                              batch: SnapshotTransferBatch, overlapped: Bool, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        let call = hook.next(), hook = hook, first = LockedCount()
+        await hook.onStart?(call, path)
+        return try await base.downloadSnapshotFile(profile: profile, path: path, canonicalRoot: canonicalRoot, destination: destination,
+                                                   limit: limit, batch: batch, overlapped: overlapped) { update in
+            first.increment()
+            if first.value == 1 { await hook.onFirstProgress?(call) }
+            await progress(update)
+        }
+    }
+    func endSnapshotBatch(_ batch: SnapshotTransferBatch) async { await base.endSnapshotBatch(batch) }
+    func disconnect() async { await base.disconnect() }
 }
 
 private struct Fixture {

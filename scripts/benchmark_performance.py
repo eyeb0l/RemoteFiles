@@ -44,8 +44,36 @@ def tree(path, depth, rng, branches=3):
             tree(path / f"{rng.choice(WORDS)} {index}", depth - 1, rng, branches)
 
 
+def offline_trees(path, rng):
+    """Folders to save offline. `small50` is 50 small files in 10 subfolders, like the Linux guest's `docs`;
+    `tiny400` is 400 tiny files in 24 folders two levels deep, more than the library's 100-file cap, so the
+    benchmark drives the folder download directly; `mixed` is 40 small files and six of 0.5 to 12 MiB."""
+    small = path / "small50"
+    for folder in range(10):
+        (small / f"part {folder}").mkdir(parents=True)
+        for index in range(5):
+            (small / f"part {folder}" / f"note-{index}.md").write_bytes(rng.randbytes(rng.randrange(200, 8_000)))
+    tiny = path / "tiny400"
+    for top in range(4):
+        for inner in range(5):
+            folder = tiny / f"group {top}" / f"set {inner}"
+            folder.mkdir(parents=True)
+            for index in range(20):
+                (folder / f"item-{index}.txt").write_bytes(rng.randbytes(rng.randrange(16, 512)))
+    mixed = path / "mixed"
+    sizes = iter([512 << 10, 1 << 20, 2 << 20, 3 << 20, 6 << 20, 12 << 20])
+    for folder in range(4):
+        (mixed / f"folder {folder}").mkdir(parents=True)
+        for index in range(10):
+            (mixed / f"folder {folder}" / f"page-{index}.html").write_bytes(rng.randbytes(rng.randrange(1_000, 64_000)))
+        for size in [next(sizes, None), next(sizes, None) if folder % 2 else None]:
+            if size:
+                (mixed / f"folder {folder}" / f"media-{size >> 10}k.bin").write_bytes(rng.randbytes(size))
+
+
 def generate_fixture(bench, include_huge):
     rng = random.Random(0x5EED)
+    offline_trees(bench / "offline", random.Random(0x0FF1))
     for count in (10, 100, 1_000, 9_900):
         mixed_folder(bench / f"d{count}", count, rng)
     if include_huge:

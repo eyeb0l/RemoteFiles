@@ -2,7 +2,7 @@
 
 [Documentation](README.md) · [Build and test](DEVELOPMENT.md)
 
-What limits each operation, what was measured on 7 November 2026, and how to benchmark a change. Measured on iPhone means a physical iPhone 17 Pro; measured on Mac means the same code on a Mac, which says little about absolute speed on a phone. Raw samples are in [`performance/2026-11-07`](performance/2026-11-07), for the [follow-ups](#follow-ups-7-november) in [`performance/2026-11-07-followups`](performance/2026-11-07-followups), and for [the phone's download cap](#the-phones-download-cap-not-the-client) in [`performance/2026-11-07-download-cap`](performance/2026-11-07-download-cap).
+What limits each operation, what was measured on 7 November 2026, and how to benchmark a change. Measured on iPhone means a physical iPhone 17 Pro; measured on Mac means the same code on a Mac, which says little about absolute speed on a phone. Raw samples are in [`performance/2026-11-07`](performance/2026-11-07), for the [follow-ups](#follow-ups-7-november) in [`performance/2026-11-07-followups`](performance/2026-11-07-followups), for [the phone's download cap](#the-phones-download-cap-not-the-client) in [`performance/2026-11-07-download-cap`](performance/2026-11-07-download-cap), and for [offline folders](#offline-folders-one-channel-sixteen-files-at-a-time) and [the follow-up report](#follow-up-report-8-november) in [`performance/2026-11-08-offline`](performance/2026-11-08-offline).
 
 ## What limits what
 
@@ -10,8 +10,9 @@ What limits each operation, what was measured on 7 November 2026, and how to ben
 |---|---|---|
 | Recursive search, without the Linux helper | Round trips | 330 ms with no added latency, 12.8 s at 40 ms, on the same 364 folders (Mac) |
 | Recursive search with the Linux helper | Round trips to set it up, then the server's disk | About 9 round trips before the first line, from about 35. On a cold, slow disk the server's reads take the rest (Mac) |
-| Contents search over SFTP and saved indexes | Round trips per file | About 4.4 each; reads now overlap, up to 32 at a time |
-| Offline folders | Round trips per file | About 10.7 each, mostly the file's own channel. Listing is under 6% (Mac) |
+| Saved indexes | Round trips per file | About 4.4 each; reads overlap, up to 32 at a time |
+| Contents search over SFTP | Its walk, which reads ahead only about a folder at a time | 500 files in 144 folders at 40 ms: 22.6 s, against 3.7 s for an index of the same files (Mac). [Details](#follow-up-report-8-november) |
+| Offline folders | Round trips per file, overlapped; then listing, a folder at a time | About 5 each on one shared channel, 16 files at once, where it was 11 each in turn. 50 small files at 40 ms: 1.5 s, from 22.1 s (Mac). [Details](#offline-folders-one-channel-sixteen-files-at-a-time) |
 | Opening a connection | The protocol | 9 round trips at 40 ms to the first rows, all but one fixed by SSH, the server or SFTP. [The ledger](#connection-setup) |
 | Opening a file or small folder | Round trips | 3.5 to 10 round trips each before this work |
 | Opening a very large folder (first frame) | SwiftUI on the main thread | 2.6 s stall at 50,000 rows (iPhone); none of it in sorting, the network or layout of the data |
@@ -234,7 +235,7 @@ The servers were OpenSSH's `sftp-server` and `internal-sftp`, Dropbear 2022.83 w
 
 Name searches, which read nothing, didn't change. A first version offered files as folders arrived and charged reads only when used, which a review showed could exceed the limits; offering them in the walk's order and charging at once [measured the same](performance/2026-11-07-followups/read-ahead-limits-fix.jsonl): an index at 40 ms in 3.60 s against 3.43 s, and content searches in 13.1 s and 13.9 s against 13.6 s and 14.7 s. *Cost:* up to 32 reads and their results held at once, within the byte budget; an index shows only folder counts until its listing is done; a live search reads ahead only about a folder at a time, since its walk can't take listings while it reads. *Would reverse it:* reads timing out on a slow server that read one at a time in time, which the 2 MiB cap is there to prevent.
 
-Not tried: offline folders, whose files each open their own channel for about four of their 10.7 round trips. Sharing one channel, or downloading a few at once, is the next step there.
+Not tried: offline folders, whose files each open their own channel for about four of their 10.7 round trips. Sharing one channel, or downloading a few at once, is the next step there. *Done on 8 November: [both](#offline-folders-one-channel-sixteen-files-at-a-time).*
 
 ### Downloads on a faster phone link: no measurable change, `TransferPacing` kept
 
@@ -301,15 +302,94 @@ Nothing in the app changed. The benchmark gained the three window arms and the p
 
 **What it leaves.** At 150 ms growth settles below a fixed 64 (11.9 against 14.3 MiB/s from the mini). By design it stops once requests wait half as long again as the shortest round trip; a fixed 64 keeps about 4 MiB in flight, which anything else on the connection waits behind. Whether the rest is worth that wait needs `contended` measured on the phone at that latency.
 
+## Offline folders: one channel, sixteen files at a time
+
+8 November. Before is `e5087b4` with the new scenarios added (`a24282a`, the only commit both builds share); after is this change. Both ran on the Mac mini against the loopback OpenSSH fixture through `latency_proxy.py`, alternating processes and reversing the order on the second pass ([driver](performance/2026-11-08-offline/paired.sh.txt)). No phone was used: these are proxy measurements on a Mac, not iPhone results.
+
+**What limited it.** Each file paid about 11 round trips, one file after another: opening its own channel, the subsystem and OpenSSH's window, `INIT`, the two `REALPATH`s, `OPEN`, the post-open recheck with `FSTAT`, the read, `CLOSE`, and waiting for the channel to close. Four of those are the channel. At 40 ms the 50 small files took 22.1 s, 440 ms each, and 400 tiny files 170 s; a channel per file also meant a server process per file.
+
+**The candidates**, each switchable in one process (`OfflineBenchmarkArm`), 40 ms, two rotating passes. The rows for one and four files at a time are an earlier build that gave every overlapping file 1 MiB; the arms are kept in the harness.
+
+| Arm, 40 ms | 50 small | 400 tiny | Mixed, 25.8 MiB | Channels | Folder tap |
+|---|---:|---:|---:|---:|---:|
+| A channel per file, one at a time (before) | 22.1 s | 170 s | 20.8 s | 1 per file | 95 ms |
+| One shared channel, one at a time (A) | 13.0 s | 96.8 s | 12.3 s | 1 | 93-95 ms |
+| A channel per file, four at a time (B) | 5.9 s | 44.8 s | 7.9 s | 1 per file | 94-97 ms |
+| One shared channel, four at a time | 3.8 s | 26.6 s | 5.1 s | 1 | 92-98 ms |
+| One shared channel, eight at a time | 2.2 s | 13.8 s | 4.2 s | 1 | 90-93 ms |
+
+Sharing the channel and overlapping files each help, and together they help most; B also needs as many channels as files at once, which a server that limits channels may refuse. Overlap on one channel was then swept at 4, 8 and 16 files ([raw](performance/2026-11-08-offline/sweep-files-at-once-0-5-150ms.jsonl)): at 150 ms the 400 tiny files took 87.9 s, 45.6 s and 25.5 s, and at 0 ms 588, 512 and 493 ms. Sixteen was chosen: at that point a folder listing, still one at a time, costs about as much as the files' reads, and searches already keep 32 reads open on one channel.
+
+**What changed.**
+
+- *One channel per save.* A folder's files share an SFTP channel of their own, opened by the first and closed when the save ends. Each file sends exactly the requests it sent on a channel of its own, in the same order and judged the same way, including the post-open recheck before any byte is read. A file refused for any reason closes only its handle; a deadline or cancellation closes the channel, and the file's caller still waits for it to drain, with the socket closed after the same grace period if it doesn't. Listings stay on the browsing channel, as before. The channel count is unchanged: browsing's plus one for transfers.
+- *Up to 16 files at once, with the outcome of one at a time.* Files start in the walk's order and are committed in it, each against the byte limit it would have had saved one after another, and the first failure in that order is the one reported, after everything started before it has finished. A file overlaps others only if its listed size is at most 1 MiB; it's given its size in whole reads plus one more, from a pool of 4 MiB, the most one growing transfer has in flight, and its window doesn't grow. Reads never go a byte past their limit, so overlapping files never hold more than that between them. Larger files, and files of unknown size, run alone as before, with the exact limit and the growing window. A file that grew past its share since it was listed is saved again alone when its turn comes, and what came after it is redone, so staging never holds more than the byte limit. A transport without batches (Demo, older adapters) still saves one file at a time.
+- *Progress ten times a second.* Overlap would have sent a folder's progress to the main actor thousands of times a second, as transfers once did; it now reports at most ten times a second, as they do, and always at once for the first finished file and the finished folder.
+
+### Results
+
+Medians, 4 samples at 0, 5 and 40 ms and 2 at 150 ms; ranges in the [raw files](performance/2026-11-08-offline) ([summary script](performance/2026-11-08-offline/pair.py.txt)).
+
+| Save, whole folder | Added | Before | After | Change |
+|---|---:|---:|---:|---:|
+| 50 small files, 11 folders | 0 | 222 ms | 81 ms | −64% |
+| | 5 ms | 3.96 s | 0.25 s | −94% |
+| | 40 ms | 22.1 s (22.05-22.27) | 1.53 s (1.51-1.54) | −93% |
+| | 150 ms | 74.5 s | 4.97 s | −93% |
+| 400 tiny files, 25 folders | 0 | 1.55 s | 0.50 s | −68% |
+| | 5 ms | 30.5 s | 1.36 s | −96% |
+| | 40 ms | 170 s (169.5-170.0) | 7.7 s (7.67-7.73) | −95% |
+| | 150 ms | 573 s | 25.5 s | −96% |
+| 40 small and 6 files of 0.5-12 MiB, 25.8 MiB | 0 | 252 ms | 127 ms | −50% |
+| | 5 ms | 3.69 s | 0.53 s | −86% |
+| | 40 ms | 20.6 s | 3.1 s, 8.2 MiB/s from 1.2 | −85% |
+| | 150 ms | 69.4 s | 10.2 s | −85% |
+
+The first finished file comes no sooner, since it still takes its own round trips: within 6% either way from 5 ms up (at 40 ms 702, 1,074 and 701 ms before, 708, 1,095 and 659 after), and 7 to 16 ms later with nothing added, where 16 files share the server's queue. The 400 tiny files exceed the library's 100-file limit, so the benchmark runs that tree through `OfflineFolderDownload` directly with every other limit as shipped: the same transfers without the final move into the library.
+
+**Browsing meanwhile.** A folder tap during a save at 40 ms took 92-95 ms after against 94-95 ms before, five taps per tree. Large files run alone with the same window as before, so a tap waits behind nothing it didn't before.
+
+**Resources.** One channel per save instead of one per file. At most 16 files and 3.4 MiB of reads in flight; 3.4 MiB came from a 12 MiB file alone with its growing window; the trees of small files never went above 1.0 MiB, 16 files of one read each. The heap's peak above its start rose by 0.3 to 1 MB for the small trees, and stayed within 6 to 12 MB for the mixed one either way. Progress reports at 40 ms fell from 261 to 16 for 50 files, and from 2,025 to 83 for 400.
+
+**Stopping a save**, 40 ms, after its first file. Cancellation returns within 5 ms either way. Before, its slot was free 3 to 4 ms later because a file cancelled while opening its channel closed the whole connection: every cancelled sample needed a new one afterwards, about nine round trips before browsing could continue. After, the slot is free 40 to 150 ms later, once the channel's close is answered, and the connection stays up in every sample. When the connection drops, both reconnect for the next operation; before, a drop that fell between two files could also be survived by the next file reconnecting, so a save sometimes finished. With 16 files in flight one is always mid-transfer, so the save fails, as a dropped read always did.
+
+### Correctness
+
+- `OfflineFolderConcurrencyTests` runs saves on a transport that, like the real one, refuses more than its limit, and compares them with saving one file at a time: commit order with files finishing out of order; the earliest failure in folder order winning over a later one that came first and over a walk failure; storage, count and per-file limits, including storage running out exactly and part-way through a file; staging never above the byte limit; the 4 MiB pool; large and unknown-size files alone; a file that grew; cancellation keeping the slot until every overlapping transfer that ignores it stops; the folder deadline; and progress. Putting back four bugs found while writing it (space released before commit, files beside a large one, failures reported as they arrive, a grown file not retried) fails it each time.
+- Against OpenSSH: one channel per save, twice, with every file's bytes equal to the server's; a file replaced by a link after its folder was listed, and a folder before it was, each failing the save with nothing published and the connection kept; a dropped connection and a cancellation mid-transfer publishing nothing, cancellation needing no reconnection, and the next save succeeding. One version of the link test failed one run in three: a cancelled file arriving after the save ended opened a new channel and closed the connection. An ended batch now refuses files, and a cancellation before the channel is installed waits out the grace period instead of closing the socket at once.
+- All 496 macOS tests pass with OpenSSH, with `LatencyBenchmarkTests` skipped as usual.
+- Not run: the iOS simulator, the UI journeys and VoiceOver (no view changed), a physical iPhone, and servers other than OpenSSH. The security checks are the ones each file always made; their order relative to each other is unchanged. Nothing tested a server that refuses a second channel, but the count is the same as before.
+
+*Cost:* up to 16 open handles and a second server process per save; files committed in order, so a slow early file holds back the count shown; a dropped connection now always fails a save; the first file 7 to 16 ms later on a LAN; three small benchmark-only switches in `OfflineFolderDownload` and `SnapshotTransferBatch`. *Rejected:* a channel per file at several at a time (B), which beat sharing alone but lost to sharing with overlap and needs a channel per file; and a pool of channels, which nothing measured called for. *Would reverse it:* a server that mishandles several requests on one handle set at once, or limits open handles below 16; the batch then needs a smaller `concurrentFiles`.
+
+## Follow-up report, 8 November
+
+Measured where the fixture allows, on the Mac through the proxy, with the candidate; not implemented.
+
+**1. Live content searches across folder boundaries: the largest remaining gain.** A contents search over SFTP of the fixture's `tree` (500 files in 144 folders, the search's file limit) took 22.6 s at 40 ms and 3.8 s at 5 ms. An index of the same files, which lists every folder before it reads and keeps 32 reads in flight, took 3.7 s and 0.66 s ([raw](performance/2026-11-08-offline/content-search-vs-index.jsonl)), so letting the walk list ahead while it reads is worth up to six times. A folder tap during the search took 94 ms at 40 ms, as with nothing running. The design: one window of folders listed ahead (as name searches already do, 8 to 64) feeding the existing read-ahead in the walk's order, with each read charged to the limits as it starts, as now. Results and their order don't change, since matches are still handled in walk order; what changes is that a folder's reads can start while an earlier folder's are still out. *Costs:* listings and reads now compete on the walk's one channel, more work is wasted when the match limit stops a search early, and time to the first match may rise slightly if listings queue ahead of the first reads; read them first when both are ready. Time to first match wasn't measured: the fixture's files are empty.
+
+**2. Read-window pacing: keep `TransferPacing`.** Rotating four policies in one process, three 64 MiB downloads each, five folder taps during each ([raw](performance/2026-11-08-offline/window-policies-taps.jsonl)):
+
+| Mac → proxy | Fixed 16 | Growing to 64 (shipped) | Fixed 64 | Growing to 128 |
+|---|---:|---:|---:|---:|
+| 40 ms | 18.7 MiB/s, tap 93 ms | 41.9 MiB/s, 94 ms | 42.1 MiB/s, 95 ms | 42.0 MiB/s, 93 ms |
+| 150 ms | 5.6 MiB/s, 316 ms | 14.5 MiB/s, 317 ms | 16.2 MiB/s, 316 ms | 15.1 MiB/s, 316 ms |
+| 40 ms, 100 Mbit/s | 11.0 MiB/s, 168 ms | 11.0 MiB/s, 170 ms | 11.0 MiB/s, 672 ms | 11.0 MiB/s, 169 ms |
+| 150 ms, 100 Mbit/s | 5.5 MiB/s, 316 ms | 9.1 MiB/s, 375 ms | 9.4 MiB/s, 671 ms | 9.1 MiB/s, 381 ms |
+
+Where the link isn't full, growth reaches 64 and taps cost nothing; where it is, a fixed 64 gains at most 3% and makes taps wait four times as long, and the growing window stops at 16 to 47. A larger limit adds 4% at 150 ms and nothing elsewhere. The one open gap, 11% below a fixed 64 at 150 ms on a free link, is the price of stopping at 1.5 times the round trip, which is what keeps the capped rows fast; it needs the phone at 150 ms from the wired mini, the only path fast enough, before changing anything.
+
+**3. Keeping a verified Linux search root between searches: not recommended yet.** No Linux guest ran this session, so nothing was measured. From the 7 November trace, a repeated search of one folder spends about six of its nine round trips proving the root, 240 ms at 40 ms. Keeping that would mean holding a directory descriptor open in a helper or channel between searches, and then trusting it later: the folder can be renamed, replaced or unmounted meanwhile, and the descriptor still names the old inode, so results would come from a folder the path no longer leads to unless every search re-proves the path against the held inode, which costs most of what it saves. It also holds a server process and descriptor per folder searched, across reconnects, host-key changes and key changes, each of which would have to drop it. Re-proving only by `REALPATH` and `stat` over SFTP (two of the nine) is the variant worth measuring, on the guest, with the existing acceptance suite and a test that replaces the folder between searches.
+
 ## Remaining opportunities
 
 Theoretical until measured, most promising first.
 
-1. **Offline folders' files.** About 10.7 round trips each, one at a time; a shared channel would save about four.
-2. **Repeated server searches of one folder.** Keeping the checked root and its channel could take a search from about nine round trips to three.
-3. **The first requests with `INIT`.** One round trip per channel, measured on seven implementations; see [why it was left out](#connection-setup-nothing-to-adopt).
-4. **Live content searches over SFTP** read ahead only about a folder at a time. Letting the walk take listings while it reads would give them the index's window.
-5. **Read-window growth on a long phone path.** At 150 ms it reached 11.9 MiB/s against 14.3 for a fixed 64; measure browsing during a transfer on the phone before trading queue depth for it. See [the phone's download cap](#the-phones-download-cap-not-the-client).
+1. **Live content searches over SFTP** read ahead only about a folder at a time; an index of the same files is six times faster at 40 ms. See [the follow-up report](#follow-up-report-8-november).
+2. **Offline folders' listings.** With files overlapped, the save's folders are listed one at a time, about two round trips each: by that count about 7.5 s of the 25.5 s that 400 tiny files in 25 folders take at 150 ms, not measured separately. Listing a few ahead, as searches do, on the batch's channel.
+3. **Repeated server searches of one folder.** About six of nine round trips, but see the risks above before keeping anything open.
+4. **The first requests with `INIT`.** One round trip per channel, measured on seven implementations; see [why it was left out](#connection-setup-nothing-to-adopt).
+5. **Read-window growth on a long phone path.** At 150 ms on a free link it reaches 89% of a fixed 64; measure on the phone from the mini before trading queue depth for it.
 
 ## Run it
 
@@ -319,6 +399,9 @@ python3 -B scripts/benchmark_performance.py run --output after.jsonl --label aft
 
 # Compare two recorded files.
 python3 -B scripts/benchmark_performance.py compare before.jsonl after.jsonl
+
+# Offline folders, alternating a baseline worktree with this checkout, as on 8 November.
+CAND=. BASE=../baseline bash docs/performance/2026-11-08-offline/paired.sh.txt offline.jsonl 0,5,40 2 22502
 ```
 
 To compare fairly, `git worktree add` the baseline, build both, and alternate `run --skip-build --checkout PATH` between them. `--only download,search` narrows the scenarios, `--mbit 100` caps the rate.
@@ -345,7 +428,7 @@ python3 -B scripts/benchmark_performance.py server --output linux.jsonl --checko
   --port 22401 --user ubuntu --key KEY --host-key HOST_KEY.pub --root /srv/rf/bench --only assisted,bulk --rtt 0,40,150
 ```
 
-The `assisted` scenarios search the guest's `tree`, `big` and `docs` folders with the helper and with the walk; `REMOTEFILES_BENCHMARK_ASSISTED_MODE=helper` or `walk` runs one. `bulk` builds an index and saves an offline folder of `REMOTEFILES_BENCHMARK_BULK_ROOT`. `--cold-command` empties the server's caches before each search sample. `windowpairs` rotates a read window fixed at 16, a growing one and one fixed at 64 in one process, and records how far each grew. `linkbaseline` rotates SFTP with a plain TCP read of the same file: `REMOTEFILES_BENCHMARK_RAW_PORTS` lists ports on the server's host, or `HOST:PORT` elsewhere, that send `big-64m.bin` and close, such as a loop of `nc -l`; the two-stream arm also reads from the next port up, and `REMOTEFILES_BENCHMARK_SFTP_PORTS` lists other ports of the same server, such as one without the proxy. For 120 Hz frames, give the benchmark host an Info.plist with `CADisableMinimumFrameDurationOnPhone`; `REMOTEFILES_BENCHMARK_FRAME_RATE=60` asks for 60 Hz in the same build.
+The `assisted` scenarios search the guest's `tree`, `big` and `docs` folders with the helper and with the walk; `REMOTEFILES_BENCHMARK_ASSISTED_MODE=helper` or `walk` runs one. `bulk` builds an index and saves an offline folder of `REMOTEFILES_BENCHMARK_BULK_ROOT`. `--cold-command` empties the server's caches before each search sample. `windowpairs` rotates a read window fixed at 16, a growing one and one fixed at 64 in one process, and records how far each grew. `linkbaseline` rotates SFTP with a plain TCP read of the same file: `REMOTEFILES_BENCHMARK_RAW_PORTS` lists ports on the server's host, or `HOST:PORT` elsewhere, that send `big-64m.bin` and close, such as a loop of `nc -l`; the two-stream arm also reads from the next port up, and `REMOTEFILES_BENCHMARK_SFTP_PORTS` lists other ports of the same server, such as one without the proxy. For 120 Hz frames, give the benchmark host an Info.plist with `CADisableMinimumFrameDurationOnPhone`; `REMOTEFILES_BENCHMARK_FRAME_RATE=60` asks for 60 Hz in the same build. `offline` saves the generated `offline` trees (`small50`, `tiny400`, `mixed`; `REMOTEFILES_BENCHMARK_OFFLINE_TREES` narrows them), then times folder taps during a save and cancelling or dropping one; `REMOTEFILES_BENCHMARK_OFFLINE_EXTRAS=0` skips those, `REMOTEFILES_BENCHMARK_OFFLINE_SAVES=0` keeps only them, and `REMOTEFILES_BENCHMARK_OFFLINE_ARMS=dedicated1,shared1,shared16` rotates transfer policies in one process. `windowtaps` rotates read-window policies with folder taps during each download; give it `--mbit`. `pipeline` runs a live contents search and an index build of the same tree.
 
 Keep the phone unlocked and allow Local Network on first run. Links vary, so alternate short runs and compare pairs, as for downloads above. Remove the host afterwards with `xcrun devicectl device uninstall app`; it is `dev.iris.RemoteFilesBenchTestHost`.
 
