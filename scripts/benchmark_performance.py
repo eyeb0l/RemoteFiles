@@ -44,6 +44,20 @@ def tree(path, depth, rng, branches=3):
             tree(path / f"{rng.choice(WORDS)} {index}", depth - 1, rng, branches)
 
 
+def text_tree(path, depth, rng, level=0):
+    """The shape of `tree`, 364 folders of six files each, but text of 1 to 6 KB. From the third level down
+    about one file in six holds "kestrel", so the first match comes some way into the walk; none holds "zzzqq"."""
+    path.mkdir(parents=True, exist_ok=True)
+    for index in range(6):
+        words = [rng.choice(WORDS) for _ in range(rng.randrange(150, 900))]
+        if level >= 2 and rng.random() < 1 / 6:
+            words.insert(rng.randrange(len(words)), "kestrel")
+        (path / f"{rng.choice(WORDS)}-{index}.txt").write_text(" ".join(words) + "\n", encoding="utf-8")
+    if depth:
+        for index in range(3):
+            text_tree(path / f"{rng.choice(WORDS)} {index}", depth - 1, rng, level + 1)
+
+
 def offline_trees(path, rng):
     """Folders to save offline. `small50` is 50 small files in 10 subfolders, like the Linux guest's `docs`;
     `tiny400` is 400 tiny files in 24 folders two levels deep, more than the library's 100-file cap, so the
@@ -85,6 +99,7 @@ def generate_fixture(bench, include_huge):
     for index in range(256):
         os.symlink(f"file-{index % 44}.txt", links / f"link-{index}.txt")
     tree(bench / "tree", 5, rng)
+    text_tree(bench / "texts", 5, random.Random(0x7E87))
     for index in range(40):
         mixed_folder(bench / "wide" / f"folder {index}", 1_000, rng)
     (bench / "report.md").write_text("# Fixture report\n\nRead over independent OpenSSH.\n")

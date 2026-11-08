@@ -83,6 +83,11 @@ public enum RemoteFolderSearch {
     }
 
     private struct Folder: Sendable { let path: String; let depth: Int }
+    /// A folder whose listing has been taken in queue order: its visible entries sorted by name, or why not.
+    private enum Accepted { case listed([RemoteEntry]), outside, failed(Error) }
+    /// How many folders a live content search lists ahead of the one whose files it is reading, including those
+    /// being listed. Benchmarks change it; see docs/PERFORMANCE.md.
+    nonisolated(unsafe) static var liveLookahead = 32
     // Keep the queue index attached to its result across task-group suspension points.
     // Optimized tuple results can repeat an earlier index and leave descendants unreported.
     private struct Listing: Sendable {
@@ -136,19 +141,30 @@ public enum RemoteFolderSearch {
         try Task.checkCancellation()
         let deadline = ContinuousClock.now + limits.timeLimit
         var queue = [Folder(path: root, depth: 0)]
-        // Folders are listed up to the window ahead, but reported strictly in queue order: nearer
-        // folders always come first and count first towards the match limit.
-        var started = 0, reported = 0, running = 0
+        // Folders are listed up to the window ahead, then accepted strictly in queue order: their subfolders join
+        // the queue and their files are offered to the read-ahead. They're reported in the same order, so nearer
+        // folders always come first and count first towards the match limit. A live content search reports a
+        // folder once its files are read, and accepts listings between files, so its reads and listings overlap
+        // across folders; everything else reports a folder as soon as it is accepted.
+        var started = 0, accepted = 0, reported = 0, running = 0
         var finished: [Int: Result<DirectorySnapshot, Error>] = [:], retried: Set<Int> = []
+        var ready: [Int: Accepted] = [:]
+        // Why listing stopped, which the report takes up between folders; whether a recovery came too late to
+        // start, which ends the walk; and a failure that will end it, which nothing after is accepted past.
+        var listingStop: Stop?, abandoned = false, blocked = false
         var progress = Update(), matched = delivered.count
         var pacing = ListingPacing(limits: limits)
         // An index reads at most the file limit, so it keeps only the files it may read, and counts the rest.
         var listedForIndex: [(files: [RemoteEntry], skipped: Int)] = [], readableForIndex = 0
         let walker = service as? any FolderWalking
         // Only where listings already overlap: the same transport can overlap its reads.
-        let readAhead = walker != nil ? content.map { SearchReadAhead(service: service, profile: profile, root: root, limits: $0) } : nil
+        let mailbox = SearchWalkEvents<Listing>()
+        let readAhead = walker != nil ? content.map { SearchReadAhead(service: service, profile: profile, root: root, limits: $0, events: mailbox) } : nil
         defer { readAhead?.cancelAll() }
-        let list: @Sendable (Int, String) async -> Listing = { index, path in
+        // Folders listed, or being listed, ahead of the one being reported. Only a live content search falls behind.
+        let live = content != nil && !query.isEmpty
+        let lookahead = live ? max(1, Self.liveLookahead) : Int.max
+        let list: @Sendable (Int, String) async -> Void = { index, path in
             let started = ContinuousClock.now
             do {
                 let snapshot: DirectorySnapshot
@@ -157,75 +173,102 @@ public enum RemoteFolderSearch {
                 } else {
                     snapshot = try await service.listDirectory(profile: profile, path: path)
                 }
-                return Listing(index: index, result: .success(snapshot), elapsed: started.duration(to: .now))
+                mailbox.post(Listing(index: index, result: .success(snapshot), elapsed: started.duration(to: .now)))
             } catch {
-                return Listing(index: index, result: .failure(error), elapsed: started.duration(to: .now))
+                mailbox.post(Listing(index: index, result: .failure(error), elapsed: started.duration(to: .now)))
             }
         }
-        try await withThrowingTaskGroup(of: Listing.self) { group in
-            // Refill before polling, including after consuming the last child, and finish only
-            // when there are no queued listings to start and no outstanding results to consume.
-            while true {
-                try Task.checkCancellation()
-                while running < pacing.window, started < queue.count, progress.stop == nil {
-                    guard started < limits.maxFolders else { progress.stop = .folderLimit; break }
-                    guard ContinuousClock.now < deadline else { progress.stop = .timeLimit; break }
+        try await withThrowingDiscardingTaskGroup { group in
+            // Takes the listings that have finished and accepts every folder now next in queue order. Never waits.
+            func acceptListings() {
+                for listing in mailbox.take() {
+                    let index = listing.index
+                    running -= 1
+                    pacing.finished(after: listing.elapsed)
+                    if case .failure(let error) = listing.result, index > 0, endsConnection(error), retried.insert(index).inserted {
+                        // A peer's deadline retires the shared SFTP channel and fails the listings on it;
+                        // list this folder once more on a fresh channel before giving up.
+                        // Recovery starts another listing, so it shares the walk's scheduling deadline.
+                        guard ContinuousClock.now < deadline else {
+                            abandoned = true
+                            group.cancelAll()
+                            return
+                        }
+                        let path = queue[index].path
+                        group.addTask { await list(index, path) }
+                        running += 1
+                        continue
+                    }
+                    finished[index] = listing.result
+                }
+                while !blocked, accepted - reported < lookahead, let result = finished.removeValue(forKey: accepted) {
+                    let folder = queue[accepted]
+                    switch result {
+                    case .success(let snapshot):
+                        if content != nil, !RemoteResourcePath.contains(snapshot.path, in: root) {
+                            ready[accepted] = .outside // A listed folder may have become a link since its parent was read.
+                            break
+                        }
+                        let visible = snapshot.entries.filter { includeHidden || !$0.name.hasPrefix(".") }
+                            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                        if folder.depth < limits.maxDepth {
+                            for entry in visible where entry.kind == .directory { queue.append(Folder(path: entry.path, depth: folder.depth + 1)) }
+                        }
+                        // Offered in the order the walk will read them, so that nothing is read ahead of a file the
+                        // walk still has to read itself.
+                        if let readAhead, let content {
+                            readAhead.offer(visible.filter { scanReads($0, root: root, limits: content, options: options, extraction: extraction)
+                                && reusable?($0) == nil && !delivered.contains(Data($0.path.utf8)) })
+                        }
+                        ready[accepted] = .listed(visible)
+                    case .failure(let error):
+                        if error is CancellationError || folder.depth == 0 || !isSkippable(error) { blocked = true }
+                        ready[accepted] = .failed(error)
+                    }
+                    accepted += 1
+                }
+            }
+            // Starts more listings. A walk does this after reporting what it could, so that a limit reached in a
+            // folder starts nothing after it, except that a live search also does it before each file it reads.
+            func refill() {
+                while !blocked, !abandoned, listingStop == nil, running < pacing.window, started < queue.count, started - reported < lookahead {
+                    guard started < limits.maxFolders else { listingStop = .folderLimit; break }
+                    guard ContinuousClock.now < deadline else { listingStop = .timeLimit; break }
                     let index = started, path = queue[index].path
                     group.addTask { await list(index, path) }
                     running += 1; started += 1
                 }
-                guard running > 0, let listing = try await group.next() else { break }
-                let index = listing.index, result = listing.result
-                running -= 1
-                pacing.finished(after: listing.elapsed)
+                SearchPipelineMetrics.shared.note(listings: running, foldersAhead: started - reported)
+            }
+            // Finish only when there are no queued listings to start, no outstanding listings and nothing
+            // accepted left to report.
+            while true {
                 try Task.checkCancellation()
-                if case .failure(let error) = result, index > 0, endsConnection(error), retried.insert(index).inserted {
-                    // A peer's deadline retires the shared SFTP channel and fails the listings on it;
-                    // list this folder once more on a fresh channel before giving up.
-                    // Recovery starts another listing, so it shares the walk's scheduling deadline.
-                    guard ContinuousClock.now < deadline else {
-                        progress.stop = .timeLimit
-                        group.cancelAll()
-                        break
-                    }
-                    let path = queue[index].path
-                    group.addTask { await list(index, path) }
-                    running += 1
+                let seen = mailbox.count
+                // A live search starts reads before listings, as it does between files. Any other walk starts
+                // listings only after reporting what it could.
+                if !live { refill() }
+                acceptListings()
+                if abandoned { progress.stop = .timeLimit; break }
+                if let readAhead, content != nil, ContinuousClock.now < deadline {
+                    progress.chargedBytes += readAhead.fill(charged: progress.chargedBytes, files: progress.filesSearched)
+                }
+                if live { refill() }
+                if progress.stop == nil { progress.stop = listingStop }
+                guard reported < accepted else {
+                    guard running > 0 else { break }
+                    await mailbox.wait(after: seen)
                     continue
                 }
-                finished[index] = result
-                // Offer the files of every folder now ready to be reported, in the order the walk will read
-                // them, so that nothing is read ahead of a file the walk still has to read itself.
-                if let readAhead, let content {
-                    var next = reported
-                    while let listed = finished[next] {
-                        next += 1
-                        guard case .success(let snapshot) = listed, RemoteResourcePath.contains(snapshot.path, in: root) else { continue }
-                        readAhead.offer(snapshot.entries.filter { (includeHidden || !$0.name.hasPrefix("."))
-                                && scanReads($0, root: root, limits: content, options: options, extraction: extraction)
-                                && reusable?($0) == nil && !delivered.contains(Data($0.path.utf8)) }
-                            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending })
-                    }
-                    if ContinuousClock.now < deadline {
-                        progress.chargedBytes += readAhead.fill(charged: progress.chargedBytes, files: progress.filesSearched)
-                    }
-                }
-                while let result = finished.removeValue(forKey: reported) {
+                while reported < accepted, !abandoned, let item = ready.removeValue(forKey: reported) {
                     let folder = queue[reported]; reported += 1
                     var update = Update()
-                    switch result {
-                    case .success(let snapshot):
-                        if content != nil, !RemoteResourcePath.contains(snapshot.path, in: root) {
-                            progress.unreadableFolders += 1
-                            break // A listed folder may have become a link since its parent was read.
-                        }
+                    switch item {
+                    case .outside:
+                        progress.unreadableFolders += 1
+                    case .listed(let visible):
                         progress.foldersSearched += 1
-                        let visible = snapshot.entries.filter { includeHidden || !$0.name.hasPrefix(".") }
-                            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-                        for entry in visible where entry.kind == .directory {
-                            if folder.depth < limits.maxDepth { queue.append(Folder(path: entry.path, depth: folder.depth + 1)) }
-                            else { progress.skippedDeepFolders += 1 }
-                        }
+                        if folder.depth >= limits.maxDepth { progress.skippedDeepFolders += visible.count { $0.kind == .directory } }
                         if let content, query.isEmpty {
                             // Building an index, with no first match to hurry for. The walk stops listing
                             // while it reads, so list everything first and let every read overlap.
@@ -239,7 +282,14 @@ public enum RemoteFolderSearch {
                             try await scan(unreported, query: query, root: root, profile: profile,
                                 service: service, limits: content, matchLimit: limits.maxMatches, deadline: deadline,
                                 matched: &matched, progress: &progress, options: options, extraction: extraction, collect: collect,
-                                reusable: reusable, readAhead: readAhead, report: report)
+                                reusable: reusable, readAhead: readAhead, events: mailbox, between: { progress in
+                                    // Reads first: the first match waits for them, and listings only for later folders.
+                                    acceptListings()
+                                    if let readAhead, ContinuousClock.now < deadline {
+                                        progress.chargedBytes += readAhead.fill(charged: progress.chargedBytes, files: progress.filesSearched)
+                                    }
+                                    refill()
+                                }, report: report)
                             if matched >= limits.maxMatches, reported < queue.count { progress.stop = .matchLimit }
                         } else {
                             let found = visible.filter { options.accepts($0) && options.range(in: $0.name, query: query) != nil && !delivered.contains(Data($0.path.utf8)) }
@@ -257,7 +307,7 @@ public enum RemoteFolderSearch {
                                 progress.stop = .matchLimit
                             }
                         }
-                    case .failure(let error):
+                    case .failed(let error):
                         if error is CancellationError { throw error }
                         guard folder.depth > 0, isSkippable(error) else { throw error }
                         progress.unreadableFolders += 1
@@ -275,6 +325,7 @@ public enum RemoteFolderSearch {
                 if progress.stop == .matchLimit || (content != nil && stopsReading(progress.stop)) { group.cancelAll(); break }
                 if let content, query.isEmpty, readableForIndex > content.maxFiles { group.cancelAll(); break }
             }
+            group.cancelAll()
         }
         // Reads that finished before a deadline during listing are still collected; nothing new starts.
         if let content {

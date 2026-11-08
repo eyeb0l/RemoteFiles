@@ -569,18 +569,24 @@ private actor ReadAheadService: RemoteFileService, FolderWalking {
     let contents: [String: Data]
     let readDelay: Duration
     let listingDelays: [String: Duration]
+    let listingErrors: [String: RemoteFileError]
     private(set) var reads: [(path: String, limit: Int)] = []
     private(set) var listed: [String] = []
+    /// Reads that had returned when each listing started, by folder.
+    private(set) var readsDoneWhenListed: [String: Int] = [:]
     private(set) var mostAtOnce = 0
     private(set) var bytesRead = 0
-    private var running = 0
-    init(folders: [String: [RemoteEntry]], contents: [String: Data], readDelay: Duration = .milliseconds(5), listingDelays: [String: Duration] = [:]) {
+    private var running = 0, readsDone = 0
+    init(folders: [String: [RemoteEntry]], contents: [String: Data], readDelay: Duration = .milliseconds(5), listingDelays: [String: Duration] = [:],
+         listingErrors: [String: RemoteFileError] = [:]) {
         self.folders = folders; self.contents = contents; self.readDelay = readDelay; self.listingDelays = listingDelays
+        self.listingErrors = listingErrors
     }
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { .init(path: path, entries: folders[path] ?? []) }
     func listDirectoryForWalk(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
-        listed.append(path)
+        listed.append(path); readsDoneWhenListed[path] = readsDone
         if let delay = listingDelays[path] { try await Task.sleep(for: delay) }
+        if let error = listingErrors[path] { throw error }
         return .init(path: path, entries: folders[path] ?? [])
     }
     func resolvingLinks(in entries: [RemoteEntry], profile: ConnectionProfile) async throws -> [RemoteEntry] { entries }
@@ -590,7 +596,7 @@ private actor ReadAheadService: RemoteFileService, FolderWalking {
         try Task.checkCancellation()
         reads.append((path, limit))
         running += 1; mostAtOnce = max(mostAtOnce, running)
-        defer { running -= 1 }
+        defer { running -= 1; readsDone += 1 }
         try await Task.sleep(for: readDelay)
         guard let data = contents[path] else { throw RemoteFileError.notFound }
         guard data.count <= limit else { throw RemoteFileError.tooLarge(limit) }
@@ -792,11 +798,185 @@ final class SearchReadAheadTests: XCTestCase {
     }
 }
 
+/// Live content searches list folders ahead while they read, so a later folder's reads overlap an earlier one's.
+final class SearchListingAheadTests: XCTestCase {
+    private let profile = ConnectionProfile(name: "Listing ahead", host: "example.invalid", username: "reader", identityID: UUID())
+
+    /// Three levels of folders, `files` text files in each, some holding the query.
+    private func deepTree(files: Int = 2) -> (folders: [String: [RemoteEntry]], contents: [String: Data]) {
+        var folders: [String: [RemoteEntry]] = [:], contents: [String: Data] = [:]
+        func fill(_ path: String, depth: Int) {
+            folders[path] = []
+            for index in 0..<files {
+                let file = path + "/file-\(index).txt"
+                contents[file] = Data(((path.count + index) % 3 == 0 ? "a needle here" : "nothing to see").utf8)
+                folders[path]!.append(RemoteEntry(name: "file-\(index).txt", path: file, kind: .file, size: UInt64(contents[file]!.count)))
+            }
+            guard depth < 3 else { return }
+            for index in 0..<3 {
+                let child = path + "/folder-\(index)"
+                folders[path]!.append(RemoteEntry(name: "folder-\(index)", path: child, kind: .directory))
+                fill(child, depth: depth + 1)
+            }
+        }
+        fill("/r", depth: 0)
+        return (folders, contents)
+    }
+
+    private func search(_ service: any RemoteFileService, limits: RemoteFolderSearch.Limits = .init(),
+                        content: RemoteFolderSearch.ContentLimits = .init()) async -> (matches: [String], final: RemoteFolderSearch.Update, error: Error?) {
+        var matches: [String] = [], final = RemoteFolderSearch.Update()
+        do {
+            for try await update in RemoteFolderSearch.contents(matching: "needle", below: "/r", profile: profile, service: service, includeHidden: false,
+                                                                limits: limits, contentLimits: content) {
+                matches += update.contentMatches.map(\.entry.path); final = update
+            }
+        } catch { return (matches, final, error) }
+        return (matches, final, nil)
+    }
+
+    /// Whatever the order listings come back in, a search reports what one reading a folder at a time reports.
+    func testListingAheadKeepsTheResultsAndAccountingOfAWalkOneFolderAtATime() async throws {
+        let (folders, contents) = deepTree()
+        var generator = SystemRandomNumberGenerator()
+        let cases: [(String, RemoteFolderSearch.Limits, RemoteFolderSearch.ContentLimits, [String: RemoteFileError])] = [
+            ("everything", .init(), .init(), [:]),
+            ("matches", .init(maxMatches: 5), .init(), [:]),
+            ("files", .init(), .init(maxFiles: 9), [:]),
+            ("folders", .init(maxFolders: 6), .init(), [:]),
+            ("depth", .init(maxDepth: 1), .init(), [:]),
+            ("unreadable folder", .init(), .init(), ["/r/folder-0/folder-1": .permissionDenied]),
+            ("failing folder", .init(), .init(), ["/r/folder-1/folder-0": .invalidPath]),
+        ]
+        let shipped = RemoteFolderSearch.liveLookahead
+        defer { RemoteFolderSearch.liveLookahead = shipped }
+        for (name, limits, content, errors) in cases {
+            // One folder listed at a time, and no reading ahead: the walk as it would be without any of this.
+            RemoteFolderSearch.liveLookahead = 1
+            let plain = await search(PlainTreeService(folders: folders, contents: contents, listingErrors: errors), limits: limits, content: content)
+            RemoteFolderSearch.liveLookahead = shipped
+            for _ in 0..<3 {
+                // Later folders often come back first.
+                let delays = Dictionary(uniqueKeysWithValues: folders.keys.map { ($0, Duration.milliseconds(Int.random(in: 0...15, using: &generator))) })
+                let ahead = await search(ReadAheadService(folders: folders, contents: contents, readDelay: .milliseconds(3), listingDelays: delays,
+                                                          listingErrors: errors), limits: limits, content: content)
+                XCTAssertEqual(ahead.matches, plain.matches, name)
+                XCTAssertEqual(ahead.final.stop, plain.final.stop, name)
+                XCTAssertEqual(ahead.final.filesSearched, plain.final.filesSearched, name)
+                XCTAssertEqual(ahead.final.bytesRead, plain.final.bytesRead, name)
+                XCTAssertEqual(ahead.final.foldersSearched, plain.final.foldersSearched, name)
+                XCTAssertEqual(ahead.final.unreadableFolders, plain.final.unreadableFolders, name)
+                XCTAssertEqual(ahead.final.skippedDeepFolders, plain.final.skippedDeepFolders, name)
+                XCTAssertEqual(ahead.error.map { String(describing: $0) }, plain.error.map { String(describing: $0) }, name)
+                if plain.final.stop == nil, plain.error == nil {
+                    XCTAssertEqual(ahead.final.chargedBytes, plain.final.chargedBytes, "\(name): every read was used, so nothing more was charged")
+                }
+            }
+        }
+    }
+
+    /// The first folder's second file can't finish until a file of the next folder has started reading, which only
+    /// happens if the walk takes that folder's listing before reading on.
+    func testAFolderListedBetweenReadsStartsReadingBeforeTheEarlierFolderIsDone() async throws {
+        let service = GatedListingService(firstFolder: ["a.txt", "b.txt"], listedOnceStarted: "a.txt", held: "b.txt")
+        let (matches, final, error) = await search(service)
+        XCTAssertNil(error)
+        XCTAssertEqual(matches, ["/r/f0/a.txt", "/r/f0/b.txt", "/r/f1/c.txt"], "In walk order, however the reads overlapped")
+        XCTAssertEqual(final.filesSearched, 3)
+        let released = await service.heldReadReleasedByNextFolder, reads = await service.reads
+        XCTAssertTrue(released, "The next folder's read started while this one was under way")
+        XCTAssertEqual(reads.sorted(), ["/r/f0/a.txt", "/r/f0/b.txt", "/r/f1/c.txt"], "Each file once")
+    }
+
+    /// The same while the walk waits for the only read it has: the next folder is listed only once that read has
+    /// started, and the read can't finish until a file of the next folder has started.
+    func testAFolderListedWhileTheWalkWaitsForAReadStartsReadingAtOnce() async throws {
+        let service = GatedListingService(firstFolder: ["b.txt"], listedOnceStarted: "b.txt", held: "b.txt")
+        let (matches, _, error) = await search(service)
+        XCTAssertNil(error)
+        XCTAssertEqual(matches, ["/r/f0/b.txt", "/r/f1/c.txt"])
+        let released = await service.heldReadReleasedByNextFolder
+        XCTAssertTrue(released, "The walk took the listing while it waited")
+    }
+
+    /// Reads that can't keep up don't let the listings run away with the tree: a live search lists only so far ahead.
+    func testListingAheadStaysWithinItsWindow() async throws {
+        var folders: [String: [RemoteEntry]] = ["/r": []], contents: [String: Data] = [:]
+        for index in 0..<40 {
+            let folder = "/r/folder-\(String(format: "%02d", index))", file = folder + "/file.txt"
+            folders["/r"]!.append(RemoteEntry(name: RemotePath.name(of: folder), path: folder, kind: .directory))
+            contents[file] = Data("needle".utf8)
+            folders[folder] = [RemoteEntry(name: "file.txt", path: file, kind: .file, size: 6)]
+        }
+        let shipped = RemoteFolderSearch.liveLookahead
+        RemoteFolderSearch.liveLookahead = 4
+        defer { RemoteFolderSearch.liveLookahead = shipped }
+        let service = ReadAheadService(folders: folders, contents: contents, readDelay: .milliseconds(20))
+        let (matches, _, error) = await search(service)
+        XCTAssertNil(error)
+        XCTAssertEqual(matches.count, 40)
+        let done = await service.readsDoneWhenListed
+        for index in 0..<40 {
+            // The folder is the walk's (index + 1)th. It starts once the walk has reported all but four before it, and
+            // every reported folder but the one being read has had its file read.
+            let folder = "/r/folder-\(String(format: "%02d", index))"
+            XCTAssertGreaterThanOrEqual(done[folder] ?? -1, index + 1 - 4 - 2, folder)
+        }
+    }
+}
+
+/// `/r` holds `f0` and `f1`, which holds `c.txt`. `f1` is listed only once the read of `listedOnceStarted` in `f0` has
+/// started; `a.txt`'s read returns only once `f1` is listed; `held`'s read waits for `c.txt`'s to start, or gives up
+/// after a minute, longer than the search's own 30-second deadline, so a loaded runner can't fail a correct walk.
+private actor GatedListingService: RemoteFileService, FolderWalking {
+    private(set) var reads: [String] = []
+    private(set) var heldReadReleasedByNextFolder = false
+    private var started: Set<String> = [], f1Listed = false
+    private let folders: [String: [RemoteEntry]]
+    private let listedOnceStarted: String, held: String
+    init(firstFolder: [String], listedOnceStarted: String, held: String) {
+        folders = ["/r": [RemoteEntry(name: "f0", path: "/r/f0", kind: .directory), RemoteEntry(name: "f1", path: "/r/f1", kind: .directory)],
+                   "/r/f0": firstFolder.map { RemoteEntry(name: $0, path: "/r/f0/" + $0, kind: .file, size: 6) },
+                   "/r/f1": [RemoteEntry(name: "c.txt", path: "/r/f1/c.txt", kind: .file, size: 6)]]
+        self.listedOnceStarted = "/r/f0/" + listedOnceStarted; self.held = "/r/f0/" + held
+    }
+    private func until(_ condition: () -> Bool, seconds: Double) async -> Bool {
+        let end = ContinuousClock.now + .seconds(seconds)
+        while !condition() {
+            guard ContinuousClock.now < end, !Task.isCancelled else { return false }
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        return true
+    }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { .init(path: path, entries: folders[path] ?? []) }
+    func listDirectoryForWalk(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
+        if path == "/r/f1" { _ = await until({ started.contains(listedOnceStarted) }, seconds: 60); f1Listed = true }
+        return .init(path: path, entries: folders[path] ?? [])
+    }
+    func resolvingLinks(in entries: [RemoteEntry], profile: ConnectionProfile) async throws -> [RemoteEntry] { entries }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.invalidPath }
+    func readSearchFile(profile: ConnectionProfile, path: String, canonicalRoot: String, limit: Int) async throws -> Data {
+        try Task.checkCancellation()
+        reads.append(path); started.insert(path)
+        if path == "/r/f0/a.txt" { _ = await until({ f1Listed }, seconds: 60) }
+        if path == held { heldReadReleasedByNextFolder = await until({ started.contains("/r/f1/c.txt") }, seconds: 60) }
+        return Data("needle".utf8)
+    }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.notFound }
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry { throw RemoteFileError.notFound }
+    func disconnect() async {}
+}
+
 /// The same files for a transport without overlapping listings, which reads one at a time.
 private actor PlainTreeService: RemoteFileService {
-    let folders: [String: [RemoteEntry]], contents: [String: Data]
-    init(folders: [String: [RemoteEntry]], contents: [String: Data]) { self.folders = folders; self.contents = contents }
-    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { .init(path: path, entries: folders[path] ?? []) }
+    let folders: [String: [RemoteEntry]], contents: [String: Data], listingErrors: [String: RemoteFileError]
+    init(folders: [String: [RemoteEntry]], contents: [String: Data], listingErrors: [String: RemoteFileError] = [:]) {
+        self.folders = folders; self.contents = contents; self.listingErrors = listingErrors
+    }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
+        if let error = listingErrors[path] { throw error }
+        return .init(path: path, entries: folders[path] ?? [])
+    }
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.invalidPath }
     func readSearchFile(profile: ConnectionProfile, path: String, canonicalRoot: String, limit: Int) async throws -> Data {
         guard let data = contents[path] else { throw RemoteFileError.notFound }

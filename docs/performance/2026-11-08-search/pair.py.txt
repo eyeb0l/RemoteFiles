@@ -1,0 +1,20 @@
+import json,statistics,sys
+from collections import defaultdict
+d=defaultdict(list)
+for path in sys.argv[1:]:
+    for l in open(path):
+        r=json.loads(l)
+        if r['scenario'].startswith('#'): continue
+        who,cond=r['label'].split('@')
+        d[(cond,r['scenario'],who)].extend(r['samples'])
+def q(v):
+    v=sorted(v); return statistics.median(v), v[0], v[-1]
+conds=sorted({k[0] for k in d}, key=lambda c:int(c[3:]))
+scen=sorted({k[1] for k in d})
+for c in conds:
+  for s in scen:
+    b=d.get((c,s,'base')); a=d.get((c,s,'cand'))
+    if not b or not a: continue
+    (bm,bl,bh),(am,al,ah)=q(b),q(a)
+    ch=f"{(am-bm)/bm*100:+.0f}%" if bm else '-'
+    print(f"{c:7} {s:42} base {bm:9.4g} [{bl:.4g}-{bh:.4g}] n={len(b)} | cand {am:9.4g} [{al:.4g}-{ah:.4g}] n={len(a)} | {ch}")
