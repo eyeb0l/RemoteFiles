@@ -49,6 +49,10 @@ Reading anchors use the same caret position when saving and restoring a text
 offset. This keeps Back navigation from shifting the page when the visible anchor
 falls at a paragraph boundary.
 
+Deferred Markdown blocks keep the visible location when their measured heights
+arrive after a busy main-thread layout. The bounded correction applies the final
+measured change before stopping; an active scroll takes priority.
+
 ## Read source
 
 The bottom bar switches Markdown, HTML and SVG between **Rendered** and **Source**.

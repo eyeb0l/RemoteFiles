@@ -15,6 +15,11 @@ Local changes:
   matching restoration at paragraph and wrapped-line boundaries where two visual
   carets share that offset. A hosted viewport regression reproduces a 47-point
   jump without relying on swipe timing.
+  Deferred-block correction applies one final accumulated layout delta when a
+  main-thread stall outlasts its frame budget, then retires without extending the
+  two-second deadline. Active touch scrolling takes precedence over that final
+  correction. Hosted controlled-region regressions cover the late frame, bounded
+  retirement and touch takeover, alongside the full overflow viewport suite.
 
 - `StructuredText.swift`: a direct `AttributedString` initializer renders an
   already prepared document without a parsing state transition. Attribute-only

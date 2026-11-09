@@ -263,7 +263,11 @@ import UIKit
   @objc private func correctAnchor() {
     if restoring { restoreFrame(); return }
     guard let saved = geometryAnchor, let scroll, let window = scroll.window,
-          let point = resolve(saved, in: scroll), CACurrentMediaTime() < until else {
+          let point = resolve(saved, in: scroll) else {
+      cancelAnchor(); recordReadingAnchor(); return
+    }
+    let finished = CACurrentMediaTime() >= until
+    if finished, scroll.isTracking || scroll.isDragging || scroll.isDecelerating {
       cancelAnchor(); recordReadingAnchor(); return
     }
     let viewport = scroll.convert(scroll.bounds, to: window)
@@ -274,6 +278,9 @@ import UIKit
                                      y: max(-scroll.adjustedContentInset.top, scroll.contentOffset.y + delta)), animated: false)
       documentY = currentY
     }
+    // Synchronous layout can occupy the entire budget before a display-link tick.
+    // Apply its accumulated delta once before retiring, without extending the budget.
+    if finished { cancelAnchor(); recordReadingAnchor() }
   }
 
   private func restoreFrame() {
