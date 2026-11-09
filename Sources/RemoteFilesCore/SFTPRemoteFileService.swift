@@ -1085,6 +1085,9 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         // its turn. The batch forgets its loan when it retires, but the session keeps it until the channel closes.
         if let loan = session.foregroundLoan, !loan.waiters.isEmpty {
             if loan === batch.loan, batch.users == 0 { batch.retire() }
+            // Outside the idle deadline below, and the caller's own (see `TransferQueueing`): queueing isn't stalling.
+            TransferQueueing.observer?(true)
+            defer { TransferQueueing.observer?(false) }
             try await waitWhileLent(session)
             guard !batch.ended else { throw CancellationError() }
         }

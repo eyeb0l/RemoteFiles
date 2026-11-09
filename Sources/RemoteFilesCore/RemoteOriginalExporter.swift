@@ -55,7 +55,8 @@ public actor RemoteOriginalExporter {
 
     /// `directory` must be a dedicated directory owned by this exporter. With `idleTimeout`, a transfer is
     /// abandoned after `timeoutSeconds` without receiving bytes, rather than after that long in all, so a slow
-    /// file still finishes; a stalled one still ends even if the transport ignores its own deadline.
+    /// file still finishes; a stalled one still ends even if the transport ignores its own deadline. Time the
+    /// transport reports queued for a channel (`TransferQueueing`) is not idle.
     public init(service: any RemoteFileService, directory: URL,
                 fileLimit: Int = maximumFileBytes,
                 retentionSeconds: TimeInterval = maximumRetentionSeconds,
@@ -99,8 +100,10 @@ public actor RemoteOriginalExporter {
                 let task = Task {
                     let result: Result<PreparedOriginalFile, Error>
                     do {
-                        result = .success(try await self.fetch(id: id, profile: profile, entry: entry,
-                                                              allowedRoot: allowedRoot, directory: temporaryDirectory, progress: progress))
+                        result = .success(try await TransferQueueing.$observer.withValue({ activity.waiting($0) }) {
+                            try await self.fetch(id: id, profile: profile, entry: entry,
+                                                 allowedRoot: allowedRoot, directory: temporaryDirectory, progress: progress)
+                        })
                     } catch {
                         result = .failure(Self.exportError(error))
                     }
@@ -112,9 +115,13 @@ public actor RemoteOriginalExporter {
                     while true {
                         do { try await Task.sleep(until: until, clock: .continuous) }
                         catch { return }
-                        // Idle: wait on from the last bytes received, until a whole interval has passed without any.
-                        guard idleTimeout, let last = activity.last, last + interval > ContinuousClock.now else { break }
-                        until = last + interval
+                        guard idleTimeout else { break }
+                        // Idle: wait on from the last bytes received, or the end of a wait for a channel, until a whole
+                        // interval has passed without either. Time spent waiting for a channel never counts.
+                        let now = ContinuousClock.now
+                        guard let since = activity.idleSince else { until = now + interval; continue }
+                        guard since + interval > now else { break }
+                        until = since + interval
                     }
                     await self?.cancel(id: id, error: OriginalFileExportError.timedOut)
                 }
@@ -256,13 +263,19 @@ public actor RemoteOriginalExporter {
     }
 }
 
-/// When a transfer last received more bytes than before. Progress can repeat a count; only growth counts.
+/// When a transfer was last active: it started, received more bytes than before, or stopped waiting for a channel.
+/// Progress can repeat a count; only growth counts.
 private final class ExportActivity: @unchecked Sendable {
     private let lock = NSLock()
     private var bytes: UInt64 = 0
-    private var at: ContinuousClock.Instant?
-    var last: ContinuousClock.Instant? { lock.withLock { at } }
+    private var at = ContinuousClock.now
+    private var queued = false
+    /// Where the idle interval runs from, or nil while the transfer waits for a channel.
+    var idleSince: ContinuousClock.Instant? { lock.withLock { queued ? nil : at } }
     func received(_ total: UInt64) {
         lock.withLock { if total > bytes { bytes = total; at = .now } }
+    }
+    func waiting(_ value: Bool) {
+        lock.withLock { queued = value; if !value { at = .now } }
     }
 }

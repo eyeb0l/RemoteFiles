@@ -36,7 +36,9 @@ browsing for the slot. A transfer's cancellation and deadlines therefore stay it
 
 Browsing waits for a single download or export to finish. A folder save starts no further files while
 browsing is waiting, hands the slot back once the files under way finish, and borrows it again for the
-rest, so browsing waits for at most the files in flight (up to 16 small ones, or one large one). While
+rest, so browsing waits for at most the files in flight (up to 16 small ones, or one large one). A file
+waiting for the slot to come back is queued, not stalled: neither its transfer's idle deadline nor the
+save's minute without bytes starts until it has the slot. While
 a transfer holds the slot, a second, simultaneous transfer is still refused, as on any server whose
 slots are all in use. Cancelling a transfer while it waits for browsing to finish can close the SSH
 connection, as cancelling any transfer before it owns a channel already could.

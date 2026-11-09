@@ -298,19 +298,53 @@ final class OriginalFileExportTests: XCTestCase {
         XCTAssertTrue(children(dir).isEmpty)
         await service.resume()
     }
+
+    /// Waiting for a borrowed channel to come back isn't stalling: the idle interval starts once the wait ends.
+    func testIdleTimeoutLeavesOutAWaitForAChannel() async throws {
+        let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let service = SteppedTransportMock(steps: 5, interval: .milliseconds(200), stallAfter: nil, queued: .seconds(3))
+        let exporter = RemoteOriginalExporter(service: service, directory: dir, timeoutSeconds: 2, idleTimeout: true)
+        let result = try await exporter.prepare(profile: profile, entry: entry(), allowedRoot: "/fixture")
+        XCTAssertEqual(try Data(contentsOf: result.url).count, 5)
+        await exporter.release(result.id)
+    }
+
+    /// The wait doesn't suspend the deadline for good: a transfer that stalls after it still ends.
+    func testIdleTimeoutEndsATransferThatStallsAfterWaitingForAChannel() async throws {
+        let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let service = SteppedTransportMock(steps: 5, interval: .milliseconds(200), stallAfter: 0, queued: .seconds(3))
+        let exporter = RemoteOriginalExporter(service: service, directory: dir, timeoutSeconds: 2, idleTimeout: true)
+        do { _ = try await exporter.prepare(profile: profile, entry: entry(), allowedRoot: "/fixture"); XCTFail("A stalled transfer finished") }
+        catch OriginalFileExportError.timedOut { }
+        let queueEnded = await service.queueEnded
+        let resumed = try XCTUnwrap(queueEnded)
+        XCTAssertGreaterThanOrEqual(resumed.duration(to: .now), .seconds(2), "Not before a whole idle interval after the wait")
+        XCTAssertTrue(children(dir).isEmpty)
+        await service.resume()
+    }
 }
 
-/// Reports one more byte every `interval`, then optionally stalls (ignoring cancellation) after `stallAfter` bytes.
+/// First waits `queued` for a channel, as a folder save's file does while browsing has back the slot it lent.
+/// Then reports one more byte every `interval`, optionally stalling (ignoring cancellation) after `stallAfter` bytes.
 private actor SteppedTransportMock: RemoteFileService {
-    private let steps: Int, interval: Duration, stallAfter: Int?
+    private let steps: Int, interval: Duration, stallAfter: Int?, queued: Duration?
     private var held: CheckedContinuation<Void, Never>?
     private(set) var lastProgress: ContinuousClock.Instant?
-    init(steps: Int, interval: Duration, stallAfter: Int?) { self.steps = steps; self.interval = interval; self.stallAfter = stallAfter }
+    private(set) var queueEnded: ContinuousClock.Instant?
+    init(steps: Int, interval: Duration, stallAfter: Int?, queued: Duration? = nil) {
+        self.steps = steps; self.interval = interval; self.stallAfter = stallAfter; self.queued = queued
+    }
     func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
         try await downloadFile(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination, limit: limit, progress: { _ in })
     }
     func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int,
                       progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        if let queued {
+            TransferQueueing.observer?(true)
+            try? await Task.sleep(for: queued)
+            queueEnded = .now
+            TransferQueueing.observer?(false)
+        }
         for step in 1...steps {
             if step - 1 == stallAfter { await withCheckedContinuation { held = $0 } }
             try? await Task.sleep(for: interval)

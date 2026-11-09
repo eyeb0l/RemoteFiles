@@ -36,6 +36,14 @@ public protocol ResumableManagedDownloading: ManagedRemoteFileDownloading {
                                      progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry
 }
 
+/// Time a transfer spends queued for a channel it may not use yet, such as a folder save's file waiting while
+/// browsing has back the slot it lent, is not idle: the transport's own idle deadline starts once the wait is
+/// over. A caller timing the transfer itself, as `RemoteOriginalExporter` does, binds `observer` to leave the
+/// wait out too. The transport calls it with `true` as the wait begins and `false` as it ends.
+enum TransferQueueing {
+    @TaskLocal static var observer: (@Sendable (_ waiting: Bool) -> Void)?
+}
+
 struct TransferActivity: Sendable {
     let receivedBytes: @Sendable (Int) -> Void
     static let ignored = TransferActivity(receivedBytes: { _ in })
