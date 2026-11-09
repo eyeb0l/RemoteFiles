@@ -11,7 +11,8 @@ import subprocess
 # Documentation and repository metadata: Repository checks only, no Mac runner.
 REPOSITORY_ONLY = ("docs/*", "README.md", "AGENTS.md", "ROADMAP.md", "PREVIEW_STATUS.md",
                    "LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING", ".gitignore",
-                   "Vendor/*/UPSTREAM.md", "Tests/LinuxSearchAcceptance/README.md", "design/*",
+                   "Vendor/*/UPSTREAM.md", "Tests/LinuxSearchAcceptance/README.md",
+                   "Tests/ServerCompatibilityAcceptance/README.md", "design/*",
                    # Runs only in Xcode Cloud; scripts/test_testflight_release.py covers it in Repository checks.
                    "ci_scripts/*")
 # A change to the workflow, the runner or its launchers must prove every lane.
@@ -25,7 +26,7 @@ UI = ("Tests/RemoteFilesUITests/*", "App/*", "Package.swift", "Package.resolved"
 # Covered by the hosted core and macOS lanes, or not executed by CI at all.
 QUICK_ONLY = ("Sources/*", "Tests/RemoteFilesCoreTests/*", "RemoteFiles.xcodeproj/*", "scripts/*",
               "Tests/SmallFeatureFixtures/*", "Tests/ImageOpenFixtures/*", "Tests/ReadingAnchorFixtures/*",
-              "Tests/LinuxSearchAcceptance/*")
+              "Tests/LinuxSearchAcceptance/*", "Tests/ServerCompatibilityAcceptance/*")
 LANES = ("ui", "voiceover", "release")
 # The evidence that lets a push to main skip the UI journeys.
 CI_WORKFLOW = ".github/workflows/ci.yml"
