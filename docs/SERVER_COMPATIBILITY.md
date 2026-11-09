@@ -145,7 +145,31 @@ the failed-preview race) and `testOneChannelServerCancelledSaveReturnsTheChannel
 were developed, the first failed with `channelSetupRejected` at the search, at browsing after it and at
 the download after a failed preview; that last step fails three times in three without the settle step. All 508 package tests passed with the OpenSSH fixture (one benchmark skipped as before).
 
+## Network faults: 9 November 2026
+
+[Network fault acceptance](../Tests/NetworkFaultAcceptance/README.md) ran the production adapter from
+a Mac against a disposable OpenSSH 10.2p1 daemon on an Ubuntu server, with delay, loss, rate limits
+and total outages applied by `tc netem` and `nftables` on the server to the fixture's port alone.
+The Mac's direct path was blocked by a per-process firewall, so the client reached the fixture through
+an SSH port forward and the faults applied to the fixture's own TCP connection on the server's loopback.
+The app's socket therefore saw stalls, not its own retransmissions. All six tests passed on the final
+code (and on an earlier run with similar figures):
+
+| Fault | Result |
+|---|---|
+| 150 ± 30 ms delay, 2% loss on replies | Listing 1.7 s, helper search 1.6 s, 8 MiB download 6.7 s, 48-file save 7.2 s; every byte equal; one connection |
+| Outage during a managed download (6 Mbit/s) | Ended at its idle deadline plus close grace (15.8 s with a 10 s test deadline), kept 2.9 MB, resumed from exactly that offset on a new connection |
+| 5 s outage during a download | Finished on the same connection, every byte equal |
+| Outage while browsing | Timed out at 15.07 s; TCP outlived the outage, so browsing continued on the same connection |
+| Outage, then cancelling a folder save | Returned in 7 ms; nothing published; the save then succeeded |
+| Outage outlasting a folder save | Failed at 179.4 s (a file's 180 s deadline); drained in 5.0 s; nothing published; the save then succeeded |
+
+A folder save's files use a fixed 180-second deadline rather than a transfer's idle deadline, so a
+save stalled by an outage takes three minutes to report failure, against about a minute for a single
+download; cancelling it is immediate.
+
 Still unverified: proprietary servers such as Bitvise and NAS-specific configurations, other server
-versions, real network loss/latency, and physical iPhone cancellation and one-channel behaviour. Missing interpreter/procfs capability still uses the
+versions, network faults seen by the client's own socket (rather than through a forward), and physical
+iPhone cancellation and one-channel behaviour. Missing interpreter/procfs capability still uses the
 bounded SFTP fallback. Existing canonical path checks and the portable SFTP atomic-confinement
 limitation remain unchanged.
