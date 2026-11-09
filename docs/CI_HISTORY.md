@@ -10,6 +10,63 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 9 November 2026: portrait library-overlay Tab report (PR #66)
+
+The PR #66 report came from one hardware-HID run on an iPad simulator, recorded in
+that PR's thread. The iPad was in portrait with a reader open. The run tapped a
+missing link, dismissed the alert with Escape, then tapped Show Sidebar to overlay
+the library. One Tab and one Down left no visible focus ring and did not move the
+folder selection. A second Tab and Down put the focus ring on the library's Offline
+Files button. That Down and the following ones still moved the folder selection
+beneath the overlay. The run logged no key events, and its screenshots have since
+been deleted.
+
+This investigation could not reproduce that state on unchanged `5a23f69`. The
+dedicated iPad Pro 11-inch (M5) simulator (iOS 27.2, Xcode 27.2) ran an uncommitted
+diagnostic build. It logged every key press that reached `UIApplication.sendEvent`,
+each focus update, the first responder and each key-command decision.
+
+- **Input limits.** The T3 device tool has no hardware-key command, and its `type`
+  refuses to run unless a text field has focus (`TEXT_INPUT_NOT_FOCUSED`), so it
+  cannot send Tab or arrows. XCTest's `typeKey` sends Tab (HID 43) and the arrows as
+  real key presses. About a second after each key, though, focus drops to nil, and
+  the next `typeKey` restores it before its key arrives. The simulator's hardware
+  keyboard also detached, so the software keyboard appeared.
+- **Where Tab went.** In each of four portrait runs, with or without the link alert,
+  the first Tab focused the folder's search field beneath the library overlay.
+  Arrows were then declined because a text field was being edited. XCTest never
+  moved focus from that field into the library. Return through `typeText("\n")` did
+  not end editing, and a second Tab left focus in the field.
+- **Router timing.** The router counts a focus move as made by Tab only if the focus
+  update arrives within one second of the Tab. Real Tab presses produced focus
+  updates after 1.48 s, 2.07 s and 0.75 s, so two of the three moves were counted as
+  focus the system restored. A Tab-counted move is also forgotten when focus
+  passes through nil, and focus restored afterwards without Tab doesn't count again.
+  Either path would produce the reported symptom if the focused item were in the
+  library. In these runs the focused item was always the search field, whose own
+  check declined the arrows.
+
+Hardware-key injection was then tried with Iris's approval, using the SimulatorKit
+`SimDeviceLegacyHIDClient` route that PR #66 had used. Its messages were accepted
+without error but never reached the simulator: neither the app's log nor
+`backboardd` saw them. That held after a reboot, with the hardware keyboard enabled
+through `SimDevice setHardwareKeyboardEnabled:keyboardType:error:`, after an XCTest
+key press had run on that boot, after a touch, and with the T3 Device panel closed.
+Calling `resetHIDSession` left the client with `machPortNotConnected`. The message
+builder still takes the HID usage and direction that the PR #66 tool passed. Sending
+Tab and the arrows as one synthesized XCTest event record didn't help either. Only
+the first key of each record arrived, and the Tab's key-up never did.
+
+The existing `testArrowKeysSelectFilteredRowsAndSubfolderSearchResults` passed on the
+same build (87 s), with the diagnostic hooks compiled in.
+
+The cause of the reported run therefore remains unproven, and the keyboard router
+was not changed. Confirming it needs a working hardware-key path on a simulator, or
+a physical iPad with a keyboard, with the diagnostic log through the Offline Files
+step. Diagnostic logs, screenshots and xcresults are outside the checkout in
+`/private/tmp/remotefiles-kbfocus/` (`diag1b`, `diag2`, `diag3`, `diag4`, `diag6`,
+`warmup` and `diag5-runner-crash.ips`, the crash of an earlier record attempt).
+
 ## 8 November 2026: offline reader Back readiness race
 
 Main [run 42513803390, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/42513803390/attempts/1),
