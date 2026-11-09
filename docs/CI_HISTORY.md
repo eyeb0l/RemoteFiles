@@ -67,6 +67,96 @@ step. Diagnostic logs, screenshots and xcresults are outside the checkout in
 `/private/tmp/remotefiles-kbfocus/` (`diag1b`, `diag2`, `diag3`, `diag4`, `diag6`,
 `warmup` and `diag5-runner-crash.ips`, the crash of an earlier record attempt).
 
+## 9 November 2026: unresolved control-input and playback causes
+
+This follow-up starts at `5a23f69`, after #101 and #102. The earlier switch and playback
+changes in #81 are mitigations, not established root-cause fixes. Green subsequent
+runs do not establish why UIKit ignored a touch or which AVPlayer the old test held.
+
+**Hosted evidence refreshed.** [#101's main run 42526282580](https://github.com/eyeb0l/RemoteFiles/actions/runs/42526282580)
+and [#102's PR run 42527516008](https://github.com/eyeb0l/RemoteFiles/actions/runs/42527516008)
+both passed the browse/read/refresh, keyboard-shortcuts, automatic-index and PDF/OCR
+journeys. Their retained `simulator-ui.log` files contain no `UI SWITCH` rescue lines.
+[#102's main run 42538381333](https://github.com/eyeb0l/RemoteFiles/actions/runs/42538381333)
+passed Repository checks, both quick lanes and CI gate; its UI job was skipped, not
+another execution of those journeys. Its core artifact records
+`testMediaViewStopsWhenAppBackgrounds` passing in 0.131 seconds. The offline-reader Back
+and offline-folder test fixes in #101 are separate from these four investigations;
+the old `InvalidTransition` message remains untraced.
+
+**Switches.** The earlier trace in [Switch touches that do nothing](#switch-touches-that-do-nothing)
+establishes delivery to an enabled UISwitch without its long-press recognizer beginning;
+it does not establish why. The current automatic-index binding updates its local
+Boolean synchronously before starting persistence work; OCR uses a direct state binding.
+Neither explains a touch that never reaches either setter. `pressSwitch`'s existing
+hold/repeat remains a mitigation for those index journeys, not a touch-delivery fix or
+evidence about a physical finger. There is no basis to apply that repeat to unrelated
+controls.
+
+**Source-mode tap.** The [#84 comment](https://github.com/eyeb0l/RemoteFiles/pull/84#issuecomment-6694488824)
+explicitly distinguishes an observation (Rendered stayed selected) from a theory
+(a dropped tap under load). The original failing UI artifact of
+[42274841878, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/42274841878/attempts/1)
+was retained again. Its synthesized-event attachment puts the touch at
+`(243.419, 822.664)`, inside Source's final accessibility frame
+`{{201, 798.7}, {85, 48}}`. The recording still shows Rendered selected after the tap.
+This weakens a simple wrong-coordinate explanation, but neither attachment records
+the view receiving the touch or its recognizer states. The screenshot taken before
+the tap still shows the document skeleton, although the rendered scroll container
+already exists. A container's existence therefore does not prove that the whole
+reader has finished presenting. That is not, by itself, proof that a readiness gate
+would fix this tap. No retry or timeout increase follows from these artifacts.
+
+**Playback.** The retained core artifact of
+[42004987008, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/42004987008/attempts/1)
+confirms the immediate `rate == 0` assertion failed with 1 after the wait for an
+empty current item. It does not capture player identity or the sequence of `play`,
+`pause` and item removal. The existing mounted-player/item gate and final-state wait
+cover the two proposed races; they do not distinguish them. #78's cancellation-error
+mapping is a different, resolved issue.
+
+**Liquid Glass idle waits.** [#66's description](https://github.com/eyeb0l/RemoteFiles/pull/66)
+reports the endless lens animation on the reading-mode segmented control after Find
+closes, including reproduction on then-unmodified main. That report does not identify
+the animation key, its owner, the triggering transition or whether XCTest alone
+misclassified it as non-idle. It must not be conflated with the first-key routing or
+portrait iPad focus investigations.
+
+**Local baseline.** On the reserved iPhone Air simulator (`6264A288`, iOS 27.2), the
+unchanged test behaviour passed 17 PlaybackTests (13.312 seconds, no failures or
+skips), then the four named UI methods (355.155 seconds, no failures or skips).
+The background method took 0.142 seconds. Browse/read/refresh took 37.937 seconds,
+keyboard shortcuts 85.762, PDF/OCR 105.788 and automatic indexing 125.668.
+There were no `UI SWITCH`, `PLAYBACK MOUNT` or `PLAYBACK BACKGROUND` failure lines.
+This is one focused local execution, not a rate estimate or a physical-device check.
+
+**Bounded diagnostic pass.** Temporary `UIWindow.sendEvent`/recognizer logging and a
+two-second layer-animation sampler were then installed only in this checkout's demo
+app. Six additional Source/Rendered round trips each required the requested content
+to appear; no failed selection was retried. The OCR journey measured twelve 0.2-second
+presses separately before performing its original assertions. All twelve changed the
+switch value. The touch timestamps give 0.216667 seconds for each, delivery reached an
+enabled UISwitch, and the observed 0.01-second long-press recognizer entered its begun
+state. This provides a successful trace for comparison, not an ignored-touch cause;
+instrumentation can itself affect scheduling.
+
+The instrumented browse, keyboard and OCR methods passed in 75.732, 81.147 and
+134.720 seconds respectively (3 tests, 291.598 seconds, no failures or skips).
+The sampler found `_UILiquidLensView.punchout.matchPosition` and `CASDFElementLayer`
+`match-*` animations with `duration=inf`, `removed=false`, while XCTest repeatedly
+completed idle waits and mode changes. An infinite lens/matching animation's presence
+alone is therefore not a sufficient signature for #66's stall. The stall itself did
+not recur in either keyboard execution, so its specific animation/transition cause
+remains unresolved. No UIKit animation was removed or modified.
+
+The diagnostic patch, raw `touch-animation.log` and `focused-probe.xcresult` were
+retained; the temporary app/test edits were removed and the original app binary was
+restored to the reserved simulator. No code fix is justified by these passing probes.
+
+Original failing and recent passing logs, xcresults and extracted Source attachments
+are retained locally under `/private/tmp/remotefiles-ci-causes-20261109/`. No hosted
+job was retried and no workflow, assertion, timeout or skip policy was changed.
+
 ## 9 November 2026: small-screen public-key installation review
 
 The unchanged `VoiceOverChecks.testPublicKeyConfirmationVoiceOverAccountKeyCancelAndResult`
