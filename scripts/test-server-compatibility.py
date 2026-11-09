@@ -4,6 +4,9 @@
 Run with an isolated Python containing asyncssh==2.24.1 and paramiko==5.1.0.
 Servers bind only loopback, use throwaway keys and expose read-only fixture data.
 No system SSH configuration, accounts or authorised keys are changed.
+
+With --docker-host, the scenarios are instead independent SFTP servers in containers on that host,
+reached over SSH for management and published only on --docker-address (for example a tailnet address).
 """
 import argparse
 import asyncio
@@ -16,6 +19,7 @@ import os
 from pathlib import Path
 import pwd
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -27,6 +31,99 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 SCENARIOS = ("openssh-10", "openssh-2", "openssh-1", "asyncssh-default", "paramiko-10", "paramiko-2", "paramiko-1")
 PINS = {"asyncssh": "2.24.1", "paramiko": "5.1.0"}
+DOCKER_DIRECTORY = ROOT / "Tests/ServerCompatibilityAcceptance/docker"
+# Scenario: (image directory, channel limit or 0 for the server's own, root path the client browses).
+DOCKER_SCENARIOS = {
+    "openssh82-chroot": ("openssh82", 10, "/files"),
+    "openssh82-chroot-1": ("openssh82", 1, "/files"),
+    "proftpd-10": ("proftpd", 10, "/files"),
+    "proftpd-1": ("proftpd", 1, "/files"),
+    "sftpgo-default": ("sftpgo", 0, "/"),
+    "dropbear-default": ("dropbear", 0, "/srv/files"),
+}
+# Reproduce documented incompatibilities only when named: this Dropbear offers no AES-GCM, the only ciphers
+# the app's SSH stack implements, and ProFTPD disconnects the whole session when SFTPMaxChannels is exceeded.
+KNOWN_INCOMPATIBLE = ("proftpd-1", "dropbear-default")
+DOCKER_PORTS = range(22364, 22370)
+VERSION_COMMANDS = {
+    "openssh82": "dpkg-query -W -f '${Version}' openssh-server",
+    "proftpd": "proftpd --version",
+    "sftpgo": "sftpgo -v",
+    "dropbear": "dropbear -V 2>&1; apk info -v openssh-sftp-server 2>/dev/null",
+}
+
+
+def selected_scenarios(requested, docker_host, docker_address):
+    """Local servers by default; with a Docker host, its containers except the known incompatibilities."""
+    if requested:
+        scenarios = tuple(requested)
+    elif docker_host:
+        scenarios = tuple(name for name in DOCKER_SCENARIOS if name not in KNOWN_INCOMPATIBLE)
+    else:
+        scenarios = SCENARIOS
+    if any(name in DOCKER_SCENARIOS for name in scenarios) and not (docker_host and docker_address):
+        raise ValueError("Container scenarios need --docker-host and --docker-address")
+    return scenarios
+
+
+def remote(host, command, **options):
+    """Runs a management command on the Docker host over the person's already-trusted SSH configuration."""
+    return subprocess.run(["ssh", "-o", "BatchMode=yes", host, command], check=True, **options)
+
+
+def prepare_docker(host, scenarios):
+    """Copies the image definitions to a private directory on the host and builds the images the scenarios need."""
+    directory = remote(host, "mktemp -d /tmp/remotefiles-compat.XXXXXX", capture_output=True, text=True).stdout.strip()
+    if not re.fullmatch(r"/tmp/remotefiles-compat\.[A-Za-z0-9]+", directory):
+        raise RuntimeError(f"Unexpected remote directory {directory!r}")
+    archive = subprocess.Popen(["tar", "--no-xattrs", "-C", str(DOCKER_DIRECTORY.parent), "-cf", "-", "docker"],
+                               stdout=subprocess.PIPE, env=dict(os.environ, COPYFILE_DISABLE="1"))
+    remote(host, f"tar -C {directory} -xf - 2>/dev/null", stdin=archive.stdout)
+    archive.wait()
+    images = {}
+    for backend in sorted({DOCKER_SCENARIOS[name][0] for name in scenarios}):
+        tag = f"remotefiles-compat-{backend}:local"
+        remote(host, f"sudo -n docker build -q -t {tag} {directory}/docker/{backend}", stdout=subprocess.DEVNULL)
+        image = remote(host, f"sudo -n docker image inspect -f '{{{{.Id}}}}' {tag}", capture_output=True, text=True).stdout.strip()
+        version = remote(host, f"sudo -n docker run --rm --entrypoint /bin/sh {tag} -c {shlex.quote(VERSION_COMMANDS[backend])}",
+                         capture_output=True, text=True).stdout.strip()
+        images[backend] = {"tag": tag, "image": image, "version": version}
+    return directory, images
+
+
+@contextlib.contextmanager
+def docker_server(name, directory, output, host, address, workspace):
+    backend, maximum, root = DOCKER_SCENARIOS[name]
+    fixture_directory = f"{workspace}/{name}"
+    archive = subprocess.Popen(["tar", "--no-xattrs", "-C", str(directory), "-cf", "-", "files", "outside.txt", "host", "client.pub"],
+                               stdout=subprocess.PIPE, env=dict(os.environ, COPYFILE_DISABLE="1"))
+    remote(host, f"mkdir {fixture_directory} && tar -C {fixture_directory} -xf - 2>/dev/null && chmod -R a+rX {fixture_directory}", stdin=archive.stdout)
+    archive.wait()
+    listening = remote(host, "ss -ltnH", capture_output=True, text=True).stdout
+    port = next(port for port in DOCKER_PORTS if f"{address}:{port} " not in listening)
+    container = f"remotefiles-compat-{name}"
+    remote(host, f"sudo -n docker rm -f {container} >/dev/null 2>&1; sudo -n docker run -d --name {container} "
+                 f"-p {address}:{port}:2222 -v {fixture_directory}:/fixture:ro -e CHANNELS={maximum or 10} "
+                 f"remotefiles-compat-{backend}:local", stdout=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                with socket.create_connection((address, port), timeout=2) as connection:
+                    connection.settimeout(5)
+                    if connection.recv(4) == b"SSH-":
+                        break
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"{name} did not answer within 60 seconds")
+            time.sleep(0.5)
+        yield {"name": name, "directory": str(directory), "host": address, "port": port, "username": "fixture",
+               "root": root, "channels": maximum}
+    finally:
+        with (output / (name + "-server.log")).open("w") as log:
+            subprocess.run(["ssh", "-o", "BatchMode=yes", host, f"sudo -n docker logs {container}"], stdout=log, stderr=subprocess.STDOUT)
+        remote(host, f"sudo -n docker rm -f {container} >/dev/null; rm -rf {fixture_directory}")
 
 
 def test_results(log, source, channel_drain):
@@ -305,13 +402,30 @@ def run(args):
             for path in sorted(snapshot.rglob("*")) if path.is_file()},
         "dependencies": {name: importlib.metadata.version(name) for name in (*PINS, "cryptography")},
         "openssh": subprocess.run(["/usr/sbin/sshd", "-V"], capture_output=True, text=True, check=True).stderr.strip(),
+        "docker_host": args.docker_host, "docker_address": args.docker_address,
         "swift": subprocess.check_output(["swift", "--version"], text=True).strip(),
         "results": []}
-    for index, name in enumerate(args.scenarios or SCENARIOS):
+    scenarios = selected_scenarios(args.scenarios, args.docker_host, args.docker_address)
+    workspace = None
+    if args.docker_host:
+        workspace, report["docker"] = prepare_docker(args.docker_host, [name for name in scenarios if name in DOCKER_SCENARIOS])
+    try:
+        return run_scenarios(args, scenarios, output, target, command, report, workspace)
+    finally:
+        if workspace:
+            remote(args.docker_host, f"rm -rf {workspace}")
+
+
+def run_scenarios(args, scenarios, output, target, command, report, workspace):
+    for index, name in enumerate(scenarios):
         directory = output / (name + "-fixture")
         try:
             fixture(directory)
-            with server(name, directory, output) as config:
+            if name in DOCKER_SCENARIOS:
+                running = docker_server(name, directory, output, args.docker_host, args.docker_address, workspace)
+            else:
+                running = server(name, directory, output)
+            with running as config:
                 config_path = directory / "config.json"
                 config_path.write_text(json.dumps(config))
                 env = dict(os.environ, REMOTEFILES_COMPATIBILITY_CONFIG=str(config_path))
@@ -342,7 +456,9 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output")
-    parser.add_argument("--scenarios", nargs="+", choices=SCENARIOS)
+    parser.add_argument("--scenarios", nargs="+", choices=(*SCENARIOS, *DOCKER_SCENARIOS))
+    parser.add_argument("--docker-host", help="SSH destination of a host with Docker and passwordless sudo for docker")
+    parser.add_argument("--docker-address", help="address on that host to publish the servers on")
     parser.add_argument("--serve", choices=("asyncssh", "paramiko"), help=argparse.SUPPRESS)
     parser.add_argument("--directory", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--ready", type=Path, help=argparse.SUPPRESS)

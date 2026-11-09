@@ -43,5 +43,19 @@ class CompatibilityInventoryTests(unittest.TestCase):
             compatibility.test_results("", "", False)
 
 
+class ScenarioSelectionTests(unittest.TestCase):
+    def testDefaultsToLocalServersAndToCompatibleContainersOnADockerHost(self):
+        self.assertEqual(compatibility.selected_scenarios(None, None, None), compatibility.SCENARIOS)
+        containers = compatibility.selected_scenarios(None, "host", "100.64.0.1")
+        self.assertTrue(containers and all(name in compatibility.DOCKER_SCENARIOS for name in containers))
+        self.assertFalse(set(containers) & set(compatibility.KNOWN_INCOMPATIBLE))
+
+    def testNamedIncompatibilitiesRunOnlyWhenRequestedAndNeedADockerHost(self):
+        self.assertEqual(compatibility.selected_scenarios(["dropbear-default"], "host", "100.64.0.1"), ("dropbear-default",))
+        for host, address in ((None, None), ("host", None)):
+            with self.subTest(host=host), self.assertRaises(ValueError):
+                compatibility.selected_scenarios(["proftpd-10"], host, address)
+
+
 if __name__ == "__main__":
     unittest.main()

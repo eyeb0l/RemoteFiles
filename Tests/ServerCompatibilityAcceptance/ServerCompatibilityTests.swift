@@ -8,11 +8,15 @@ import NIOSSH
 final class ServerCompatibilityTests: XCTestCase {
     fileprivate struct Fixture: Decodable {
         let name: String
+        /// The server's address: loopback for local fixtures, or a container host's.
+        let host: String?
         let directory: String
         let root: String
         let port: Int
         let username: String
         let channels: Int
+        /// A member of the browsed root, which some servers (such as SFTPGo) present as "/".
+        func path(_ name: String) -> String { root == "/" ? "/" + name : root + "/" + name }
     }
 
     private func connection() async throws -> (SFTPRemoteFileService, ConnectionProfile, Fixture, URL) {
@@ -31,8 +35,9 @@ final class ServerCompatibilityTests: XCTestCase {
         let trust = try HostTrustStore(fileURL: state.appendingPathComponent("trust.json"))
         let host = try HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey:
             String(contentsOf: directory.appendingPathComponent("host.pub"), encoding: .utf8)))
-        try await trust.trustUnknown(endpoint: .init(host: "127.0.0.1", port: fixture.port), key: host)
-        let profile = ConnectionProfile(name: fixture.name, host: "127.0.0.1", port: fixture.port,
+        let address = fixture.host ?? "127.0.0.1"
+        try await trust.trustUnknown(endpoint: .init(host: address, port: fixture.port), key: host)
+        let profile = ConnectionProfile(name: fixture.name, host: address, port: fixture.port,
             username: fixture.username, identityID: key.id, startingDirectory: fixture.root)
         var saved = AppMetadata(); saved.identities = [key]; saved.connections = [profile]
         try await metadata.save(saved)
@@ -102,9 +107,10 @@ final class ServerCompatibilityTests: XCTestCase {
         XCTAssertEqual(folder.skippedLinks, 1)
         for id in folder.fileIDs {
             let lease = try await store.lease(id)
-            let relative = String(lease.pin.path.dropFirst(root.count))
+            // Relative to the browsed root, which some servers present as "/".
+            let relative = String(lease.pin.path.dropFirst(root == "/" ? 1 : root.count + 1))
             XCTAssertEqual(try Data(contentsOf: lease.url),
-                try Data(contentsOf: URL(fileURLWithPath: fixture.directory + "/files" + relative)), relative)
+                try Data(contentsOf: URL(fileURLWithPath: fixture.directory + "/files/" + relative)), relative)
         }
         _ = try await service.listDirectory(profile: profile, path: root)
         let metrics = await service.metrics()
@@ -117,9 +123,11 @@ final class ServerCompatibilityTests: XCTestCase {
         let (service, profile, fixture, state) = try await connection()
         let destination = state.appendingPathComponent("must-not-publish")
         do {
-            _ = try await service.downloadSnapshotFile(profile: profile, path: fixture.root + "/escape.txt",
+            _ = try await service.downloadSnapshotFile(profile: profile, path: fixture.path("escape.txt"),
                 canonicalRoot: fixture.root, destination: destination, limit: 100_000, progress: { _ in })
             XCTFail("Snapshot paths must not follow a symlink")
+        } catch RemoteFileError.permissionDenied {
+            // Some servers (SFTPGo) refuse to resolve a link leaving the user's root at all.
         } catch {
             XCTAssertTrue(error is RemoteDocumentLinkError, "\(error)")
         }
@@ -130,12 +138,12 @@ final class ServerCompatibilityTests: XCTestCase {
     func testReadAndTransferLimitsLeaveBrowsingUsable() async throws {
         let (service, profile, fixture, state) = try await connection()
         do {
-            _ = try await service.readFile(profile: profile, path: fixture.root + "/large.txt", limit: 1000)
+            _ = try await service.readFile(profile: profile, path: fixture.path("large.txt"), limit: 1000)
             XCTFail("Oversized previews must fail")
         } catch RemoteFileError.tooLarge { }
         let destination = state.appendingPathComponent("bounded-transfer")
         do {
-            _ = try await service.downloadSnapshotFile(profile: profile, path: fixture.root + "/large.txt",
+            _ = try await service.downloadSnapshotFile(profile: profile, path: fixture.path("large.txt"),
                 canonicalRoot: fixture.root, destination: destination, limit: 1000, progress: { _ in })
             XCTFail("Oversized originals must fail")
         } catch {
@@ -168,7 +176,7 @@ final class ChannelDrainCompatibilityTests: XCTestCase {
         for file in [started, refused] { try? FileManager.default.removeItem(at: file) }
         try Data().write(to: gate)
         _ = try await service.listDirectory(profile: profile, path: fixture.root)
-        let walk = Task { try await service.listDirectoryForWalk(profile: profile, path: fixture.root + "/held") }
+        let walk = Task { try await service.listDirectoryForWalk(profile: profile, path: fixture.path("held")) }
         addTeardownBlock {
             try? FileManager.default.removeItem(at: gate)
             _ = await walk.result
@@ -176,7 +184,7 @@ final class ChannelDrainCompatibilityTests: XCTestCase {
         try await waitForFile(started)
         let destination = state.appendingPathComponent("transfer")
         let transfer = Task {
-            try await service.downloadSnapshotFile(profile: profile, path: fixture.root + "/large.txt",
+            try await service.downloadSnapshotFile(profile: profile, path: fixture.path("large.txt"),
                 canonicalRoot: fixture.root, destination: destination, limit: 300_000, progress: { _ in })
         }
         addTeardownBlock { transfer.cancel(); _ = await transfer.result }

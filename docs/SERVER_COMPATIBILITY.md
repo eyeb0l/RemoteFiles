@@ -190,8 +190,41 @@ command allows only those actions. All three tests passed, twice (figures from t
 | Outages on the phone's socket | A download ended 15.1 s into an outage (10 s test idle limit plus the 5 s close grace), resumed from the 2.4 MB kept with every byte equal; a 5 s outage was ridden out; cancelling during an outage returned after 5.06 s (the close grace); browsing then reconnected |
 | One-channel server | Search before browsing fell back to SFTP; browsing during a 48-file save waited 0.76 s while the save handed back the channel; four loans; every byte equal; a download borrowed the channel; cancelling a borrowing save returned in 7 ms and published nothing; one connection |
 
-Still unverified: proprietary servers such as Bitvise and NAS-specific configurations, other server
-versions, and cellular-only paths or loss rates on the phone (its faults were outages and rate limits
+## NAS stand-ins: 9 November 2026
+
+No proprietary NAS was available, so the opt-in launcher's [container mode](../Tests/ServerCompatibilityAcceptance/README.md#container-stand-ins-on-a-remote-host)
+ran the same five compatibility tests from a Mac, directly over a tailnet, against independent SFTP servers
+in containers on an Ubuntu host: NAS-style chrooted OpenSSH, ProFTPD's `mod_sftp` and SFTPGo, chosen for
+their separate SSH stacks or for the configurations NAS firmware ships. They are stand-ins, not vendor
+evidence.
+
+| Scenario | Result |
+|---|---|
+| OpenSSH 8.2p1, chroot, `ForceCommand internal-sftp -R` | All five passed; the Linux helper fell back to SFTP after one attempt |
+| The same with `MaxSessions 1` | All five passed, lending browsing's channel to the offline save (the server logged its refusals) |
+| ProFTPD 1.3.8 `mod_sftp`, `DefaultRoot`, default channels | All five passed |
+| SFTPGo 2.6.6, virtual root `/` | All five passed |
+| ProFTPD with `SFTPMaxChannels 1` | Incompatible: see below |
+| Dropbear 2024.85 with OpenSSH's `sftp-server` | Incompatible: see below |
+
+Findings:
+
+- **Dropbear cannot connect.** This Dropbear build (Alpine 3.20's 2024.85) offers only
+  `chacha20-poly1305@openssh.com`, `aes128-ctr` and `aes256-ctr`, while AES-GCM is the only cipher family
+  the app's SSH stack (swift-nio-ssh) implements. Every connection ends in key exchange (the server logs
+  `No matching algo enc c->s`; the app reports `keyExchangeNegotiationFailure`). Routers and small embedded storage often run Dropbear.
+  Supporting it would need ChaCha20-Poly1305 in the vendored SSH stack; no algorithm was added or weakened.
+- **ProFTPD drops the session when its channel limit is reached.** With `SFTPMaxChannels 1` it refuses a
+  second channel (with reason "unknown channel type") and then disconnects the whole connection, which an
+  independent client (Paramiko) also lost. Any client that opens a second channel loses the session, so the
+  app's walk, search helper and transfers each disconnect it. The default limit is 10, where all tests pass.
+- **SFTPGo refuses links leaving the user's root** with "permission denied" rather than resolving them; the
+  app treats that as the refusal it is and publishes nothing. Its root is `/`, which the tests now handle.
+- **Chrooted, SFTP-only accounts block the Linux helper,** whose exec runs `internal-sftp` instead; search
+  falls back to SFTP after one attempt, as on other servers without the helper.
+
+Still unverified: proprietary servers such as Bitvise and vendor NAS firmware itself (beyond the
+stand-ins above), other server versions, and cellular-only paths or loss rates on the phone (its faults were outages and rate limits
 over a tailnet). Missing interpreter/procfs capability still uses the
 bounded SFTP fallback. Existing canonical path checks and the portable SFTP atomic-confinement
 limitation remain unchanged.
