@@ -10,6 +10,75 @@ import Citadel
 /// Real OpenSSH checks are opt-in; the isolated launcher supplies temporary paths.
 /// A skip without that fixture must never be reported as an authentication pass.
 final class SFTPIntegrationTests: XCTestCase {
+    #if os(macOS)
+    func testTwoChannelServerReclaimsTheWalkForAnOfflineSave() async throws {
+        let original = try Fixture()
+        let reservation = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .bind(host: "127.0.0.1", port: 0).get()
+        let port = try XCTUnwrap(reservation.localAddress?.port)
+        try await reservation.close()
+        let logURL = URL(fileURLWithPath: original.directory + "/two-channel-sshd.log")
+        _ = FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        let log = try FileHandle(forWritingTo: logURL)
+        let server = Process()
+        server.executableURL = URL(fileURLWithPath: "/usr/sbin/sshd")
+        server.arguments = ["-D", "-e", "-f", original.directory + "/sshd_config", "-p", String(port),
+                            "-o", "MaxSessions=2", "-o", "PidFile=" + original.directory + "/two-channel.pid"]
+        server.environment = ProcessInfo.processInfo.environment.merging(["TZ": ""]) { _, new in new }
+        server.standardOutput = log; server.standardError = log
+        try server.run()
+        addTeardownBlock {
+            if server.isRunning { server.terminate(); server.waitUntilExit() }
+            try? log.close()
+            if let evidence = ProcessInfo.processInfo.environment["REMOTEFILES_SSHD_LOG"] {
+                let retained = URL(fileURLWithPath: evidence).deletingPathExtension().appendingPathExtension("two-channel.log")
+                try? Data(contentsOf: logURL).write(to: retained, options: .atomic)
+            }
+        }
+        let deadline = ContinuousClock.now + .seconds(60)
+        while true {
+            guard server.isRunning else {
+                XCTFail("Limited fixture failed: \((try? String(contentsOf: logURL, encoding: .utf8)) ?? "no log")")
+                throw RemoteFileError.connectionEnded
+            }
+            do {
+                let probe = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+                    .connectTimeout(.seconds(1)).connect(host: "127.0.0.1", port: port).get()
+                try await probe.close()
+                break
+            } catch {
+                guard ContinuousClock.now < deadline else { throw error }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+        }
+        let fixture = try Fixture(port: port), stores = try Stores(fixture: fixture)
+        let key = try await stores.identity.generate(name: "Two-channel fixture")
+        try fixture.authorize(key.publicKey)
+        let profile = try await stores.profile(identity: key)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        let tree = try Self.offlineTree(in: fixture, folders: 3, files: 6)
+        let root = try await service.listDirectory(profile: profile, path: tree).path
+        _ = try await service.listDirectoryForWalk(profile: profile, path: root)
+        let local = URL(fileURLWithPath: original.directory + "/two-channel-offline")
+        let store = try OfflineFileStore(directory: local)
+        addTeardownBlock { await store.cancelAndDrain() }
+        let folder = try await store.pinFolder(profile: profile, path: root, service: service)
+        XCTAssertEqual(folder.fileIDs.count, 18)
+        for id in folder.fileIDs {
+            let lease = try await store.lease(id)
+            XCTAssertEqual(try Data(contentsOf: lease.url), try Data(contentsOf: URL(fileURLWithPath: lease.pin.path)))
+        }
+        _ = try await service.listDirectory(profile: profile, path: root)
+        _ = try await service.listDirectoryForWalk(profile: profile, path: root)
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.connections, 1, "Reclaim capacity on the authenticated connection")
+        let serverLog = try String(contentsOf: logURL, encoding: .utf8)
+        XCTAssertTrue(serverLog.contains("no more sessions"), "The fixture must actually exercise channel refusal")
+    }
+    #endif
+
     func testOfflineFolderSnapshotStaysConfinedAndReadableAfterDisconnect() async throws {
         let fixture = try Fixture(), stores = try Stores(fixture: fixture)
         let identity = try await stores.identity.generate(name: "Offline folder")
@@ -2154,14 +2223,14 @@ private struct Fixture {
     let username: String
     var files: String { directory + "/files" }
     var endpoint: HostEndpoint { HostEndpoint(host: "127.0.0.1", port: port) }
-    init() throws {
+    init(port overridePort: Int? = nil) throws {
         let env = ProcessInfo.processInfo.environment
         guard let directory = env["REMOTEFILES_SFTP_FIXTURE"],
               let port = Int(env["REMOTEFILES_SFTP_PORT"] ?? ""),
               let username = env["REMOTEFILES_SFTP_USER"] else {
             throw XCTSkip("Run scripts/test-openssh.sh to create an isolated real OpenSSH fixture.")
         }
-        self.directory = directory; self.port = port; self.username = username
+        self.directory = directory; self.port = overridePort ?? port; self.username = username
     }
     func authorize(_ publicKey: String) throws {
         let url = URL(fileURLWithPath: directory + "/authorized_keys")
