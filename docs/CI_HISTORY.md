@@ -204,6 +204,43 @@ not a physical-device performance improvement or a replay of the historical
 loaded-run trace. Before/after logs, xcresults and source evidence are retained
 under `/private/tmp/remotefiles-geometry-small-screen-ac1a/geometry-{red,green}/`.
 
+## 9 November 2026: first shortcut after launch
+
+[#75](https://github.com/eyeb0l/RemoteFiles/pull/75) recorded that the first ⌘ shortcut after launch
+was dropped "while UIKit lazily builds its menu system", so `testReaderShortcutsDriveAnOfflineCopy`
+pressed a ⌘G that did nothing first. Investigated on an iPhone 18 Pro simulator (iOS 27.2) with
+XCTest `typeKey`, temporary logging in the app (`sendEvent`, GameController key input, UIKit's
+key-command registration) and the simulator's `backboardd` and SpringBoard logs.
+
+**Cause.** Neither the app's responder chain nor its menu caused it. A dropped ⌘F never reached the app process.
+`backboardd` sends a ⌘ chord to the deepest process in the keyboard-focus chain (SpringBoard, then
+the app) that has registered it. UIKit registers the app's shortcuts only while a hardware keyboard is
+attached (`_shouldUpdateSerializableKeyCommandsForResponder:` answered no until then). Each `typeKey`
+attaches a new virtual keyboard and sends its keys at once. The app's registration arrived 48 ms after
+the chord had been routed, and the lazy menu build was part of that registration. SpringBoard
+registers ⌘F, ⌘G and ⇧⌘G, among other edit keys, so it took those and did nothing. Its log reads
+`KCMD: match in pid:<SpringBoard> keyboardFocus` and the events end in `SBMainSwitcherWindow`.
+⌘R, ⌥⌘U, ⇧⌘J and ⇧⌘. match nothing in SpringBoard and reach the app, even as the
+first key. The app's registration outlives XCTest's keyboard, so later chords
+reach it. Once that keyboard had attached and gone, later launches started without a registration.
+A newly created simulator registered at launch, and its first ⌘F worked, once.
+
+| First chord after launch | Runs | Reached the app |
+|---|---|---|
+| ⌘F, Offline Files | 6 | 0 |
+| ⌘F, connected reader or folder, app not registered at launch | 6 | 0 |
+| ⌘F, connected reader, app registered at launch (new simulator) | 1 | 1 |
+| ⌘F, connected reader, uninstrumented first run | 1 | 1 |
+| ⌘R, ⌥⌘U, ⇧⌘J or ⇧⌘. | 8 | 8 |
+
+**Change.** No app change. The offline test now presses ⌥⌘U first and checks that it acts, so the
+first key after launch is covered rather than absorbed. The workspace test keeps ⇧⌘. first.
+
+**Limits.** Simulator only, on two simulators: the first was deleted partway through, so the
+later runs used a new one. A physical keyboard attached before launch should be registered before
+any key is pressed, and one attached later is registered within about 50 ms, but neither was tested
+on a device.
+
 ## 8 November 2026: offline reader Back readiness race
 
 Main [run 42513803390, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/42513803390/attempts/1),

@@ -211,11 +211,22 @@ final class RemoteFilesUITests: XCTestCase {
     /// Nothing published inside the Offline Files sheet reaches the scene's commands, so its
     /// keys are key commands on the sheet. XCTest sends ⌘ combinations as real key commands,
     /// unlike Escape and Return.
+    ///
+    /// Each `typeKey` attaches a new virtual keyboard and sends its keys at once. Until a keyboard
+    /// has been attached, UIKit hasn't registered the app's shortcuts with the system, so the first
+    /// chord goes to whichever process in the keyboard-focus chain registered it: SpringBoard
+    /// registers ⌘F, ⌘G and ⇧⌘G and drops them, and other chords fall through to the app. The first
+    /// shortcut here is therefore ⌥⌘U, and the test checks that it acts.
     func testReaderShortcutsDriveAnOfflineCopy() throws {
         let app = openDemoOfflineNavigationGuide()
-        // The first ⌘ shortcut after launch builds UIKit's menu system and is dropped, in a
-        // connected reader too; ⌘G with Find closed does nothing and absorbs it.
-        app.typeKey("g", modifierFlags: .command)
+        // ⌥⌘U switches between Rendered and Source, from the first key after launch.
+        let rendered = app.scrollViews["Rendered Markdown document"].firstMatch
+        let source = app.textViews["Bounded source text"].firstMatch
+        app.typeKey("u", modifierFlags: [.command, .option])
+        XCTAssertTrue(source.waitForExistence(timeout: 20), "The first shortcut after launch, ⌥⌘U, shows the source of an offline copy")
+        app.typeKey("u", modifierFlags: [.command, .option])
+        XCTAssertTrue(rendered.waitForExistence(timeout: 20), "⌥⌘U shows the rendered offline copy again")
+
         // ⌘F finds; ⌘G and ⇧⌘G move between results.
         app.typeKey("f", modifierFlags: .command)
         let query = app.textFields["reader-find-query"]
@@ -238,13 +249,7 @@ final class RemoteFilesUITests: XCTestCase {
         app.buttons["Done"].tap()
         wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: query)], timeout: 20)
 
-        // ⌥⌘U switches between Rendered and Source; ⇧⌘J lists headings.
-        let rendered = app.scrollViews["Rendered Markdown document"].firstMatch
-        let source = app.textViews["Bounded source text"].firstMatch
-        app.typeKey("u", modifierFlags: [.command, .option])
-        XCTAssertTrue(source.waitForExistence(timeout: 20), "⌥⌘U shows the source of an offline copy")
-        app.typeKey("u", modifierFlags: [.command, .option])
-        XCTAssertTrue(rendered.waitForExistence(timeout: 20), "⌥⌘U shows the rendered offline copy again")
+        // ⇧⌘J lists headings.
         app.typeKey("j", modifierFlags: [.command, .shift])
         let headings = app.navigationBars["Headings"]
         XCTAssertTrue(headings.waitForExistence(timeout: 20), "⇧⌘J lists headings in an offline copy")
@@ -468,7 +473,8 @@ final class RemoteFilesUITests: XCTestCase {
         waitUntilHittable(projects); projects.tap()
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 30))
 
-        // ⇧⌘. shows and hides hidden files.
+        // ⇧⌘. shows and hides hidden files. It comes first because SpringBoard, not the app, gets
+        // a first ⌘F, ⌘G or ⇧⌘G after launch; see testReaderShortcutsDriveAnOfflineCopy.
         let hidden = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", ".config,")).firstMatch
         XCTAssertFalse(hidden.exists)
         app.typeKey(".", modifierFlags: [.command, .shift])
