@@ -44,7 +44,7 @@ Choose **Folder actions → Sort By**:
 
 Folders, including links to folders, always come first. Size and date describe what a link opens. Entries without a size or date sort last, and ties fall back to the name. Filtering and hidden files apply before sorting.
 
-The choice is remembered per connection and folder. Choosing **Name** removes the folder's saved choice, at most 200 choices are kept (the least recently changed is dropped first), and deleting a connection forgets its folders. Demo mode never saves sort choices.
+The choice is remembered per connection and folder. A choice made while the initial listing is loading is saved once an accepted partial or complete listing supplies the canonical folder path. Choosing **Name** removes the folder's saved choice, at most 200 choices are kept (the least recently changed is dropped first), and deleting a connection forgets its folders. Demo mode never saves sort choices.
 
 ## Searching subfolders
 
