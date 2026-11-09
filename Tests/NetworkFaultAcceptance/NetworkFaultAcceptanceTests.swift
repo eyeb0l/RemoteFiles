@@ -183,7 +183,7 @@ final class NetworkFaultAcceptanceTests: XCTestCase {
         XCTAssertEqual(again, 48)
     }
 
-    /// An outage that outlasts a folder save's own deadline fails the save, publishing nothing.
+    /// An outage that outlasts a folder save's idle limit fails the save within about a minute, publishing nothing.
     func testOutageDuringAFolderSaveFailsAtItsDeadline() async throws {
         try fault("shape 0ms 0ms 0% 4mbit")
         let (service, profile) = try await connection()
@@ -201,7 +201,8 @@ final class NetworkFaultAcceptanceTests: XCTestCase {
         let ended = outage.duration(to: .now)
         print("NETWORK_OUTAGE_SAVE ended=\(ended) result=\(result)")
         guard case .failure = result else { return XCTFail("The save finished during the outage") }
-        XCTAssertLessThan(ended, .seconds(180 + 5 + 20), "A file's deadline plus the close grace")
+        XCTAssertLessThan(ended, .seconds(60 + 5 + 20), "A file's idle limit plus the close grace, with room for a loaded host")
+        XCTAssertGreaterThanOrEqual(ended, .seconds(55), "Not before a file has gone a minute without bytes")
         // The store keeps the failed save's slot until its transfers have drained ("busy" until then).
         let draining = ContinuousClock.now
         await store.cancelAndDrain()

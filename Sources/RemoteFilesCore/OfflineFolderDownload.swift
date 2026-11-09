@@ -39,6 +39,8 @@ actor OfflineFolderDownload {
     /// Folders listed ahead of the walk, beyond the one it is taking up. Benchmarks and tests change it; see
     /// docs/PERFORMANCE.md for why it is this.
     nonisolated(unsafe) static var listingsAhead = 4
+    /// How long a file may go without receiving bytes before the save fails. Tests change it.
+    nonisolated(unsafe) static var fileIdleSeconds: TimeInterval = 60
     /// The largest listed size that may overlap other files: one starting read window. Larger files, and files
     /// of unknown size, go alone.
     static let overlappedFileBytes = SFTPRemoteFileService.transferReadWindow * 64 * 1024
@@ -377,8 +379,9 @@ actor OfflineFolderDownload {
             try Task.checkCancellation()
             let adapter = SnapshotDownloadService(base: service, root: path, batch: batch, overlapped: overlapped)
             // A directory of its own: an exporter clears abandoned output from its directory when it starts.
+            // A file fails after a minute without bytes, as a managed download does, not after three minutes in all.
             let exporter = RemoteOriginalExporter(service: adapter, directory: directory.appendingPathComponent(".download-" + UUID().uuidString),
-                                                  fileLimit: limit)
+                                                  fileLimit: limit, timeoutSeconds: Self.fileIdleSeconds, idleTimeout: true)
             await began(job, exporter: exporter)
             let prepared: PreparedOriginalFile
             do {

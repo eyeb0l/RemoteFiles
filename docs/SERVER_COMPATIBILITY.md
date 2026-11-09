@@ -157,16 +157,18 @@ code (and on an earlier run with similar figures):
 
 | Fault | Result |
 |---|---|
-| 150 ± 30 ms delay, 2% loss on replies | Listing 1.7 s, helper search 1.6 s, 8 MiB download 6.7 s, 48-file save 7.2 s; every byte equal; one connection |
-| Outage during a managed download (6 Mbit/s) | Ended at its idle deadline plus close grace (15.8 s with a 10 s test deadline), kept 2.9 MB, resumed from exactly that offset on a new connection |
+| 150 ± 30 ms delay, 2% loss on replies | Listing 2.6 s, helper search 1.7 s, 8 MiB download 5.1 s, 48-file save 6.2 s; every byte equal; one connection |
+| Outage during a managed download (6 Mbit/s) | Ended at its idle deadline plus close grace (15.3 s with a 10 s test deadline), kept 2.8 MB, resumed from exactly that offset on a new connection |
 | 5 s outage during a download | Finished on the same connection, every byte equal |
-| Outage while browsing | Timed out at 15.07 s; TCP outlived the outage, so browsing continued on the same connection |
-| Outage, then cancelling a folder save | Returned in 7 ms; nothing published; the save then succeeded |
-| Outage outlasting a folder save | Failed at 179.4 s (a file's 180 s deadline); drained in 5.0 s; nothing published; the save then succeeded |
+| Outage while browsing | Timed out at 15.06 s; TCP outlived the outage, so browsing continued on the same connection |
+| Outage, then cancelling a folder save | Returned in 16 ms; nothing published; the save then succeeded |
+| Outage outlasting a folder save | Failed at 60.2 s (a file's 60 s idle limit; 179.4 s before that change); drained in 4.5 s; nothing published; the save then succeeded |
 
-A folder save's files use a fixed 180-second deadline rather than a transfer's idle deadline, so a
-save stalled by an outage takes three minutes to report failure, against about a minute for a single
-download; cancelling it is immediate.
+A folder save's files then had a fixed 180-second deadline rather than a transfer's idle deadline, so a
+save stalled by an outage took three minutes to report failure, against about a minute for a single
+download. A folder save's file now fails after 60 seconds without receiving bytes, in the transport and in
+its exporter; `testStalledFolderSaveFailsAtTheIdleLimit` covers it in the macOS OpenSSH suite, and fails
+against the fixed deadline. Single-file offline saves and exports keep the 180-second total.
 
 Still unverified: proprietary servers such as Bitvise and NAS-specific configurations, other server
 versions, network faults seen by the client's own socket (rather than through a forward), and physical

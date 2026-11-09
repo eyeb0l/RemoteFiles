@@ -47,21 +47,25 @@ public actor RemoteOriginalExporter {
     private let fileLimit: Int
     private let retentionSeconds: TimeInterval
     private let timeoutSeconds: TimeInterval
+    private let idleTimeout: Bool
     private var transfer: Transfer?
     private var prepared: PreparedOriginalFile?
     private var expiry: Task<Void, Never>?
     private var cleanedAbandonedFiles = false
 
-    /// `directory` must be a dedicated directory owned by this exporter.
+    /// `directory` must be a dedicated directory owned by this exporter. With `idleTimeout`, a transfer is
+    /// abandoned after `timeoutSeconds` without receiving bytes, rather than after that long in all, so a slow
+    /// file still finishes; a stalled one still ends even if the transport ignores its own deadline.
     public init(service: any RemoteFileService, directory: URL,
                 fileLimit: Int = maximumFileBytes,
                 retentionSeconds: TimeInterval = maximumRetentionSeconds,
-                timeoutSeconds: TimeInterval = 180) {
+                timeoutSeconds: TimeInterval = 180, idleTimeout: Bool = false) {
         self.service = service
         self.directory = directory
         self.fileLimit = min(max(1, fileLimit), Self.maximumFileBytes)
         self.retentionSeconds = min(max(0.01, retentionSeconds), Self.maximumRetentionSeconds)
         self.timeoutSeconds = min(max(0.01, timeoutSeconds), 180)
+        self.idleTimeout = idleTimeout
     }
 
     deinit {
@@ -82,6 +86,12 @@ public actor RemoteOriginalExporter {
         guard Self.validFilename(entry.exportFilename ?? entry.name) else { throw OriginalFileExportError.invalidFilename }
         if let size = entry.size, size > UInt64(fileLimit) { throw OriginalFileExportError.tooLarge(fileLimit) }
         let id = UUID()
+        let activity = ExportActivity()
+        let reported = progress
+        let progress: DownloadProgressHandler = { update in
+            activity.received(update.receivedBytes)
+            await reported(update)
+        }
         let result: PreparedOriginalFile = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<PreparedOriginalFile, Error>) in
                 guard !Task.isCancelled else { continuation.resume(throwing: CancellationError()); return }
@@ -96,9 +106,16 @@ public actor RemoteOriginalExporter {
                     }
                     self.finish(id: id, result: result)
                 }
-                let deadline = Task { [weak self, timeoutSeconds] in
-                    do { try await Task.sleep(for: .seconds(timeoutSeconds)) }
-                    catch { return }
+                let deadline = Task { [weak self, timeoutSeconds, idleTimeout] in
+                    let interval = Duration.seconds(timeoutSeconds)
+                    var until = ContinuousClock.now + interval
+                    while true {
+                        do { try await Task.sleep(until: until, clock: .continuous) }
+                        catch { return }
+                        // Idle: wait on from the last bytes received, until a whole interval has passed without any.
+                        guard idleTimeout, let last = activity.last, last + interval > ContinuousClock.now else { break }
+                        until = last + interval
+                    }
                     await self?.cancel(id: id, error: OriginalFileExportError.timedOut)
                 }
                 transfer = Transfer(id: id, directory: temporaryDirectory, task: task,
@@ -236,5 +253,16 @@ public actor RemoteOriginalExporter {
         if case RemoteFileError.unsupportedFile = error { return OriginalFileExportError.notRegularFile }
         if case RemoteResourceError.outsideDocument = error { return OriginalFileExportError.outsideRoot }
         return error
+    }
+}
+
+/// When a transfer last received more bytes than before. Progress can repeat a count; only growth counts.
+private final class ExportActivity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var bytes: UInt64 = 0
+    private var at: ContinuousClock.Instant?
+    var last: ContinuousClock.Instant? { lock.withLock { at } }
+    func received(_ total: UInt64) {
+        lock.withLock { if total > bytes { bytes = total; at = .now } }
     }
 }

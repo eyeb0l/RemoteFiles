@@ -272,6 +272,59 @@ final class OriginalFileExportTests: XCTestCase {
         await exporter.release(result.id)
         XCTAssertTrue(children(dir).isEmpty)
     }
+
+    /// A folder save's file may take longer than the timeout in all while bytes keep arriving.
+    func testIdleTimeoutLetsASlowButSteadyTransferFinish() async throws {
+        let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let service = SteppedTransportMock(steps: 15, interval: .milliseconds(200), stallAfter: nil)
+        let exporter = RemoteOriginalExporter(service: service, directory: dir, timeoutSeconds: 2, idleTimeout: true)
+        let started = ContinuousClock.now
+        let result = try await exporter.prepare(profile: profile, entry: entry(), allowedRoot: "/fixture")
+        XCTAssertGreaterThan(started.duration(to: .now), .seconds(2), "Longer in all than the idle timeout")
+        XCTAssertEqual(try Data(contentsOf: result.url).count, 15)
+        await exporter.release(result.id)
+    }
+
+    /// Bytes stop arriving: the transfer ends one idle interval after the last, even if the transport never does.
+    func testIdleTimeoutEndsAStalledTransfer() async throws {
+        let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let service = SteppedTransportMock(steps: 15, interval: .milliseconds(200), stallAfter: 3)
+        let exporter = RemoteOriginalExporter(service: service, directory: dir, timeoutSeconds: 2, idleTimeout: true)
+        do { _ = try await exporter.prepare(profile: profile, entry: entry(), allowedRoot: "/fixture"); XCTFail("A stalled transfer finished") }
+        catch OriginalFileExportError.timedOut { }
+        let lastProgress = await service.lastProgress
+        let stalled = try XCTUnwrap(lastProgress)
+        XCTAssertGreaterThanOrEqual(stalled.duration(to: .now), .seconds(2), "Not before a whole idle interval without bytes")
+        XCTAssertTrue(children(dir).isEmpty)
+        await service.resume()
+    }
+}
+
+/// Reports one more byte every `interval`, then optionally stalls (ignoring cancellation) after `stallAfter` bytes.
+private actor SteppedTransportMock: RemoteFileService {
+    private let steps: Int, interval: Duration, stallAfter: Int?
+    private var held: CheckedContinuation<Void, Never>?
+    private(set) var lastProgress: ContinuousClock.Instant?
+    init(steps: Int, interval: Duration, stallAfter: Int?) { self.steps = steps; self.interval = interval; self.stallAfter = stallAfter }
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
+        try await downloadFile(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination, limit: limit, progress: { _ in })
+    }
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int,
+                      progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        for step in 1...steps {
+            if step - 1 == stallAfter { await withCheckedContinuation { held = $0 } }
+            try? await Task.sleep(for: interval)
+            lastProgress = .now
+            await progress(.init(receivedBytes: UInt64(step), totalBytes: UInt64(steps)))
+        }
+        try Data(repeating: 7, count: steps).write(to: destination)
+        return .init(name: "stepped.bin", path: path, kind: .file, size: UInt64(steps))
+    }
+    func resume() { let continuation = held; held = nil; continuation?.resume() }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.unsupportedFile }
+    func disconnect() {}
 }
 
 /// Deliberately ignores cancellation when held, to model a late transfer completion.

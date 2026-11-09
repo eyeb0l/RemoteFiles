@@ -692,7 +692,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         }
         let result: (RemoteEntry, Int, WindowSample)
         if let batch, batch.sharesChannel {
-            result = try await performOnBatchChannel(session: session, batch: batch, seconds: 180, operation: operation)
+            result = try await performOnBatchChannel(session: session, batch: batch, operation: operation)
         } else {
             result = try await performOnDedicatedChannel(session: session, budget: managed ? .idle(managedTransferIdle) : .total(180), operation: operation)
         }
@@ -1068,14 +1068,15 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     }
 
     /// As `performOnDedicatedChannel`, on the batch's channel instead of a new one: the operation keeps its own
-    /// deadline, its caller waits for it to drain, and a channel that hasn't drained within the grace period
+    /// idle deadline (as a managed download's: it fails only after `managedTransferIdle` without file bytes, so a
+    /// slow file still finishes and a stalled one fails in about a minute), its caller waits for it to drain, and a channel that hasn't drained within the grace period
     /// closes the socket. A deadline or cancellation closes the channel for every file on it; the next file
     /// opens another, as it does after the connection was replaced. Once the batch has ended nothing starts,
     /// so a cancelled file arriving late can't open a channel only to close the connection.
     ///
     /// Unlike a file's own channel, one still opening isn't a reason to close the socket at once: the open is
     /// shared, so a live connection finishes it and the grace period covers a dead one.
-    private func performOnBatchChannel<T: Sendable>(session: LiveSession, batch: SnapshotTransferBatch, seconds: UInt64,
+    private func performOnBatchChannel<T: Sendable>(session: LiveSession, batch: SnapshotTransferBatch,
                                                     operation: @escaping @Sendable (SFTPClient, TransferActivity) async throws -> T) async throws -> T {
         try Task.checkCancellation()
         guard !batch.ended else { throw CancellationError() }
@@ -1114,12 +1115,12 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
             }
         }
         do {
-            return try await Self.deadline(seconds: seconds, close: close) {
+            return try await TransferIdleDeadline.run(idle: managedTransferIdle, clock: ContinuousClock(), close: close) { activity in
                 defer { drained.set() }
                 let sftp = try await opening.value
                 control.install(sftp)
                 try Task.checkCancellation()
-                return try await operation(sftp, .ignored)
+                return try await operation(sftp, activity)
             }
         } catch {
             throw Self.mapped(error)

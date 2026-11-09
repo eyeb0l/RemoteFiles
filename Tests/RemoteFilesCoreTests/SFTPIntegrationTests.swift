@@ -1629,6 +1629,42 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertEqual(after.connections, before.connections + 1, "The closed socket is replaced by a new connection")
     }
 
+    /// A folder save stalled by a dead network took three minutes to fail: each file had a fixed 180-second
+    /// deadline. A file now fails at the same idle limit as a managed download, and nothing is published.
+    func testStalledFolderSaveFailsAtTheIdleLimit() async throws {
+        let (fixture, proxy, service, profile) = try await connectedThroughProxy(name: "Stalled folder save")
+        await service.setTransferTimings(idle: .seconds(2), closeGrace: .seconds(1))
+        let source = try stallFixtureFile(fixture)
+        let folder = URL(fileURLWithPath: source).deletingPathExtension().path
+        try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: false)
+        try FileManager.default.moveItem(atPath: source, toPath: folder + "/large.bin")
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: folder) }
+        let store = try OfflineFileStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent("stalled-save-" + UUID().uuidString))
+        addTeardownBlock { await store.cancelAndDrain() }
+        let stalled = LockedTestFlag()
+        let guardTask = watchdog(proxy)
+        let started = ContinuousClock.now
+        do {
+            // Once the folder is listed, before its file's transfer: on loopback the file would finish first.
+            _ = try await store.pinFolder(profile: profile, path: folder, service: service, progress: { update in
+                if update.folders > 0, stalled.setOnce() { proxy.stallReplies() }
+            })
+            XCTFail("A save whose replies stop must not succeed")
+        } catch {
+            XCTAssertTrue("\(error)".contains("timedOut"), "Expected the idle limit to report a timeout, got \(error)")
+        }
+        guardTask.cancel()
+        let elapsed = ContinuousClock.now - started
+        XCTAssertTrue(stalled.isSet, "The replies were held during the save")
+        XCTAssertLessThan(elapsed, .seconds(10), "The idle limit plus the close grace must end the save, not 180 seconds")
+        await store.cancelAndDrain()
+        let pins = await store.snapshot()
+        XCTAssertTrue(pins.isEmpty, "A failed save publishes no partial copy")
+        proxy.resumeReplies()
+        let listing = try await service.listDirectory(profile: profile, path: folder)
+        XCTAssertEqual(listing.entries.map(\.name), ["large.bin"])
+    }
+
     /// Retried managed downloads restarted from byte zero after a dead network on the iPhone.
     /// The kept bytes are continued only while the server's file keeps its size and modification
     /// time and the kept bytes still end with the server's bytes; otherwise the transfer restarts.
