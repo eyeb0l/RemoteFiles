@@ -170,8 +170,22 @@ download. A folder save's file now fails after 60 seconds without receiving byte
 its exporter; `testStalledFolderSaveFailsAtTheIdleLimit` covers it in the macOS OpenSSH suite, and fails
 against the fixed deadline. Single-file offline saves and exports keep the 180-second total.
 
+## Physical iPhone, channels and faults: 9 November 2026
+
+[Device acceptance](../Tests/DeviceAcceptance/README.md) ran on the iPhone 17 Pro (iOS 27.2) in a signed
+Debug `RemoteFilesTests` build of the committed code, against OpenSSH 10.2p1 daemons on an Ubuntu server
+reached over the phone's own tailnet connection; the server logged the phone's address. Faults were
+applied on the server to the fixture port alone, by the phone itself through a control key whose forced
+command allows only those actions. All three tests passed, twice (figures from the second run):
+
+| Test | Result |
+|---|---|
+| Cancellation | A rate-limited download 0.9 s, a folder save 5 ms and a helper content search under 1 ms after cancelling; nothing published; browsing and a helper search then worked on the same connection |
+| Outages on the phone's socket | A download ended 15.1 s into an outage (10 s test idle limit plus the 5 s close grace), resumed from the 2.4 MB kept with every byte equal; a 5 s outage was ridden out; cancelling during an outage returned after 5.06 s (the close grace); browsing then reconnected |
+| One-channel server | Search before browsing fell back to SFTP; browsing during a 48-file save waited 0.76 s while the save handed back the channel; four loans; every byte equal; a download borrowed the channel; cancelling a borrowing save returned in 7 ms and published nothing; one connection |
+
 Still unverified: proprietary servers such as Bitvise and NAS-specific configurations, other server
-versions, network faults seen by the client's own socket (rather than through a forward), and physical
-iPhone cancellation and one-channel behaviour. Missing interpreter/procfs capability still uses the
+versions, and cellular-only paths or loss rates on the phone (its faults were outages and rate limits
+over a tailnet). The Mac's network fault suite still ran through a forward. Missing interpreter/procfs capability still uses the
 bounded SFTP fallback. Existing canonical path checks and the portable SFTP atomic-confinement
 limitation remain unchanged.
