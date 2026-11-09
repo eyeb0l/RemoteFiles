@@ -18,6 +18,11 @@ private struct OverflowFixtureView: View {
         filename: "viewport.md", readingPosition: state.position) }
 }
 
+@MainActor private final class GeometryScrollFixture: UIScrollView {
+    var trackingTouch = false
+    override var isTracking: Bool { trackingTouch || super.isTracking }
+}
+
 @MainActor final class OverflowViewportTests: XCTestCase {
     private func fixture(_ count: Int = 24) -> String {
         (0..<count).map { index in
@@ -318,6 +323,68 @@ private struct OverflowFixtureView: View {
         attachment.name = "Reading position restored after delayed viewport attachment"
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func geometryFixture() throws -> (UIWindow, UIWindow?, GeometryScrollFixture, OverflowGeometryCache, ReadingAnchorRegionBridge.Probe) {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        let controller = UIViewController()
+        window.rootViewController = controller
+        let scroll = GeometryScrollFixture(frame: window.bounds)
+        scroll.contentInsetAdjustmentBehavior = .never
+        scroll.contentSize = CGSize(width: window.bounds.width, height: 3000)
+        controller.view.addSubview(scroll)
+        let cache = OverflowGeometryCache()
+        let probe = OverflowAnchorBridge.Probe(cache, deferring: true)
+        probe.frame = CGRect(x: 0, y: 0, width: 1, height: 1)
+        scroll.addSubview(probe)
+        let region = ReadingAnchorRegionBridge.Probe(cache, id: .image("stalled-layout"), ready: true)
+        region.frame = CGRect(x: 0, y: 1000, width: window.bounds.width, height: 500)
+        scroll.addSubview(region)
+        window.makeKeyAndVisible()
+        scroll.setContentOffset(CGPoint(x: 0, y: 1000), animated: false)
+        return (window, previous, scroll, cache, region)
+    }
+
+    func testGeometryCorrectionAppliesTheAccumulatedLayoutChangeAfterAMainThreadStall() throws {
+        let (window, previous, scroll, cache, region) = try geometryFixture()
+        defer { cache.cancelAnchor(); cleanup(window, previous: previous) }
+        cache.captureAnchor()
+        XCTAssertTrue(cache.hasReadingAnchor)
+        let before = region.convert(region.bounds, to: window).minY
+
+        // Deliberately prevent display-link callbacks beyond the two-second correction
+        // budget, as a synchronous text layout can. This is the stimulus, not a readiness wait.
+        Thread.sleep(forTimeInterval: 2.1)
+        region.frame.origin.y += 62
+        cache.geometryDidChange()
+        // Deliver the same frame callback CADisplayLink would now deliver, without
+        // depending on which run-loop source wins after the controlled stall.
+        cache.perform(NSSelectorFromString("correctAnchor"))
+        XCTAssertEqual(scroll.contentOffset.y, 1062, accuracy: 1,
+                       "A late first frame must compensate the measured layout delta before retiring the anchor")
+        XCTAssertEqual(region.convert(region.bounds, to: window).minY, before, accuracy: 1)
+        region.frame.origin.y += 20
+        cache.perform(NSSelectorFromString("correctAnchor"))
+        XCTAssertEqual(scroll.contentOffset.y, 1062, accuracy: 1,
+                       "The expired correction must retire after its final frame rather than extend its budget")
+    }
+
+    func testExpiredGeometryCorrectionYieldsToActiveTouchScrolling() throws {
+        let (window, previous, scroll, cache, region) = try geometryFixture()
+        defer { cache.cancelAnchor(); cleanup(window, previous: previous) }
+        cache.captureAnchor()
+        Thread.sleep(forTimeInterval: 2.1)
+        region.frame.origin.y += 62
+        cache.geometryDidChange()
+        scroll.trackingTouch = true
+        cache.perform(NSSelectorFromString("correctAnchor"))
+        XCTAssertEqual(scroll.contentOffset.y, 1000, accuracy: 1,
+                       "A touch already controlling the viewport wins over a delayed correction")
+        scroll.trackingTouch = false
+        cache.perform(NSSelectorFromString("correctAnchor"))
+        XCTAssertEqual(scroll.contentOffset.y, 1000, accuracy: 1, "The cancelled anchor cannot move the view after the touch")
     }
 
     func testAttachedUnreadyAnchorFinishesWithinItsCorrectionBudget() async throws {

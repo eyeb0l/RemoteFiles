@@ -67,6 +67,30 @@ step. Diagnostic logs, screenshots and xcresults are outside the checkout in
 `/private/tmp/remotefiles-kbfocus/` (`diag1b`, `diag2`, `diag3`, `diag4`, `diag6`,
 `warmup` and `diag5-runner-crash.ips`, the crash of an earlier record attempt).
 
+## 9 November 2026: deferred Markdown geometry after a main-thread stall
+
+The earlier overflow investigation left a visible-line jump under heavy layout
+unresolved. A controlled native-region regression now reproduces the deadline
+mechanism on current main: capture the visible region, deliberately block the
+main thread for 2.1 seconds, then deliver a 62-point geometry change and the
+display-link callback. The old callback discarded its anchor before compensating
+the change because its wall-clock correction budget had already expired. The
+viewport stayed at 1000 instead of 1062, and the visible region moved by 62 points.
+
+The callback now applies that final accumulated delta before retiring the anchor,
+without extending its two-second budget or starting another wait. Active touch
+tracking, dragging or deceleration takes precedence at expiry. The controlled
+regressions require both the correction and its retirement, and verify touch
+takeover; the existing deferred-prose, code/table, Source-return and attachment
+tests remain unchanged.
+
+The first regression failed before the fix. Afterward all 12
+`OverflowViewportTests` passed with zero failures or skips on the signed iPhone
+17e simulator, iOS 27.2 / Xcode 27.2. This demonstrates the correction mechanism,
+not a physical-device performance improvement or a replay of the historical
+loaded-run trace. Before/after logs, xcresults and source evidence are retained
+under `/private/tmp/remotefiles-geometry-small-screen-ac1a/geometry-{red,green}/`.
+
 ## 8 November 2026: offline reader Back readiness race
 
 Main [run 42513803390, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/42513803390/attempts/1),
