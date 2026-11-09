@@ -890,7 +890,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                 throw RemoteFileError.unavailable("The jump host couldn't reach the destination. Check its hostname and port, and that the jump host permits TCP forwarding to it.")
             }
             if let sshError = error as? NIOSSHError, sshError.type == .keyExchangeNegotiationFailure {
-                throw RemoteFileError.unavailable(Self.noCommonEncryption(jumpHost: profile.jumpHost != nil))
+                throw RemoteFileError.unavailable(Self.noCommonAlgorithms(jumpHost: profile.jumpHost != nil))
             }
             if error is NIOConnectionError {
                 throw RemoteFileError.unavailable("Couldn't connect to this server. Check its address and network. For local Wi-Fi, allow RemoteFiles in Settings → Privacy & Security → Local Network, then try again.")
@@ -899,13 +899,14 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         }
     }
 
-    /// The SSH stack implements only AES-GCM ciphers, which some servers (stock Dropbear among them) don't offer.
-    /// Any key-exchange, host-key, cipher or MAC mismatch ends negotiation the same way. No weaker algorithm is
-    /// enabled as a fallback.
-    nonisolated static func noCommonEncryption(jumpHost: Bool) -> String {
-        "RemoteFiles and this server\(jumpHost ? " or its jump host" : "") have no encryption method in common, so it can't connect securely. "
-            + "RemoteFiles uses AES-GCM ciphers (aes128-gcm@openssh.com or aes256-gcm@openssh.com) with modern key exchange; "
-            + "some servers, including Dropbear, don't offer AES-GCM. Ask the server's administrator to enable it."
+    /// The SSH stack reports every key-exchange, host-key, cipher and MAC mismatch as the same error, without
+    /// saying which list failed, so the message names everything the app needs rather than guessing. A missing
+    /// AES-GCM cipher (stock Dropbear offers none) is the common case. No weaker algorithm is enabled as a fallback.
+    nonisolated static func noCommonAlgorithms(jumpHost: Bool) -> String {
+        "RemoteFiles and this server\(jumpHost ? " or its jump host" : "") have no secure connection method in common, so it can't connect. "
+            + "RemoteFiles needs AES-GCM encryption (aes128-gcm@openssh.com or aes256-gcm@openssh.com), "
+            + "Curve25519 or elliptic-curve Diffie-Hellman key exchange, and an Ed25519 or ECDSA host key, and doesn't fall back to weaker methods. "
+            + "Some servers, including Dropbear, don't offer AES-GCM. Ask the server's administrator which of these the server lacks."
     }
 
     /// Short operations share the session's SFTP channel, saving the channel-open, subsystem and

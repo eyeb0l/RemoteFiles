@@ -120,15 +120,27 @@ final class SFTPIntegrationTests: XCTestCase {
 
     /// Stock Dropbear offers only ChaCha20-Poly1305 and AES-CTR. A server like it must be refused with a message
     /// that says why, not a generic connection failure, and nothing weaker may be tried instead.
-    func testServerWithoutAESGCMReportsNoCommonEncryption() async throws {
-        let server = try await limitedServer(sessions: 10, options: ["Ciphers=chacha20-poly1305@openssh.com,aes128-ctr,aes256-ctr"])
+    func testServerWithoutAESGCMReportsNoCommonAlgorithms() async throws {
+        try await assertNoCommonAlgorithms(
+            options: ["Ciphers=chacha20-poly1305@openssh.com,aes128-ctr,aes256-ctr"], serverLog: "no matching cipher found")
+    }
+
+    /// A key-exchange mismatch fails negotiation with the same error while AES-GCM is on offer, so the message
+    /// must not tell the administrator to enable a cipher the server already has.
+    func testServerWithoutCommonKeyExchangeReportsNoCommonAlgorithms() async throws {
+        try await assertNoCommonAlgorithms(
+            options: ["KexAlgorithms=diffie-hellman-group14-sha256"], serverLog: "no matching key exchange method found")
+    }
+
+    private func assertNoCommonAlgorithms(options: [String], serverLog: String) async throws {
+        let server = try await limitedServer(sessions: 10, options: options)
         do {
             _ = try await server.service.listDirectory(profile: server.profile, path: server.fixture.files)
-            XCTFail("A server without AES-GCM must not connect")
+            XCTFail("A server with no algorithms in common must not connect")
         } catch RemoteFileError.unavailable(let message) {
-            XCTAssertEqual(message, SFTPRemoteFileService.noCommonEncryption(jumpHost: false))
+            XCTAssertEqual(message, SFTPRemoteFileService.noCommonAlgorithms(jumpHost: false))
         }
-        XCTAssertTrue(try server.log().contains("no matching cipher found"), "The server must have refused on its ciphers")
+        XCTAssertTrue(try server.log().contains(serverLog), "The server must have refused with \"\(serverLog)\"")
     }
 
     private struct LimitedServer {
