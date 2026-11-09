@@ -61,6 +61,7 @@ NETWORK_FAULT_USER=USER NETWORK_FAULT_ROOT=/tmp/FIXTURE/files NETWORK_FAULT_CONT
   swift test --package-path "$snapshot" --filter NetworkFaultAcceptanceTests
 ```
 
-The suite clears all faults before and after each test. It takes about three minutes, one of them for
-the outage that outlasts a folder save's idle limit. Afterwards run `fault.sh PORT DEV clear`, stop only the
+The suite clears all faults before and after each test. It takes about three minutes on a fast path, one of them for
+the outage that outlasts a folder save's idle limit; over a real network the 2% loss test alone can take
+several minutes, because TCP's loss-limited rate falls with the round trip. Afterwards run `fault.sh PORT DEV clear`, stop only the
 daemon named by its PID file, and remove the fixture directory and temporary keys.

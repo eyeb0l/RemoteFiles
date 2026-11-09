@@ -148,21 +148,25 @@ the download after a failed preview; that last step fails three times in three w
 ## Network faults: 9 November 2026
 
 [Network fault acceptance](../Tests/NetworkFaultAcceptance/README.md) ran the production adapter from
-a Mac against a disposable OpenSSH 10.2p1 daemon on an Ubuntu server, with delay, loss, rate limits
-and total outages applied by `tc netem` and `nftables` on the server to the fixture's port alone.
-The Mac's direct path was blocked by a per-process firewall, so the client reached the fixture through
-an SSH port forward and the faults applied to the fixture's own TCP connection on the server's loopback.
-The app's socket therefore saw stalls, not its own retransmissions. All six tests passed on the final
-code (and on an earlier run with similar figures):
+a Mac against a disposable OpenSSH 10.2p1 daemon on an Ubuntu server, directly over a tailnet, with
+delay, loss, rate limits and total outages applied by `tc netem` and `nftables` on the server's tailnet
+interface to the fixture's port alone; the server logged the Mac's own address. All six tests passed on
+the final code:
 
 | Fault | Result |
 |---|---|
-| 150 ± 30 ms delay, 2% loss on replies | Listing 2.6 s, helper search 1.7 s, 8 MiB download 5.1 s, 48-file save 6.2 s; every byte equal; one connection |
-| Outage during a managed download (6 Mbit/s) | Ended at its idle deadline plus close grace (15.3 s with a 10 s test deadline), kept 2.8 MB, resumed from exactly that offset on a new connection |
+| 150 ± 30 ms delay, 2% loss on replies | Listing 1.6 s, helper search 1.6 s, 8 MiB download 135 s, 48-file save 75 s; every byte equal; one connection |
+| Outage during a managed download (6 Mbit/s) | Ended at its idle deadline plus close grace (15.2 s with a 10 s test deadline), kept 3.5 MB, resumed from exactly that offset on a new connection |
 | 5 s outage during a download | Finished on the same connection, every byte equal |
-| Outage while browsing | Timed out at 15.06 s; TCP outlived the outage, so browsing continued on the same connection |
-| Outage, then cancelling a folder save | Returned in 16 ms; nothing published; the save then succeeded |
-| Outage outlasting a folder save | Failed at 60.2 s (a file's 60 s idle limit; 179.4 s before that change); drained in 4.5 s; nothing published; the save then succeeded |
+| Outage while browsing | Timed out at 15.1 s; TCP outlived the outage, so browsing continued on the same connection |
+| Outage, then cancelling a folder save | Returned in 5 ms; nothing published; the save then succeeded |
+| Outage outlasting a folder save | Failed at 59.6 s (a file's 60 s idle limit; 179.4 s before that change); drained in 4.8 s; nothing published; the save then succeeded |
+
+The lossy transfers are slow because of TCP, not the app: with a 150 ms round trip, 2% loss and the
+tailnet's 1,280-byte packets, TCP's loss-limited rate is about 70 KB/s, which predicts roughly two
+minutes for 8 MiB. Earlier runs, before a per-process firewall on the Mac allowed the test runner,
+reached the fixture through an SSH port forward with the faults on the server's loopback, where loss
+is recovered almost at once (the same download took 5–7 s); every other result matched.
 
 A folder save's files then had a fixed 180-second deadline rather than a transfer's idle deadline, so a
 save stalled by an outage took three minutes to report failure, against about a minute for a single
@@ -186,6 +190,6 @@ command allows only those actions. All three tests passed, twice (figures from t
 
 Still unverified: proprietary servers such as Bitvise and NAS-specific configurations, other server
 versions, and cellular-only paths or loss rates on the phone (its faults were outages and rate limits
-over a tailnet). The Mac's network fault suite still ran through a forward. Missing interpreter/procfs capability still uses the
+over a tailnet). Missing interpreter/procfs capability still uses the
 bounded SFTP fallback. Existing canonical path checks and the portable SFTP atomic-confinement
 limitation remain unchanged.
