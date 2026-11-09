@@ -17,3 +17,9 @@ A short-lived account lock serializes cooperating installers. A server interrupt
 Cancellation closes this installation’s connection, but cannot undo an append already completed by the server. A lost reply therefore reports an unconfirmed outcome rather than success. Review and retry the same key: duplicate detection prevents a second complete entry. A partial interrupted append is preserved and a retry starts a new line before the complete key. Confirmed installation means the append and reread completed; it does not establish that the server’s authentication policy permits login with that key. Custom `AuthorizedKeysFile` locations require manual setup.
 
 Automated coverage uses injected UI transport and disposable local home directories, plus host verification and password refusal on the isolated password-disabled OpenSSH fixture. The setup continuation runs only after a confirmed current installation; regressions cover cancelled late success, uncertain outcomes, and already-installed keys. These checks do not grant access to a real server or establish a password-enabled production-server installation.
+
+The complete confirmation journey also passes on the iPhone 17e simulator with
+the keyboard shown: Review Installation is reached by scrolling the exposed form,
+then VoiceOver verifies the account, key, Cancel, a second review and the result.
+The small-screen regression was in the test's full-screen swipe starting over the
+keyboard, not the installation layout; no production installation code changed.

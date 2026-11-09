@@ -575,8 +575,20 @@ extension XCUIApplication {
         let password = app.secureTextFields["Account password"]
         XCTAssertTrue(password.waitForExistence(timeout: 10)); password.tap(); password.typeText("public-fixture-password")
         let review = app.buttons["Review Installation"]
-        for _ in 0..<5 { if review.isHittable { break }; app.swipeUp() }
-        XCTAssertTrue(review.isHittable); review.tap()
+        for _ in 0..<5 {
+            if review.exists && review.isHittable { break }
+            // On a small screen the keyboard covers the start of app.swipeUp(),
+            // so that gesture reaches the keyboard instead of scrolling the form.
+            let top = app.navigationBars["Install Public Key"].frame.maxY + 12
+            let keyboard = app.keyboards.firstMatch
+            let bottom = (keyboard.exists ? keyboard.frame.minY : app.frame.maxY) - 20
+            XCTAssertGreaterThan(bottom - top, 80, "The installation form must expose a scrollable area")
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let x = app.frame.midX
+            origin.withOffset(CGVector(dx: x, dy: top + (bottom - top) * 0.85))
+                .press(forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: x, dy: top + (bottom - top) * 0.15)))
+        }
+        XCTAssertTrue(review.exists && review.isHittable, app.debugDescription); review.tap()
         XCTAssertTrue(app.navigationBars["Confirm Installation"].waitForExistence(timeout: 5))
         try withVoiceOver {
             try focus("fixture@fixture.invalid:22", name: "confirmation account", limit: 25)

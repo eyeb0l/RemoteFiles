@@ -67,6 +67,29 @@ step. Diagnostic logs, screenshots and xcresults are outside the checkout in
 `/private/tmp/remotefiles-kbfocus/` (`diag1b`, `diag2`, `diag3`, `diag4`, `diag6`,
 `warmup` and `diag5-runner-crash.ips`, the crash of an earlier record attempt).
 
+## 9 November 2026: small-screen public-key installation review
+
+The unchanged `VoiceOverChecks.testPublicKeyConfirmationVoiceOverAccountKeyCancelAndResult`
+reproduced the iPhone 17e failure before VoiceOver started: after typing the
+fixture password, five `app.swipeUp()` gestures did not expose Review Installation.
+The recording still showed the form's first sections and the keyboard. Retained
+input events put the swipe start at y=522, over the keyboard rather than the form.
+The failure was not a disappearing confirmation control or an installation refusal.
+
+The test now drags only inside the exposed form band, below its navigation bar
+and above the current keyboard frame. It retains the five-scroll bound and all
+confirmation, account/key/fingerprint, Cancel, second-review and result assertions.
+No production installation code, test deadline, skip or VoiceOver traversal changed.
+
+On the same signed iPhone 17e simulator, iOS 27.2 / Xcode 27.2, the unchanged
+baseline failed (1 method, 147.710 seconds) and the corrected complete journey
+passed (1 method, 102.716 seconds, zero failures/skips). These durations are not
+a performance comparison: the baseline also logged a 60-second XCTest event-loop
+idle notification stall, which this change does not claim to fix. Teardown restored
+VoiceOver to its original disabled state. No real server or private key was used.
+Logs, recording, input traces and xcresults are retained under
+`/private/tmp/remotefiles-geometry-small-screen-ac1a/{baseline-install,install-green}/`.
+
 ## 9 November 2026: deferred Markdown geometry after a main-thread stall
 
 The earlier overflow investigation left a visible-line jump under heavy layout
