@@ -118,6 +118,19 @@ final class SFTPIntegrationTests: XCTestCase {
         }
     }
 
+    /// Stock Dropbear offers only ChaCha20-Poly1305 and AES-CTR. A server like it must be refused with a message
+    /// that says why, not a generic connection failure, and nothing weaker may be tried instead.
+    func testServerWithoutAESGCMReportsNoCommonEncryption() async throws {
+        let server = try await limitedServer(sessions: 10, options: ["Ciphers=chacha20-poly1305@openssh.com,aes128-ctr,aes256-ctr"])
+        do {
+            _ = try await server.service.listDirectory(profile: server.profile, path: server.fixture.files)
+            XCTFail("A server without AES-GCM must not connect")
+        } catch RemoteFileError.unavailable(let message) {
+            XCTAssertEqual(message, SFTPRemoteFileService.noCommonEncryption(jumpHost: false))
+        }
+        XCTAssertTrue(try server.log().contains("no matching cipher found"), "The server must have refused on its ciphers")
+    }
+
     private struct LimitedServer {
         let service: SFTPRemoteFileService
         let profile: ConnectionProfile
@@ -128,7 +141,7 @@ final class SFTPIntegrationTests: XCTestCase {
     }
 
     /// A second, disposable daemon from the usual fixture's keys and configuration, allowing `sessions` channels.
-    private func limitedServer(sessions: Int) async throws -> LimitedServer {
+    private func limitedServer(sessions: Int, options: [String] = []) async throws -> LimitedServer {
         let original = try Fixture()
         let reservation = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .bind(host: "127.0.0.1", port: 0).get()
@@ -142,6 +155,7 @@ final class SFTPIntegrationTests: XCTestCase {
         server.executableURL = URL(fileURLWithPath: "/usr/sbin/sshd")
         server.arguments = ["-D", "-e", "-f", original.directory + "/sshd_config", "-p", String(port),
                             "-o", "MaxSessions=\(sessions)", "-o", "PidFile=" + original.directory + "/\(name).pid"]
+            + options.flatMap { ["-o", $0] }
         server.environment = ProcessInfo.processInfo.environment.merging(["TZ": ""]) { _, new in new }
         server.standardOutput = log; server.standardError = log
         try server.run()

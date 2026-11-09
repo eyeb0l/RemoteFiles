@@ -45,6 +45,8 @@ Browsing is read only. The optional [public-key installer](PUBLIC_KEY_INSTALLATI
 
 The first connection on a local network may require iOS Local Network permission. A timeout alone does not tell you what failed. Check that the server is awake, SSH and SFTP are running, the hostname and port are correct, any VPN or tunnel is connected, network policy permits access, and the app has Local Network permission if needed. See [device permissions and lifecycle](DEVICE_PERMISSIONS_LIFECYCLE.md) for permission recovery.
 
+If the app says it and the server have no encryption method in common, the server offers none of the ciphers RemoteFiles supports. RemoteFiles uses AES-GCM (`aes128-gcm@openssh.com` or `aes256-gcm@openssh.com`) and does not fall back to weaker algorithms. Some servers, including Dropbear on routers and small storage devices, don't offer AES-GCM; the server's administrator has to enable it. See [server compatibility](SERVER_COMPATIBILITY.md#nas-stand-ins-9-november-2026).
+
 If a host key changes, stop and verify the new fingerprint through a trusted channel before resetting trust. A changed key can be legitimate, but can also mean you reached a different server.
 
 ## Keys and trust

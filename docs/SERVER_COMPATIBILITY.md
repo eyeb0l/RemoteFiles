@@ -212,7 +212,9 @@ Findings:
 - **Dropbear cannot connect.** This Dropbear build (Alpine 3.20's 2024.85) offers only
   `chacha20-poly1305@openssh.com`, `aes128-ctr` and `aes256-ctr`, while AES-GCM is the only cipher family
   the app's SSH stack (swift-nio-ssh) implements. Every connection ends in key exchange (the server logs
-  `No matching algo enc c->s`; the app reports `keyExchangeNegotiationFailure`). Routers and small embedded storage often run Dropbear.
+  `No matching algo enc c->s`). The app now says it has no encryption method in common with the server and
+  names AES-GCM, instead of a generic error; `testServerWithoutAESGCMReportsNoCommonEncryption` covers it
+  with OpenSSH offering Dropbear's ciphers. Routers and small embedded storage often run Dropbear.
   Supporting it would need ChaCha20-Poly1305 in the vendored SSH stack; no algorithm was added or weakened.
 - **ProFTPD drops the session when its channel limit is reached.** With `SFTPMaxChannels 1` it refuses a
   second channel (with reason "unknown channel type") and then disconnects the whole connection, which an

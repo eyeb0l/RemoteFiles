@@ -889,11 +889,23 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
             if profile.jumpHost != nil, let sshError = error as? NIOSSHError, sshError.type == .channelSetupRejected {
                 throw RemoteFileError.unavailable("The jump host couldn't reach the destination. Check its hostname and port, and that the jump host permits TCP forwarding to it.")
             }
+            if let sshError = error as? NIOSSHError, sshError.type == .keyExchangeNegotiationFailure {
+                throw RemoteFileError.unavailable(Self.noCommonEncryption(jumpHost: profile.jumpHost != nil))
+            }
             if error is NIOConnectionError {
                 throw RemoteFileError.unavailable("Couldn't connect to this server. Check its address and network. For local Wi-Fi, allow RemoteFiles in Settings → Privacy & Security → Local Network, then try again.")
             }
             throw error
         }
+    }
+
+    /// The SSH stack implements only AES-GCM ciphers, which some servers (stock Dropbear among them) don't offer.
+    /// Any key-exchange, host-key, cipher or MAC mismatch ends negotiation the same way. No weaker algorithm is
+    /// enabled as a fallback.
+    nonisolated static func noCommonEncryption(jumpHost: Bool) -> String {
+        "RemoteFiles and this server\(jumpHost ? " or its jump host" : "") have no encryption method in common, so it can't connect securely. "
+            + "RemoteFiles uses AES-GCM ciphers (aes128-gcm@openssh.com or aes256-gcm@openssh.com) with modern key exchange; "
+            + "some servers, including Dropbear, don't offer AES-GCM. Ask the server's administrator to enable it."
     }
 
     /// Short operations share the session's SFTP channel, saving the channel-open, subsystem and
