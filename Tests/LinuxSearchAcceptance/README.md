@@ -76,6 +76,20 @@ configuration or a connection failure fails the suite. Preserve its log and
 source SHA. Stop only the fixture daemon identified by its temporary PID file,
 close the tunnel, and remove its synthetic tree and temporary keys afterward.
 
+### Session-channel limits
+
+`LinuxServerChannelLimitAcceptanceTests` runs against a fixture daemon with a low `MaxSessions` and must
+be told the limit in `LINUX_SEARCH_MAX_SESSIONS`. Start one daemon per limit from the same configuration
+with `MaxSessions` 3, 2 and 1 on further ports, and run only that class against each (the other tests
+assume the helper fits beside browsing, which needs three). With room for the helper it must run before
+and after a cancelled search; without, search must fall back once to SFTP with the same results. Every
+limit must keep one authenticated connection.
+
+```sh
+LINUX_SEARCH_MAX_SESSIONS=2 LINUX_SEARCH_PORT=22349 ... \
+  swift test --package-path "$snapshot" --filter LinuxServerChannelLimitAcceptanceTests
+```
+
 ### A disposable guest on a Mac
 
 Without a Linux host, a QEMU guest on Apple silicon works and needs no shared daemon. Verify the
@@ -95,6 +109,16 @@ qemu-system-aarch64 -M virt -accel hvf -cpu host -smp 4 -m 2048 \
 
 Then start the fixture daemon on 22401 inside the guest as above; no tunnel is needed. A second
 drive with `throttling.iops-total=150` models a slow disk for cold-cache timings.
+
+## Recorded validation: 2026-11-09
+
+Ubuntu 26.04.1, Linux `7.0.0-42-generic`, OpenSSH `10.2p1`, Python `3.14`, with loopback daemons at
+`MaxSessions` 10, 3, 2 and 1 reached through one SSH forward. Before the channel-limit changes, the
+cancellation test failed at 3 (the search after the cancelled one found the helper disabled for the
+connection), and at 1 a search threw `channelSetupRejected`. After them the channel-limit test passed at
+all four limits, using the helper twice at 10 and 3 and SFTP after one attempt at 2 and 1, with one
+connection each; the seven tests above passed at 10 and 3. At 2 and 1 those of the seven that search
+after browsing fail by design: the helper never fits beside browsing there. See [server compatibility](../../docs/SERVER_COMPATIBILITY.md#the-linux-search-helper).
 
 ## Recorded validation: 2026-11-07
 

@@ -58,48 +58,103 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         let session = try await session(for: profile)
         guard !session.serverSearchUnavailable else { return nil }
         measurements.serverSearchAttempts += 1
-        do {
-            let timeout = UInt64(limits.timeLimit.components.seconds + 1) + timeoutSeconds
-            let (update, bytes) = try await performOnDedicatedChannel(session: session, timeout: timeout, closesInBackground: true) { sftp in
-                let identity = try await Self.searchIdentity(root: root, sftp: sftp)
-                // The root stays held until the helper has finished with it.
-                defer { _ = identity.directory.sendClose() }
-                let command = try ServerFolderSearch.command(query: query, root: root, includeHidden: includeHidden,
-                    limits: limits, content: content, identity: identity.value)
-                let decoder = ServerFolderSearch.OutputDecoder(query: query, root: root, includeHidden: includeHidden, limits: limits, content: content)
-                return try await Self.streamSearchCommand(client: session.client, command: command, timeout: timeout, decoder: decoder, partial: partial)
-            }
-            try Task.checkCancellation()
-            guard session.client.isConnected else { throw RemoteFileError.connectionEnded }
-            measurements.bytesReceived += bytes
-            measurements.serverSearchOperations += 1
-            return update
-        } catch {
-            try Task.checkCancellation()
-            guard session.client.isConnected else { throw RemoteFileError.connectionEnded }
-            // Failed capability checks are remembered only for this authenticated session.
-            // Connection loss, deadlines and trust errors are never disguised as unsupported search.
-            switch error {
-            case let failure as SearchRootFailure:
-                throw Self.mapped(failure.underlying) // About this folder, not about what the server can do.
-            case ServerFolderSearch.Failure.resourceLimit, CitadelError.commandOutputTooLarge:
-                return nil // A narrower subsequent search can still use this capable server.
-            case is ServerFolderSearch.Failure, is SSHClient.CommandFailed, is TTYSTDError:
-                session.serverSearchUnavailable = true
-                return nil
-            case let error as NIOSSHError where error.type == .channelSetupRejected:
-                session.serverSearchUnavailable = true
-                return nil
-            case let status as SFTPMessage.Status where status.errorCode == .failure || status.errorCode == .unsupportedOperation:
-                session.serverSearchUnavailable = true
-                return nil
-            case RemoteFileError.notFound, RemoteFileError.permissionDenied, RemoteFileError.unsupportedFile:
-                // No accessible procfs/descriptor capability: retain the ordinary SFTP search.
-                session.serverSearchUnavailable = true
-                return nil
-            default: throw Self.mapped(error)
+        var retried = false
+        while true {
+            // Channels of an earlier search, cancelled or finished, that the server may not have freed yet.
+            let earlier = session.helperChannels.count, expectsRoom = retried
+            do {
+                let timeout = UInt64(limits.timeLimit.components.seconds + 1) + timeoutSeconds
+                let helperChannels = session.helperChannels
+                let (update, bytes) = try await performOnDedicatedChannel(session: session, timeout: timeout, purpose: .search(expectsRoom: expectsRoom),
+                                                                                         closesInBackground: true) { sftp in
+                    let identity = try await Self.searchIdentity(root: root, sftp: sftp)
+                    // The root stays held until the helper has finished with it.
+                    defer { _ = identity.directory.sendClose() }
+                    let command = try ServerFolderSearch.command(query: query, root: root, includeHidden: includeHidden,
+                        limits: limits, content: content, identity: identity.value)
+                    let decoder = ServerFolderSearch.OutputDecoder(query: query, root: root, includeHidden: includeHidden, limits: limits, content: content)
+                    return try await self.retryingRefusal(session, expected: expectsRoom) {
+                        try await Self.streamSearchCommand(client: session.client, command: command, timeout: timeout, decoder: decoder,
+                                                           partial: partial, onChannel: { helperChannels.add($0.closeFuture) })
+                    }
+                }
+                try Task.checkCancellation()
+                guard session.client.isConnected else { throw RemoteFileError.connectionEnded }
+                measurements.bytesReceived += bytes
+                measurements.serverSearchOperations += 1
+                return update
+            } catch {
+                try Task.checkCancellation()
+                guard session.client.isConnected else { throw RemoteFileError.connectionEnded }
+                // Failed capability checks are remembered only for this authenticated session.
+                // Connection loss, deadlines and trust errors are never disguised as unsupported search.
+                switch error {
+                case let failure as SearchRootFailure:
+                    throw Self.mapped(failure.underlying) // About this folder, not about what the server can do.
+                case ServerFolderSearch.Failure.resourceLimit, CitadelError.commandOutputTooLarge:
+                    return nil // A narrower subsequent search can still use this capable server.
+                case is ServerFolderSearch.Failure, is SSHClient.CommandFailed, is TTYSTDError:
+                    session.serverSearchUnavailable = true
+                    return nil
+                case _ where Self.isChannelRefusal(error):
+                    // The server limits session channels: a question of room, not of what it can run. The helper
+                    // needs two beside browsing. Free what this connection can and try once more; remember the
+                    // refusal only when browsing alone left no room, since transfers and closing channels pass.
+                    await fallBackFromHelper(session)
+                    if !retried {
+                        retried = true
+                        if earlier > 0 { continue }
+                        if await reclaimWalk(for: session) { continue }
+                    }
+                    if session.transferChannels.count == 0, session.foregroundLoan == nil { session.serverSearchUnavailable = true }
+                    return nil
+                case let status as SFTPMessage.Status where status.errorCode == .failure || status.errorCode == .unsupportedOperation:
+                    session.serverSearchUnavailable = true
+                    return nil
+                case RemoteFileError.notFound, RemoteFileError.permissionDenied, RemoteFileError.unsupportedFile:
+                    // No accessible procfs/descriptor capability: retain the ordinary SFTP search.
+                    session.serverSearchUnavailable = true
+                    return nil
+                default: throw Self.mapped(error)
+                }
             }
         }
+    }
+
+    /// After a refusal, lets the helper's channels close before SFTP search takes over, so that the slots they held
+    /// are free for it. Bounded: a peer can hold a close until its process exits. (After other failures, browsing
+    /// waits for them itself if the server refuses its channel; see `acquireSFTP`.)
+    private func fallBackFromHelper(_ session: LiveSession) async {
+        await awaitHelperChannels(session)
+    }
+
+    private func awaitHelperChannels(_ session: LiveSession) async {
+        _ = await session.helperChannels.closed(within: dedicatedCloseGrace)
+    }
+
+    /// OpenSSH frees a session's slot only once that session's process has exited, a moment after its channel
+    /// closed. Where this connection expects room (`expected`), a refusal while one of its own channels is still
+    /// closing, or soon after one closed, is asked again, briefly, rather than taken for the server's limit.
+    /// Nothing is sent on a refused channel, so asking again is safe.
+    private func retryingRefusal<T: Sendable>(_ session: LiveSession, expected: Bool, replacingShared: Bool = false,
+                                              _ open: @Sendable () async throws -> T) async throws -> T {
+        let started = ContinuousClock.now
+        var delay = Duration.milliseconds(25)
+        while true {
+            do { return try await open() } catch {
+                guard expected, Self.isChannelRefusal(error), session.client.isConnected,
+                      started.duration(to: .now) < dedicatedCloseGrace, session.mayStillHoldASlot(within: Self.slotReleaseAllowance, replacingShared: replacingShared) else { throw error }
+                try await Task.sleep(for: delay)
+                delay = min(delay * 2, .milliseconds(400))
+            }
+        }
+    }
+
+    /// How long after one of this connection's channels closed its slot may still be counted.
+    static let slotReleaseAllowance: Duration = .seconds(1)
+
+    nonisolated static func isChannelRefusal(_ error: Error) -> Bool {
+        (error as? NIOSSHError)?.type == .channelSetupRejected
     }
 
     nonisolated static func searchProcessPath(_ path: String) -> Bool {
@@ -187,12 +242,13 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     /// which ends the helper the next time it writes.
     nonisolated private static func streamSearchCommand(client: SSHClient, command: String, timeout: UInt64,
                                                         decoder: ServerFolderSearch.OutputDecoder,
-                                                        partial: @escaping @Sendable (RemoteFolderSearch.Update) -> Void) async throws -> (RemoteFolderSearch.Update, Int) {
+                                                        partial: @escaping @Sendable (RemoteFolderSearch.Update) -> Void,
+                                                        onChannel: @escaping @Sendable (Channel) -> Void = { _ in }) async throws -> (RemoteFolderSearch.Update, Int) {
         // Unbuffered in effect: the whole output is capped by `outputLimit`, however fast it comes.
         let (chunks, sink) = AsyncStream.makeStream(of: ByteBuffer.self)
         let execution = Task {
             defer { sink.finish() }
-            _ = try await executeSearchCommand(client: client, command: command, timeout: timeout, onOutput: { sink.yield($0) })
+            _ = try await executeSearchCommand(client: client, command: command, timeout: timeout, onOutput: { sink.yield($0) }, onChannel: onChannel)
         }
         return try await withTaskCancellationHandler {
             var decoder = decoder, bytes = 0
@@ -221,14 +277,15 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     nonisolated static func executeSearchCommand(client: SSHClient, command: String, timeout: UInt64,
                                                  maxResponseSize: Int = ServerFolderSearch.outputLimit,
                                                  onOutput: (@Sendable (ByteBuffer) -> Void)? = nil,
-                                                 onChannelCreated: @escaping @Sendable () -> Void = {}) async throws -> ByteBuffer {
+                                                 onChannelCreated: @escaping @Sendable () -> Void = {},
+                                                 onChannel: @escaping @Sendable (Channel) -> Void = { _ in }) async throws -> ByteBuffer {
         let control = SocketControl()
         return try await withTaskCancellationHandler {
             defer { control.close() }
             return try await detachedDeadline(seconds: timeout, onTimeout: { control.close() }) {
                 try Task.checkCancellation()
                 return try await client.executeBoundedCommand(command, maxResponseSize: maxResponseSize, onOutput: onOutput, onChannelCreated: {
-                    control.install($0); onChannelCreated()
+                    onChannel($0); control.install($0); onChannelCreated()
                 })
             }
         } onCancel: { control.close() }
@@ -856,11 +913,17 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                                       operation: @escaping @Sendable (SFTPClient, DeferredCloses) async throws -> T) async throws -> T {
         let channel = SFTPChannelControl()
         do {
+            // Outside the deadline: on a one-channel server this waits for a transfer, which may take a while.
+            try await enterForeground(session)
             return try await Self.detachedDeadline(seconds: timeoutSeconds, extending: progress, onTimeout: {
                 channel.close()
                 if !channel.hasClient { session.control.close() }
             }) {
-                let shared = try await self.acquireSFTP(for: session, role: role)
+                let shared: SharedSFTPChannel
+                do { shared = try await self.acquireSFTP(for: session, role: role) } catch {
+                    await self.leaveForeground(session)
+                    throw error
+                }
                 channel.install(shared.client, closing: shared.closing)
                 let closes = DeferredCloses()
                 do {
@@ -868,23 +931,63 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                     let value = try await operation(shared.client, closes)
                     let pending = closes.take()
                     if pending.isEmpty {
-                        await self.release(shared, from: session, reusable: true)
+                        await self.release(shared, from: session, reusable: true, leaving: true)
                     } else {
-                        Task { await self.release(shared, from: session, reusable: await self.settle(pending, on: shared)) }
+                        Task { await self.release(shared, from: session, reusable: await self.settle(pending, on: shared), leaving: true) }
                     }
                     return value
                 } catch {
                     let pending = closes.take()
                     if pending.isEmpty {
-                        await self.release(shared, from: session, reusable: false)
+                        await self.release(shared, from: session, reusable: false, leaving: true)
                     } else {
-                        Task { _ = await self.settle(pending, on: shared); await self.release(shared, from: session, reusable: false) }
+                        Task { _ = await self.settle(pending, on: shared); await self.release(shared, from: session, reusable: false, leaving: true) }
                     }
                     throw error
                 }
             }
         } catch {
             throw Self.mapped(error)
+        }
+    }
+
+    /// Waits while a transfer holds the session slot that browsing lent it (see `lendForeground`), then counts
+    /// the caller as using the session's shared channels until `leaveForeground`. Cancellable.
+    private func enterForeground(_ session: LiveSession) async throws {
+        while let loan = session.foregroundLoan {
+            // The slot came back and `endLoan` counted this caller in, ahead of any transfer.
+            if try await wait(on: loan, admitted: true) { return }
+        }
+        session.foregroundUsers += 1
+    }
+
+    /// A transfer waiting for the slot to come back. It isn't counted in: browsing goes first.
+    private func waitWhileLent(_ session: LiveSession) async throws {
+        while let loan = session.foregroundLoan { _ = try await wait(on: loan, admitted: false) }
+    }
+
+    private func wait(on loan: ForegroundLoan, admitted: Bool) async throws -> Bool {
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Bool, Error>) in
+                if Task.isCancelled { waiter.resume(throwing: CancellationError()); return }
+                loan.waiters[id] = (waiter, admitted)
+                loan.returnWhenIdle?()
+            }
+        } onCancel: {
+            Task { await self.abandonWait(id, on: loan) }
+        }
+    }
+
+    private func abandonWait(_ id: UUID, on loan: ForegroundLoan) {
+        loan.waiters.removeValue(forKey: id)?.0.resume(throwing: CancellationError())
+    }
+
+    private func leaveForeground(_ session: LiveSession) {
+        session.foregroundUsers -= 1
+        if session.foregroundUsers == 0, let drained = session.foregroundLoan?.drained {
+            session.foregroundLoan?.drained = nil
+            drained.resume()
         }
     }
 
@@ -903,18 +1006,24 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
 
     /// Streaming transfers own a child SFTP channel. Cancelling or timing out closes it, releasing
     /// its handles without delaying browsing requests queued behind bulk reads.
-    private func performOnDedicatedChannel<T: Sendable>(session: LiveSession, timeout: UInt64, closesInBackground: Bool = false,
+    private func performOnDedicatedChannel<T: Sendable>(session: LiveSession, timeout: UInt64, purpose: DedicatedChannelPurpose = .transfer,
+                                                        closesInBackground: Bool = false,
                                                         operation: @escaping @Sendable (SFTPClient) async throws -> T) async throws -> T {
-        try await performOnDedicatedChannel(session: session, budget: .total(timeout), closesInBackground: closesInBackground) { sftp, _ in
+        try await performOnDedicatedChannel(session: session, budget: .total(timeout), purpose: purpose, closesInBackground: closesInBackground) { sftp, _ in
             try await operation(sftp)
         }
     }
 
     private enum DedicatedChannelBudget { case total(UInt64), idle(Duration) }
 
+    /// A transfer may reclaim the walk's channel, or borrow browsing's on a one-channel server, when the server
+    /// refuses it a channel. The search helper does neither here: `searchFolders` decides what its refusal means.
+    private enum DedicatedChannelPurpose: Equatable { case transfer, search(expectsRoom: Bool) }
+
     /// `closesInBackground` returns as soon as the operation has what its caller needs, instead of waiting a
     /// round trip for the channel to close. Only for work that leaves nothing behind that a later write could hit.
-    private func performOnDedicatedChannel<T: Sendable>(session: LiveSession, budget: DedicatedChannelBudget, closesInBackground: Bool = false,
+    private func performOnDedicatedChannel<T: Sendable>(session: LiveSession, budget: DedicatedChannelBudget,
+        purpose: DedicatedChannelPurpose = .transfer, closesInBackground: Bool = false,
         operation: @escaping @Sendable (SFTPClient, TransferActivity) async throws -> T) async throws -> T {
         let channel = SFTPChannelControl()
         measurements.sftpChannels += 1
@@ -934,7 +1043,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         }
         let work: @Sendable (TransferActivity) async throws -> T = { activity in
             defer { drained.set() }
-            let sftp = try await self.openTransferSFTP(for: session)
+            let sftp = try await self.openTransferSFTP(for: session, purpose: purpose).sftp
             channel.install(sftp)
             do {
                 try Task.checkCancellation()
@@ -970,14 +1079,31 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                                                     operation: @escaping @Sendable (SFTPClient, TransferActivity) async throws -> T) async throws -> T {
         try Task.checkCancellation()
         guard !batch.ended else { throw CancellationError() }
+        // Browsing is waiting for the slot this batch (or another transfer) borrowed: start nothing more on it. The
+        // files still running finish, the channel goes back, and this file borrows it again once browsing has had
+        // its turn. The batch forgets its loan when it retires, but the session keeps it until the channel closes.
+        if let loan = session.foregroundLoan, !loan.waiters.isEmpty {
+            if loan === batch.loan, batch.users == 0 { batch.retire() }
+            try await waitWhileLent(session)
+            guard !batch.ended else { throw CancellationError() }
+        }
         if batch.session !== session || batch.control.isClosed { batch.retire() }
         let opening: Task<SFTPClient, Error>
         if let existing = batch.opening {
             opening = existing
         } else {
-            opening = Task { try await self.openTransferSFTP(for: session) }
+            opening = Task {
+                let channel = try await self.openTransferSFTP(for: session, purpose: .transfer)
+                if let loan = channel.loan { self.lend(loan, to: batch) }
+                return channel.sftp
+            }
             batch.session = session; batch.opening = opening
             measurements.sftpChannels += 1
+        }
+        batch.users += 1
+        defer {
+            batch.users -= 1
+            if batch.users == 0, let loan = batch.loan, !loan.waiters.isEmpty { batch.retire() }
         }
         let control = batch.control, drained = LockedFlag(), grace = dedicatedCloseGrace
         let close: @Sendable () -> Void = {
@@ -1000,46 +1126,143 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         }
     }
 
-    /// Reclaim the optional walk channel only after a server refuses another channel. Servers with
-    /// two session slots can then keep browsing and one isolated transfer. In-flight walk requests
-    /// drain normally before their channel closes; subsequent walks share browsing for this session.
-    /// A server with no reclaimable walk still reports its refusal, without reconnecting or sharing
-    /// a transfer's cancellation/deadline with foreground reads.
-    private func openTransferSFTP(for session: LiveSession) async throws -> SFTPClient {
-        do { return try await session.client.openSFTP(logger: Self.sftpLogger()) }
-        catch {
-            guard let refusal = error as? NIOSSHError, refusal.type == .channelSetupRejected,
-                  session.walkReclamation != nil || session.sftp[.walk] != nil || session.openingSFTP[.walk] != nil else { throw error }
-            session.walkUsesForeground = true
-            let draining: Task<Void, Never>
-            if let pending = session.walkReclamation {
-                draining = pending
-            } else {
-                let shared = session.sftp.removeValue(forKey: .walk)
-                let opening = session.openingSFTP.removeValue(forKey: .walk)
-                draining = Task {
-                    if let shared { await self.drainWalk(shared) }
-                    if let opening, let shared = try? await opening.value { await self.drainWalk(shared) }
-                }
-                session.walkReclamation = draining
-            }
-            await draining.value
-            session.walkReclamation = nil
-            try Task.checkCancellation()
-            guard session.client.isConnected else { throw RemoteFileError.connectionEnded }
-            measurements.sftpChannels += 1
-            return try await session.client.openSFTP(logger: Self.sftpLogger())
+    /// A folder save that borrowed browsing's slot gives it back as soon as none of its files is running.
+    private func lend(_ loan: ForegroundLoan, to batch: SnapshotTransferBatch) {
+        guard !loan.ended else { return }
+        batch.loan = loan
+        loan.returnWhenIdle = { [weak batch] in
+            guard let batch, batch.users == 0, batch.loan != nil else { return }
+            batch.retire()
         }
     }
 
-    private func drainWalk(_ shared: SharedSFTPChannel) async {
+    private struct TransferChannel { let sftp: SFTPClient; let loan: ForegroundLoan? }
+
+    /// Opens a dedicated channel. When the server refuses a transfer one, makes room on this connection rather
+    /// than reconnecting, in this order: wait for a finished search's channels, or a retired browsing channel, to
+    /// close; reclaim the optional walk channel (`reclaimWalk`); on a server allowing one channel, borrow
+    /// browsing's (`lendForeground`).
+    /// Each happens at most once. A transfer never shares a channel with browsing, so its cancellation and
+    /// deadlines stay its own. Only an explicit channel-open refusal counts as a lack of room.
+    private func openTransferSFTP(for session: LiveSession, purpose: DedicatedChannelPurpose) async throws -> TransferChannel {
+        let tracked = purpose == .transfer ? session.transferChannels : session.helperChannels
+        var waited = false, reclaimed = false, settled = false
+        // A server that has had to lend browsing's slot allows one channel. Asking it for another while browsing
+        // holds or is opening its own would only race browsing for the slot; borrow it in turn instead.
+        if purpose == .transfer, session.lendsForeground, let lent = try await lendForeground(session) { return lent }
+        while true {
+            do {
+                let client = session.client, expected = waited || reclaimed || settled || purpose == .search(expectsRoom: true)
+                let sftp = try await retryingRefusal(session, expected: expected) { try await client.openSFTP(logger: Self.sftpLogger()) }
+                tracked.add(sftp.closeFuture)
+                return TransferChannel(sftp: sftp, loan: nil)
+            } catch {
+                guard purpose == .transfer, Self.isChannelRefusal(error) else { throw error }
+                try Task.checkCancellation()
+                guard session.client.isConnected else { throw RemoteFileError.connectionEnded }
+                if !waited, session.helperChannels.count > 0 {
+                    waited = true
+                    await awaitHelperChannels(session)
+                } else if !settled, session.sftp.isEmpty, session.openingSFTP.isEmpty, session.sharedChannels.count > 0 {
+                    // Browsing's channel was retired and is still closing: the server counts it until it has closed.
+                    settled = true
+                    _ = await session.sharedChannels.closed(within: dedicatedCloseGrace)
+                } else if !reclaimed, await reclaimWalk(for: session) {
+                    reclaimed = true
+                } else if let lent = try await lendForeground(session) {
+                    return lent
+                } else {
+                    throw error
+                }
+                try Task.checkCancellation()
+                guard session.client.isConnected else { throw RemoteFileError.connectionEnded }
+                measurements.sftpChannels += 1
+            }
+        }
+    }
+
+    /// Reclaim the optional walk channel only after a server refuses another channel. Servers with
+    /// two session slots can then keep browsing and one isolated transfer. In-flight walk requests
+    /// drain normally before their channel closes; subsequent walks share browsing for this session.
+    /// Returns false, having done nothing, when there is no walk channel to reclaim.
+    private func reclaimWalk(for session: LiveSession) async -> Bool {
+        guard session.walkReclamation != nil || session.sftp[.walk] != nil || session.openingSFTP[.walk] != nil else { return false }
+        session.walkUsesForeground = true
+        let draining: Task<Void, Never>
+        if let pending = session.walkReclamation {
+            draining = pending
+        } else {
+            let shared = session.sftp.removeValue(forKey: .walk)
+            let opening = session.openingSFTP.removeValue(forKey: .walk)
+            draining = Task {
+                if let shared { await self.drain(shared, in: session) }
+                if let opening, let shared = try? await opening.value { await self.drain(shared, in: session) }
+            }
+            session.walkReclamation = draining
+        }
+        await draining.value
+        session.walkReclamation = nil
+        return true
+    }
+
+    /// Lets a shared channel's current work finish, closes it, and waits until it has closed.
+    private func drain(_ shared: SharedSFTPChannel, in session: LiveSession) async {
         shared.retired = true
         if shared.users > 0 { await withCheckedContinuation { shared.idleWaiters.append($0) } }
         await shared.close().value
+        try? await shared.client.closeFuture.get()
     }
 
-    private func acquireSFTP(for session: LiveSession, role: SFTPChannelRole = .foreground) async throws -> SharedSFTPChannel {
-        if role == .walk, session.walkUsesForeground { return try await acquireSFTP(for: session, role: .foreground) }
+    /// A server that refuses a second channel while this connection holds only browsing's allows one. A transfer
+    /// then borrows that slot: new foreground work waits outside its deadline (`enterForeground`), work under
+    /// way finishes, browsing's channel closes, and the transfer opens its own. The slot comes back when the
+    /// transfer's channel has closed, however that happens, and browsing then opens its channel again. Browsing
+    /// waits for a single file; a folder save gives the slot back between files whenever browsing is waiting.
+    /// Returns nil, having done nothing, if anything else holds a channel on this connection.
+    private func lendForeground(_ session: LiveSession) async throws -> TransferChannel? {
+        guard session.foregroundLoan == nil, session.transferChannels.count == 0, session.helperChannels.count == 0,
+              session.sftp[.walk] == nil, session.openingSFTP[.walk] == nil, session.walkReclamation == nil,
+              session.sftp[.foreground] != nil || session.openingSFTP[.foreground] != nil || session.foregroundUsers > 0 else { return nil }
+        let loan = ForegroundLoan()
+        session.foregroundLoan = loan
+        do {
+            if session.foregroundUsers > 0 { await withCheckedContinuation { loan.drained = $0 } }
+            if let shared = session.sftp.removeValue(forKey: .foreground) { await drain(shared, in: session) }
+            if let opening = session.openingSFTP.removeValue(forKey: .foreground), let shared = try? await opening.value {
+                await drain(shared, in: session)
+            }
+            try Task.checkCancellation()
+            guard session.client.isConnected else { throw RemoteFileError.connectionEnded }
+            measurements.sftpChannels += 1
+            let client = session.client
+            let sftp = try await retryingRefusal(session, expected: true) { try await client.openSFTP(logger: Self.sftpLogger()) }
+            session.transferChannels.add(sftp.closeFuture)
+            sftp.closeFuture.whenComplete { _ in Task { await self.endLoan(loan, in: session) } }
+            measurements.foregroundLoans += 1
+            session.lendsForeground = true
+            return TransferChannel(sftp: sftp, loan: loan)
+        } catch {
+            endLoan(loan, in: session)
+            throw error
+        }
+    }
+
+    private func endLoan(_ loan: ForegroundLoan, in session: LiveSession) {
+        guard !loan.ended else { return }
+        loan.ended = true
+        loan.returnWhenIdle = nil
+        if session.foregroundLoan === loan { session.foregroundLoan = nil }
+        // Browsing waiting for the slot is counted in at once, so a transfer borrowing it next waits for that work.
+        let waiters = loan.waiters
+        loan.waiters = [:]
+        for (waiter, admitted) in waiters.values {
+            if admitted { session.foregroundUsers += 1 }
+            waiter.resume(returning: admitted)
+        }
+    }
+
+    private func acquireSFTP(for session: LiveSession, role: SFTPChannelRole = .foreground, madeRoom: Bool = false) async throws -> SharedSFTPChannel {
+        if role == .walk, session.walkUsesForeground { return try await acquireSFTP(for: session, role: .foreground, madeRoom: madeRoom) }
         if let shared = session.sftp[role] {
             if !shared.retired, !shared.closing.isSet, shared.client.isActive { shared.users += 1; return shared }
             retire(shared, from: session)
@@ -1048,8 +1271,17 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         if let pending = session.openingSFTP[role] {
             opening = pending
         } else {
+            // Browsing expects room whenever no other open channel of this connection's could hold the slot.
             let client = session.client
-            opening = Task { SharedSFTPChannel(client: try await client.openSFTP(logger: Self.sftpLogger()), role: role) }
+            let expected = role == .foreground && session.transferChannels.count == 0 && session.helperChannels.count == 0
+                && session.sftp[.walk] == nil && session.openingSFTP[.walk] == nil
+            opening = Task {
+                let sftp = try await self.retryingRefusal(session, expected: expected, replacingShared: true) {
+                    try await client.openSFTP(logger: Self.sftpLogger())
+                }
+                session.sharedChannels.add(sftp.closeFuture)
+                return SharedSFTPChannel(client: sftp, role: role)
+            }
             session.openingSFTP[role] = opening
             measurements.sftpChannels += 1
         }
@@ -1061,7 +1293,17 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
             // A server allowing few channels may refuse a second one. A walk then shares the first.
             if role == .walk, let refusal = error as? NIOSSHError, refusal.type == .channelSetupRejected {
                 session.walkUsesForeground = true
-                return try await acquireSFTP(for: session, role: .foreground)
+                return try await acquireSFTP(for: session, role: .foreground, madeRoom: madeRoom)
+            }
+            // Browsing refused its own channel. On a server allowing one, a walk or a search helper may have taken
+            // the slot first: wait for the helper's channels to close, or take the walk's back (it shares browsing's
+            // from then on), and try once more.
+            if role == .foreground, !madeRoom, Self.isChannelRefusal(error), session.client.isConnected {
+                if session.helperChannels.count > 0 {
+                    await awaitHelperChannels(session)
+                    return try await acquireSFTP(for: session, role: .foreground, madeRoom: true)
+                }
+                if await reclaimWalk(for: session) { return try await acquireSFTP(for: session, role: .foreground, madeRoom: true) }
             }
             throw error
         }
@@ -1076,13 +1318,14 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         return shared
     }
 
-    private func release(_ shared: SharedSFTPChannel, from session: LiveSession, reusable: Bool) {
+    private func release(_ shared: SharedSFTPChannel, from session: LiveSession, reusable: Bool, leaving: Bool = false) {
         shared.users -= 1
         if !reusable { retire(shared, from: session) } else if shared.retired, shared.users == 0 { shared.close() }
         if shared.users == 0 {
             let waiters = shared.idleWaiters; shared.idleWaiters = []
             waiters.forEach { $0.resume() }
         }
+        if leaving { leaveForeground(session) }
     }
 
     private func retire(_ shared: SharedSFTPChannel, from session: LiveSession) {
@@ -1285,6 +1528,8 @@ public struct TransportMetrics: Sendable {
     /// The most files, and bytes of reads, the last snapshot batch had in flight at once.
     public fileprivate(set) var lastBatchPeakFiles = 0
     public fileprivate(set) var lastBatchPeakBytes = 0
+    /// Transfers that borrowed browsing's channel on a server allowing one. See `lendForeground`.
+    public fileprivate(set) var foregroundLoans = 0
 }
 
 /// Saves a folder's files over one SFTP channel of their own, several at a time. See `SnapshotTransferBatch`.
@@ -1309,6 +1554,9 @@ final class SnapshotTransferBatch: @unchecked Sendable {
     fileprivate var opening: Task<SFTPClient, Error>?
     fileprivate var control = SFTPChannelControl()
     fileprivate var ended = false
+    /// Browsing's slot, when this batch's channel borrowed it, and the files using or waiting for the channel.
+    fileprivate var loan: ForegroundLoan?
+    fileprivate var users = 0
     private let lock = NSLock()
     private var files = 0, bytes = 0, mostFiles = 0, mostBytes = 0
     init(sharesChannel: Bool = true) { self.sharesChannel = sharesChannel }
@@ -1324,7 +1572,7 @@ final class SnapshotTransferBatch: @unchecked Sendable {
     /// Closes the channel, including one still opening, so that the next file opens another.
     fileprivate func retire() {
         Self.close(control, opening: opening)
-        session = nil; opening = nil; control = SFTPChannelControl()
+        session = nil; opening = nil; control = SFTPChannelControl(); loan = nil
     }
     private static func close(_ control: SFTPChannelControl, opening: Task<SFTPClient, Error>?) {
         control.close()
@@ -1351,6 +1599,23 @@ private final class LiveSession: @unchecked Sendable {
     var walkUsesForeground = false
     var walkReclamation: Task<Void, Never>?
     var serverSearchUnavailable = false
+    /// Operations using or opening the shared channels, and the slot browsing has lent a transfer, if any.
+    var foregroundUsers = 0
+    var foregroundLoan: ForegroundLoan?
+    /// Set once browsing has had to lend its slot: the server allows one channel.
+    var lendsForeground = false
+    /// Dedicated channels the server may still count: the search helper's, and transfers'.
+    let helperChannels = OpenChannels()
+    let transferChannels = OpenChannels()
+    /// Browsing's and the walk's channels, open or closing.
+    let sharedChannels = OpenChannels()
+    /// Whether a channel of this connection's closed within `allowance`, or, when browsing replaces its channel,
+    /// whether the one it replaces (or a walk's) is still closing. See `retryingRefusal`.
+    func mayStillHoldASlot(within allowance: Duration, replacingShared: Bool) -> Bool {
+        if replacingShared, sharedChannels.count > 0 { return true }
+        let now = ContinuousClock.now
+        return [sharedChannels, helperChannels, transferChannels].contains { $0.lastClosed.map { $0.duration(to: now) < allowance } ?? false }
+    }
     init(profile: ConnectionProfile, client: SSHClient, control: SocketControl, bastion: SSHClient? = nil) {
         self.profile = profile; self.client = client; self.control = control; self.bastion = bastion
     }
@@ -1380,6 +1645,59 @@ private final class SharedSFTPChannel: @unchecked Sendable {
         let task = Task { try? await client.close(); return () }
         closeTask = task
         return task
+    }
+}
+
+/// Browsing's session slot, lent to a transfer on a server allowing one channel. Actor-isolated to
+/// SFTPRemoteFileService. See `lendForeground`.
+private final class ForegroundLoan: @unchecked Sendable {
+    /// Work waiting for the slot to come back; browsing's is counted in as it returns.
+    var waiters: [UUID: (CheckedContinuation<Bool, Error>, admitted: Bool)] = [:]
+    /// The borrower, waiting for foreground work under way to finish.
+    var drained: CheckedContinuation<Void, Never>?
+    /// Set by a borrower that can give the slot back early, between its own operations.
+    var returnWhenIdle: (() -> Void)?
+    var ended = false
+}
+
+/// Channels that the server may still count against its session limit: open, or closing but not yet closed.
+final class OpenChannels: @unchecked Sendable {
+    private let lock = NSLock()
+    private var futures: [ObjectIdentifier: EventLoopFuture<Void>] = [:]
+    private var closedAt: ContinuousClock.Instant?
+    var count: Int { lock.withLock { futures.count } }
+    /// When one of these channels last closed.
+    var lastClosed: ContinuousClock.Instant? { lock.withLock { closedAt } }
+
+    func add(_ closed: EventLoopFuture<Void>) {
+        let id = ObjectIdentifier(closed)
+        lock.withLock { futures[id] = closed }
+        closed.whenComplete { [weak self] _ in
+            guard let self else { return }
+            self.lock.withLock { _ = self.futures.removeValue(forKey: id); self.closedAt = .now }
+        }
+    }
+
+    /// Waits for every channel tracked now to close. False if some were still open when the time ran out.
+    func closed(within limit: Duration) async -> Bool {
+        let pending = lock.withLock { Array(futures.values) }
+        guard let loop = pending.first?.eventLoop else { return true }
+        let all = EventLoopFuture.andAllComplete(pending, on: loop)
+        return await withCheckedContinuation { continuation in
+            let once = ResumeOnce(continuation)
+            let timer = Task { try? await Task.sleep(for: limit); once.resume(false) }
+            all.whenComplete { _ in timer.cancel(); once.resume(true) }
+        }
+    }
+}
+
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    init(_ continuation: CheckedContinuation<Bool, Never>) { self.continuation = continuation }
+    func resume(_ value: Bool) {
+        let pending: CheckedContinuation<Bool, Never>? = lock.withLock { defer { continuation = nil }; return continuation }
+        pending?.resume(returning: value)
     }
 }
 

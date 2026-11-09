@@ -96,30 +96,21 @@ final class ServerCompatibilityTests: XCTestCase {
         _ = try await service.listDirectoryForWalk(profile: profile, path: root)
         let store = try OfflineFileStore(directory: state.appendingPathComponent("offline"))
         addTeardownBlock { await store.cancelAndDrain() }
-        if fixture.channels == 1 {
-            do {
-                _ = try await store.pinFolder(profile: profile, path: root, service: service)
-                XCTFail("A server allowing only the browsing channel must refuse an isolated transfer")
-            } catch {
-                XCTAssertEqual((error as? NIOSSHError)?.type, .channelSetupRejected, "\(error)")
-            }
-            await store.cancelAndDrain()
-            let pins = await store.snapshot()
-            XCTAssertTrue(pins.isEmpty, "A refused transfer publishes no partial copy")
-        } else {
-            let folder = try await store.pinFolder(profile: profile, path: root, service: service)
-            XCTAssertEqual(folder.fileIDs.count, 14)
-            XCTAssertEqual(folder.skippedLinks, 1)
-            for id in folder.fileIDs {
-                let lease = try await store.lease(id)
-                let relative = String(lease.pin.path.dropFirst(root.count))
-                XCTAssertEqual(try Data(contentsOf: lease.url),
-                    try Data(contentsOf: URL(fileURLWithPath: fixture.directory + "/files" + relative)), relative)
-            }
+        // A one-channel server lends browsing's channel to the save; none shares it.
+        let folder = try await store.pinFolder(profile: profile, path: root, service: service)
+        XCTAssertEqual(folder.fileIDs.count, 14)
+        XCTAssertEqual(folder.skippedLinks, 1)
+        for id in folder.fileIDs {
+            let lease = try await store.lease(id)
+            let relative = String(lease.pin.path.dropFirst(root.count))
+            XCTAssertEqual(try Data(contentsOf: lease.url),
+                try Data(contentsOf: URL(fileURLWithPath: fixture.directory + "/files" + relative)), relative)
         }
         _ = try await service.listDirectory(profile: profile, path: root)
         let metrics = await service.metrics()
         XCTAssertEqual(metrics.connections, 1, "Channel refusal must not discard a healthy SSH connection")
+        if fixture.channels == 1 { XCTAssertGreaterThanOrEqual(metrics.foregroundLoans, 1, "The fixture must exercise lending") }
+        else { XCTAssertEqual(metrics.foregroundLoans, 0, "Servers with room for a transfer never lend browsing's channel") }
     }
 
     func testSnapshotRejectsRedirectWithoutPublishingBytes() async throws {
@@ -130,7 +121,7 @@ final class ServerCompatibilityTests: XCTestCase {
                 canonicalRoot: fixture.root, destination: destination, limit: 100_000, progress: { _ in })
             XCTFail("Snapshot paths must not follow a symlink")
         } catch {
-            if fixture.channels != 1 { XCTAssertTrue(error is RemoteDocumentLinkError, "\(error)") }
+            XCTAssertTrue(error is RemoteDocumentLinkError, "\(error)")
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
         _ = try await service.listDirectory(profile: profile, path: fixture.root)
@@ -148,9 +139,7 @@ final class ServerCompatibilityTests: XCTestCase {
                 canonicalRoot: fixture.root, destination: destination, limit: 1000, progress: { _ in })
             XCTFail("Oversized originals must fail")
         } catch {
-            // On a single-channel server the retained browsing channel can itself prevent a transfer.
-            if case RemoteFileError.tooLarge = error { }
-            else { XCTAssertTrue(fixture.channels == 1 && (error as? NIOSSHError)?.type == .channelSetupRejected, "\(error)") }
+            guard case RemoteFileError.tooLarge = error else { return XCTFail("\(error)") }
         }
         let size = (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         XCTAssertLessThanOrEqual(size, 1000)

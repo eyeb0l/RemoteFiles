@@ -22,11 +22,44 @@ channel-capacity failures.
 
 Two session channels therefore suffice for browsing plus one isolated transfer even after a search
 or prefetch. While sharing, search/listing traffic can delay browsing and a channel failure can affect
-both; this is the cost of the server's smaller limit. One-channel servers support browsing and SFTP
-search, but can refuse an export, download or offline save while browsing retains that slot. Such a
-refusal publishes no partial saved folder and leaves the SSH connection usable. Transfers do not
-silently fall back to the browsing channel. Other simultaneous isolated transfers can still exhaust
-a server's slots.
+both; this is the cost of the server's smaller limit.
+
+### One-channel servers
+
+A server that refuses a second channel while the connection holds only browsing's allows one. A
+transfer then borrows browsing's slot rather than sharing its channel: new browsing work waits, outside
+its own deadline, while work already under way finishes; browsing's channel closes; the transfer opens
+its own. The slot comes back when the transfer's channel has closed, however that happens (completion,
+cancellation, deadline or a dropped connection), and browsing work that was waiting goes first. Once a
+server has needed this, later transfers on the same connection borrow in turn instead of racing
+browsing for the slot. A transfer's cancellation and deadlines therefore stay its own.
+
+Browsing waits for a single download or export to finish. A folder save starts no further files while
+browsing is waiting, hands the slot back once the files under way finish, and borrows it again for the
+rest, so browsing waits for at most the files in flight (up to 16 small ones, or one large one). While
+a transfer holds the slot, a second, simultaneous transfer is still refused, as on any server whose
+slots are all in use. Cancelling a transfer while it waits for browsing to finish can close the SSH
+connection, as cancelling any transfer before it owns a channel already could.
+
+### Slots the server has not yet freed
+
+OpenSSH frees a session's slot only when that session's process has exited, a moment after its channel
+has closed. The connection therefore tracks every channel it opens until it has closed. Where it has
+just made room (reclaimed the walk, let a transfer or helper channel close, or replaced a retired
+browsing channel), a refusal while one of its channels is still closing, or within a second of one
+closing, is asked again briefly (at most five seconds); nothing has been sent on a refused channel. A
+transfer refused while the only channels left are retired browsing ones waits for them to close first.
+
+### The Linux search helper
+
+The helper needs a private SFTP channel (holding the search root) and an exec channel beside browsing's,
+so three in all. A refusal of either is a question of room, not of what the server can run: the search
+lets this attempt's channels close before SFTP search takes over (on a one-channel server the fallback
+needs that slot), then frees what it can and tries once more: an earlier search's channels that were
+still closing, or the walk's channel. Only when browsing alone left no room is the helper remembered as
+unavailable for the connection; a refusal while transfers hold channels falls back for that search only.
+With `MaxSessions` 3 the helper runs beside browsing, including straight after a cancelled search; with
+2 or 1 it never fits beside browsing, so search uses SFTP after one attempt.
 
 ## Reproducible checks
 
@@ -88,8 +121,31 @@ passed in 26.122 seconds, with no failures or skips. It exercised folder browsin
 Source/Rendered switching, Refresh and Back. No assertion, timeout or app code changed for the retry.
 This UI smoke uses Demo; the three production transport/persistence checks above use real servers.
 
+## One-channel lending and Linux channel limits: 9 November 2026
+
+A baseline of the unchanged transport against Ubuntu 26.04 (Linux 7.0, OpenSSH 10.2p1, Python 3.14)
+with disposable loopback daemons at `MaxSessions` 10, 3, 2 and 1 found two faults beyond the
+documented limits. After a cancelled helper search, its channels were still closing when the next
+search asked for one; the refusal was remembered, disabling the helper for the connection
+(`MaxSessions` 3 and 2). On a one-channel server a first search threw `channelSetupRejected` to the
+caller, because the helper's channel was still closing when the SFTP fallback opened browsing's. A
+one-channel server could also refuse browsing itself after the SFTP search had opened the walk's
+channel first: browsing now takes the walk's slot back.
+
+With the changes above, the [Linux acceptance](../Tests/LinuxSearchAcceptance/README.md) channel-limit
+test passed at all four limits on one connection each: the helper ran before and after a cancelled
+search at 10 and 3, and at 2 and 1 search fell back once to SFTP with the same results. The seven
+existing Linux tests passed at 10 and 3. The opt-in matrix above passed all 37 tests across its seven
+configurations, now requiring one-channel OpenSSH and Paramiko to complete the offline save by lending
+browsing's channel, and every other server never to lend it. It found one more race, a download
+straight after a failed preview on one-channel OpenSSH, now covered by the settle step above. The macOS
+OpenSSH suite gained `testOneChannelServerLendsBrowsingToTransfersOnOneConnection` (a search before
+browsing; browsing during a 96-file save, which hands the slot back and borrows it again; a download;
+the failed-preview race) and `testOneChannelServerCancelledSaveReturnsTheChannel`. While these changes
+were developed, the first failed with `channelSetupRejected` at the search, at browsing after it and at
+the download after a failed preview; that last step fails three times in three without the settle step. All 508 package tests passed with the OpenSSH fixture (one benchmark skipped as before).
+
 Still unverified: proprietary servers such as Bitvise and NAS-specific configurations, other server
-versions, real network loss/latency, physical iPhone cancellation and one-channel behaviour, and a Linux
-helper constrained by low channel limits. Missing interpreter/procfs capability still uses the bounded
-SFTP fallback. Existing canonical path checks and the portable SFTP atomic-confinement limitation
-remain unchanged.
+versions, real network loss/latency, and physical iPhone cancellation and one-channel behaviour. Missing interpreter/procfs capability still uses the
+bounded SFTP fallback. Existing canonical path checks and the portable SFTP atomic-confinement
+limitation remain unchanged.
