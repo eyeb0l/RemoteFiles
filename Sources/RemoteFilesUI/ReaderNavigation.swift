@@ -149,14 +149,7 @@ struct ReaderBottomBar: ToolbarContent {
         }
         ToolbarSpacer(.flexible, placement: .bottomBar)
         if let source {
-            ToolbarItem(placement: .bottomBar) {
-                Picker("Reading mode", selection: source) {
-                    Text("Rendered").tag(false)
-                    Text("Source").tag(true)
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-            }
+            ToolbarItem(placement: .bottomBar) { ReadingModePicker(source: source).fixedSize() }
             .sharedBackgroundVisibility(.hidden)
             ToolbarSpacer(.flexible, placement: .bottomBar)
         }
@@ -164,6 +157,44 @@ struct ReaderBottomBar: ToolbarContent {
             ToolbarItem(placement: .bottomBar) {
                 Button("Headings", systemImage: "list.bullet.indent", action: headings)
             }
+        }
+    }
+}
+
+/// The reading modes as a segmented control that never writes an old mode back.
+/// UIKit moves a segmented control's selection when the touch ends, and sends its action only after
+/// the next Core Animation commit. SwiftUI's segmented `Picker` writes its binding's value to the
+/// control on every update, so a reader update arriving in between put the old mode back and the
+/// tap did nothing. This writes only a mode that changed elsewhere.
+private struct ReadingModePicker: UIViewRepresentable {
+    @Binding var source: Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator(source: $source) }
+    func makeUIView(context: Context) -> UISegmentedControl {
+        let control = UISegmentedControl(items: ["Rendered", "Source"])
+        control.selectedSegmentIndex = source ? 1 : 0
+        control.addTarget(context.coordinator, action: #selector(Coordinator.selectionChanged(_:)), for: .valueChanged)
+        return control
+    }
+    func updateUIView(_ control: UISegmentedControl, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.source = $source
+        guard coordinator.synchronized != source else { return }
+        coordinator.synchronized = source
+        control.selectedSegmentIndex = source ? 1 : 0
+    }
+
+    @MainActor final class Coordinator: NSObject {
+        var source: Binding<Bool>
+        /// The mode the control last took from the reader or gave to it.
+        var synchronized: Bool
+        init(source: Binding<Bool>) {
+            self.source = source
+            synchronized = source.wrappedValue
+        }
+        @objc func selectionChanged(_ control: UISegmentedControl) {
+            synchronized = control.selectedSegmentIndex == 1
+            source.wrappedValue = synchronized
         }
     }
 }
