@@ -118,6 +118,39 @@ final class SFTPIntegrationTests: XCTestCase {
         }
     }
 
+    /// Stock Dropbear offers only ChaCha20-Poly1305 and AES-CTR. A server like it must be refused with a message
+    /// that says why, not a generic connection failure, and nothing weaker may be tried instead.
+    func testServerWithoutAESGCMReportsNoCommonAlgorithms() async throws {
+        try await assertNoCommonAlgorithms(
+            options: ["Ciphers=chacha20-poly1305@openssh.com,aes128-ctr,aes256-ctr"], serverLog: "no matching cipher found")
+    }
+
+    /// A key-exchange mismatch fails negotiation with the same error while AES-GCM is on offer, so the message
+    /// must not tell the administrator to enable a cipher the server already has.
+    func testServerWithoutCommonKeyExchangeReportsNoCommonAlgorithms() async throws {
+        try await assertNoCommonAlgorithms(
+            options: ["KexAlgorithms=diffie-hellman-group14-sha256"], serverLog: "no matching key exchange method found")
+    }
+
+    private func assertNoCommonAlgorithms(options: [String], serverLog: String) async throws {
+        let server = try await limitedServer(sessions: 10, options: options)
+        do {
+            _ = try await server.service.listDirectory(profile: server.profile, path: server.fixture.files)
+            XCTFail("A server with no algorithms in common must not connect")
+        } catch RemoteFileError.unavailable(let message) {
+            XCTAssertEqual(message, SFTPRemoteFileService.noCommonAlgorithms(jumpHost: false))
+        }
+        // The client fails as soon as it reads the server's offer, which can be before sshd has read the
+        // client's and logged its refusal, so wait for the line rather than reading the log once.
+        let deadline = ContinuousClock.now + .seconds(60)
+        while try !server.log().contains(serverLog) {
+            guard ContinuousClock.now < deadline else {
+                return XCTFail("The server must have refused with \"\(serverLog)\": \(try server.log())")
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
     private struct LimitedServer {
         let service: SFTPRemoteFileService
         let profile: ConnectionProfile
@@ -128,7 +161,7 @@ final class SFTPIntegrationTests: XCTestCase {
     }
 
     /// A second, disposable daemon from the usual fixture's keys and configuration, allowing `sessions` channels.
-    private func limitedServer(sessions: Int) async throws -> LimitedServer {
+    private func limitedServer(sessions: Int, options: [String] = []) async throws -> LimitedServer {
         let original = try Fixture()
         let reservation = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .bind(host: "127.0.0.1", port: 0).get()
@@ -142,6 +175,7 @@ final class SFTPIntegrationTests: XCTestCase {
         server.executableURL = URL(fileURLWithPath: "/usr/sbin/sshd")
         server.arguments = ["-D", "-e", "-f", original.directory + "/sshd_config", "-p", String(port),
                             "-o", "MaxSessions=\(sessions)", "-o", "PidFile=" + original.directory + "/\(name).pid"]
+            + options.flatMap { ["-o", $0] }
         server.environment = ProcessInfo.processInfo.environment.merging(["TZ": ""]) { _, new in new }
         server.standardOutput = log; server.standardError = log
         try server.run()
