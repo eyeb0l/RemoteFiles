@@ -96,7 +96,7 @@ jobs:
     needs: [repository-checks, quick]
     if: needs.repository-checks.outputs.ui == 'true'
     runs-on: xcode-27
-    # Build 30, boot 6, settle 8 and test execution 60 minutes, plus checkout, caches and evidence upload.
+    # Build 30, boot 11, settle 8 and test execution 60 minutes, plus checkout, caches and evidence upload.
     timeout-minutes: 120
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
