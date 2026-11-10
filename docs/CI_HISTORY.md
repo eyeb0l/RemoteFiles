@@ -10,6 +10,189 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 10 November 2026: lost mode taps, ignored switch presses and idle waits traced to their causes
+
+An independent pass over the items [9 November](#9-november-2026-unresolved-control-input-and-playback-causes)
+left open. Three things made the difference:
+
+- **CI's own runtime.** iOS 27.0 (24A434) was installed beside 27.2, on a new iPhone 18 Pro
+  simulator for each. Every result below names its runtime.
+- **A tracer outside the app.** A small library loaded with `DYLD_INSERT_LIBRARIES` logged each
+  touch, gesture-recognizer state, write to a `UISwitch` or `UISegmentedControl`, control action,
+  main-thread wait over 40 ms, and each UIKit animation that started without stopping. The app
+  under test was the unchanged build.
+- **Stalls on demand.** A script paused the app with `SIGSTOP` for 150 ms in every 200. That stands
+  in for a starved main thread on a runner whose load is in the hundreds, without loading the Mac.
+
+### Source-mode tap
+
+**Cause.** UIKit moves a segmented control's selection when the touch ends, and sends its
+`valueChanged` action later, from a block it runs after the next Core Animation commit
+(`_UIAfterCACommitBlock`, called by the update cycle). SwiftUI's segmented `Picker` writes its
+binding's value to the control in every `updateUIView`. An update in between writes the old mode
+back, so the action then reports no change. The reader updates several times in the two seconds
+after a document arrives, which is when the journey taps.
+
+| Evidence | iOS | Result |
+|---|---|---|
+| Hosted run [42274841878, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/42274841878/attempts/1), recording | 27.0 | The control lifts under the touch, with Source dimmed, and settles on Rendered: the touch arrived |
+| Same value written 25 ms into the touch | 27.2 | 8 of 8 taps still selected Source, so a write during the touch is harmless |
+| Old value written when the touch ended | 27.0 | 5 of 5 taps lost, with that recording's appearance |
+| Nothing forced, taps 0.6 to 1.2 s after the control appeared, app paused as above | 27.0 | 1 of 39 lost; its trace is below |
+| Both controls with touch-down and touch-up handled together | 27.0, 27.2 | Segmented control 12 of 12 selected, so a stall alone does not lose this tap |
+
+The lost tap's trace, in seconds:
+
+```
+403522.1908 touch ended on the control          (selection now Source)
+403522.2144 setSelectedSegmentIndex 0 (was 1)   (SwiftUI's update writes Rendered back)
+403522.2188 sendActions valueChanged            (reads Rendered; the binding does not change)
+```
+
+Before the fix the reader wrote the unchanged selection to the control at about 0.15, 0.75 and
+1.55 seconds after it appeared, and five times after each tap. Giving the picker its own view did
+not stop that: two of the three remained.
+
+**Fix.** `ReadingModePicker` replaces the `Picker` in `ReaderBottomBar` with the same
+`UISegmentedControl`, and writes to it only when the mode changed somewhere else. It looks the same
+on iOS 27.0, exposes the same Rendered and Source buttons to XCTest, and still follows ⌥⌘U, Find in
+an HTML document and heading links. A person could lose this tap too, in the frame a document
+finished loading.
+
+**Proof.** `ReaderBottomBarTests` replays the three steps of the trace. It fails on the SwiftUI
+picker, alone or in its own view, and passes on the new control. In the app the only writes left
+are each control's first and real mode changes. The paused-app taps above went from 38 of 39 to
+60 of 60, with no other write in that trace.
+
+### Switch presses
+
+**Cause.** A `UISwitch` acts on a touch only once its long-press recognizer has begun, and that
+needs a 10 ms timer to fire between touch-down and touch-up. If the main thread is busy until both
+events are waiting, the run loop handles them one after the other and the timer never gets its
+turn. The recognizer fails and the switch does nothing. This is the trace
+[5 November](#switch-touches-that-do-nothing) recorded without its cause, and it explains why a
+217 ms press could still be ignored: what matters is whether the run loop comes round while the
+touch is down, which the length of the press only makes more likely.
+
+| Touch, app paused 150 ms in every 200 | iOS | Toggled | Ignored |
+|---|---|---|---|
+| Tap, touch-down and touch-up handled within 30 ms | 27.0 | 0 | 6 |
+| Tap, handled within 30 ms | 27.2 | 0 | 1 |
+| Tap, handled further apart | 27.0 | 14 | 0 |
+| Tap, handled further apart | 27.2 | 13 | 1 (paused 160 ms straight after touch-down) |
+| Half-second press | 27.2 | 15 | 0 |
+| Tap, app not paused | 27.0, 27.2 | 24 | 0 |
+
+Unlike the segmented control, the switch changes its value and sends its action together, so a
+SwiftUI update cannot undo it: 5 of 5 taps survived the old value being written at touch-up.
+
+**What stays.** `pressSwitch` already holds for half a second and presses again if nothing
+changes. That is the right shape for this cause, since a longer hold needs a longer stall to fail,
+and its comment now says so. No app change follows: the switch is UIKit's, and a person's tap is
+lost only if the main thread stalls for the whole of it.
+
+### Idle waits after Find closes
+
+**Cause.** [#66](https://github.com/eyeb0l/RemoteFiles/pull/66) blamed a never-ending lens
+animation on the segmented control. It is the keyboard. Closing Find removes the focused field,
+the keyboard hides, and UIKit animates every change made while it hides, including the Find bar's
+own fade, layout and symbol colours. Those layers are freed when the bar goes, and some of their
+animations then never report stopping. XCTest counts starts against stops, so from then on every
+`Wait for … to idle` runs its full 60 seconds and logs `App animations complete notification not
+received`.
+
+| Find bar | iOS | Tracer loaded | Result |
+|---|---|---|---|
+| Original | 27.2 | Yes | Stalled at the 4th, 12th and 19th close in three runs |
+| Original | 27.0 | Yes | Stalled at the 11th close |
+| Original | 27.0 | No | Stalled at the 2nd close |
+| Original | 27.2 | No | 60 closes, none stalled |
+| Leaves at once | 27.0 | Yes | 60 closes, none stalled |
+| Leaves at once | 27.0 | No | 60 closes, none stalled |
+| Leaves at once | 27.2 | No | 60 closes, none stalled |
+
+Each run opened Find, searched, tapped Done and switched modes twice, again and again in one
+launch, and stopped at its first stalled wait. In the traced stalls, between one and four
+animations of the keyboard's own 0.38-second block were left open: `position`, `bounds.size` or
+`contentsMultiplyColor` on layers of the Find field, its buttons and their symbols, all freed by
+then.
+
+**Fix.** `ReaderFindBar` leaves at once, with `.transition(.identity)`, and takes no animation
+from the transaction. Nothing of the bar is then animated by the keyboard that its removal hides.
+The bar used to fade for the 0.38 seconds the keyboard took; it already appeared and, with a
+hardware keyboard, went without one.
+
+**Limits.** No hosted log has shown this: the nine UI lane logs retained from 3 to 9 November have
+no such message. The lens animations 9 November's sampler found are infinite by design and do not
+count against XCTest's idle check.
+
+### `InvalidTransition` beside hosted failures
+
+`InvalidTransition { phase: idle targetPhase: failed(deinit) }` is not the failure it appears
+beside. A hosted test that throws within half a second of taking down a window holding the reader's
+toolbar reports that text in place of its own error. Two seconds later the same throw is reported
+correctly, a window holding only `Text` or a bare `NavigationStack` never shows it, and the error
+caught inside the test is the test's own `NSError`. So the description comes from something the
+frameworks throw and catch while the toolbar is freed, which XCTest prints in place of the test's
+error. The assertion printed before it, such as `Offline reader lifecycle did not settle`, is the
+real failure.
+
+### A ⌘F taken by SpringBoard
+
+`testReaderShortcutsDriveAnOfflineCopy` failed 2 of 15 local runs with these changes, at `⌘F opens
+Find in an offline copy`, and passed 6 of 6 without them, which is too few to tell the two apart.
+The simulator's `backboardd` log shows the cause, and it is not the reader.
+[9 November](#9-november-2026-first-shortcut-after-launch) took UIKit to register the app's
+shortcuts just after the first chord. It registers them after one of the first few, on iOS 27.0:
+
+| Run | App's shortcuts registered | ⌘F |
+|---|---|---|
+| Passed, with the changes | After the second ⌥⌘U, 1.8 s before ⌘F | Reached the app |
+| Passed, without them | 5 ms before ⌘F was routed | Reached the app |
+| Failed, with the changes | 0.34 s after ⌘F was routed | `KCMD: match in pid:` SpringBoard |
+
+The journey now opens Find with `openFindWithShortcut`, which repeats ⌘F until Find opens and logs
+`UI SHORTCUT` for each one lost. With Find open ⌘F only focuses its field, so a repeat cannot undo
+a chord that worked. Sent as the very first chord after launch, ⌘F was lost and its repeat opened
+Find in 4 of 4 runs. The keyboard journey sends five other chords before its ⌘F and is unchanged.
+
+### Playback rate after backgrounding
+
+Not reproduced. The test as it was when it failed ran 40 times on iOS 27.0 with its host paused as
+above, and the rate was 0 every time the item had gone. The four hosted failures do narrow it,
+though. Each took 5 to 6 seconds where a pass takes 0.13 to 0.38, and run 42004987008's assertion
+failed within half a second, so the time went on taking the player down afterwards. A rate that
+was only late would not slow that. A player told to play with no item keeps its rate of 1. So the
+test played a player the app had already emptied, as [5 November](#playback-background-rate)
+supposed, and which path emptied it first is still not known. The gate added then has held: 4
+failures in 59 core jobs from 3 November until it merged, and none in the 64 since.
+
+### Simulator boot bound
+
+Nightly run [42598591962](https://github.com/eyeb0l/RemoteFiles/actions/runs/42598591962)'s first
+attempt stopped at `simctl bootstatus` after 300 seconds. Its phase record shows the 1-minute load
+at 512 when it stopped, against 8 before the boot: the device was booting slowly, not hung. Of 266
+boots from 3 to 9 November the median took 104 seconds, 20 took more than three minutes, and the
+slowest to finish took 298, counting `simctl boot` as well. The bound is now 600 seconds, and the
+UI job's ceiling still has eleven minutes to spare.
+
+### Evidence upload
+
+Run [42296553075](https://github.com/eyeb0l/RemoteFiles/actions/runs/42296553075)'s first attempt
+passed all 36 UI journeys and failed because `upload-artifact` could not reach GitHub
+(`Failed to CreateArtifact: Unable to make request: ETIMEDOUT`). The upload now gets a second
+attempt in a following step, and only that one can fail the job, so evidence that cannot be
+retained still fails the lane. This is the one exception to the rule against `continue-on-error`,
+and a runner test pins it to that step.
+
+### Evidence
+
+Traces, logs, result bundles, the tracer and the pause script are under
+`/private/tmp/remotefiles-ci-indep/`. The lost tap is `runs/v270-early-throttle`, the switch
+tables `runs/throttle1`, `runs/v270-throttle1` and `runs/throttle2-press`, and the Find runs
+`runs/*findclose*` and `runs/n27*`, and the shortcut runs `runs/seq-*`. No hosted job was rerun.
+Nothing here was tried on a device.
+
 ## 9 November 2026: abandoned VoiceOver and Release jobs (PR #106)
 
 Run 42667473091 selected every lane for PR #106. The quick lanes and the UI journeys
