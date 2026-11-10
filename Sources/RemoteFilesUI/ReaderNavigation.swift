@@ -119,6 +119,12 @@ struct ReaderFindBar: View {
         .padding(.horizontal, 16).padding(.vertical, 6)
         .onAppear { focused = true }
         .onChange(of: navigation.findFocusRequest) { _, _ in focused = true }
+        // Closing Find removes the focused field, which hides the keyboard, and UIKit animates
+        // every change made while it hides. Animations it started on this bar's layers never
+        // reported stopping once the bar had gone, and XCTest then waited a minute before each
+        // step. The bar goes at once instead; see "Idle waits after Find closes" in docs/CI_HISTORY.md.
+        .transition(.identity)
+        .transaction { $0.animation = nil }
     }
     private var statusText: some View {
         Text(status).font(.footnote.monospacedDigit()).foregroundStyle(.secondary)
