@@ -934,7 +934,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         }
         let work: @Sendable (TransferActivity) async throws -> T = { activity in
             defer { drained.set() }
-            let sftp = try await session.client.openSFTP(logger: Self.sftpLogger())
+            let sftp = try await self.openTransferSFTP(for: session)
             channel.install(sftp)
             do {
                 try Task.checkCancellation()
@@ -975,8 +975,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         if let existing = batch.opening {
             opening = existing
         } else {
-            let client = session.client
-            opening = Task { try await client.openSFTP(logger: Self.sftpLogger()) }
+            opening = Task { try await self.openTransferSFTP(for: session) }
             batch.session = session; batch.opening = opening
             measurements.sftpChannels += 1
         }
@@ -1001,7 +1000,46 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         }
     }
 
+    /// Reclaim the optional walk channel only after a server refuses another channel. Servers with
+    /// two session slots can then keep browsing and one isolated transfer. In-flight walk requests
+    /// drain normally before their channel closes; subsequent walks share browsing for this session.
+    /// A server with no reclaimable walk still reports its refusal, without reconnecting or sharing
+    /// a transfer's cancellation/deadline with foreground reads.
+    private func openTransferSFTP(for session: LiveSession) async throws -> SFTPClient {
+        do { return try await session.client.openSFTP(logger: Self.sftpLogger()) }
+        catch {
+            guard let refusal = error as? NIOSSHError, refusal.type == .channelSetupRejected,
+                  session.walkReclamation != nil || session.sftp[.walk] != nil || session.openingSFTP[.walk] != nil else { throw error }
+            session.walkUsesForeground = true
+            let draining: Task<Void, Never>
+            if let pending = session.walkReclamation {
+                draining = pending
+            } else {
+                let shared = session.sftp.removeValue(forKey: .walk)
+                let opening = session.openingSFTP.removeValue(forKey: .walk)
+                draining = Task {
+                    if let shared { await self.drainWalk(shared) }
+                    if let opening, let shared = try? await opening.value { await self.drainWalk(shared) }
+                }
+                session.walkReclamation = draining
+            }
+            await draining.value
+            session.walkReclamation = nil
+            try Task.checkCancellation()
+            guard session.client.isConnected else { throw RemoteFileError.connectionEnded }
+            measurements.sftpChannels += 1
+            return try await session.client.openSFTP(logger: Self.sftpLogger())
+        }
+    }
+
+    private func drainWalk(_ shared: SharedSFTPChannel) async {
+        shared.retired = true
+        if shared.users > 0 { await withCheckedContinuation { shared.idleWaiters.append($0) } }
+        await shared.close().value
+    }
+
     private func acquireSFTP(for session: LiveSession, role: SFTPChannelRole = .foreground) async throws -> SharedSFTPChannel {
+        if role == .walk, session.walkUsesForeground { return try await acquireSFTP(for: session, role: .foreground) }
         if let shared = session.sftp[role] {
             if !shared.retired, !shared.closing.isSet, shared.client.isActive { shared.users += 1; return shared }
             retire(shared, from: session)
@@ -1022,9 +1060,14 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
             if session.openingSFTP[role] == opening { session.openingSFTP[role] = nil }
             // A server allowing few channels may refuse a second one. A walk then shares the first.
             if role == .walk, let refusal = error as? NIOSSHError, refusal.type == .channelSetupRejected {
+                session.walkUsesForeground = true
                 return try await acquireSFTP(for: session, role: .foreground)
             }
             throw error
+        }
+        if role == .walk, session.walkUsesForeground {
+            retire(shared, from: session)
+            return try await acquireSFTP(for: session, role: .foreground)
         }
         if session.openingSFTP[role] == opening { session.openingSFTP[role] = nil; session.sftp[role] = shared }
         // Another waiter may have failed on this channel and retired it while this one resumed.
@@ -1036,6 +1079,10 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     private func release(_ shared: SharedSFTPChannel, from session: LiveSession, reusable: Bool) {
         shared.users -= 1
         if !reusable { retire(shared, from: session) } else if shared.retired, shared.users == 0 { shared.close() }
+        if shared.users == 0 {
+            let waiters = shared.idleWaiters; shared.idleWaiters = []
+            waiters.forEach { $0.resume() }
+        }
     }
 
     private func retire(_ shared: SharedSFTPChannel, from session: LiveSession) {
@@ -1301,6 +1348,8 @@ private final class LiveSession: @unchecked Sendable {
     // Actor-isolated to SFTPRemoteFileService; closing the SSH socket also closes these channels.
     var sftp: [SFTPChannelRole: SharedSFTPChannel] = [:]
     var openingSFTP: [SFTPChannelRole: Task<SharedSFTPChannel, Error>] = [:]
+    var walkUsesForeground = false
+    var walkReclamation: Task<Void, Never>?
     var serverSearchUnavailable = false
     init(profile: ConnectionProfile, client: SSHClient, control: SocketControl, bastion: SSHClient? = nil) {
         self.profile = profile; self.client = client; self.control = control; self.bastion = bastion
@@ -1320,10 +1369,17 @@ private final class SharedSFTPChannel: @unchecked Sendable {
     let closing = LockedFlag()
     var users = 0
     var retired = false
+    var idleWaiters: [CheckedContinuation<Void, Never>] = []
+    private let closeLock = NSLock()
+    private var closeTask: Task<Void, Never>?
     init(client: SFTPClient, role: SFTPChannelRole) { self.client = client; self.role = role }
-    func close() {
+    @discardableResult func close() -> Task<Void, Never> {
+        closeLock.lock(); defer { closeLock.unlock() }
+        if let closeTask { return closeTask }
         let client = client
-        Task { try? await client.close() }
+        let task = Task { try? await client.close(); return () }
+        closeTask = task
+        return task
     }
 }
 

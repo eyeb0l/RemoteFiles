@@ -12,6 +12,7 @@ Choose a guide by what you want to do.
 - [Use a jump host](JUMP_HOSTS.md): connect through one SSH bastion and verify both hosts.
 - [Manage SSH keys](KEY_SUPPORT.md) or [install a public key](PUBLIC_KEY_INSTALLATION.md) on a compatible server. Installation is a separately confirmed server change; browsing is read only.
 - [Browse and search folders](FOLDER_BROWSING.md): sorting, hidden files, symbolic links and search limits.
+- [Server compatibility](SERVER_COMPATIBILITY.md): verified implementations, session-channel limits and reproducible acceptance.
 - [Read and preview files](READER.md): supported formats, navigation, source, sharing and size limits.
 - [Manage downloads](DOWNLOADS.md): queues, progress, retry, Files export and background SSH transfers.
 - [Save files and folders for offline use](OFFLINE_FILES.md): snapshots, updates, storage limits and offline links.

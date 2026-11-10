@@ -39,6 +39,18 @@ class CIScopeTests(unittest.TestCase):
                 self.assertEqual(lanes(result), QUICK_ONLY)
                 self.assertEqual(result["reasons"], {})
 
+    def test_opt_in_server_acceptance_suites_never_select_acceptance_lanes(self):
+        # Their launchers copy them into isolated snapshots; no CI target compiles them.
+        for readme in ("Tests/LinuxSearchAcceptance/README.md", "Tests/ServerCompatibilityAcceptance/README.md"):
+            with self.subTest(path=readme):
+                self.assertEqual(lanes(classify([readme])), NOTHING)
+        for path in ("Tests/LinuxSearchAcceptance/LinuxServerSearchAcceptanceTests.swift",
+                     "Tests/ServerCompatibilityAcceptance/ServerCompatibilityTests.swift"):
+            with self.subTest(path=path):
+                result = classify([path])
+                self.assertEqual(lanes(result), QUICK_ONLY)
+                self.assertEqual(result["reasons"], {})
+
     def test_ui_journeys_app_target_packages_vendored_code_and_demo_resources_add_the_ui_tier(self):
         for path in ("Tests/RemoteFilesUITests/RemoteFilesUITests.swift", "App/Info.plist", "Package.swift", "Package.resolved",
                      "RemoteFiles.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved",

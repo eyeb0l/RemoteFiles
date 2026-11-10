@@ -10,6 +10,21 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 9 November 2026: abandoned VoiceOver and Release jobs (PR #106)
+
+Run 42667473091 selected every lane for PR #106. The quick lanes and the UI journeys
+passed. The VoiceOver and Release jobs were never created: the run lists no job,
+log or annotation for either. GitHub reported both to **CI gate** as `abandoned`, so
+the gate failed closed, as intended. Both lanes had passed in that morning's nightly
+run, and nothing in the repository explains why GitHub did not schedule them.
+
+Only an unknown path had selected them: the PR's new opt-in
+`Tests/ServerCompatibilityAcceptance/` suite. Like `Tests/LinuxSearchAcceptance/`,
+no CI target compiles it; its launcher copies it into an isolated snapshot. The
+scope now classifies its README as repository-only and its other files as quick
+validation. Because that fix changes `scripts/ci_scope.py`, its own push still
+selects every lane, which gives the two lanes a fresh chance to run.
+
 ## 9 November 2026: portrait library-overlay Tab report (PR #66)
 
 The PR #66 report came from one hardware-HID run on an iPad simulator, recorded in
