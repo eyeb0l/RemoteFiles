@@ -74,6 +74,12 @@ those still in flight, so draining them costs no extra round trip; its status mu
 before EOF, task cancellation, or a reply other than names or EOF (upstream silently ended the listing on
 one) stops new requests, drains those in flight, closes the handle and fails the listing.
 
+`SFTPClient` also exposes its child channel's `closeFuture` as a read-only property. Servers that limit
+session channels free a slot only once its channel has closed, and a close can begin in several places
+(a deadline, cancellation, the connection ending). RemoteFiles waits on it before reopening the channel
+a one-channel server lent to a transfer, and before falling back after its Linux search helper ran out of
+channels. Nothing else about the channel or its pipeline is exposed.
+
 The vendored SFTP decoder rejects a zero-length frame and any frame larger than 1 MiB as soon as its
 four-byte length prefix arrives. Both client and server `ByteToMessageHandler` instances use the matching
 1 MiB-plus-prefix cumulation cap. SFTP v3 has no negotiated maximum; RemoteFiles requests file data in

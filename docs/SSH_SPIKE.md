@@ -54,7 +54,9 @@ Its next few folders are listed ahead on the session's walk channel, over a sess
 ([details](PERFORMANCE.md#offline-folders-listing-ahead-while-files-run)).
 On a server with few session slots, walks share browsing after a channel refusal. An idle or draining
 walk channel is reclaimed when needed for an isolated transfer; two slots suffice for browsing and
-one transfer. [Server compatibility](SERVER_COMPATIBILITY.md) records the behaviour and acceptance.
+one transfer. On a server allowing one, browsing lends its slot to a transfer and waits, outside its
+deadline, for it back; a folder save returns it between files when browsing is waiting.
+[Server compatibility](SERVER_COMPATIBILITY.md) records the behaviour and acceptance.
 A listing canonicalizes its path once and skips Citadel's repeated `realpath`, saving one round
 trip per folder. The application only exposes realpath, stat, readdir, and read operations; it
 does not issue remote writes or shell commands.

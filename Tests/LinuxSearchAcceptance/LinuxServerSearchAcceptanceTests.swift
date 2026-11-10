@@ -6,6 +6,10 @@ import Citadel
 
 final class LinuxServerSearchAcceptanceTests: XCTestCase {
     private func connection(restricted: Bool = false) async throws -> (SFTPRemoteFileService, ConnectionProfile, String) {
+        try await Self.sharedConnection(for: self, restricted: restricted)
+    }
+
+    static func sharedConnection(for test: XCTestCase, restricted: Bool = false) async throws -> (SFTPRemoteFileService, ConnectionProfile, String) {
         let env = ProcessInfo.processInfo.environment
         let local = try XCTUnwrap(env["LINUX_SEARCH_LOCAL"])
         let root = try XCTUnwrap(env["LINUX_SEARCH_ROOT"])
@@ -23,7 +27,7 @@ final class LinuxServerSearchAcceptanceTests: XCTestCase {
         var saved = AppMetadata(); saved.identities = [identity]; saved.connections = [profile]
         try await metadata.save(saved)
         let service = SFTPRemoteFileService(identityStore: identities, trustStore: trust, metadataStore: metadata, timeoutSeconds: 15)
-        addTeardownBlock { await service.disconnect() }
+        test.addTeardownBlock { await service.disconnect() }
         return (service, profile, root)
     }
 
@@ -193,6 +197,52 @@ final class LinuxServerSearchAcceptanceTests: XCTestCase {
         let metrics = await service.metrics()
         XCTAssertGreaterThanOrEqual(metrics.serverSearchOperations, 1)
         XCTAssertEqual(metrics.connections, 1)
+    }
+}
+
+/// Runs against a fixture daemon whose `MaxSessions` is `LINUX_SEARCH_MAX_SESSIONS`. The helper needs a private SFTP
+/// channel and an exec channel beside browsing's: with room for them it must still be used, including straight after
+/// a cancelled search whose channels the server has not yet freed; without, the SFTP search must give the same results.
+final class LinuxServerChannelLimitAcceptanceTests: XCTestCase {
+    func testHelperSearchUnderTheServersChannelLimit() async throws {
+        let sessions = try XCTUnwrap(Int(ProcessInfo.processInfo.environment["LINUX_SEARCH_MAX_SESSIONS"] ?? ""))
+        let (service, profile, root) = try await LinuxServerSearchAcceptanceTests.sharedConnection(for: self)
+        // Browsing, and a background listing that opens the walk's channel where the server allows one.
+        _ = try await service.listDirectory(profile: profile, path: root)
+        _ = try await service.listDirectoryInBackground(profile: profile, path: root + "/sub")
+        func contents(_ query: String, below folder: String) async throws -> [String] {
+            var found: [String] = []
+            for try await update in RemoteFolderSearch.contents(matching: query, below: folder, profile: profile, service: service, includeHidden: false) {
+                found += update.contentMatches.map(\.entry.name)
+            }
+            return found
+        }
+        let first = try await contents("[x].*", below: root)
+        XCTAssertEqual(first, ["needle-2.txt"])
+        // Cancel a search mid-way, then search at once: its channels may not have been freed yet.
+        let cancelled = Task {
+            for try await _ in RemoteFolderSearch.contents(matching: "needle", below: root + "/large", profile: profile, service: service, includeHidden: false) { }
+        }
+        while await service.metrics().serverSearchAttempts < 2 && sessions >= 3 { await Task.yield() }
+        try await Task.sleep(for: .milliseconds(150))
+        cancelled.cancel()
+        _ = await cancelled.result
+        let after = try await contents("needle", below: root + "/sub")
+        XCTAssertEqual(after, ["source.md"])
+        let listing = try await service.listDirectory(profile: profile, path: root + "/sub")
+        XCTAssertTrue(listing.entries.contains { $0.name == "source.md" })
+        let metrics = await service.metrics()
+        print("LINUX_CHANNELS sessions=\(sessions) attempts=\(metrics.serverSearchAttempts) completed=\(metrics.serverSearchOperations) sftpReads=\(metrics.fileOperations) channels=\(metrics.sftpChannels) connections=\(metrics.connections)")
+        XCTAssertEqual(metrics.connections, 1, "A channel limit must not cost the authenticated connection")
+        if sessions >= 3 {
+            XCTAssertEqual(metrics.serverSearchAttempts, 3)
+            XCTAssertEqual(metrics.serverSearchOperations, 2, "The searches before and after the cancelled one use the helper")
+            XCTAssertEqual(metrics.fileOperations, 0)
+        } else {
+            XCTAssertEqual(metrics.serverSearchAttempts, 1, "Browsing alone leaves no room: remembered for the connection")
+            XCTAssertEqual(metrics.serverSearchOperations, 0)
+            XCTAssertGreaterThan(metrics.fileOperations, 0)
+        }
     }
 }
 

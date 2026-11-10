@@ -37,9 +37,10 @@ All scenarios require:
 - Unicode listings, reused browsing/walk channels, exact large-file bytes with pipelined reads.
 - Repeated content searches using bounded SFTP fallback, remembered helper unavailability, no
   symlink-content reads, and the file-count limit.
-- An offline folder saved after browsing and walking: all original bytes and the skipped link,
-  or explicit channel rejection on a one-channel server with no partial snapshot published.
-- Snapshot symlink rejection, preview/transfer byte limits, and continued browsing.
+- An offline folder saved after browsing and walking: all original bytes and the skipped link. A
+  one-channel server must lend browsing's channel to the save; other servers must never lend it.
+- Snapshot symlink rejection, preview/transfer byte limits (a download straight after a failed
+  preview, on every server), and continued browsing.
 
 AsyncSSH caps replies at 1 KiB and Paramiko at 4 KiB to exercise real short-read handling.
 Against `paramiko-2`, two additional tests gate an actual READDIR with files outside the saved tree.

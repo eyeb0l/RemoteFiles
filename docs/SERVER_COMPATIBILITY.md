@@ -22,11 +22,46 @@ channel-capacity failures.
 
 Two session channels therefore suffice for browsing plus one isolated transfer even after a search
 or prefetch. While sharing, search/listing traffic can delay browsing and a channel failure can affect
-both; this is the cost of the server's smaller limit. One-channel servers support browsing and SFTP
-search, but can refuse an export, download or offline save while browsing retains that slot. Such a
-refusal publishes no partial saved folder and leaves the SSH connection usable. Transfers do not
-silently fall back to the browsing channel. Other simultaneous isolated transfers can still exhaust
-a server's slots.
+both; this is the cost of the server's smaller limit.
+
+### One-channel servers
+
+A server that refuses a second channel while the connection holds only browsing's allows one. A
+transfer then borrows browsing's slot rather than sharing its channel: new browsing work waits, outside
+its own deadline, while work already under way finishes; browsing's channel closes; the transfer opens
+its own. The slot comes back when the transfer's channel has closed, however that happens (completion,
+cancellation, deadline or a dropped connection), and browsing work that was waiting goes first. Once a
+server has needed this, later transfers on the same connection borrow in turn instead of racing
+browsing for the slot. A transfer's cancellation and deadlines therefore stay its own.
+
+Browsing waits for a single download or export to finish. A folder save starts no further files while
+browsing is waiting, hands the slot back once the files under way finish, and borrows it again for the
+rest, so browsing waits for at most the files in flight (up to 16 small ones, or one large one). A file
+waiting for the slot to come back is queued, not stalled: neither its transfer's idle deadline nor the
+save's minute without bytes starts until it has the slot. While
+a transfer holds the slot, a second, simultaneous transfer is still refused, as on any server whose
+slots are all in use. Cancelling a transfer while it waits for browsing to finish can close the SSH
+connection, as cancelling any transfer before it owns a channel already could.
+
+### Slots the server has not yet freed
+
+OpenSSH frees a session's slot only when that session's process has exited, a moment after its channel
+has closed. The connection therefore tracks every channel it opens until it has closed. Where it has
+just made room (reclaimed the walk, let a transfer or helper channel close, or replaced a retired
+browsing channel), a refusal while one of its channels is still closing, or within a second of one
+closing, is asked again briefly (at most five seconds); nothing has been sent on a refused channel. A
+transfer refused while the only channels left are retired browsing ones waits for them to close first.
+
+### The Linux search helper
+
+The helper needs a private SFTP channel (holding the search root) and an exec channel beside browsing's,
+so three in all. A refusal of either is a question of room, not of what the server can run: the search
+lets this attempt's channels close before SFTP search takes over (on a one-channel server the fallback
+needs that slot), then frees what it can and tries once more: an earlier search's channels that were
+still closing, or the walk's channel. Only when browsing alone left no room is the helper remembered as
+unavailable for the connection; a refusal while transfers hold channels falls back for that search only.
+With `MaxSessions` 3 the helper runs beside browsing, including straight after a cancelled search; with
+2 or 1 it never fits beside browsing, so search uses SFTP after one attempt.
 
 ## Reproducible checks
 
@@ -88,8 +123,75 @@ passed in 26.122 seconds, with no failures or skips. It exercised folder browsin
 Source/Rendered switching, Refresh and Back. No assertion, timeout or app code changed for the retry.
 This UI smoke uses Demo; the three production transport/persistence checks above use real servers.
 
+## One-channel lending and Linux channel limits: 9 November 2026
+
+A baseline of the unchanged transport against Ubuntu 26.04 (Linux 7.0, OpenSSH 10.2p1, Python 3.14)
+with disposable loopback daemons at `MaxSessions` 10, 3, 2 and 1 found two faults beyond the
+documented limits. After a cancelled helper search, its channels were still closing when the next
+search asked for one; the refusal was remembered, disabling the helper for the connection
+(`MaxSessions` 3 and 2). On a one-channel server a first search threw `channelSetupRejected` to the
+caller, because the helper's channel was still closing when the SFTP fallback opened browsing's. A
+one-channel server could also refuse browsing itself after the SFTP search had opened the walk's
+channel first: browsing now takes the walk's slot back.
+
+With the changes above, the [Linux acceptance](../Tests/LinuxSearchAcceptance/README.md) channel-limit
+test passed at all four limits on one connection each: the helper ran before and after a cancelled
+search at 10 and 3, and at 2 and 1 search fell back once to SFTP with the same results. The seven
+existing Linux tests passed at 10 and 3. The opt-in matrix above passed all 37 tests across its seven
+configurations, now requiring one-channel OpenSSH and Paramiko to complete the offline save by lending
+browsing's channel, and every other server never to lend it. It found one more race, a download
+straight after a failed preview on one-channel OpenSSH, now covered by the settle step above. The macOS
+OpenSSH suite gained `testOneChannelServerLendsBrowsingToTransfersOnOneConnection` (a search before
+browsing; browsing during a 96-file save, which hands the slot back and borrows it again; a download;
+the failed-preview race) and `testOneChannelServerCancelledSaveReturnsTheChannel`. While these changes
+were developed, the first failed with `channelSetupRejected` at the search, at browsing after it and at
+the download after a failed preview; that last step fails three times in three without the settle step. All 508 package tests passed with the OpenSSH fixture (one benchmark skipped as before).
+
+## Network faults: 9 November 2026
+
+[Network fault acceptance](../Tests/NetworkFaultAcceptance/README.md) ran the production adapter from
+a Mac against a disposable OpenSSH 10.2p1 daemon on an Ubuntu server, directly over a tailnet, with
+delay, loss, rate limits and total outages applied by `tc netem` and `nftables` on the server's tailnet
+interface to the fixture's port alone; the server logged the Mac's own address. All six tests passed on
+the final code:
+
+| Fault | Result |
+|---|---|
+| 150 ± 30 ms delay, 2% loss on replies | Listing 1.6 s, helper search 1.6 s, 8 MiB download 135 s, 48-file save 75 s; every byte equal; one connection |
+| Outage during a managed download (6 Mbit/s) | Ended at its idle deadline plus close grace (15.2 s with a 10 s test deadline), kept 3.5 MB, resumed from exactly that offset on a new connection |
+| 5 s outage during a download | Finished on the same connection, every byte equal |
+| Outage while browsing | Timed out at 15.1 s; TCP outlived the outage, so browsing continued on the same connection |
+| Outage, then cancelling a folder save | Returned in 5 ms; nothing published; the save then succeeded |
+| Outage outlasting a folder save | Failed at 59.6 s (a file's 60 s idle limit; 179.4 s before that change); drained in 4.8 s; nothing published; the save then succeeded |
+
+The lossy transfers are slow because of TCP, not the app: with a 150 ms round trip, 2% loss and the
+tailnet's 1,280-byte packets, TCP's loss-limited rate is about 70 KB/s, which predicts roughly two
+minutes for 8 MiB. Earlier runs, before a per-process firewall on the Mac allowed the test runner,
+reached the fixture through an SSH port forward with the faults on the server's loopback, where loss
+is recovered almost at once (the same download took 5–7 s); every other result matched.
+
+A folder save's files then had a fixed 180-second deadline rather than a transfer's idle deadline, so a
+save stalled by an outage took three minutes to report failure, against about a minute for a single
+download. A folder save's file now fails after 60 seconds without receiving bytes, in the transport and in
+its exporter; `testStalledFolderSaveFailsAtTheIdleLimit` covers it in the macOS OpenSSH suite, and fails
+against the fixed deadline. Single-file offline saves and exports keep the 180-second total.
+
+## Physical iPhone, channels and faults: 9 November 2026
+
+[Device acceptance](../Tests/DeviceAcceptance/README.md) ran on the iPhone 17 Pro (iOS 27.2) in a signed
+Debug `RemoteFilesTests` build of the committed code, against OpenSSH 10.2p1 daemons on an Ubuntu server
+reached over the phone's own tailnet connection; the server logged the phone's address. Faults were
+applied on the server to the fixture port alone, by the phone itself through a control key whose forced
+command allows only those actions. All three tests passed, twice (figures from the second run):
+
+| Test | Result |
+|---|---|
+| Cancellation | A rate-limited download 0.9 s, a folder save 5 ms and a helper content search under 1 ms after cancelling; nothing published; browsing and a helper search then worked on the same connection |
+| Outages on the phone's socket | A download ended 15.1 s into an outage (10 s test idle limit plus the 5 s close grace), resumed from the 2.4 MB kept with every byte equal; a 5 s outage was ridden out; cancelling during an outage returned after 5.06 s (the close grace); browsing then reconnected |
+| One-channel server | Search before browsing fell back to SFTP; browsing during a 48-file save waited 0.76 s while the save handed back the channel; four loans; every byte equal; a download borrowed the channel; cancelling a borrowing save returned in 7 ms and published nothing; one connection |
+
 Still unverified: proprietary servers such as Bitvise and NAS-specific configurations, other server
-versions, real network loss/latency, physical iPhone cancellation and one-channel behaviour, and a Linux
-helper constrained by low channel limits. Missing interpreter/procfs capability still uses the bounded
-SFTP fallback. Existing canonical path checks and the portable SFTP atomic-confinement limitation
-remain unchanged.
+versions, and cellular-only paths or loss rates on the phone (its faults were outages and rate limits
+over a tailnet). Missing interpreter/procfs capability still uses the
+bounded SFTP fallback. Existing canonical path checks and the portable SFTP atomic-confinement
+limitation remain unchanged.

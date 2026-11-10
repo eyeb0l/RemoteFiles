@@ -70,6 +70,12 @@ public final class SFTPClient: Sendable {
     public var isActive: Bool {
         self.channel.isActive
     }
+
+    /// Completes once the SFTP channel has closed, however the close began, including when its SSH
+    /// connection ends. RemoteFiles uses it to know when the server has given back a session slot.
+    public var closeFuture: EventLoopFuture<Void> {
+        self.channel.closeFuture
+    }
     
     /// The SFTP client's event loop.
     public var eventLoop: EventLoop {

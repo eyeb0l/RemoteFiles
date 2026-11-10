@@ -12,18 +12,136 @@ import Citadel
 final class SFTPIntegrationTests: XCTestCase {
     #if os(macOS)
     func testTwoChannelServerReclaimsTheWalkForAnOfflineSave() async throws {
+        let server = try await limitedServer(sessions: 2)
+        let (service, profile, fixture) = (server.service, server.profile, server.fixture)
+        let tree = try Self.offlineTree(in: fixture, folders: 3, files: 6)
+        let root = try await service.listDirectory(profile: profile, path: tree).path
+        _ = try await service.listDirectoryForWalk(profile: profile, path: root)
+        let local = URL(fileURLWithPath: server.directory + "/two-channel-offline")
+        let store = try OfflineFileStore(directory: local)
+        addTeardownBlock { await store.cancelAndDrain() }
+        let folder = try await store.pinFolder(profile: profile, path: root, service: service)
+        XCTAssertEqual(folder.fileIDs.count, 18)
+        for id in folder.fileIDs {
+            let lease = try await store.lease(id)
+            XCTAssertEqual(try Data(contentsOf: lease.url), try Data(contentsOf: URL(fileURLWithPath: lease.pin.path)))
+        }
+        _ = try await service.listDirectory(profile: profile, path: root)
+        _ = try await service.listDirectoryForWalk(profile: profile, path: root)
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.connections, 1, "Reclaim capacity on the authenticated connection")
+        XCTAssertEqual(metrics.foregroundLoans, 0, "Two channels hold browsing and a transfer without lending")
+        XCTAssertTrue(try server.log().contains("no more sessions"), "The fixture must actually exercise channel refusal")
+    }
+
+    /// A server allowing one session channel: a search tried first leaves its helper channel closing, then
+    /// browsing, a walk, an offline save with browsing between its files, and a download all work on one
+    /// connection, with no transfer ever sharing browsing's channel.
+    func testOneChannelServerLendsBrowsingToTransfersOnOneConnection() async throws {
+        let server = try await limitedServer(sessions: 1)
+        let (service, profile, fixture) = (server.service, server.profile, server.fixture)
+        let tree = try Self.offlineTree(in: fixture, folders: 4, files: 24)
+        // First, before browsing opens its channel: the helper's own channel must be closed before the SFTP search.
+        var found: [String] = []
+        for try await update in RemoteFolderSearch.names(matching: "file-23", below: tree, profile: profile, service: service, includeHidden: false) {
+            found += update.matches.map(\.name)
+        }
+        XCTAssertEqual(found.count, 4)
+        let root = try await service.listDirectory(profile: profile, path: tree).path
+        _ = try await service.listDirectoryForWalk(profile: profile, path: root)
+        let store = try OfflineFileStore(directory: URL(fileURLWithPath: server.directory + "/one-channel-offline"))
+        addTeardownBlock { await store.cancelAndDrain() }
+        let saving = Task { try await store.pinFolder(profile: profile, path: root, service: service) }
+        // Browsing while the save holds the only channel waits for the files under way, then succeeds, and the
+        // save borrows the channel again for the rest.
+        try await Self.waitForLoan(service)
+        let listing = try await service.listDirectory(profile: profile, path: root + "/folder 3")
+        XCTAssertEqual(listing.entries.count, 24)
+        let folder = try await saving.value
+        let loans = await service.metrics().foregroundLoans
+        print("ONE_CHANNEL save loans=\(loans)")
+        XCTAssertGreaterThanOrEqual(loans, 2, "The save gave the channel back for browsing, then borrowed it again")
+        XCTAssertEqual(folder.fileIDs.count, 96)
+        for id in folder.fileIDs {
+            let lease = try await store.lease(id)
+            XCTAssertEqual(try Data(contentsOf: lease.url), try Data(contentsOf: URL(fileURLWithPath: lease.pin.path)))
+        }
+        // A single download while browsing holds the channel borrows it too.
+        _ = try await service.listDirectory(profile: profile, path: root)
+        let destination = URL(fileURLWithPath: server.directory + "/one-channel-download")
+        let file = root + "/folder 1/file-4.txt"
+        _ = try await service.downloadSnapshotFile(profile: profile, path: file, canonicalRoot: root,
+                                                   destination: destination, limit: 100_000, progress: { _ in })
+        XCTAssertEqual(try Data(contentsOf: destination), try Data(contentsOf: URL(fileURLWithPath: file)))
+        let lentForDownload = await service.metrics().foregroundLoans
+        XCTAssertEqual(lentForDownload, loans + 1)
+        // A failed preview retires browsing's channel; a download straight after must wait for it to close.
+        do { _ = try await service.readFile(profile: profile, path: file, limit: 10); XCTFail("Oversized previews must fail") }
+        catch RemoteFileError.tooLarge { }
+        let again = URL(fileURLWithPath: server.directory + "/one-channel-download-again")
+        _ = try await service.downloadSnapshotFile(profile: profile, path: file, canonicalRoot: root,
+                                                   destination: again, limit: 100_000, progress: { _ in })
+        XCTAssertEqual(try Data(contentsOf: again), try Data(contentsOf: URL(fileURLWithPath: file)))
+        _ = try await service.listDirectory(profile: profile, path: root)
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.connections, 1, "Lend the slot on the authenticated connection")
+        XCTAssertTrue(try server.log().contains("no more sessions"), "The fixture must actually exercise channel refusal")
+    }
+
+    /// Cancelling a save that borrowed browsing's only channel publishes nothing, returns the slot, and
+    /// leaves the connection browsing.
+    func testOneChannelServerCancelledSaveReturnsTheChannel() async throws {
+        let server = try await limitedServer(sessions: 1)
+        let (service, profile, fixture) = (server.service, server.profile, server.fixture)
+        let tree = try Self.offlineTree(in: fixture, folders: 4, files: 24)
+        let root = try await service.listDirectory(profile: profile, path: tree).path
+        let store = try OfflineFileStore(directory: URL(fileURLWithPath: server.directory + "/one-channel-cancelled"))
+        addTeardownBlock { await store.cancelAndDrain() }
+        let saving = Task { try await store.pinFolder(profile: profile, path: root, service: service) }
+        try await Self.waitForLoan(service)
+        saving.cancel()
+        do { _ = try await saving.value; XCTFail("The cancelled save completed") } catch is CancellationError { }
+        await store.cancelAndDrain()
+        let pins = await store.snapshot()
+        XCTAssertTrue(pins.isEmpty, "A cancelled save publishes no partial copy")
+        let listing = try await service.listDirectory(profile: profile, path: root + "/folder 2")
+        XCTAssertEqual(listing.entries.count, 24)
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.connections, 1)
+    }
+
+    private static func waitForLoan(_ service: SFTPRemoteFileService) async throws {
+        let deadline = ContinuousClock.now + .seconds(60)
+        while await service.metrics().foregroundLoans == 0 {
+            guard ContinuousClock.now < deadline else { XCTFail("No transfer borrowed browsing's channel"); throw RemoteFileError.timedOut }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+    }
+
+    private struct LimitedServer {
+        let service: SFTPRemoteFileService
+        let profile: ConnectionProfile
+        let fixture: Fixture
+        let directory: String
+        let logURL: URL
+        func log() throws -> String { try String(contentsOf: logURL, encoding: .utf8) }
+    }
+
+    /// A second, disposable daemon from the usual fixture's keys and configuration, allowing `sessions` channels.
+    private func limitedServer(sessions: Int) async throws -> LimitedServer {
         let original = try Fixture()
         let reservation = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .bind(host: "127.0.0.1", port: 0).get()
         let port = try XCTUnwrap(reservation.localAddress?.port)
         try await reservation.close()
-        let logURL = URL(fileURLWithPath: original.directory + "/two-channel-sshd.log")
+        let name = "limited-\(sessions)-\(port)"
+        let logURL = URL(fileURLWithPath: original.directory + "/\(name)-sshd.log")
         _ = FileManager.default.createFile(atPath: logURL.path, contents: nil)
         let log = try FileHandle(forWritingTo: logURL)
         let server = Process()
         server.executableURL = URL(fileURLWithPath: "/usr/sbin/sshd")
         server.arguments = ["-D", "-e", "-f", original.directory + "/sshd_config", "-p", String(port),
-                            "-o", "MaxSessions=2", "-o", "PidFile=" + original.directory + "/two-channel.pid"]
+                            "-o", "MaxSessions=\(sessions)", "-o", "PidFile=" + original.directory + "/\(name).pid"]
         server.environment = ProcessInfo.processInfo.environment.merging(["TZ": ""]) { _, new in new }
         server.standardOutput = log; server.standardError = log
         try server.run()
@@ -31,7 +149,7 @@ final class SFTPIntegrationTests: XCTestCase {
             if server.isRunning { server.terminate(); server.waitUntilExit() }
             try? log.close()
             if let evidence = ProcessInfo.processInfo.environment["REMOTEFILES_SSHD_LOG"] {
-                let retained = URL(fileURLWithPath: evidence).deletingPathExtension().appendingPathExtension("two-channel.log")
+                let retained = URL(fileURLWithPath: evidence).deletingPathExtension().appendingPathExtension("\(name).log")
                 try? Data(contentsOf: logURL).write(to: retained, options: .atomic)
             }
         }
@@ -52,30 +170,13 @@ final class SFTPIntegrationTests: XCTestCase {
             }
         }
         let fixture = try Fixture(port: port), stores = try Stores(fixture: fixture)
-        let key = try await stores.identity.generate(name: "Two-channel fixture")
+        let key = try await stores.identity.generate(name: "Limited fixture \(sessions)")
         try fixture.authorize(key.publicKey)
         let profile = try await stores.profile(identity: key)
         try await stores.trustFixtureHost()
         let service = stores.service()
         addTeardownBlock { await service.disconnect() }
-        let tree = try Self.offlineTree(in: fixture, folders: 3, files: 6)
-        let root = try await service.listDirectory(profile: profile, path: tree).path
-        _ = try await service.listDirectoryForWalk(profile: profile, path: root)
-        let local = URL(fileURLWithPath: original.directory + "/two-channel-offline")
-        let store = try OfflineFileStore(directory: local)
-        addTeardownBlock { await store.cancelAndDrain() }
-        let folder = try await store.pinFolder(profile: profile, path: root, service: service)
-        XCTAssertEqual(folder.fileIDs.count, 18)
-        for id in folder.fileIDs {
-            let lease = try await store.lease(id)
-            XCTAssertEqual(try Data(contentsOf: lease.url), try Data(contentsOf: URL(fileURLWithPath: lease.pin.path)))
-        }
-        _ = try await service.listDirectory(profile: profile, path: root)
-        _ = try await service.listDirectoryForWalk(profile: profile, path: root)
-        let metrics = await service.metrics()
-        XCTAssertEqual(metrics.connections, 1, "Reclaim capacity on the authenticated connection")
-        let serverLog = try String(contentsOf: logURL, encoding: .utf8)
-        XCTAssertTrue(serverLog.contains("no more sessions"), "The fixture must actually exercise channel refusal")
+        return LimitedServer(service: service, profile: profile, fixture: fixture, directory: original.directory, logURL: logURL)
     }
     #endif
 
@@ -1526,6 +1627,42 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertFalse(listing.entries.isEmpty)
         let after = await service.metrics()
         XCTAssertEqual(after.connections, before.connections + 1, "The closed socket is replaced by a new connection")
+    }
+
+    /// A folder save stalled by a dead network took three minutes to fail: each file had a fixed 180-second
+    /// deadline. A file now fails at the same idle limit as a managed download, and nothing is published.
+    func testStalledFolderSaveFailsAtTheIdleLimit() async throws {
+        let (fixture, proxy, service, profile) = try await connectedThroughProxy(name: "Stalled folder save")
+        await service.setTransferTimings(idle: .seconds(2), closeGrace: .seconds(1))
+        let source = try stallFixtureFile(fixture)
+        let folder = URL(fileURLWithPath: source).deletingPathExtension().path
+        try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: false)
+        try FileManager.default.moveItem(atPath: source, toPath: folder + "/large.bin")
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: folder) }
+        let store = try OfflineFileStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent("stalled-save-" + UUID().uuidString))
+        addTeardownBlock { await store.cancelAndDrain() }
+        let stalled = LockedTestFlag()
+        let guardTask = watchdog(proxy)
+        let started = ContinuousClock.now
+        do {
+            // Once the folder is listed, before its file's transfer: on loopback the file would finish first.
+            _ = try await store.pinFolder(profile: profile, path: folder, service: service, progress: { update in
+                if update.folders > 0, stalled.setOnce() { proxy.stallReplies() }
+            })
+            XCTFail("A save whose replies stop must not succeed")
+        } catch {
+            XCTAssertTrue("\(error)".contains("timedOut"), "Expected the idle limit to report a timeout, got \(error)")
+        }
+        guardTask.cancel()
+        let elapsed = ContinuousClock.now - started
+        XCTAssertTrue(stalled.isSet, "The replies were held during the save")
+        XCTAssertLessThan(elapsed, .seconds(10), "The idle limit plus the close grace must end the save, not 180 seconds")
+        await store.cancelAndDrain()
+        let pins = await store.snapshot()
+        XCTAssertTrue(pins.isEmpty, "A failed save publishes no partial copy")
+        proxy.resumeReplies()
+        let listing = try await service.listDirectory(profile: profile, path: folder)
+        XCTAssertEqual(listing.entries.map(\.name), ["large.bin"])
     }
 
     /// Retried managed downloads restarted from byte zero after a dead network on the iPhone.
