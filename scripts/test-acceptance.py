@@ -47,6 +47,12 @@ STAGED_LANES = ("simulator-core", "simulator-ui", "voiceover")
 DEFAULT_COMMAND_MINUTES = 30
 # Test execution that outgrows the default; an explicit --timeout-minutes still bounds every command.
 EXECUTION_DEADLINE_SECONDS = {"simulator-ui": 60 * 60}
+# A new device's first boot on a hosted runner. Of 266 boots from 3 to 9 November the median took
+# 104 seconds, 20 took over three minutes and the slowest that finished took 298, counting both
+# commands. One was stopped at the old 300-second bound while the load was still 512, so it was
+# slow rather than hung (docs/CI_HISTORY.md). The bound leaves that tail twice the room.
+BOOT_COMMAND_SECONDS = 60
+BOOT_STATUS_SECONDS = 600
 
 
 def timed(phases, name, operation):
@@ -78,8 +84,8 @@ def boot_selected_simulator(run, simulator):
     log = run.output / "simulator-boot.log"
     def boot():
         with log.open("w") as handle:
-            for command, timeout in ((["xcrun", "simctl", "boot", simulator], 60),
-                                     (["xcrun", "simctl", "bootstatus", simulator, "-b"], 300)):
+            for command, timeout in ((["xcrun", "simctl", "boot", simulator], BOOT_COMMAND_SECONDS),
+                                     (["xcrun", "simctl", "bootstatus", simulator, "-b"], BOOT_STATUS_SECONDS)):
                 subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT, check=True, timeout=timeout)
     timed(run.metadata["phases"], "simulator-boot", boot)
     inventory = json.loads(capture(["xcrun", "simctl", "list", "devices", "available", "-j"]))

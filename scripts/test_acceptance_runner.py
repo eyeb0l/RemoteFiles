@@ -108,6 +108,17 @@ class SimulatorSettleTests(unittest.TestCase):
         self.assertEqual(result["waited_seconds"], 45)
         self.assertEqual(len(sleeps), 3)
 
+    def test_boot_allows_for_the_slowest_healthy_first_boots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = acceptance.Run(Path(directory), Path(directory), {"phases": []})
+            with patch.object(acceptance.subprocess, "run") as command, \
+                 patch.object(acceptance, "capture", return_value='{"devices": {}}'):
+                acceptance.boot_selected_simulator(run, "UDID")
+            self.assertEqual([(call.args[0][2], call.kwargs["timeout"]) for call in command.call_args_list],
+                             [("boot", 60), ("bootstatus", 600)])
+            # The slowest boot that finished took 298 seconds in all; one stopped at 300 was still working.
+            self.assertGreaterEqual(acceptance.BOOT_STATUS_SECONDS, 2 * 298)
+
     def test_settle_runs_only_for_measured_ci_boots(self):
         with tempfile.TemporaryDirectory() as directory:
             run = acceptance.Run(Path(directory), Path(directory), {"phases": []})
@@ -611,7 +622,7 @@ class WorkflowShapeTests(unittest.TestCase):
             self.assertNotIn("ui-shard", text)
             self.assertNotIn("UI_SHARD", text)
         settle = inspect.signature(acceptance.settle_after_boot).parameters["limit"].default
-        boot = 6 * 60  # simctl boot, then bootstatus.
+        boot = acceptance.BOOT_COMMAND_SECONDS + acceptance.BOOT_STATUS_SECONDS
         needed = acceptance.DEFAULT_COMMAND_MINUTES * 60 + boot + settle + acceptance.EXECUTION_DEADLINE_SECONDS["simulator-ui"]
         ceiling = int(re.search(r"timeout-minutes: (\d+)", job)[1]) * 60
         self.assertGreater(ceiling - needed, 5 * 60, "Leave time for checkout, caches and evidence upload")
@@ -644,6 +655,20 @@ class WorkflowShapeTests(unittest.TestCase):
         checks = self.job("repository-checks")
         self.assertIn("CI_MAIN_PUSH: ${{ github.event_name == 'push' }}", checks)
         self.assertIn("CI_FORCE_ACCEPTANCE: ${{ github.event_name == 'schedule' || inputs.full_acceptance == true ||", checks)
+
+    def test_a_failed_evidence_upload_is_tried_again_before_it_fails_the_lane(self):
+        action = (self.root / ".github/actions/validate/action.yml").read_text()
+        first, second = action.split("- name: Retain lane logs and result bundles")[1:]
+        self.assertIn("id: evidence\n", first)
+        self.assertIn("continue-on-error: true\n", first)
+        self.assertIn("if: always() && steps.evidence.outcome == 'failure'\n", second)
+        self.assertIn("overwrite: true\n", second)
+        # Only the first attempt may fail quietly, and both retain the same evidence under one name.
+        self.assertEqual(action.count("continue-on-error"), 1)
+        def retained(step):
+            return [line for line in step.split("\n    - name:", 1)[0].splitlines() if "env.EVIDENCE" in line or " name: " in line]
+        self.assertEqual(retained(first), retained(second))
+        self.assertEqual(len(retained(first)), 11)
 
     def test_build_caches_are_lane_scoped_and_saved_only_from_main(self):
         action = (self.root / ".github/actions/validate/action.yml").read_text()

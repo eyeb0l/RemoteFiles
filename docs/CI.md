@@ -151,6 +151,7 @@ checkout, with a fresh evidence directory and shared build caches. The core, UI 
 VoiceOver lanes record source identity and toolchain/device inventory while their
 disposable simulator is still shut down, run `build-for-testing` for
 `generic/platform=iOS Simulator`, boot the device only after the build succeeds,
+allowing its first boot ten minutes,
 wait up to eight minutes for the 1-minute load average to fall below 40 per logical
 CPU, then run the same products with `test-without-building`. A failed build never
 boots the device or executes cached products. Each command receives a 30-minute
@@ -191,6 +192,15 @@ Budget every wait for that:
   method durations in the lane artifact before changing a limit.
 - To reproduce slow WebKit locally, pause each new `com.apple.WebKit.WebContent`
   process of a dedicated simulator with `SIGSTOP` for about 13 seconds.
+- A `UISwitch` ignores a touch whose start and end the main thread handles together, so a
+  journey holds a switch with `pressSwitch` and never taps it. Pausing the app with `SIGSTOP`
+  for 150 ms in every 200 reproduces that locally.
+- SpringBoard takes ⌘F, ⌘G and ⇧⌘G until UIKit has registered the app's shortcuts, which
+  follows one of the first chords after launch. Send another chord first, and open Find with
+  `openFindWithShortcut`, which repeats a ⌘F that did nothing.
+- A `Wait for … to idle` that takes 60 seconds and logs `App animations complete notification
+  not received` means a UIKit animation started and never reported stopping. Every later wait
+  in that launch does the same, so find the animation rather than raising a wait.
 
 ## Caches and evidence
 
@@ -210,6 +220,7 @@ and settle separately with host load averages; `<lane>-load.log` samples the bus
 processes every 15 seconds; `/usr/bin/time -l` records CPU, memory and page faults
 per command. Logs, each fixture-backed lane's complete `<lane>-sshd.log`, summaries
 and xcresults are uploaded for seven days as `validation-<lane>-<run>-<attempt>`.
+An upload that fails is tried once more, and only the second failure fails the job.
 Failed method identifiers and assertions are printed in the job log. New commits
 cancel superseded runs for the same PR or branch; the nightly run has its own
 concurrency group, so a merge neither cancels it nor is cancelled by it.
@@ -246,7 +257,10 @@ the full logs, xcresults and the fixture's server log. Investigate before rerunn
 and rerun only a failure shown to be unrelated, naming the method and the suspected
 cause in the PR. A same-commit rerun that passes is not a diagnosis. Treat an app
 termination failure or a `simctl bootstatus` timeout as runner infrastructure once
-the log shows that pattern. A UI or VoiceOver failure on `main` after a merge
+the log shows that pattern. `InvalidTransition { phase: idle … }` beside a hosted
+failure is XCTest's report of something the frameworks threw while the test's window
+was taken down; the assertion before it is the failure. A UI or VoiceOver failure on
+`main` after a merge
 belongs to that merge: fix it forward or show it unrelated. Past investigations,
 with the runs they cite, are in [CI history](CI_HISTORY.md).
 

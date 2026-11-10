@@ -84,12 +84,35 @@ runs:
                 print("Simulator " + command + " timed out", flush=True)
         PYTHON
     - name: Retain lane logs and result bundles
+      id: evidence
       if: always()
+      # A request to GitHub's artifact service timed out once after every UI journey had passed
+      # and failed the lane. The next step tries again, and only that one can fail the job.
+      continue-on-error: true
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
       with:
         name: validation-${{ inputs.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
         retention-days: 7
         if-no-files-found: warn
+        path: |
+          ${{ env.EVIDENCE }}/SUMMARY.md
+          ${{ env.EVIDENCE }}/summary.json
+          ${{ env.EVIDENCE }}/phase-timings.json
+          ${{ env.EVIDENCE }}/BLOCKER.txt
+          ${{ env.EVIDENCE }}/*.log
+          ${{ env.EVIDENCE }}/*-xcresult-*.json
+          ${{ env.EVIDENCE }}/source-manifest.json
+          ${{ env.EVIDENCE }}/source-status.txt
+          ${{ env.EVIDENCE }}/simulator-*.json
+          ${{ env.EVIDENCE }}/*.xcresult
+    - name: Retain lane logs and result bundles after a failed upload
+      if: always() && steps.evidence.outcome == 'failure'
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      with:
+        name: validation-${{ inputs.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: warn
+        overwrite: true
         path: |
           ${{ env.EVIDENCE }}/SUMMARY.md
           ${{ env.EVIDENCE }}/summary.json

@@ -228,9 +228,8 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(rendered.waitForExistence(timeout: 20), "⌥⌘U shows the rendered offline copy again")
 
         // ⌘F finds; ⌘G and ⇧⌘G move between results.
-        app.typeKey("f", modifierFlags: .command)
-        let query = app.textFields["reader-find-query"]
-        XCTAssertTrue(query.waitForExistence(timeout: 20), "⌘F opens Find in an offline copy")
+        let query = openFindWithShortcut(in: app)
+        XCTAssertTrue(query.exists, "⌘F opens Find in an offline copy")
         wait(for: [expectation(for: NSPredicate(format: "hasKeyboardFocus == true"), evaluatedWith: query)], timeout: 20)
         query.typeText("Reading marker 2")
         let status = app.staticTexts["reader-find-status"]
@@ -1745,11 +1744,27 @@ final class RemoteFilesUITests: XCTestCase {
                       "Expected a live background app, got \(state)", file: file, line: line)
     }
 
-    /// SwiftUI exposes the entire labelled row as the switch, so this aims for its actual thumb. The
-    /// switch sometimes ignores a touch that reaches it, so an ignored press is repeated and logged.
-    /// The binding sets the value at once, so ten seconds without it means the press did nothing and
-    /// a repeat can't undo it. The caller still asserts the value. See "Switch touches that do nothing"
-    /// in docs/CI_HISTORY.md.
+    /// SpringBoard registers ⌘F too, and takes it until UIKit has registered the app's shortcuts.
+    /// That follows one of the first chords after launch, not always the first, and a ⌘F sent
+    /// before it does nothing. With Find open ⌘F only focuses its field, so the chord is repeated
+    /// until Find opens, and each loss is logged. See "A ⌘F taken by SpringBoard" in
+    /// docs/CI_HISTORY.md.
+    private func openFindWithShortcut(in app: XCUIApplication) -> XCUIElement {
+        let query = app.textFields["reader-find-query"]
+        for press in 1...3 {
+            app.typeKey("f", modifierFlags: .command)
+            if query.waitForExistence(timeout: 10) { break }
+            print("UI SHORTCUT ⌘F did not open Find on press \(press)")
+        }
+        return query
+    }
+
+    /// SwiftUI exposes the entire labelled row as the switch, so this aims for its actual thumb. A
+    /// switch acts only if a 10 ms timer fires between touch-down and touch-up, and it can't while
+    /// the main thread is too busy to handle them apart. Holding gives it half a second, and a press
+    /// that still does nothing is repeated and logged. The binding sets the value at once, so ten
+    /// seconds without it means the press did nothing and a repeat can't undo it. The caller still
+    /// asserts the value. See "Switch presses" in docs/CI_HISTORY.md.
     private func pressSwitch(_ row: XCUIElement, name: String) {
         let before = row.value as? String
         let thumb = row.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5))
