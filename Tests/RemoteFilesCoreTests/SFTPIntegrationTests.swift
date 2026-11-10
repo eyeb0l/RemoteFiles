@@ -140,7 +140,15 @@ final class SFTPIntegrationTests: XCTestCase {
         } catch RemoteFileError.unavailable(let message) {
             XCTAssertEqual(message, SFTPRemoteFileService.noCommonAlgorithms(jumpHost: false))
         }
-        XCTAssertTrue(try server.log().contains(serverLog), "The server must have refused with \"\(serverLog)\"")
+        // The client fails as soon as it reads the server's offer, which can be before sshd has read the
+        // client's and logged its refusal, so wait for the line rather than reading the log once.
+        let deadline = ContinuousClock.now + .seconds(60)
+        while try !server.log().contains(serverLog) {
+            guard ContinuousClock.now < deadline else {
+                return XCTFail("The server must have refused with \"\(serverLog)\": \(try server.log())")
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
     }
 
     private struct LimitedServer {
