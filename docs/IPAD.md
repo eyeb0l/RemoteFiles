@@ -20,6 +20,10 @@ Editing or deleting the visible connection clears its selected routes so old-ser
 
 Automated navigation tests cover route projection, preview replacement, folder history, recents, disconnect and the size-class layout decision. Simulator UI journeys include assertions for the workspace and adaptive overlays; consult their results for the build being tested. Simulator results do not establish physical iPad, iPhone Duo or Stage Manager behavior.
 
+## Several windows
+
+Each window browses on its own connection and has its own folder, reader and search. They share one library: a connection, key, favourite or recent added, changed or removed in one window appears in the others, and no window saves an older copy of the library over a newer one. Trusted host keys and reading history are shared the same way, so a host whose trust is reset in one window must be accepted again in every window. A connection edited or removed in one window closes its folders and readers in the others, as it does where it was edited. Downloads, offline files and saved search indexes were already shared.
+
 ## Keyboard shortcuts
 
 With a hardware keyboard, hold ⌘ to list these shortcuts, or open the iPad menu bar. They act on the folder and reader on screen, in the workspace and the stack alike; a command that doesn't apply there is greyed out.

@@ -162,6 +162,34 @@ final class FolderListingTests: XCTestCase {
         XCTAssertTrue(gate.shouldShow(count: 675, now: start + .seconds(2)))
     }
 
+    /// An index build reports after every folder and file. The screen gets the first report at once,
+    /// then the newest at most once an interval, and always the last one.
+    @MainActor func testProgressRelayPassesTheFirstReportAtOnceThenTheNewestAndNeverDropsTheLast() async throws {
+        var shown: [Int] = []
+        let relay = LatestProgressRelay<Int>(interval: .milliseconds(200)) { shown.append($0) }
+        func wait(until condition: () -> Bool) async throws {
+            for _ in 0..<6_000 where !condition() { try await Task.sleep(for: .milliseconds(5)) }
+        }
+        relay.offer(1)
+        try await wait { !shown.isEmpty }
+        XCTAssertEqual(shown, [1], "The first report doesn't wait for an interval")
+        // Reported from other tasks, as a build does, far faster than the screen is told.
+        await withTaskGroup(of: Void.self) { group in
+            for batch in 0..<4 { group.addTask { for value in 0..<250 { relay.offer(2 + batch * 250 + value) } } }
+        }
+        relay.offer(5_000)
+        try await wait { shown.last == 5_000 }
+        XCTAssertEqual(shown.last, 5_000, "The last report always arrives")
+        // One for each interval that passed, however loaded the machine: never one for each report.
+        XCTAssertLessThan(shown.count, 100, "A thousand reports reached the screen as a handful")
+        let settled = shown
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(shown, settled, "Nothing is passed on twice")
+        relay.offer(5_001)
+        try await wait { shown.last == 5_001 }
+        XCTAssertEqual(shown, settled + [5_001])
+    }
+
     @MainActor func testSearchBatcherShowsFirstMatchesAndEverythingElseSoonAfter() async throws {
         var applied: [RemoteFolderSearch.Update] = []
         let batcher = FolderSearchBatcher(interval: .milliseconds(50)) { applied.append($0) }

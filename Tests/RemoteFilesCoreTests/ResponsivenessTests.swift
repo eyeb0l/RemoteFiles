@@ -126,6 +126,48 @@ private struct SourceFixture: View {
         XCTAssertEqual(builds(), settled + 1)
     }
 
+    /// The scroll offset is saved as the document scrolls. Nothing on screen shows it, so saving it
+    /// must not build the document's content again: that is every paragraph, on every frame.
+    func testScrollingARenderedDocumentDoesNotBuildItsContentAgain() async throws {
+        let text = (1...300).map { "## Section \($0)\n\nParagraph \($0) of a long report, with a [link](other.md) and enough words to wrap.\n" }.joined(separator: "\n")
+        let position = DocumentReadingPosition()
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: DocumentContentView(
+            text: text, markdown: true, source: false, readingPosition: position, openDocumentLink: { _ in }))
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        func scrollView() -> UIScrollView? {
+            func find(_ view: UIView) -> UIScrollView? {
+                if let scroll = view as? UIScrollView, scroll.contentSize.height > scroll.bounds.height * 3 { return scroll }
+                return view.subviews.lazy.compactMap(find).first
+            }
+            return find(window)
+        }
+        try await waitUntil { scrollView() != nil }
+        let scroll = try XCTUnwrap(scrollView())
+        // Let preparation, first layout and deferred rendering settle before counting.
+        var settled = -1
+        try await waitUntil {
+            let builds = position.renderedContentBuilds
+            defer { settled = builds }
+            try? await Task.sleep(for: .milliseconds(300))
+            return builds == settled && builds == position.renderedContentBuilds
+        }
+        let before = position.renderedContentBuilds
+        for step in 1...40 {
+            scroll.setContentOffset(CGPoint(x: 0, y: CGFloat(step) * 60), animated: false)
+            window.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try await waitUntil { position.rendered.y > 1_000 }
+        XCTAssertGreaterThan(position.rendered.y, 1_000, "The offset is still tracked for saving")
+        print("Rendered content builds over forty scroll steps: \(position.renderedContentBuilds - before)")
+        XCTAssertLessThanOrEqual(position.renderedContentBuilds - before, 4,
+                                 "Forty scroll steps built the content \(position.renderedContentBuilds - before) times")
+    }
+
     func testPrefetchListsLeadingSubfoldersOnceAndFillsTheCache() async throws {
         let service = CountingFolderService()
         let (model, directory) = try model(service)

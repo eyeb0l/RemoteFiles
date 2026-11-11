@@ -116,7 +116,9 @@ public final class DownloadManager {
             guard bytes.count <= 2 * 1024 * 1024 else { throw DownloadManagerError.queueFull }
             items = try JSONDecoder().decode([ManagedDownload].self, from: bytes)
             guard items.count <= Self.maximumItems, Set(items.map(\.id)).count == items.count,
-                  items.allSatisfy({ Self.validFilename($0.filename) && $0.receivedBytes <= UInt64(self.fileLimit) }) else { throw DownloadManagerError.unavailable }
+                  // Names are judged as the version that saved them judged them, so one it let through
+                  // can't make the whole queue unavailable. New downloads are judged by `validFilename`.
+                  items.allSatisfy({ RemotePath.wasAcceptedAsFilename($0.filename) && $0.receivedBytes <= UInt64(self.fileLimit) }) else { throw DownloadManagerError.unavailable }
             for index in items.indices {
                 if items[index].state == .downloading || items[index].state == .queued {
                     items[index].state = .interrupted
@@ -476,7 +478,7 @@ public final class DownloadManager {
         try removeItem(url)
     }
     private static func validFilename(_ name: String) -> Bool {
-        !name.isEmpty && name != "." && name != ".." && !name.contains("/") && !name.contains("\\") &&
+        !name.isEmpty && !RemotePath.isDotName(name) && !RemotePath.hasSeparator(name) &&
         !name.unicodeScalars.contains { $0.value < 32 || $0.value == 127 }
     }
     private static func makePrivateDirectory(_ directory: URL) throws {

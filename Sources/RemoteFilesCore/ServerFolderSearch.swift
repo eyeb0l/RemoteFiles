@@ -50,8 +50,8 @@ enum ServerFolderSearch {
 
     static func command(query: String, root: String, includeHidden: Bool, limits: RemoteFolderSearch.Limits,
                         content: RemoteFolderSearch.ContentLimits?, rootHandle: String? = nil, identity: RootIdentity? = nil) throws -> String {
-        guard root.hasPrefix("/"), !root.contains("\0"), root == "/" || !root.hasSuffix("/"),
-              !root.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }) else { throw Failure.unsupported }
+        guard RemotePath.isAbsolute(root), !root.utf8.contains(0), root.utf8.elementsEqual("/".utf8) || !RemotePath.endsWithSeparator(root),
+              !RemotePath.components(of: root).contains(where: RemotePath.isDotName) else { throw Failure.unsupported }
         // Cap custom limits too: a server cannot cause unbounded allocations or a long-running job.
         guard (0...16).contains(limits.maxDepth), (1...1_000).contains(limits.maxFolders),
               (1...500).contains(limits.maxMatches), limits.timeLimit > .zero,
@@ -193,15 +193,15 @@ enum ServerFolderSearch {
             var matches: [(key: [Substring], entry: RemoteEntry, match: RemoteFolderSearch.ContentMatch?)] = []
             for candidate in value.candidates {
                 let path = candidate.path
-                let components = path.split(separator: "/", omittingEmptySubsequences: false)
-                guard path != root, RemoteResourcePath.contains(path, in: root), !path.contains("\0"),
-                      !components.dropFirst().contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }),
+                let components = RemotePath.components(of: path, omittingEmpty: false)
+                guard !path.utf8.elementsEqual(root.utf8), RemoteResourcePath.contains(path, in: root), !path.utf8.contains(0),
+                      !components.dropFirst().contains(where: { $0.isEmpty || RemotePath.isDotName($0) }),
                       seen.insert(Data(path.utf8)).inserted, let kind = RemoteEntry.Kind(rawValue: candidate.kind), candidate.modified.isFinite else {
                     throw Failure.invalidResponse
                 }
-                let relative = path.dropFirst(root == "/" ? 1 : root.count + 1).split(separator: "/")
+                let relative = RemotePath.components(of: path, under: root)
                 guard relative.count <= limits.maxDepth + 1,
-                      includeHidden || !relative.contains(where: { $0.hasPrefix(".") }) else { throw Failure.invalidResponse }
+                      includeHidden || !relative.contains(where: RemotePath.isHidden) else { throw Failure.invalidResponse }
                 let entry = RemoteEntry(name: RemotePath.name(of: path), path: path, kind: kind, size: candidate.size,
                                         modifiedAt: Date(timeIntervalSince1970: candidate.modified))
                 let key = Array(components.dropFirst())

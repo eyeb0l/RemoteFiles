@@ -85,6 +85,8 @@ Scripts, event handlers, animation, embedded images, HTML and external resources
 
 When the app becomes inactive or backgrounded, an opaque window-level privacy cover sits above readers and presented sheets for the app switcher snapshot. Returning removes the cover without changing navigation or reader position.
 
+Control Centre, Notification Centre, a system prompt and Face ID make the app inactive without closing its connection. Becoming active again then reads nothing again: the folder isn't listed again, a search carries on, the Saved Search Index sheet stays open on its build, and a video waits paused where it was. Only a return from the background starts a new session and checks what's on screen with the server. The one exception is a connection that had failed, which is tried again, because what made the app inactive may be what it was waiting for: the Local Network prompt, or Wi-Fi turned on in Control Centre.
+
 ## Reader memory
 
 Leaving a connected reader releases its decoded preview and parsed navigation index. Backgrounding unmounts the renderer and releases its parsed index, while retaining the selected reader’s bounded original text so a failed reconnect can still show the previous copy. Returning prepares them again from the bounded raw-byte cache when available and revalidates with the server. Offline readers release their local preview and verified lease when inactive. Reading anchors remain small and contain no document text.

@@ -34,7 +34,8 @@ replacement invalidate preparation and dismiss a prepared picker. Temporary
 files have private permissions and iOS complete-file protection, are excluded
 from backup, and are removed on picker completion/cancel/dismissal. Prepared
 files expire after ten minutes; abandoned previous-process outputs are removed
-on next exporter use. The destination copy belongs to the user’s chosen Files
+on next exporter use. Another window's export, under way or already handed to
+Files, is not such an output and is left alone. The destination copy belongs to the user’s chosen Files
 provider after the native picker completes.
 
 The existing image **Share** action continues to share downsampled display

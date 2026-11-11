@@ -54,7 +54,7 @@ public enum DocumentPolicy {
     static let protectedCertificateExtensions: Set<String> = ["p12", "pfx"]
 
     public static func kind(filename: String) -> DocumentKind {
-        let name = filename.split(separator: "/").last.map(String.init)?.lowercased() ?? ""
+        let name = RemotePath.components(of: filename).last.map(String.init)?.lowercased() ?? ""
         let suffix = name.split(separator: ".", omittingEmptySubsequences: false).last.map(String.init) ?? ""
         if ["md", "markdown"].contains(suffix) { return .markdown }
         if ["jpg", "jpeg", "png", "heic", "heif", "gif", "tif", "tiff", "webp", "bmp"].contains(suffix) { return .image }
@@ -71,7 +71,7 @@ public enum DocumentPolicy {
         }
 
         // Extensionless names (including dotfiles) are candidates; byte validation remains mandatory.
-        if !name.contains(".") || name.first == "." || searchTextExtensions.contains(suffix) { return .plainText }
+        if !name.contains(".") || RemotePath.isHidden(name) || searchTextExtensions.contains(suffix) { return .plainText }
         return .unsupported
     }
 
@@ -109,9 +109,9 @@ public enum DocumentPolicy {
               let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
               parts.scheme == nil, parts.host == nil, parts.user == nil, parts.password == nil,
               let path = parts.percentEncodedPath.removingPercentEncoding,
-              !path.hasPrefix("/"), !path.contains("\\"),
+              !RemotePath.isAbsolute(path), !RemotePath.hasBackslash(path),
               !path.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
-              !url.absoluteString.hasPrefix("//") else { return false }
+              !RemotePath.startsWithDoubledSeparator(url.absoluteString) else { return false }
         // Keep fragments/queries actionable so the navigation policy can explain their limitation.
         return !path.isEmpty || parts.fragment != nil || parts.query != nil
     }

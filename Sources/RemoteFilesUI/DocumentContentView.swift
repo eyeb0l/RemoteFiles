@@ -88,6 +88,7 @@ public struct DocumentContentView: View {
                 .accessibilityLabel(markdown ? "Markdown source" : "Plain text document")
             } else {
                 GeometryReader { viewport in
+                let _ = position.noteRenderedContentBuild()
                 ScrollView {
                     // Textual installs prepared content after its first layout. A lazy stack
                     // can retain that initial zero-height row for image-free documents.

@@ -96,7 +96,7 @@ public actor RemoteOriginalExporter {
         let result: PreparedOriginalFile = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<PreparedOriginalFile, Error>) in
                 guard !Task.isCancelled else { continuation.resume(throwing: CancellationError()); return }
-                let temporaryDirectory = directory.appendingPathComponent("export-" + id.uuidString, isDirectory: true)
+                let temporaryDirectory = directory.appendingPathComponent(Self.processPrefix + id.uuidString, isDirectory: true)
                 let task = Task {
                     let result: Result<PreparedOriginalFile, Error>
                     do {
@@ -198,14 +198,13 @@ public actor RemoteOriginalExporter {
         let fm = FileManager.default
         try fm.createDirectory(at: directory, withIntermediateDirectories: true,
                                attributes: [.posixPermissions: 0o700])
-        // Previous-process leftovers are never a cache and must not survive the next use.
+        // Previous-process leftovers are never a cache and must not survive the next use. This process's
+        // own are left alone: they belong to another window's exporter, or to this one's earlier self.
         if !cleanedAbandonedFiles {
             cleanedAbandonedFiles = true
-            for child in try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
-                if child.lastPathComponent.hasPrefix("export-"),
-                   UUID(uuidString: String(child.lastPathComponent.dropFirst(7))) != nil {
-                    try? fm.removeItem(at: child)
-                }
+            for child in try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            where Self.isAbandoned(child.lastPathComponent) {
+                try? fm.removeItem(at: child)
             }
         }
         try fm.createDirectory(at: temporaryDirectory, withIntermediateDirectories: false,
@@ -250,8 +249,21 @@ public actor RemoteOriginalExporter {
                                     expiresAt: Date().addingTimeInterval(retentionSeconds))
     }
 
+    /// Every exporter in this process shares the directory, one per window and a new one after each
+    /// return from the background. The prefix tells their folders from a previous process's debris,
+    /// so one window's first export doesn't delete the file another is writing or handing to Files.
+    static let processPrefix = "export-" + UUID().uuidString + "-"
+    static func isAbandoned(_ name: String) -> Bool {
+        guard name.hasPrefix("export-"), !name.hasPrefix(processPrefix) else { return false }
+        let parts = name.dropFirst(7)
+        // "export-<id>" from older versions, or "export-<process>-<id>".
+        if UUID(uuidString: String(parts)) != nil { return true }
+        return parts.count == 73 && UUID(uuidString: String(parts.prefix(36))) != nil
+            && parts.dropFirst(36).first == "-" && UUID(uuidString: String(parts.suffix(36))) != nil
+    }
+
     private static func validFilename(_ value: String) -> Bool {
-        !value.isEmpty && value != "." && value != ".." && !value.contains("/") && !value.contains("\\")
+        !value.isEmpty && !RemotePath.isDotName(value) && !RemotePath.hasSeparator(value)
             && !value.unicodeScalars.contains { $0.value < 32 || $0.value == 127 }
     }
 

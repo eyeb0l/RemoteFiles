@@ -13,26 +13,27 @@ public enum RemoteDocumentLinkPath {
         }
         guard let components = URLComponents(string: reference), components.scheme == nil,
               components.host == nil, components.user == nil, components.password == nil,
-              !reference.hasPrefix("//"),
+              !RemotePath.startsWithDoubledSeparator(reference),
               let decoded = components.percentEncodedPath.removingPercentEncoding,
-              !decoded.hasPrefix("/"), !decoded.contains("\\"),
+              !RemotePath.isAbsolute(decoded), !RemotePath.hasBackslash(decoded),
               !decoded.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else {
             throw RemoteDocumentLinkError.invalidReference
         }
         guard components.fragment == nil else { throw RemoteDocumentLinkError.anchorsUnsupported }
         guard components.query == nil else { throw RemoteDocumentLinkError.queryUnsupported }
-        guard !decoded.isEmpty, !decoded.hasSuffix("/") else { throw RemoteDocumentLinkError.invalidReference }
-        let rootParts = connectionRoot.split(separator: "/")
-        var parts = documentPath.split(separator: "/").dropLast().map(String.init)
-        for component in decoded.split(separator: "/") {
-            if component == "." { continue }
-            if component == ".." {
+        guard !decoded.isEmpty, !RemotePath.endsWithSeparator(decoded) else { throw RemoteDocumentLinkError.invalidReference }
+        // Names are split by bytes, so no ".." hides beside a combining mark and goes to the server unresolved.
+        let rootParts = RemotePath.components(of: connectionRoot)
+        var parts = RemotePath.components(of: documentPath).dropLast().map(String.init)
+        for component in RemotePath.components(of: decoded) {
+            if RemotePath.isCurrentName(component) { continue }
+            if RemotePath.isParentName(component) {
                 guard parts.count > rootParts.count else { throw RemoteDocumentLinkError.outsideConnection }
                 parts.removeLast()
             } else { parts.append(String(component)) }
         }
         let target = "/" + parts.joined(separator: "/")
-        guard target != connectionRoot, RemoteResourcePath.contains(target, in: connectionRoot) else {
+        guard !target.utf8.elementsEqual(connectionRoot.utf8), RemoteResourcePath.contains(target, in: connectionRoot) else {
             throw RemoteDocumentLinkError.outsideConnection
         }
         guard DocumentPolicy.kind(filename: RemotePath.name(of: target)) != .unsupported else {
@@ -42,9 +43,9 @@ public enum RemoteDocumentLinkPath {
     }
 
     private static func canonicalAbsolute(_ path: String) -> Bool {
-        guard path.hasPrefix("/"), !path.hasPrefix("//"), !path.contains("\\"),
+        guard RemotePath.isAbsolute(path), !RemotePath.startsWithDoubledSeparator(path), !RemotePath.hasBackslash(path),
               !path.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { return false }
-        return !path.split(separator: "/").contains(where: { $0 == "." || $0 == ".." })
+        return !RemotePath.components(of: path).contains(where: RemotePath.isDotName)
     }
 }
 

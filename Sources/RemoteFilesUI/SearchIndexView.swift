@@ -190,20 +190,27 @@ struct SearchIndexView: View {
         error = nil; buildSummary = nil; progress = .init()
         let previous = rereadsEverything ? nil : self.snapshot
         var final = RemoteFolderSearch.Update()
+        let store = await model.searchIndexStore()
+        var reservation: UUID?
+        // A build that saves nothing gives up its reservation, which holds automatic updates off.
+        // Not awaited: the sheet's task is cancelled when it closes, and this must still run.
+        defer { if let reservation { Task { await store.endBuild(profile: profile, root: root, generation: reservation) } } }
+        let shown = LatestProgressRelay<RemoteFolderSearch.Update> { update in
+            guard building, buildRevision == build, model.sessionRevision == revision else { return }
+            progress = update
+        }
         do {
-            let store = await model.searchIndexStore()
             let generation = try await store.beginBuild(profile: profile, root: root)
+            reservation = generation
             let snapshot = try await RemoteFolderSearch.buildIndex(below: root, profile: profile,
                 service: model.searchService, includeHidden: includeHidden, extraction: extraction, reusing: previous) { update in
                 final = update
-                Task { @MainActor in
-                    guard building, buildRevision == build, model.sessionRevision == revision else { return }
-                    progress = update
-                }
+                shown.offer(update)
             }
             try Task.checkCancellation()
             guard model.sessionRevision == revision, model.isForeground else { return }
             try await store.save(snapshot, profile: profile, root: root, generation: generation)
+            reservation = nil
             try Task.checkCancellation()
             self.snapshot = snapshot; indexRevision += 1
             let read = final.filesSearched - final.reusedFiles

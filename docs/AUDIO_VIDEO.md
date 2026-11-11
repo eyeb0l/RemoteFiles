@@ -50,8 +50,9 @@ extension so cache eviction and refresh cannot remove its active bytes.
 AVFoundation forbids every external media reference, including local reference
 movies and references to web resources. There is no web player or transcoding
 service. Playback and its temporary file are released when leaving the preview,
-disconnecting or backgrounding. Picture in Picture and background playback are
-disabled. The underlying bounded resource cache follows its existing retention
+disconnecting or backgrounding. While the app is only inactive, under Control
+Centre or a system prompt, playback pauses and keeps its position. Picture in
+Picture and background playback are disabled. The underlying bounded resource cache follows its existing retention
 policy. Cancelled preparation reports cancellation even if AVFoundation returns
 its own loading error or marks the asset unplayable; it cannot publish a player.
 The online and offline preview callers suppress errors from cancelled tasks.

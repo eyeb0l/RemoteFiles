@@ -51,12 +51,11 @@ public extension RemoteFolderSearch {
         for document in snapshot.documents {
             try Task.checkCancellation()
             let entry = document.entry
-            let relative = entry.path.dropFirst(root == "/" ? 1 : root.count + 1)
             // A hidden `.pem` counted as text before certificate previews, so an older saved index can
             // still hold one until it's next updated. It no longer takes part in searches.
             guard RemoteResourcePath.contains(entry.path, in: root), options.accepts(entry),
                   !DocumentPolicy.kind(filename: entry.name).isCertificateFile,
-                  includeHidden || !relative.split(separator: "/").contains(where: { $0.hasPrefix(".") }) else { continue }
+                  includeHidden || !RemotePath.components(of: entry.path, under: root).contains(where: RemotePath.isHidden) else { continue }
             update.filesSearched += 1
             for segment in document.segments {
                 if let match = firstMatch(in: segment.text, query: query, entry: entry, options: options, page: segment.page) {

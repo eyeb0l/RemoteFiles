@@ -224,7 +224,7 @@ actor OfflineFolderDownload {
                           RemoteResourcePath.contains(entry.path, in: path), seen.insert(Data(entry.path.utf8)).inserted else {
                         throw RemoteFileError.invalidPath
                     }
-                    if !includeHidden && entry.name.hasPrefix(".") { continue }
+                    if !includeHidden && RemotePath.isHidden(entry.name) { continue }
                     switch entry.kind {
                     case .symlink:
                         result.skippedLinks += 1; report.skippedLinks += 1

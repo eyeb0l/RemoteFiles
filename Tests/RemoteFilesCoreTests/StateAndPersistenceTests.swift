@@ -102,6 +102,70 @@ final class StateAndPersistenceTests: XCTestCase {
         let snapshot = await store.snapshot(); XCTAssertEqual(snapshot.recents.first, fresh, "A newly opened entry has a new identity")
     }
 
+    /// Each window keeps a copy of the library. A change is made to what is saved now, so it can't
+    /// undo what another window saved after that copy was taken.
+    func testLibraryChangesApplyToWhatIsSavedAndReachEveryObserver() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("library-v1.json")
+        let store = try MetadataStore.shared(fileURL: url)
+        let sameFile = try MetadataStore.shared(fileURL: directory.appendingPathComponent("nested/../library-v1.json"))
+        XCTAssertTrue(store === sameFile, "Every window naming this file shares one store")
+        let elsewhere = try MetadataStore.shared(fileURL: directory.appendingPathComponent("other-v1.json"))
+        XCTAssertFalse(store === elsewhere)
+
+        var observed = await store.changes().makeAsyncIterator()
+        let initial = await observed.next()
+        XCTAssertEqual(initial?.metadata, AppMetadata(), "An observer starts from the library as it is")
+        XCTAssertEqual(initial?.revision, 0)
+        let first = profile(), second = profile()
+        let window = UUID()
+        let afterFirst = try await store.update(origin: window) { $0.connections.append(first) }
+        let afterSecond = try await sameFile.update { $0.connections.append(second) }
+        XCTAssertEqual(afterFirst.metadata.connections, [first]); XCTAssertEqual(afterSecond.metadata.connections, [first, second])
+        // Saves are numbered and say whose they were, so a window can tell a late report of its own.
+        XCTAssertEqual(afterFirst.revision, 1); XCTAssertEqual(afterFirst.origin, window)
+        XCTAssertEqual(afterSecond.revision, 2); XCTAssertNil(afterSecond.origin)
+        var newest = await observed.next()
+        if newest?.revision == 1 { newest = await observed.next() }
+        XCTAssertEqual(newest?.metadata.connections, [first, second]); XCTAssertEqual(newest?.revision, 2)
+        let relaunched = await (try MetadataStore(fileURL: url)).snapshot()
+        XCTAssertEqual(relaunched.connections, [first, second])
+
+        // A change that fails saves nothing and tells no one.
+        struct Refused: Error {}
+        do { try await store.update { $0.connections.removeAll(); throw Refused() }; XCTFail("A failed change was saved") }
+        catch is Refused {}
+        let kept = await store.current()
+        XCTAssertEqual(kept.metadata.connections, [first, second]); XCTAssertEqual(kept.revision, 2)
+
+        let trust = try HostTrustStore.shared(fileURL: directory.appendingPathComponent("known-hosts-v1.json"))
+        let sameTrust = try HostTrustStore.shared(fileURL: directory.appendingPathComponent("./known-hosts-v1.json"))
+        XCTAssertTrue(trust === sameTrust)
+        let history = ReadingPositionStore.shared(fileURL: directory.appendingPathComponent("reading-positions-v1.json"))
+        XCTAssertTrue(history === ReadingPositionStore.shared(fileURL: directory.appendingPathComponent("reading-positions-v1.json")))
+    }
+
+    func testASharedStoreIsReadAgainOnceNothingHoldsIt() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("library-v1.json")
+        var store: MetadataStore? = try MetadataStore.shared(fileURL: url)
+        let saved = profile()
+        try await store?.update { $0.connections.append(saved) }
+        store = nil
+        // As a relaunch: the file is what's left, and a damaged one still fails closed. The actor is
+        // released once its last job has finished, which can be a moment after the reference goes.
+        try Data("{\"connections\": incomplete".utf8).write(to: url)
+        let deadline = ContinuousClock.now + .seconds(30)
+        var failedClosed = false
+        while !failedClosed, ContinuousClock.now < deadline {
+            if (try? MetadataStore.shared(fileURL: url)) == nil { failedClosed = true }
+            else { try await Task.sleep(for: .milliseconds(20)) }
+        }
+        XCTAssertTrue(failedClosed, "A store nothing holds is read again from its file")
+    }
+
     func testFailedRecentRemovalPreservesSavedSnapshot() async throws {
         let directory = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
         let parent = directory.appendingPathComponent("library"), url = parent.appendingPathComponent("state.json")

@@ -289,8 +289,8 @@ struct EnhancedMarkdownWebView: UIViewRepresentable {
                     let file = try await resolver.localFile(for: image.reference, in: location)
                     let decoded = try await RemoteImageDecoder.shared.decode(file, maxPixel: 1600)
                     try Task.checkCancellation()
-                    guard let encoded = UIImage(cgImage: decoded.image).pngData() else { throw RemoteResourceError.notImage }
-                    data = "data:image/png;base64," + encoded.base64EncodedString()
+                    data = try await Self.dataURL(for: decoded)
+                    try Task.checkCancellation()
                 } catch is CancellationError { return }
                 catch { failureMessage = error.localizedDescription }
                 guard let self, self.mounted, load === self.load, !Task.isCancelled, let view = self.view else { return }
@@ -298,6 +298,14 @@ struct EnhancedMarkdownWebView: UIViewRepresentable {
                     arguments: ["index": index, "generation": generation, "data": data, "error": failureMessage], in: nil, in: .defaultClient) { _ in }
                 self.imageTasks[index] = nil
             }
+        }
+        /// Encoding a photograph as PNG and then as text takes tens of milliseconds, for every image that
+        /// comes into view. This class lives on the main actor, where that would stall scrolling.
+        nonisolated static func dataURL(for image: DisplayImage) async throws -> String {
+            try await Task.detached(priority: .userInitiated) {
+                guard let encoded = UIImage(cgImage: image.image).pngData() else { throw RemoteResourceError.notImage }
+                return "data:image/png;base64," + encoded.base64EncodedString()
+            }.value
         }
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
             if finished { parent.readingPosition.rendered = scrollView.contentOffset }

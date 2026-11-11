@@ -46,7 +46,8 @@ final class AutomaticSearchIndexUpdater {
         let store = await model.searchIndexStore()
         let saved: SearchIndexSnapshot
         do {
-            guard try await store.updatesAutomatically(profile: profile, root: root),
+            // Asked first without reading the saved text: most openings of the folder find nothing due.
+            guard try await store.isDueForAutomaticUpdate(profile: profile, root: root, now: now, interval: interval),
                   let snapshot = try await store.load(profile: profile, root: root),
                   snapshot.isDueForAutomaticUpdate(at: now, interval: interval) else { return false }
             saved = snapshot
@@ -91,8 +92,13 @@ final class AutomaticSearchIndexUpdater {
     private func run(_ saved: SearchIndexSnapshot, profile: ConnectionProfile, root: String, key: String, token: UUID,
                      revision: Int, store: SearchIndexStore, service: any RemoteFileService, model: AppModel) async {
         var final = RemoteFolderSearch.Update()
+        let shown = LatestProgressRelay<RemoteFolderSearch.Update> { [weak self] update in
+            guard let self, self.tasks[key]?.token == token else { return }
+            self.progress[key] = update
+        }
         do {
-            let generation = try await store.beginBuild(profile: profile, root: root)
+            // Refused as superseded while a build someone asked for is under way, in any window.
+            let generation = try await store.beginBuild(profile: profile, root: root, automatic: true)
             // Another window may have deleted the index or turned the setting off since the check.
             // A deletion after this point invalidates the reservation instead.
             guard try await store.updatesAutomatically(profile: profile, root: root) else {
@@ -101,10 +107,7 @@ final class AutomaticSearchIndexUpdater {
             let snapshot = try await RemoteFolderSearch.buildIndex(below: root, profile: profile, service: service,
                 includeHidden: saved.includeHidden, extraction: saved.extraction, reusing: saved) { update in
                 final = update
-                Task { @MainActor [weak self] in
-                    guard let self, self.tasks[key]?.token == token else { return }
-                    self.progress[key] = update
-                }
+                shown.offer(update)
             }
             try Task.checkCancellation()
             guard tasks[key]?.token == token, canRun(profile, model: model), model.sessionRevision == revision else {

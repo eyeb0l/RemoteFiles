@@ -520,6 +520,9 @@ private actor MediaConnectionService: RemoteFileService {
         let disconnects = await service.disconnects; XCTAssertEqual(disconnects, 0)
         let relaunched = try AppModel(directory: directory, fileService: service); await relaunched.load()
         XCTAssertTrue(relaunched.metadata.recents.isEmpty); XCTAssertEqual(relaunched.metadata.favourites, [recent])
+        // The two models share a store while both live, so what reached the file is read separately.
+        let onDisk = await (try MetadataStore(fileURL: directory.appendingPathComponent("library-v1.json"))).snapshot()
+        XCTAssertTrue(onDisk.recents.isEmpty); XCTAssertEqual(onDisk.favourites, [recent])
     }
     func testOfflineChangesReachOtherWindowsAndDemoObserversStaySeparate() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -873,6 +876,8 @@ private actor MediaConnectionService: RemoteFileService {
         await model.removeConnection(profile)
         let reopened = try AppModel(directory: directory, fileService: service); await reopened.load()
         XCTAssertTrue(reopened.metadata.connections.isEmpty)
+        let onDisk = await (try MetadataStore(fileURL: directory.appendingPathComponent("library-v1.json"))).snapshot()
+        XCTAssertTrue(onDisk.connections.isEmpty, "Read from the file, since the two models share a store while both live")
         XCTAssertEqual(reopened.offlinePins.count, 1)
         let store = try XCTUnwrap(reopened.offlineStore), lease = try await store.lease(pin.id)
         XCTAssertEqual(try Data(contentsOf: lease.url), Data("changed server bytes\r\n東京  ".utf8))
@@ -914,6 +919,143 @@ private actor MediaConnectionService: RemoteFileService {
         XCTAssertEqual(try Data(contentsOf: fresh.url), Data("changed server bytes\r\n東京  ".utf8))
         await newExporter.release(fresh.id)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fresh.url.path))
+    }
+
+    /// Control Centre, Notification Centre, a system prompt and Face ID make a scene inactive and then
+    /// active again with its connection still open. Only the background ends the session.
+    func testBecomingActiveStartsANewSessionOnlyAfterTheBackgroundOrAFailedConnection() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try AppModel(directory: directory, fileService: BackgroundExportService())
+        await model.load()
+        let profile = ConnectionProfile(name: "Lifecycle", host: "fixture.invalid", username: "reader", identityID: UUID())
+        let revision = model.sessionRevision
+        model.sceneBecameActive()
+        model.connectionStates[profile.id] = "Connected"
+        model.sceneBecameActive()
+        XCTAssertEqual(model.sessionRevision, revision, "Nothing is read again after Control Centre: folders, searches and readers key on this")
+        XCTAssertTrue(model.isForeground)
+
+        model.isForeground = false
+        await model.background()
+        model.sceneBecameActive()
+        XCTAssertEqual(model.sessionRevision, revision + 1, "A return from the background starts a new session")
+        XCTAssertTrue(model.isForeground)
+        model.sceneBecameActive()
+        XCTAssertEqual(model.sessionRevision, revision + 1)
+
+        // What made the scene inactive may be what a failed connection was waiting for: the Local
+        // Network prompt, or Wi-Fi turned on in Control Centre.
+        model.handle(RemoteFileError.timedOut, profile: profile)
+        model.sceneBecameActive()
+        XCTAssertEqual(model.sessionRevision, revision + 2, "A connection that had failed is tried again")
+        model.connectionStates[profile.id] = "Connected"
+        model.sceneBecameActive()
+        XCTAssertEqual(model.sessionRevision, revision + 2)
+    }
+
+    func testRecordingTheNewestRecentAgainChangesNothing() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try AppModel(directory: directory, fileService: BackgroundExportService())
+        await model.load()
+        let profile = ConnectionProfile(name: "Recents", host: "fixture.invalid", username: "reader", identityID: UUID())
+        let first = RemoteEntry(name: "one.md", path: "/docs/one.md", kind: .file)
+        let second = RemoteEntry(name: "two.md", path: "/docs/two.md", kind: .file)
+        await model.recordRecent(profile: profile, entry: first)
+        await model.recordRecent(profile: profile, entry: second)
+        let library = directory.appendingPathComponent("library-v1.json")
+        let recents = model.metadata.recents, saved = try Data(contentsOf: library)
+        let written = try FileManager.default.attributesOfItem(atPath: library.path)[.modificationDate] as? Date
+        XCTAssertEqual(recents.map(\.path), [second.path, first.path])
+        // Every check of an open file records it. Recording the newest again rewrote the library and
+        // gave its row a new identity each time.
+        await model.recordRecent(profile: profile, entry: second)
+        XCTAssertEqual(model.metadata.recents, recents)
+        XCTAssertEqual(try Data(contentsOf: library), saved)
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: library.path)[.modificationDate] as? Date, written)
+        await model.recordRecent(profile: profile, entry: first)
+        XCTAssertEqual(model.metadata.recents.map(\.path), [first.path, second.path], "An older recent still moves to the top")
+    }
+
+    /// Each window has its own model. They share one library, one set of trusted host keys and one
+    /// reading history; with a store apiece, each wrote its own copy back over what another had saved.
+    func testWindowsShareOneLibraryAndNeverWriteAnOlderCopyOverIt() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = try AppModel(directory: directory, fileService: BackgroundExportService())
+        let second = try AppModel(directory: directory, fileService: BackgroundExportService())
+        // Never loaded, so its copy of the library stays as empty as a window that hasn't heard yet.
+        let stale = try AppModel(directory: directory, fileService: BackgroundExportService())
+        await first.load(); await second.load()
+        let library = directory.appendingPathComponent("library-v1.json")
+        func saved() async throws -> AppMetadata { await (try MetadataStore(fileURL: library)).snapshot() }
+
+        let identity = IdentityMetadata(name: "Shared key", publicKey: "ssh-ed25519 fixture", fingerprint: "SHA256:fixture",
+                                        requiresPassphrase: false, keychainReference: "fixture")
+        var profile = ConnectionProfile(name: "Added in one window", host: "fixture.invalid", username: "reader", identityID: identity.id)
+        try await first.addIdentity(identity)
+        await first.saveConnection(profile)
+        try await waitForOfflineState { second.metadata.connections == [profile] && second.metadata.identities == [identity] }
+        XCTAssertEqual(first.metadata.identities, [identity], "Told of its own change, a window doesn't add it twice")
+
+        // Opening a file and favouriting a folder in windows that haven't heard of the connection.
+        await stale.recordRecent(profile: profile, entry: .init(name: "one.md", path: "/docs/one.md", kind: .file))
+        await stale.favourite(profile: profile, path: "/docs")
+        var onDisk = try await saved()
+        XCTAssertEqual(onDisk.connections, [profile], "A window's older copy must not replace a connection saved since")
+        XCTAssertEqual(onDisk.identities, [identity])
+        XCTAssertEqual(onDisk.recents.map(\.path), ["/docs/one.md"]); XCTAssertEqual(onDisk.favourites.map(\.path), ["/docs"])
+        try await waitForOfflineState { first.metadata == onDisk && second.metadata == onDisk }
+        await second.favourite(profile: profile, path: "/docs")
+        try await waitForOfflineState { first.metadata.favourites.isEmpty }
+
+        // The key is still in use by a connection another window made, whatever this window's copy says.
+        await stale.deleteIdentity(identity)
+        onDisk = try await saved()
+        XCTAssertEqual(onDisk.identities, [identity]); XCTAssertNotNil(stale.errorMessage)
+
+        // Trust and history are one store each: a reset in one window holds in every other.
+        XCTAssertTrue(first.trust === second.trust); XCTAssertTrue(first.readingPositions === second.readingPositions)
+        XCTAssertTrue(first.metadataStore === second.metadataStore)
+        let endpoint = HostEndpoint(host: "rotated.invalid", port: 22), other = HostEndpoint(host: "other.invalid", port: 22)
+        let oldKey = NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey
+        let otherKey = NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey
+        try await first.trust.trustUnknown(endpoint: endpoint, key: HostKeyDetails(publicKey: oldKey))
+        try await second.trust.validate(endpoint: endpoint, publicKey: oldKey)
+        try await first.trust.reset(endpoint: endpoint)
+        try await second.trust.trustUnknown(endpoint: other, key: HostKeyDetails(publicKey: otherKey))
+        for store in [second.trust, try HostTrustStore(fileURL: directory.appendingPathComponent("known-hosts-v1.json"))] {
+            do { try await store.validate(endpoint: endpoint, publicKey: oldKey); XCTFail("A key whose trust was reset is trusted again") }
+            catch HostTrustError.unknown { }
+            try await store.validate(endpoint: other, publicKey: otherKey)
+        }
+
+        // A connection edited or removed in one window is retired in the others, as it is where it was edited.
+        let listing = FolderListing(.init(path: "/docs", entries: []))
+        second.routes = [.folder(profile.id, "/docs")]; second.cache(listing, id: profile.id, requestedPath: "/docs")
+        profile.host = "moved.invalid"
+        await first.saveConnection(profile)
+        try await waitForOfflineState { second.metadata.connections == [profile] && second.routes.isEmpty }
+        XCTAssertNil(second.cachedListing(profile.id, path: "/docs"), "Names read from the old server aren't shown under the new one")
+        second.routes = [.folder(profile.id, "/docs")]
+        await first.removeConnection(profile)
+        try await waitForOfflineState { second.metadata.connections.isEmpty && second.routes.isEmpty }
+        onDisk = try await saved()
+        XCTAssertTrue(onDisk.connections.isEmpty); XCTAssertTrue(onDisk.recents.isEmpty)
+
+        // Demo shows its own library and keeps the real one current for leaving it.
+        await second.setDemo(true)
+        let demoConnections = second.metadata.connections
+        let later = ConnectionProfile(name: "Added during Demo", host: "later.invalid", username: "reader", identityID: identity.id)
+        await first.saveConnection(later)
+        // A favourite saved after it marks the point by which this window has heard of both.
+        await first.favourite(profile: later, path: "/later")
+        XCTAssertEqual(second.metadata.connections, demoConnections)
+        await second.setDemo(false)
+        try await waitForOfflineState { second.metadata.connections == [later] && second.metadata.favourites.map(\.path) == ["/later"] }
+        onDisk = try await saved()
+        XCTAssertEqual(second.metadata, onDisk)
     }
 }
 

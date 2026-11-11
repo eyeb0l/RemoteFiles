@@ -48,6 +48,14 @@ public actor HostTrustStore {
     private struct Document: Codable { let version: Int; let records: [Record] }
     private let fileURL: URL
     private var keys: [HostEndpoint: HostKeyDetails]
+    private static let stores = SharedFileStores<HostTrustStore>()
+
+    /// App windows use the same store for a trust file. With one each, a window that still held a
+    /// host's old key went on accepting it after another window reset that host's trust, and wrote
+    /// the old key back when it next trusted any host at all.
+    public static func shared(fileURL: URL) throws -> HostTrustStore {
+        try stores.store(at: fileURL) { try HostTrustStore(fileURL: $0) }
+    }
 
     public init(fileURL: URL) throws {
         self.fileURL = fileURL

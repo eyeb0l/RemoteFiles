@@ -280,11 +280,66 @@ public enum RemotePath {
         let bytes = parent.utf8
         let start = bytes.firstIndex { $0 != 0x2F } ?? bytes.endIndex
         let end = bytes[start...].lastIndex { $0 != 0x2F }.map(bytes.index(after:)) ?? start
-        return (parent.hasPrefix("/") ? "/" : "") + parent[start..<end] + "/"
+        return (isAbsolute(parent) ? "/" : "") + parent[start..<end] + "/"
     }
     public static func parent(of path: String) -> String {
-        let parts = path.split(separator: "/").dropLast()
-        return "/" + parts.joined(separator: "/")
+        "/" + components(of: path).dropLast().joined(separator: "/")
     }
-    public static func name(of path: String) -> String { path.split(separator: "/").last.map(String.init) ?? "/" }
+    public static func name(of path: String) -> String { components(of: path).last.map(String.init) ?? "/" }
+
+    // SFTP names are bytes, and only the byte 0x2F separates them. Swift compares Strings by Character,
+    // and a slash next to a combining or prepended mark is part of a longer Character: split that way,
+    // "/r/\u{301}x" has one name, and "a\u{600}/../b" has no "..". Everything below goes by bytes.
+
+    /// The names in a path. Empty ones, from doubled, leading or trailing slashes, are left out unless asked for.
+    public static func components(of path: String, omittingEmpty: Bool = true) -> [Substring] {
+        components(of: path[...], omittingEmpty: omittingEmpty)
+    }
+    public static func components(of path: Substring, omittingEmpty: Bool = true) -> [Substring] {
+        path.utf8.split(separator: 0x2F, omittingEmptySubsequences: omittingEmpty).map { Substring($0) }
+    }
+    /// The names leading from `root` to `path`, which must lie under it.
+    public static func components(of path: String, under root: String) -> [Substring] {
+        let prefix = root.utf8.elementsEqual("/".utf8) ? 1 : root.utf8.count + 1
+        return components(of: Substring(path.utf8.dropFirst(prefix)))
+    }
+    public static func isAbsolute<Path: StringProtocol>(_ path: Path) -> Bool { path.utf8.first == 0x2F }
+    public static func endsWithSeparator(_ path: String) -> Bool { path.utf8.last == 0x2F }
+    public static func startsWithDoubledSeparator<Path: StringProtocol>(_ path: Path) -> Bool {
+        path.utf8.starts(with: [0x2F, 0x2F])
+    }
+    public static func hasDoubledSeparator<Path: StringProtocol>(_ path: Path) -> Bool {
+        var previous: UInt8 = 0
+        for byte in path.utf8 {
+            if byte == 0x2F, previous == 0x2F { return true }
+            previous = byte
+        }
+        return false
+    }
+    /// Whether any byte is a slash or backslash, which no single name may hold.
+    public static func hasSeparator<Name: StringProtocol>(_ name: Name) -> Bool { name.utf8.contains { $0 == 0x2F || $0 == 0x5C } }
+    public static func hasBackslash<Path: StringProtocol>(_ path: Path) -> Bool { path.utf8.contains(0x5C) }
+    /// "." or "..", which name a folder by position and never a file.
+    public static func isDotName<Name: StringProtocol>(_ name: Name) -> Bool {
+        name.utf8.elementsEqual(".".utf8) || name.utf8.elementsEqual("..".utf8)
+    }
+    public static func isParentName<Name: StringProtocol>(_ name: Name) -> Bool { name.utf8.elementsEqual("..".utf8) }
+    public static func isCurrentName<Name: StringProtocol>(_ name: Name) -> Bool { name.utf8.elementsEqual(".".utf8) }
+    /// What a version that compared names by Character let through as one local file name, and so
+    /// may have saved. Only for reading what was saved then: a name this accepts and `hasSeparator`
+    /// refuses holds a separator and is never used to make a path, but one such entry must not make
+    /// the whole of a saved library unreadable.
+    static func wasAcceptedAsFilename(_ value: String) -> Bool {
+        !value.isEmpty && value != "." && value != ".." && !value.contains("/") && !value.contains("\\") &&
+        !value.unicodeScalars.contains { $0.value < 32 || $0.value == 127 }
+    }
+    /// The same for a remote path, as `OfflineFolderPin.validPath` once judged it, but for the leading
+    /// slash, which goes by its byte: a path it refused for a first name starting with a mark is a path.
+    static func wasAcceptedAsPath(_ path: String) -> Bool {
+        isAbsolute(path) && !path.hasPrefix("//") && (path == "/" || !path.hasSuffix("/")) &&
+        !path.contains("\\") && !path.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }) &&
+        !path.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) && !path.contains("//")
+    }
+    /// Hidden as servers and shells mean it: the name's first byte is a full stop.
+    public static func isHidden<Name: StringProtocol>(_ name: Name) -> Bool { name.utf8.first == 0x2E }
 }

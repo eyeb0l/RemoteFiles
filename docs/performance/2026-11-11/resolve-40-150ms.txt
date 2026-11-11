@@ -1,0 +1,19 @@
+# scripts/benchmark-latency.sh RTT 0 5, MacBook Air (M3, 16 GB), macOS 27.2.1, loopback OpenSSH through latency_proxy.py.
+# Five runs a line. Order within each RTT: after, before, before, after. Before is 836643c with the
+# "resolve document link" measurement added; after is this change.
+after BENCH rtt=40ms mbit=0 | resolve symlink | median 45 ms | fastest 43 ms
+after BENCH rtt=40ms mbit=0 | resolve document link | median 168 ms | fastest 103 ms
+before BENCH rtt=40ms mbit=0 | resolve symlink | median 100 ms | fastest 99 ms
+before BENCH rtt=40ms mbit=0 | resolve document link | median 177 ms | fastest 173 ms
+before BENCH rtt=40ms mbit=0 | resolve symlink | median 88 ms | fastest 87 ms
+before BENCH rtt=40ms mbit=0 | resolve document link | median 175 ms | fastest 174 ms
+after BENCH rtt=40ms mbit=0 | resolve symlink | median 43 ms | fastest 42 ms
+after BENCH rtt=40ms mbit=0 | resolve document link | median 90 ms | fastest 88 ms
+after BENCH rtt=150ms mbit=0 | resolve symlink | median 156 ms | fastest 155 ms
+after BENCH rtt=150ms mbit=0 | resolve document link | median 310 ms | fastest 306 ms
+before BENCH rtt=150ms mbit=0 | resolve symlink | median 308 ms | fastest 306 ms
+before BENCH rtt=150ms mbit=0 | resolve document link | median 617 ms | fastest 614 ms
+before BENCH rtt=150ms mbit=0 | resolve symlink | median 311 ms | fastest 309 ms
+before BENCH rtt=150ms mbit=0 | resolve document link | median 621 ms | fastest 616 ms
+after BENCH rtt=150ms mbit=0 | resolve symlink | median 155 ms | fastest 155 ms
+after BENCH rtt=150ms mbit=0 | resolve document link | median 310 ms | fastest 308 ms

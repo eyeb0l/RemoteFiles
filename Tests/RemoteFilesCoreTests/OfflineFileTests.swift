@@ -314,6 +314,31 @@ final class OfflineFileTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: lease.url.path))
     }
 
+    /// Names were once compared by Character, which let a separator through when a combining mark or
+    /// joiner sat beside it. A copy saved under such a name could never be opened. It still can't,
+    /// but it no longer takes the rest of the library with it.
+    func testACopySavedUnderANameHoldingASeparatorFailsAloneAndNeverMakesAPath() async throws {
+        let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try OfflineFileStore(directory: dir), service = OfflineTransport(Data("kept".utf8))
+        let affected = try await save(store, service, "first.txt"), other = try await save(store, service, "second.txt")
+        let index = dir.appendingPathComponent("index-v1.json")
+        for name in ["docs/\u{200D}join.txt", "saved\\\u{301}name.txt", "../\u{301}above.txt"] {
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: index)) as? [String: Any])
+            var entries = try XCTUnwrap(object["pins"] as? [[String: Any]])
+            let position = try XCTUnwrap(entries.firstIndex { $0["id"] as? String == affected.id.uuidString })
+            entries[position]["filename"] = name; object["pins"] = entries
+            try JSONSerialization.data(withJSONObject: object).write(to: index)
+            let reopened = try OfflineFileStore(directory: dir)
+            let saved = await reopened.snapshot()
+            XCTAssertEqual(Set(saved.map(\.id)), [affected.id, other.id], "The library still opens")
+            do { _ = try await reopened.lease(affected.id); XCTFail("\(name.debugDescription) must not become a local path") }
+            catch OfflineFileError.damaged { }
+            let lease = try await reopened.lease(other.id)
+            XCTAssertEqual(try Data(contentsOf: lease.url), Data("kept".utf8))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent(".leases/\u{301}above.txt").path))
+        }
+    }
+
     func testInvalidManifestCannotRedirectLocalFilesAndPreservesExistingBytes() async throws {
         let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
         let store = try OfflineFileStore(directory: dir), service = OfflineTransport(Data("kept".utf8))

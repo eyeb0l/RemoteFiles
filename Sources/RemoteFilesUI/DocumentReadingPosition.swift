@@ -8,7 +8,10 @@ import UIKit
 /// Owned by each reader route, rather than the content subtree that refresh/mode changes replace.
 /// Rendered and source coordinates remain independent when switching reading modes.
 @MainActor @Observable public final class DocumentReadingPosition {
-    public var rendered: CGPoint = .zero { didSet { if rendered != oldValue { scheduleSave() } } }
+    // The two scroll offsets are written on every frame of a scroll and shown by nothing: views take
+    // them when they appear and when they restore a position. Observed, each frame's write had the
+    // rendered document's whole content built again, every paragraph of it.
+    @ObservationIgnored public var rendered: CGPoint = .zero { didSet { if rendered != oldValue { scheduleSave() } } }
     public var sourceAnchor: SavedReadingPosition.Anchor? { didSet { if sourceAnchor != oldValue { scheduleSave() } } }
     public var htmlAnchor: SavedReadingPosition.Anchor? { didSet { if htmlAnchor != oldValue { scheduleSave() } } }
     /// The page and vertical position within it for a PDF preview.
@@ -21,11 +24,14 @@ import UIKit
     @ObservationIgnored var sourceVoiceOverLine: (() -> Int?)?
     /// Counts syntax colours reaching the source view, which replaces its accessibility elements.
     var sourceHighlights = 0
+    /// Counts how often the rendered document's content was built, so a test can see that scrolling doesn't.
+    @ObservationIgnored var renderedContentBuilds = 0
+    func noteRenderedContentBuild() { renderedContentBuilds += 1 }
     // Weak renderer callbacks let a lifecycle flush await the final DOM capture without
     // retaining the WebKit view or document in the route's reading history.
     @ObservationIgnored var captureHTMLPosition: (() async -> Void)?
     @ObservationIgnored var htmlSessionID: UUID?
-    public var source: CGPoint = .zero { didSet { if source != oldValue { scheduleSave() } } }
+    @ObservationIgnored public var source: CGPoint = .zero { didSet { if source != oldValue { scheduleSave() } } }
     @ObservationIgnored private var store: ReadingPositionStore?
     @ObservationIgnored private var connectionID: UUID?
     @ObservationIgnored private var path: String?
@@ -60,6 +66,15 @@ import UIKit
         let nextRevision = await withTaskCancellationHandler { try? await hashing.value } onCancel: { hashing.cancel() }
         guard let nextRevision else { return false }
         return await prepare(revision: nextRevision, token: token, store: store, connectionID: connectionID, path: path) {}
+    }
+
+    /// As `preparePDF(fileURL:)`, for bytes whose SHA-256 the caller has only just checked: an offline
+    /// copy's lease reads and hashes the whole file against this digest before handing it over, so
+    /// hashing it again would read up to 128 MiB a second time on every opening.
+    @discardableResult
+    public func preparePDF(verifiedDigest: String, store: ReadingPositionStore?, connectionID: UUID, path: String) async -> Bool {
+        let token = UUID(); preparationID = token
+        return await prepare(revision: verifiedDigest, token: token, store: store, connectionID: connectionID, path: path) {}
     }
 
     @discardableResult

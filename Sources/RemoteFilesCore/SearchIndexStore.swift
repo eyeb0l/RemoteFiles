@@ -31,6 +31,9 @@ public struct SearchIndexSnapshot: Sendable {
     /// Whether an automatic update is due. A creation date in the future means the device clock
     /// moved backwards, so the age is unknown and the index is treated as due.
     public func isDueForAutomaticUpdate(at now: Date = Date(), interval: TimeInterval = automaticUpdateInterval) -> Bool {
+        Self.isDueForAutomaticUpdate(createdAt: createdAt, at: now, interval: interval)
+    }
+    static func isDueForAutomaticUpdate(createdAt: Date, at now: Date, interval: TimeInterval) -> Bool {
         let age = now.timeIntervalSince(createdAt)
         return age < 0 || age >= interval
     }
@@ -59,8 +62,17 @@ public actor SearchIndexStore {
     static let maximumIndexes = 8
     static let maximumDiskBytes = 128 * 1_024 * 1_024
     private let directory: URL
-    private struct Build { let generation: UUID; let connectionID: UUID }
+    private struct Build { let generation: UUID; let connectionID: UUID; let automatic: Bool; let startedAt: Date }
     private var builds: [String: Build] = [:]
+    /// How long a manual build's reservation holds automatic updates off if it was never ended.
+    /// A build ends its reservation by saving, failing or being cancelled; this covers one that couldn't.
+    static let manualBuildAllowance: TimeInterval = 10 * 60
+    /// When each saved index was made, so asking whether it is due doesn't read it again. An entry
+    /// holds for as long as the file's size and modification date do.
+    private struct Freshness { let createdAt: Date; let size: Int; let modified: Date }
+    private var freshness: [String: Freshness] = [:]
+    /// Temporary files this old were left by a process that ended part-way through a save.
+    static let abandonedWriteAge: TimeInterval = 10 * 60
     /// Index keys set to update automatically, with their connection so removal can find them.
     /// Kept apart from the snapshots, so a save never changes the setting and changing the
     /// setting never rewrites saved text.
@@ -76,12 +88,25 @@ public actor SearchIndexStore {
 
     /// Reserve the next replacement before traversing remote files. All windows sharing this
     /// actor observe the reservation; a newer build or deletion invalidates the older token.
-    public func beginBuild(profile: ConnectionProfile, root: String) throws -> UUID {
+    /// An automatic update never replaces a build someone asked for, in this window or another:
+    /// it is refused as superseded, and runs when the folder is next opened if it is still due.
+    public func beginBuild(profile: ConnectionProfile, root: String, automatic: Bool = false, now: Date = Date()) throws -> UUID {
         try Task.checkCancellation()
         guard Self.validPath(root) else { throw SearchIndexError.invalidSnapshot }
         let key = try Self.key(profile: profile, root: root), generation = UUID()
-        builds[key] = Build(generation: generation, connectionID: profile.id)
+        if automatic, let current = builds[key], !current.automatic {
+            let age = now.timeIntervalSince(current.startedAt)
+            if age >= 0, age < Self.manualBuildAllowance { throw SearchIndexError.superseded }
+        }
+        builds[key] = Build(generation: generation, connectionID: profile.id, automatic: automatic, startedAt: now)
         return generation
+    }
+
+    /// Gives up a reservation whose build failed or was cancelled, so it no longer holds automatic
+    /// updates off. A reservation already replaced, or used by a save, is left alone.
+    public func endBuild(profile: ConnectionProfile, root: String, generation: UUID) {
+        guard let key = try? Self.key(profile: profile, root: root), builds[key]?.generation == generation else { return }
+        builds.removeValue(forKey: key)
     }
 
     public func save(_ snapshot: SearchIndexSnapshot, profile: ConnectionProfile, root: String,
@@ -99,13 +124,15 @@ public actor SearchIndexStore {
         guard bytes.count <= Self.maximumEncodedBytes else { throw SearchIndexError.tooLarge }
         try Task.checkCancellation()
         try prepareDirectory()
+        removeAbandonedWrites()
         let destination = directory.appendingPathComponent(key + ".json")
-        let temporary = directory.appendingPathComponent(".pending-" + UUID().uuidString)
+        let temporary = directory.appendingPathComponent(Self.pendingPrefix + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: temporary) }
+        // The rename below is what replaces the index, so the temporary file needn't be written atomically too.
         #if os(iOS)
-        try bytes.write(to: temporary, options: [.atomic, .completeFileProtection])
+        try bytes.write(to: temporary, options: .completeFileProtection)
         #else
-        try bytes.write(to: temporary, options: .atomic)
+        try bytes.write(to: temporary)
         #endif
         try OfflineFileStore.protectFile(temporary)
         try Task.checkCancellation()
@@ -118,13 +145,61 @@ public actor SearchIndexStore {
             try Task.checkCancellation()
             try FileManager.default.removeItem(at: oldest.url)
             total -= oldest.size
-            try forgetAutomatic { $0.key == oldest.url.deletingPathExtension().lastPathComponent }
+            let evicted = oldest.url.deletingPathExtension().lastPathComponent
+            freshness.removeValue(forKey: evicted)
+            try forgetAutomatic { $0.key == evicted }
         }
         try Task.checkCancellation()
         guard Darwin.rename(temporary.path, destination.path) == 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
         builds.removeValue(forKey: key)
+        remember(createdAt: snapshot.createdAt, key: key, stamp: try? Self.stamp(of: destination))
+    }
+
+    private static let pendingPrefix = ".pending-"
+    /// A process that ended between writing a temporary file and renaming it left extracted text that
+    /// nothing counts, evicts or removes with its connection. Younger ones may be another store's save.
+    private func removeAbandonedWrites(now: Date = Date()) {
+        guard let children = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
+        for child in children where child.lastPathComponent.hasPrefix(Self.pendingPrefix) {
+            let modified = (try? FileManager.default.attributesOfItem(atPath: child.path))?[.modificationDate] as? Date
+            if let modified, abs(now.timeIntervalSince(modified)) < Self.abandonedWriteAge { continue }
+            try? FileManager.default.removeItem(at: child)
+        }
+    }
+
+    private static func stamp(of file: URL) throws -> (size: Int, modified: Date) {
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular, let size = attributes[.size] as? NSNumber,
+              let modified = attributes[.modificationDate] as? Date else { throw SearchIndexError.damaged }
+        return (size.intValue, modified)
+    }
+    private func remember(createdAt: Date, key: String, stamp: (size: Int, modified: Date)?) {
+        if let stamp { freshness[key] = Freshness(createdAt: createdAt, size: stamp.size, modified: stamp.modified) }
+        else { freshness.removeValue(forKey: key) }
+    }
+
+    /// Whether the index for this folder is set to update automatically and is old enough to. Reads
+    /// only when it was made, and only the first time: opening a folder mustn't decode megabytes of
+    /// saved text to learn that nothing is due.
+    public func isDueForAutomaticUpdate(profile: ConnectionProfile, root: String, now: Date = Date(),
+                                        interval: TimeInterval = SearchIndexSnapshot.automaticUpdateInterval) throws -> Bool {
+        guard try updatesAutomatically(profile: profile, root: root) else { return false }
+        let key = try Self.key(profile: profile, root: root)
+        let file = directory.appendingPathComponent(key + ".json")
+        let stamp = try Self.stamp(of: file)
+        let createdAt: Date
+        if let known = freshness[key], known.size == stamp.size, known.modified == stamp.modified {
+            createdAt = known.createdAt
+        } else {
+            let header = try readHeader(file)
+            guard header.version == 1, header.key == key, header.connectionID == profile.id,
+                  header.root.utf8.elementsEqual(root.utf8) else { throw SearchIndexError.damaged }
+            createdAt = header.createdAt
+            remember(createdAt: createdAt, key: key, stamp: stamp)
+        }
+        return SearchIndexSnapshot.isDueForAutomaticUpdate(createdAt: createdAt, at: now, interval: interval)
     }
 
     public func load(profile: ConnectionProfile, root: String) throws -> SearchIndexSnapshot? {
@@ -134,14 +209,16 @@ public actor SearchIndexStore {
         let key = try Self.key(profile: profile, root: root)
         let file = directory.appendingPathComponent(key + ".json")
         guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+        let stamp = try? Self.stamp(of: file)
         let envelope = try read(file)
         guard envelope.version == 1, envelope.key == key, envelope.connectionID == profile.id,
               envelope.root.utf8.elementsEqual(root.utf8) else { throw SearchIndexError.damaged }
-        let snapshot = envelope.snapshot
+        let snapshot = Self.withoutNamesNowHidden(envelope.snapshot, root: root)
         do { try Self.validate(snapshot, root: root) }
         catch is CancellationError { throw CancellationError() }
         catch { throw SearchIndexError.damaged }
         try Task.checkCancellation()
+        remember(createdAt: snapshot.createdAt, key: key, stamp: stamp)
         guard let cleaned = Self.withoutPrivateKeys(snapshot) else { return snapshot }
         // An index saved before keys were hidden holds them on disk, and an update would keep that
         // text for as long as the key's file didn't change, so it's rewritten as soon as it's read.
@@ -155,6 +232,20 @@ public actor SearchIndexStore {
             return nil
         } catch {} // It's rewritten at the next opening. What's returned is already clean.
         return cleaned
+    }
+
+    /// An index of visible files saved when hidden went by a name's first Character can hold a name
+    /// whose first byte is a full stop, such as one starting ".\u{301}". It is hidden now, and takes
+    /// no part in the index: the rest still loads, and the next update leaves the file out.
+    private static func withoutNamesNowHidden(_ snapshot: SearchIndexSnapshot, root: String) -> SearchIndexSnapshot {
+        guard !snapshot.includeHidden else { return snapshot }
+        let visible = snapshot.documents.filter { document in
+            !RemoteResourcePath.contains(document.entry.path, in: root)
+                || !RemotePath.components(of: document.entry.path, under: root).contains(where: RemotePath.isHidden)
+        }
+        guard visible.count != snapshot.documents.count else { return snapshot }
+        return SearchIndexSnapshot(createdAt: snapshot.createdAt, documents: visible, includeHidden: false,
+                                   extraction: snapshot.extraction, isPartial: snapshot.isPartial)
     }
 
     /// The same snapshot with any private keys hidden, or nil when it holds none.
@@ -181,6 +272,7 @@ public actor SearchIndexStore {
         guard Self.validPath(root) else { throw SearchIndexError.invalidSnapshot }
         let key = try Self.key(profile: profile, root: root)
         builds.removeValue(forKey: key)
+        freshness.removeValue(forKey: key)
         guard try existingDirectory() else { return }
         let file = directory.appendingPathComponent(key + ".json")
         if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
@@ -220,15 +312,18 @@ public actor SearchIndexStore {
     public func remove(connectionID: UUID) throws {
         try Task.checkCancellation()
         builds = builds.filter { $0.value.connectionID != connectionID }
+        freshness.removeAll()
         guard try existingDirectory() else { return }
+        removeAbandonedWrites()
         for file in try storedFiles() {
             try Task.checkCancellation()
+            // Whose it is takes only the fields before its text, not the megabytes of text themselves.
             // A corrupt file cannot be associated safely; remove it as unusable cached data.
-            let envelope: Envelope?
-            do { envelope = try read(file.url) }
+            let header: Header?
+            do { header = try readHeader(file.url) }
             catch is CancellationError { throw CancellationError() }
-            catch { envelope = nil }
-            if envelope == nil || envelope?.connectionID == connectionID {
+            catch { header = nil }
+            if header == nil || header?.connectionID == connectionID {
                 try FileManager.default.removeItem(at: file.url)
             }
         }
@@ -267,6 +362,15 @@ public actor SearchIndexStore {
         }
     }
 
+    /// What says whose index a file is and when it was made, without its documents.
+    private struct Header: Decodable {
+        let version: Int
+        let key: String
+        let connectionID: UUID
+        let root: String
+        let createdAt: Date
+    }
+
     private static func key(profile: ConnectionProfile, root: String) throws -> String {
         struct Identity: Encodable { let profile: ConnectionProfile; let root: String }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
@@ -289,8 +393,7 @@ public actor SearchIndexStore {
                   !entry.path.utf8.elementsEqual(root.utf8), RemoteResourcePath.contains(entry.path, in: root),
                   entry.name.utf8.elementsEqual(RemotePath.name(of: entry.path).utf8),
                   paths.insert(Data(entry.path.utf8)).inserted else { throw SearchIndexError.invalidSnapshot }
-            let relative = entry.path.dropFirst(root == "/" ? 1 : root.count + 1)
-            guard snapshot.includeHidden || !relative.split(separator: "/").contains(where: { $0.hasPrefix(".") }) else {
+            guard snapshot.includeHidden || !RemotePath.components(of: entry.path, under: root).contains(where: RemotePath.isHidden) else {
                 throw SearchIndexError.invalidSnapshot
             }
             guard document.segments.count <= 100 else { throw SearchIndexError.tooLarge }
@@ -365,6 +468,16 @@ public actor SearchIndexStore {
         automaticKeys = keys
     }
     private func read(_ file: URL) throws -> Envelope {
+        let bytes = try readBytes(file)
+        do { return try JSONDecoder().decode(Envelope.self, from: bytes) }
+        catch { throw SearchIndexError.damaged }
+    }
+    private func readHeader(_ file: URL) throws -> Header {
+        let bytes = try readBytes(file)
+        do { return try JSONDecoder().decode(Header.self, from: bytes) }
+        catch { throw SearchIndexError.damaged }
+    }
+    private func readBytes(_ file: URL) throws -> Data {
         let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
         guard attributes[.type] as? FileAttributeType == .typeRegular,
               let size = attributes[.size] as? NSNumber, size.uint64Value <= UInt64(Self.maximumEncodedBytes) else {
@@ -378,8 +491,7 @@ public actor SearchIndexStore {
             guard chunk.count <= Self.maximumEncodedBytes - bytes.count else { throw SearchIndexError.damaged }
             bytes.append(chunk)
         }
-        do { return try JSONDecoder().decode(Envelope.self, from: bytes) }
-        catch { throw SearchIndexError.damaged }
+        return bytes
     }
 }
 

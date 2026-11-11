@@ -260,6 +260,48 @@ final class OriginalFileExportTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: unrelated), Data([2]))
     }
 
+    /// Each window has an exporter, and each makes a new one after a return from the background. They share
+    /// one directory, so the first export of one must leave alone what another is writing or has ready.
+    func testAnotherExportersFirstUseKeepsThisProcesssFilesAndClearsEarlierOnes() async throws {
+        let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let earlierProcess = dir.appendingPathComponent("export-" + UUID().uuidString + "-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: earlierProcess, withIntermediateDirectories: true)
+        try Data([1]).write(to: earlierProcess.appendingPathComponent("old.bin"))
+
+        let readyService = OriginalExportTransportMock(bytes: Data([3, 4]))
+        let ready = RemoteOriginalExporter(service: readyService, directory: dir)
+        let prepared = try await ready.prepare(profile: profile, entry: entry(), allowedRoot: "/fixture")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: earlierProcess.path))
+
+        let heldService = OriginalExportTransportMock(bytes: Data([5, 6, 7]), holdFirstTransfer: true)
+        let writing = RemoteOriginalExporter(service: heldService, directory: dir)
+        let inFlight = Task { try await writing.prepare(profile: self.profile, entry: self.entry(), allowedRoot: "/fixture") }
+        try await waitUntil { await heldService.requests.count == 1 }
+        let inFlightFolders = Set(children(dir).map(\.lastPathComponent))
+        XCTAssertEqual(inFlightFolders.count, 2)
+
+        let newcomer = RemoteOriginalExporter(service: OriginalExportTransportMock(bytes: Data([8])), directory: dir)
+        let third = try await newcomer.prepare(profile: profile, entry: entry(), allowedRoot: "/fixture")
+        XCTAssertEqual(try Data(contentsOf: prepared.url), Data([3, 4]), "A file handed to Files in another window is still there")
+        XCTAssertTrue(inFlightFolders.isSubset(of: Set(children(dir).map(\.lastPathComponent))), "A transfer under way keeps its folder")
+
+        await heldService.resume()
+        let finished = try await inFlight.value
+        XCTAssertEqual(try Data(contentsOf: finished.url), Data([5, 6, 7]))
+        await ready.release(prepared.id); await writing.release(finished.id); await newcomer.release(third.id)
+        XCTAssertTrue(children(dir).isEmpty)
+    }
+
+    func testOnlyOtherProcessesExportFoldersCountAsAbandoned() {
+        let id = UUID().uuidString
+        XCTAssertTrue(RemoteOriginalExporter.isAbandoned("export-" + id), "From a version that named them by one identifier")
+        XCTAssertTrue(RemoteOriginalExporter.isAbandoned("export-" + UUID().uuidString + "-" + id))
+        XCTAssertFalse(RemoteOriginalExporter.isAbandoned(RemoteOriginalExporter.processPrefix + id))
+        for name in ["unrelated.txt", "export-", "export-notes", "export-" + id + "-", "export-" + id + "-" + id + "x", "Export-" + id] {
+            XCTAssertFalse(RemoteOriginalExporter.isAbandoned(name), name)
+        }
+    }
+
     func testTimeoutCancelsPromptlyAndCleansLateResult() async throws {
         let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
         let service = OriginalExportTransportMock(bytes: Data([1]), holdFirstTransfer: true)
