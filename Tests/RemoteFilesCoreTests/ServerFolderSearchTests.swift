@@ -92,6 +92,17 @@ final class ServerFolderSearchTests: XCTestCase {
             limits: .init(), content: .init(maxFiles: 501)), "Custom limits must not be silently tightened")
     }
 
+    /// A backslash is an ordinary byte in a name on the server, so a reply naming one is kept.
+    func testResponseKeepsNamesHoldingABackslash() throws {
+        let paths = ["/r/C:\\needle.txt", "/r/dir\\x/needle", "/r/a\\..\\needle.txt"]
+        let result = try ServerFolderSearch.decode(response(candidates: paths.map { candidate($0) }),
+            query: "needle", root: "/r", includeHidden: false, limits: .init(), content: nil)
+        XCTAssertEqual(Set(result.matches.map(\.path)), Set(paths))
+        let contents = try ServerFolderSearch.decode(response(candidates: paths.map { candidate($0, text: "a needle") },
+            overrides: ["files": 3, "bytes": 24, "charged": 24]), query: "needle", root: "/r", includeHidden: false, limits: .init(), content: .init())
+        XCTAssertEqual(Set(contents.contentMatches.map(\.entry.path)), Set(paths))
+    }
+
     private func outputDecoder(query: String = "needle", limits: RemoteFolderSearch.Limits = .init(),
                                content: RemoteFolderSearch.ContentLimits? = nil) -> ServerFolderSearch.OutputDecoder {
         ServerFolderSearch.OutputDecoder(query: query, root: "/r", includeHidden: false, limits: limits, content: content)
@@ -318,6 +329,19 @@ final class ServerFolderSearchTests: XCTestCase {
         let injection = try runHelper(root: root.path, query: "';$(touch INJECTION)\n", content: .init())
         XCTAssertTrue(injection.contentMatches.isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("INJECTION").path))
+    }
+
+    func testHelperFindsNamesHoldingABackslashBelowARootHoldingOne() throws {
+        let root = URL(fileURLWithPath: "/private/tmp").appendingPathComponent("search-\(UUID().uuidString)-C:\\share")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("sub\\dir"), withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        for name in ["C:\\needle.txt", "sub\\dir/a\\..\\needle.md"] {
+            try Data("a needle".utf8).write(to: root.appendingPathComponent(name))
+        }
+        let names = try runHelper(root: root.path, query: "needle")
+        XCTAssertEqual(Set(names.matches.map(\.path)), [root.path + "/C:\\needle.txt", root.path + "/sub\\dir/a\\..\\needle.md"])
+        let contents = try runHelper(root: root.path, query: "needle", content: .init())
+        XCTAssertEqual(Set(contents.contentMatches.map(\.entry.name)), ["C:\\needle.txt", "a\\..\\needle.md"])
     }
 
     func testHelperWritesAsItGoesAndEveryLineStandsAlone() throws {

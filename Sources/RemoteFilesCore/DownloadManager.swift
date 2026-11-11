@@ -246,6 +246,26 @@ public final class DownloadManager {
         await activeWorker?.value
     }
 
+    /// Interrupts only the queued and active downloads `matching` selects, as when the connection they use
+    /// was edited, removed or had its host key forgotten. Others keep their place, and the queue isn't
+    /// stopped: the active transfer is cancelled, and its connection closed, only if it is one of them, and
+    /// the next queued download starts once it drains.
+    public func interrupt(reason: String, where matching: (ManagedDownload) -> Bool) async {
+        var selected = Set<UUID>()
+        for index in items.indices where (items[index].state == .queued || items[index].state == .downloading) && matching(items[index]) {
+            items[index].state = .interrupted; items[index].message = reason
+            selected.insert(items[index].id)
+        }
+        guard !selected.isEmpty else { return }
+        let activeWorker = activeID.map(selected.contains) == true ? worker : nil
+        let activeService = activeWorker == nil ? nil : activeID.flatMap { contexts[$0]?.service }
+        // As in `interrupt(reason:)`, retire only these contexts, before yielding.
+        for id in selected { contexts.removeValue(forKey: id) }
+        activeWorker?.cancel(); publish()
+        if activeWorker != nil { await activeService?.disconnect() }
+        await activeWorker?.value
+    }
+
     private func index(_ id: UUID) -> Int? { items.firstIndex { $0.id == id } }
     private func jobDirectory(_ id: UUID) -> URL { directory.appendingPathComponent(id.uuidString, isDirectory: true) }
     private func fileURL(_ item: ManagedDownload) -> URL { jobDirectory(item.id).appendingPathComponent(item.filename) }

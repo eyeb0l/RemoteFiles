@@ -42,8 +42,11 @@ public enum RemoteDocumentLinkPath {
         return target
     }
 
+    /// The server's own paths, where a backslash is a byte of a name. The reference, written by whoever wrote
+    /// the document, still may not hold one: a server that takes it as a separator would see names the
+    /// resolution above never checked.
     private static func canonicalAbsolute(_ path: String) -> Bool {
-        guard RemotePath.isAbsolute(path), !RemotePath.startsWithDoubledSeparator(path), !RemotePath.hasBackslash(path),
+        guard RemotePath.isAbsolute(path), !RemotePath.startsWithDoubledSeparator(path),
               !path.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { return false }
         return !RemotePath.components(of: path).contains(where: RemotePath.isDotName)
     }

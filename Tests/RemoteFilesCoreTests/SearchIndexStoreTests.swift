@@ -249,6 +249,27 @@ final class SearchIndexStoreTests: XCTestCase {
         XCTAssertEqual(older?.documents.map(\.entry.path), ["/r/a.txt"]); XCTAssertEqual(older?.includeHidden, false)
     }
 
+    /// A backslash is an ordinary byte in a name on the server, as in a file copied from Windows. One such
+    /// file once made the whole folder's index impossible to save, and so to build or update.
+    func testNamesWithABackslashAreSavedLoadedAndSearched() async throws {
+        let store = SearchIndexStore(directory: directory)
+        for root in ["/r", "/", "/C:\\share"] {
+            let prefix = root == "/" ? "/" : root + "/"
+            let paths = [prefix + "C:\\notes.txt", prefix + "dir\\name/a.txt", prefix + "up\\..\\x.txt", prefix + "plain.txt"]
+            try await store.save(snapshot(paths.map { document($0) }), profile: profile, root: root)
+            let loaded = try await SearchIndexStore(directory: directory).load(profile: profile, root: root)
+            XCTAssertEqual(loaded?.documents.map(\.entry.path), paths)
+            XCTAssertEqual(loaded?.documents.map(\.entry.name), ["C:\\notes.txt", "a.txt", "up\\..\\x.txt", "plain.txt"])
+            let found = try RemoteFolderSearch.indexedContents(matching: "needle", snapshot: try XCTUnwrap(loaded), includeHidden: false, root: root)
+            XCTAssertEqual(Set(found.contentMatches.map(\.entry.path)), Set(paths))
+        }
+        // What a backslash doesn't make valid stays invalid.
+        for path in ["/r/x\\/../y.txt", "/r/\\/./y.txt"] {
+            do { try await store.save(snapshot([document(path)]), profile: profile, root: "/r"); XCTFail(path) }
+            catch SearchIndexError.invalidSnapshot {}
+        }
+    }
+
     func testCorruptionUnknownVersionAndOversizedDataAreRejected() async throws {
         let store = SearchIndexStore(directory: directory)
         let valid = snapshot([document("/r/a.txt")])

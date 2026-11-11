@@ -434,7 +434,8 @@ extension OfflineFileStore {
             let folder = OfflineFolderPin(id: previous?.id ?? UUID(), connectionID: profile.id, connectionName: profile.name,
                 routeKey: OfflinePin.routeKey(profile), path: path, name: name.isEmpty ? "Root" : name, savedAt: Date(),
                 includeHidden: includeHidden, directories: prepared.directories, fileIDs: prepared.files.map(\.id),
-                skippedLinks: prepared.skippedLinks, skippedOtherEntries: prepared.skippedOtherEntries)
+                skippedLinks: prepared.skippedLinks, skippedOtherEntries: prepared.skippedOtherEntries,
+                skippedNames: prepared.skippedNames)
             // Re-read current metadata: another window may have removed a different pin while
             // this operation was suspended. Never resurrect it from the planning snapshot.
             let candidate = pins.filter { !replaced.contains($0.id) } + prepared.files
@@ -481,6 +482,7 @@ extension OfflineFileStore {
                   folder.directories.count <= 256, dirs.count == folder.directories.count, dirs.contains(Data(folder.path.utf8)),
                   folder.skippedLinks >= 0, folder.skippedLinks <= 10_000,
                   folder.skippedOtherEntries >= 0, folder.skippedOtherEntries <= 10_000,
+                  folder.skippedNames >= 0, folder.skippedNames <= 10_000,
                   routes.insert(Data((folder.routeKey + folder.path).utf8)).inserted else { throw OfflineFileError.invalidLibrary }
             for path in folder.directories {
                 guard RemotePath.wasAcceptedAsPath(path), RemoteResourcePath.contains(path, in: folder.path),

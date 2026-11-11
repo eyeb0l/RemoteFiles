@@ -72,6 +72,17 @@ final class FolderSearchTests: XCTestCase {
         XCTAssertEqual(withHidden.paths, ["/r/.cache/.needle", "/r/.cache/needle-hidden.txt"])
     }
 
+    /// A backslash is an ordinary byte in a name on the server, as in a file copied from Windows.
+    func testNamesHoldingABackslashAreFoundAndTheirFoldersSearched() async throws {
+        let service = TreeService([
+            "/r": [file("/r/C:\\needle.txt"), folder("/r/dir\\name")],
+            "/r/dir\\name": [file("/r/dir\\name/a\\..\\needle")]
+        ])
+        let result = try await search(service, "needle")
+        XCTAssertEqual(result.paths, ["/r/C:\\needle.txt", "/r/dir\\name/a\\..\\needle"])
+        XCTAssertEqual(result.final.foldersSearched, 2)
+    }
+
     func testNewlyDiscoveredFoldersAreConsumedAfterTheLastListingFinishes() async throws {
         var tree: [String: [RemoteEntry]] = [:], expected: [String] = []
         var path = "/r"

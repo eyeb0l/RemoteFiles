@@ -49,7 +49,7 @@ final class RemotePathBoundaryTests: XCTestCase {
         XCTAssertTrue(OfflineFolderPin.validPath("/r/\u{200D}join.txt"))
         XCTAssertTrue(OfflineFolderPin.validPath("/"))
         for path in ["/a" + prepended + "/../b", "/a/.." + "/" + accent + "b", "/a" + prepended + "//b", "/a" + prepended + "/",
-                     "/a/./b", "relative", "/a\\" + accent, "//a", "/a/..", ""] {
+                     "/a/./b", "relative", "//a", "/a/..", ""] {
             XCTAssertFalse(OfflineFolderPin.validPath(path), path.debugDescription)
         }
         for name in ["a" + prepended + "/b", "../" + accent + "b", "a\\" + accent, ".", "..", "", "a/b"] {
@@ -57,6 +57,48 @@ final class RemotePathBoundaryTests: XCTestCase {
         }
         XCTAssertTrue(OfflineFileStore.validFilename(accent + "x"))
         XCTAssertTrue(OfflineFileStore.validFilename("..." + accent))
+    }
+
+    /// On the server a backslash is a byte like any other, so a path holding one is still a path: saved
+    /// indexes and offline folders keep it, and links resolve beside it. A link's own reference, written by
+    /// whoever wrote the document, still may not hold one, and neither may a name made into a local file.
+    func testBackslashIsAnOrdinaryByteInRemotePathsButNotInReferencesOrLocalNames() throws {
+        let accent = "\u{301}"
+        for path in ["/r/C:\\notes.txt", "/a\\" + accent, "/share\\docs/a.md", "/\\", "/r/..\\x", "/r/\\..\\"] {
+            XCTAssertTrue(OfflineFolderPin.validPath(path), path.debugDescription)
+            XCTAssertTrue(RemotePath.wasAcceptedAsPath(path), "Saved by this version, so it must load: " + path.debugDescription)
+        }
+        XCTAssertEqual(RemotePath.name(of: "/r/C:\\notes.txt"), "C:\\notes.txt")
+        XCTAssertEqual(RemotePath.parent(of: "/r/..\\x"), "/r")
+        // Still refused: what a backslash doesn't change.
+        for path in ["/r\\/../x", "/r/\\/./x", "r\\x", "/r\\//x", "/r\\/"] {
+            XCTAssertFalse(OfflineFolderPin.validPath(path), path.debugDescription)
+            XCTAssertFalse(RemotePath.wasAcceptedAsPath(path), path.debugDescription)
+        }
+        for name in ["C:\\notes.txt", "\\", "..\\x"] {
+            XCTAssertFalse(OfflineFileStore.validFilename(name), name.debugDescription)
+            XCTAssertFalse(RemotePath.wasAcceptedAsFilename(name), name.debugDescription)
+        }
+
+        for (root, document) in [("/Projects", "/Projects/C:\\docs/review.md"), ("/srv\\share", "/srv\\share/review.md")] {
+            let folder = RemotePath.parent(of: document)
+            XCTAssertEqual(try RemoteDocumentLinkPath.resolve("notes.md", relativeTo: document, connectionRoot: root), folder + "/notes.md")
+            XCTAssertEqual(try RemoteDocumentLinkPath.resolve("sub/../notes.md", relativeTo: document, connectionRoot: root), folder + "/notes.md")
+            XCTAssertThrowsError(try RemoteDocumentLinkPath.resolve("../../secret.md", relativeTo: document, connectionRoot: root)) {
+                XCTAssertEqual($0 as? RemoteDocumentLinkError, .outsideConnection)
+            }
+            for reference in ["..\\secret.md", "a%5Cb.md", "..%5C..%5Csecret.md"] {
+                XCTAssertThrowsError(try RemoteDocumentLinkPath.resolve(reference, relativeTo: document, connectionRoot: root), reference) {
+                    XCTAssertEqual($0 as? RemoteDocumentLinkError, .invalidReference)
+                }
+            }
+            let profile = ConnectionProfile(name: "Paths", host: "example.invalid", username: "reader", identityID: UUID())
+            let location = RemoteDocumentLocation(profile: profile, path: document)
+            XCTAssertEqual(try RemoteResourcePath.resolve("one.png", relativeTo: location), folder + "/one.png")
+            for reference in ["..\\one.png", "a%5Cone.png", "\\one.png"] {
+                XCTAssertThrowsError(try RemoteResourcePath.resolve(reference, relativeTo: location), reference)
+            }
+        }
     }
 
     func testLinksAndImagesResolveParentNamesHiddenBesideMarks() throws {

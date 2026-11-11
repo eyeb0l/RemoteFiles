@@ -316,9 +316,15 @@ public enum RemotePath {
         }
         return false
     }
-    /// Whether any byte is a slash or backslash, which no single name may hold.
+    /// Whether any byte is a slash or backslash, which no name made into a file on this device may hold. A file
+    /// saved or shared from here can reach a share or provider that takes a backslash to separate folders.
     public static func hasSeparator<Name: StringProtocol>(_ name: Name) -> Bool { name.utf8.contains { $0 == 0x2F || $0 == 0x5C } }
     public static func hasBackslash<Path: StringProtocol>(_ path: Path) -> Bool { path.utf8.contains(0x5C) }
+    /// Whether this is one name from a listing: not empty, "." or "..", and holding no slash byte. A backslash
+    /// is a byte of the name.
+    public static func isSingleName<Name: StringProtocol>(_ name: Name) -> Bool {
+        !name.utf8.isEmpty && !isDotName(name) && !name.utf8.contains(0x2F)
+    }
     /// "." or "..", which name a folder by position and never a file.
     public static func isDotName<Name: StringProtocol>(_ name: Name) -> Bool {
         name.utf8.elementsEqual(".".utf8) || name.utf8.elementsEqual("..".utf8)
@@ -335,9 +341,10 @@ public enum RemotePath {
     }
     /// The same for a remote path, as `OfflineFolderPin.validPath` once judged it, but for the leading
     /// slash, which goes by its byte: a path it refused for a first name starting with a mark is a path.
+    /// A backslash, which earlier versions refused and this one saves, is a byte of a name.
     static func wasAcceptedAsPath(_ path: String) -> Bool {
         isAbsolute(path) && !path.hasPrefix("//") && (path == "/" || !path.hasSuffix("/")) &&
-        !path.contains("\\") && !path.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }) &&
+        !path.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }) &&
         !path.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) && !path.contains("//")
     }
     /// Hidden as servers and shells mean it: the name's first byte is a full stop.

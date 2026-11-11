@@ -106,6 +106,45 @@ private actor MediaConnectionService: RemoteFileService {
     func disconnect() async { }
 }
 
+/// One window's transport. A download whose path is held waits until it is released or its task is
+/// cancelled, as a managed transfer drains when its worker is. `disconnect` only counts: in these tests one
+/// service is both a window's browsing and its download transport, and closing browsing must not look like
+/// stopping a download.
+private actor WindowDownloadService: RemoteFileService {
+    private var held: Set<String> = []
+    private var failures: [String: Error] = [:]
+    private(set) var waiting: [String] = []
+    private(set) var cancelled: [String] = []
+    private(set) var finished: [String] = []
+    func hold(_ path: String) { held.insert(path) }
+    func release(_ path: String) { held.remove(path) }
+    func fail(_ path: String, with error: Error) { failures[path] = error }
+    /// Chosen files use the exact canonical contract, as in `BackgroundExportService`.
+    func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL,
+                              limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        guard RemoteResourcePath.contains(path, in: canonicalRoot) else { throw RemoteDocumentLinkError.outsideConnection }
+        return try await downloadFile(profile: profile, path: path, allowedRoot: canonicalRoot, destination: destination, limit: limit)
+    }
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
+        if let failure = failures[path] { throw failure }
+        if held.contains(path) {
+            waiting.append(path)
+            defer { waiting.removeAll { $0 == path } }
+            do { while held.contains(path) { try await Task.sleep(for: .milliseconds(10)) } }
+            catch { cancelled.append(path); throw CancellationError() }
+        }
+        try Data("bytes".utf8).write(to: destination)
+        finished.append(path)
+        return .init(name: RemotePath.name(of: path), path: path, kind: .file, size: 5)
+    }
+    func disconnect() {}
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { .init(path: path, entries: []) }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { Data() }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
+        .init(name: RemotePath.name(of: path), path: path, kind: .directory)
+    }
+}
+
 @MainActor final class AppModelLifecycleTests: XCTestCase {
     func testCachedMediaAfterFailedConnectionCheckStaysDisconnectedAndRecoversWithoutDownloading() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -228,6 +267,164 @@ private actor MediaConnectionService: RemoteFileService {
         let disconnects = await firstService.disconnects
         XCTAssertEqual(disconnects, 0)
         await first.disconnect()
+    }
+
+    private func file(_ name: String) -> RemoteEntry { .init(name: name, path: "/" + name, kind: .file) }
+    /// Waits for what must happen, with room for a loaded CI runner.
+    private func waitUntil(_ what: String, _ condition: () async -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(30)
+        while !(await condition()), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        let met = await condition()
+        XCTAssertTrue(met, what)
+    }
+    /// Checks for a while that what must not happen doesn't.
+    private func holds(_ what: String, _ condition: () async -> Bool) async throws {
+        let deadline = ContinuousClock.now + .milliseconds(500)
+        while ContinuousClock.now < deadline {
+            guard await condition() else { return XCTFail(what) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+    private func twoWindows(_ directory: URL) async throws -> (AppModel, WindowDownloadService, AppModel, WindowDownloadService) {
+        let firstService = WindowDownloadService(), secondService = WindowDownloadService()
+        let first = try AppModel(directory: directory, fileService: firstService)
+        let second = try AppModel(directory: directory, fileService: secondService)
+        await first.load(); await second.load()
+        return (first, firstService, second, secondService)
+    }
+
+    func testEnteringDemoInOneWindowKeepsAnotherWindowsDownloadRunning() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (first, _, second, secondService) = try await twoWindows(directory)
+        let profile = ConnectionProfile(name: "Fixture", host: "fixture.invalid", username: "reader", identityID: UUID())
+        await secondService.hold("/file.bin")
+        second.enqueueDownload(profile: profile, entry: file("file.bin"))
+        let manager = try XCTUnwrap(second.downloads)
+        try await waitUntil("The download started") { await secondService.waiting == ["/file.bin"] }
+        await first.setDemo(true)
+        XCTAssertFalse(first.downloads === manager, "Demo keeps its own downloads")
+        try await holds("Another window entering Demo stopped this window's download") {
+            manager.items.first?.state == .downloading
+        }
+        var cancelled = await secondService.cancelled
+        XCTAssertEqual(cancelled, [])
+        await first.setDemo(false)
+        XCTAssertTrue(first.downloads === manager)
+        XCTAssertEqual(manager.items.first?.state, .downloading)
+        // The last window left on the queue entering Demo stops it, as closing that window would.
+        await first.setDemo(true)
+        await second.setDemo(true)
+        try await waitUntil("The last window entering Demo stopped its download") { manager.items.first?.state == .interrupted }
+        cancelled = await secondService.cancelled
+        XCTAssertEqual(cancelled, ["/file.bin"])
+    }
+
+    /// Editing, removing or forgetting the host key of a connection in one window stops that connection's
+    /// downloads in every window, and nothing else.
+    func testChangingOneConnectionStopsOnlyItsDownloadsInEveryWindow() async throws {
+        enum Change: CaseIterable { case edit, remove, resetTrust, resetJumpHostTrust }
+        for change in Change.allCases {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let (first, _, second, secondService) = try await twoWindows(directory)
+            func profile(_ name: String) -> ConnectionProfile {
+                ConnectionProfile(name: name, host: name + ".invalid", username: "reader", identityID: UUID(),
+                                  jumpHost: JumpHost(host: "jump-" + name + ".invalid", username: "reader", identityID: UUID()))
+            }
+            let x = profile("x"), y = profile("y"), z = profile("z")
+            first.metadata.connections = [x, y, z]
+            await first.persist()
+            try await waitUntil("The other window took in the library") { second.metadata.connections.count == 3 }
+            func apply(to target: ConnectionProfile) async {
+                switch change {
+                case .edit: var edited = target; edited.username = "changed"; await first.saveConnection(edited)
+                case .remove: await first.removeConnection(target)
+                case .resetTrust: await first.resetTrust(for: target)
+                case .resetJumpHostTrust: await first.resetJumpHostTrust(for: target)
+                }
+                if change == .edit || change == .remove {
+                    try? await waitUntil("The other window took in the change") {
+                        !second.metadata.connections.contains(target)
+                    }
+                }
+            }
+            await secondService.hold("/x.bin")
+            second.enqueueDownload(profile: x, entry: file("x.bin"))
+            second.enqueueDownload(profile: y, entry: file("y.bin"))
+            second.enqueueDownload(profile: z, entry: file("z.bin"))
+            let manager = try XCTUnwrap(second.downloads)
+            try await waitUntil("\(change): the download started") { await secondService.waiting == ["/x.bin"] }
+
+            await apply(to: y)
+            XCTAssertEqual(manager.items.map(\.state), [.downloading, .interrupted, .queued], "\(change)")
+            try await holds("\(change) of another connection stopped this one's download") {
+                manager.items.map(\.state) == [.downloading, .interrupted, .queued]
+            }
+            var cancelled = await secondService.cancelled
+            XCTAssertEqual(cancelled, [], "\(change)")
+
+            await apply(to: x)
+            XCTAssertEqual(manager.items.first?.state, .interrupted, "\(change)")
+            cancelled = await secondService.cancelled
+            XCTAssertEqual(cancelled, ["/x.bin"], "\(change)")
+            try await waitUntil("\(change): the queue went on") { manager.items.last?.state == .completed }
+            XCTAssertEqual(manager.items.map(\.state), [.interrupted, .interrupted, .completed], "\(change)")
+        }
+    }
+
+    /// A window that hears another changed a connection stops its own downloads of the connection as it was,
+    /// as the window that changed it did. Here the window started its download before hearing of the change.
+    func testDownloadOfAConnectionChangedInAnotherWindowStops() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = WindowDownloadService(), model = try AppModel(directory: directory, fileService: service)
+        await model.load()
+        let x = ConnectionProfile(name: "X", host: "x.invalid", username: "reader", identityID: UUID())
+        let y = ConnectionProfile(name: "Y", host: "y.invalid", username: "reader", identityID: UUID())
+        model.metadata.connections = [x, y]
+        await model.persist()
+        await service.hold("/x.bin")
+        model.enqueueDownload(profile: x, entry: file("x.bin"))
+        model.enqueueDownload(profile: y, entry: file("y.bin"))
+        let manager = try XCTUnwrap(model.downloads)
+        try await waitUntil("The download started") { await service.waiting == ["/x.bin"] }
+        var moved = x; moved.host = "moved.invalid"
+        _ = try await model.metadataStore.update(origin: UUID()) { $0.connections = [moved, y] }
+        try await waitUntil("The window took in the change") { model.metadata.connections == [moved, y] }
+        try await waitUntil("The download of the connection as it was stopped") { manager.items.first?.state == .interrupted }
+        let cancelled = await service.cancelled
+        XCTAssertEqual(cancelled, ["/x.bin"])
+        try await waitUntil("The other connection's download went on") { manager.items.last?.state == .completed }
+    }
+
+    /// Downloads a window queued keep their place when it enters Demo, as when it goes to the background. One
+    /// that then needs a trust or unlock prompt fails with its message in Downloads, rather than raising a
+    /// prompt for a real server over Demo.
+    func testWindowInDemoDoesNotRaisePromptsForDownloadsItQueuedBefore() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (first, firstService, second, _) = try await twoWindows(directory)
+        let profile = ConnectionProfile(name: "Fixture", host: "fixture.invalid", username: "reader", identityID: UUID())
+        first.metadata.connections = [profile]
+        let key = try HostKeyDetails(publicKey: NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey)
+        await firstService.hold("/held.bin")
+        await firstService.fail("/trust.bin", with: HostTrustError.unknown(endpoint: .init(host: "fixture.invalid"), key: key))
+        first.enqueueDownload(profile: profile, entry: file("held.bin"))
+        first.enqueueDownload(profile: profile, entry: file("trust.bin"))
+        first.sheet = nil
+        let manager = try XCTUnwrap(first.downloads)
+        try await waitUntil("The download started") { await firstService.waiting == ["/held.bin"] }
+        await first.setDemo(true)
+        await firstService.release("/held.bin")
+        try await waitUntil("The queue went on in the other window") { manager.items.last?.state == .failed }
+        XCTAssertEqual(manager.items.first?.state, .completed)
+        XCTAssertNil(first.sheet); XCTAssertNil(second.sheet)
+        // Back in the real library, a download it starts raises its prompt as before.
+        await first.setDemo(false)
+        first.retryDownload(try XCTUnwrap(manager.items.last))
+        try await waitUntil("The retried download failed") { manager.activeID == nil && manager.items.last?.state == .failed }
+        XCTAssertEqual(first.sheet?.id, "trust")
     }
 
     func testDownloadUnknownHostPresentsTrustSheet() async throws {
