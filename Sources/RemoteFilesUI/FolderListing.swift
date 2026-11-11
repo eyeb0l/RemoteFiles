@@ -101,7 +101,7 @@ struct FolderListing: Sendable {
         path = snapshot.path
         rows = Self.sortedByName(snapshot.entries).map(FolderRow.init)
         // Without hidden names the two arrays share one buffer.
-        defaultRows = rows.contains { $0.entry.name.hasPrefix(".") } ? rows.filter { !$0.entry.name.hasPrefix(".") } : rows
+        defaultRows = rows.contains { RemotePath.isHidden($0.entry.name) } ? rows.filter { !RemotePath.isHidden($0.entry.name) } : rows
     }
     func visible(query: String, showHidden: Bool, order: FolderSortOrder, options: SearchQueryOptions = .init()) -> [FolderRow] {
         if query.isEmpty && order == .name && options == SearchQueryOptions() { return showHidden ? rows : defaultRows }
@@ -258,6 +258,41 @@ final class PartialListingGate: @unchecked Sendable {
         guard first.duration(to: now) >= delay, count >= shownCount + shownCount / 2 else { return false }
         shownCount = count
         return true
+    }
+}
+
+/// Passes the newest of a build's progress reports to the main actor at most ten times a second.
+/// An index build reports after every folder and every file, over a thousand times and on a fast
+/// link within a fraction of a second; each one sent on its own was a main-actor task and a redraw
+/// of the sheet. The first report goes at once and the last is never dropped. Reports may come
+/// from any task.
+final class LatestProgressRelay<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private let interval: Duration
+    private let deliver: @MainActor (Value) -> Void
+    private var pending: Value?
+    private var scheduled = false
+    private var lastDelivery: ContinuousClock.Instant?
+    init(interval: Duration = .milliseconds(100), deliver: @escaping @MainActor (Value) -> Void) {
+        self.interval = interval; self.deliver = deliver
+    }
+    func offer(_ value: Value) {
+        lock.lock()
+        pending = value
+        guard !scheduled else { lock.unlock(); return }
+        scheduled = true
+        let wait = lastDelivery.map { interval - $0.duration(to: .now) } ?? .zero
+        lock.unlock()
+        Task { @MainActor in
+            if wait > .zero { try? await Task.sleep(for: wait) }
+            if let value = self.take() { self.deliver(value) }
+        }
+    }
+    private func take() -> Value? {
+        lock.lock(); defer { lock.unlock() }
+        scheduled = false; lastDelivery = .now
+        defer { pending = nil }
+        return pending
     }
 }
 

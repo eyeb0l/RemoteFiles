@@ -56,6 +56,9 @@ final class LatencyBenchmarkTests: XCTestCase {
         try await measure("list folder") { _ = try await warm.listDirectory(profile: profile, path: files) }
         try await measure("list 1,000 entries") { _ = try await warm.listDirectory(profile: profile, path: files + "/thousand") }
         try await measure("resolve symlink") { _ = try await warm.resolveEntry(profile: profile, path: files + "/report-link.md") }
+        try await measure("resolve document link") {
+            _ = try await warm.resolveDocumentLink(profile: profile, documentPath: files + "/large-report.md", reference: "report.md")
+        }
         try await measure("read 50 B file") { _ = try await warm.readFile(profile: profile, path: files + "/report.md", limit: 2_097_152) }
         try await measure("read 173 KB report") { _ = try await warm.readFile(profile: profile, path: files + "/large-report.md", limit: 2_097_152) }
         guard case .contents(_, let version?) = try await warm.readFileIfChanged(

@@ -209,6 +209,46 @@ final class SearchIndexStoreTests: XCTestCase {
         XCTAssertTrue(hidden?.includeHidden == true)
     }
 
+    /// A name starting with a joiner or a combining mark forms one Character with the slash before it.
+    /// Split by Character, its path had no such name, and one file like it failed every save of its index.
+    func testNamesStartingWithAJoinerOrCombiningMarkAreSavedAndSearched() async throws {
+        let store = SearchIndexStore(directory: directory)
+        for root in ["/r", "/"] {
+            let prefix = root == "/" ? "/" : root + "/"
+            let paths = [prefix + "\u{200D}join.txt", prefix + "\u{301}x", prefix + "sub/\u{301}y.txt", prefix + "a\u{600}/z.txt"]
+            try await store.save(snapshot(paths.map { document($0) }), profile: profile, root: root)
+            let loaded = try await store.load(profile: profile, root: root)
+            XCTAssertEqual(loaded?.documents.map(\.entry.path), paths)
+            XCTAssertEqual(loaded?.documents.map(\.entry.name), ["\u{200D}join.txt", "\u{301}x", "\u{301}y.txt", "z.txt"])
+            let found = try RemoteFolderSearch.indexedContents(matching: "needle", snapshot: try XCTUnwrap(loaded), includeHidden: false, root: root)
+            XCTAssertEqual(found.contentMatches.map(\.entry.path), paths)
+        }
+        // Hidden by its first byte, as the folder walk and the server see it.
+        let hidden = "/r/.\u{301}x"
+        do { try await store.save(snapshot([document(hidden)]), profile: profile, root: "/r"); XCTFail("A hidden name was saved as visible") }
+        catch SearchIndexError.invalidSnapshot {}
+        try await store.save(snapshot([document(hidden)], hidden: true), profile: profile, root: "/r")
+        let saved = try await store.load(profile: profile, root: "/r")
+        let withHidden = try RemoteFolderSearch.indexedContents(matching: "needle", snapshot: try XCTUnwrap(saved), includeHidden: true, root: "/r")
+        XCTAssertEqual(withHidden.contentMatches.map(\.entry.path), [hidden])
+        let withoutHidden = try RemoteFolderSearch.indexedContents(matching: "needle", snapshot: try XCTUnwrap(saved), includeHidden: false, root: "/r")
+        XCTAssertEqual(withoutHidden.contentMatches.map(\.entry.path), [])
+
+        // An index of visible files saved when hidden went by the first Character can hold such a
+        // name. It loads without it, where it would otherwise count as damaged and never update.
+        try await store.save(snapshot([document("/r/a.txt"), document(hidden)], hidden: true), profile: profile, root: "/r")
+        var edited = false
+        for file in try files() where file.lastPathComponent.count == 69 {
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+            guard object["root"] as? String == "/r" else { continue }
+            object["includeHidden"] = false; edited = true
+            try JSONSerialization.data(withJSONObject: object).write(to: file)
+        }
+        XCTAssertTrue(edited)
+        let older = try await SearchIndexStore(directory: directory).load(profile: profile, root: "/r")
+        XCTAssertEqual(older?.documents.map(\.entry.path), ["/r/a.txt"]); XCTAssertEqual(older?.includeHidden, false)
+    }
+
     func testCorruptionUnknownVersionAndOversizedDataAreRejected() async throws {
         let store = SearchIndexStore(directory: directory)
         let valid = snapshot([document("/r/a.txt")])
@@ -327,6 +367,131 @@ final class SearchIndexStoreTests: XCTestCase {
         } catch SearchIndexError.superseded {}
         let saved = try await store.load(profile: profile, root: "/r")
         XCTAssertEqual(saved?.documents.map(\.entry.path), ["/r/new.txt"])
+    }
+
+    /// Windows share this store. An automatic update starting in one must not replace a build
+    /// someone asked for in another, whose save would then fail as superseded.
+    func testAnAutomaticUpdateNeverReplacesABuildSomeoneAskedFor() async throws {
+        let store = SearchIndexStore(directory: directory)
+        let started = Date(timeIntervalSince1970: 1_000)
+        let manual = try await store.beginBuild(profile: profile, root: "/r", now: started)
+        do {
+            _ = try await store.beginBuild(profile: profile, root: "/r", automatic: true, now: started.addingTimeInterval(5))
+            XCTFail("An automatic update replaced a manual build under way")
+        } catch SearchIndexError.superseded {}
+        let otherRoot = try await store.beginBuild(profile: profile, root: "/s", automatic: true, now: started)
+        try await store.save(snapshot([document("/s/a.txt")]), profile: profile, root: "/s", generation: otherRoot)
+        try await store.save(snapshot([document("/r/manual.txt")]), profile: profile, root: "/r", generation: manual)
+
+        // Once the manual build has saved, failed or been cancelled, automatic updates run again.
+        let afterSave = try await store.beginBuild(profile: profile, root: "/r", automatic: true, now: started.addingTimeInterval(6))
+        // A manual build still replaces an automatic one, as it always did.
+        let replacing = try await store.beginBuild(profile: profile, root: "/r", now: started.addingTimeInterval(7))
+        do {
+            try await store.save(snapshot([document("/r/automatic.txt")]), profile: profile, root: "/r", generation: afterSave)
+            XCTFail("An automatic update outlived the manual build that replaced it")
+        } catch SearchIndexError.superseded {}
+        await store.endBuild(profile: profile, root: "/r", generation: afterSave)
+        do {
+            _ = try await store.beginBuild(profile: profile, root: "/r", automatic: true, now: started.addingTimeInterval(8))
+            XCTFail("Ending a replaced reservation released the one that replaced it")
+        } catch SearchIndexError.superseded {}
+        await store.endBuild(profile: profile, root: "/r", generation: replacing)
+        let afterEnd = try await store.beginBuild(profile: profile, root: "/r", automatic: true, now: started.addingTimeInterval(9))
+        try await store.save(snapshot([document("/r/automatic.txt")]), profile: profile, root: "/r", generation: afterEnd)
+
+        // A reservation nothing ever ended stops holding updates off after its allowance.
+        _ = try await store.beginBuild(profile: profile, root: "/r", now: started)
+        do {
+            _ = try await store.beginBuild(profile: profile, root: "/r", automatic: true,
+                                           now: started.addingTimeInterval(SearchIndexStore.manualBuildAllowance - 1))
+            XCTFail("A manual build within its allowance was replaced")
+        } catch SearchIndexError.superseded {}
+        _ = try await store.beginBuild(profile: profile, root: "/r", automatic: true,
+                                       now: started.addingTimeInterval(SearchIndexStore.manualBuildAllowance))
+        let saved = try await store.load(profile: profile, root: "/r")
+        XCTAssertEqual(saved?.documents.map(\.entry.path), ["/r/automatic.txt"])
+    }
+
+    /// Opening a folder asks whether its index is due. That reads when the index was made, once,
+    /// and never its text; the answer follows every save, deletion and change of the setting.
+    func testWhetherAnIndexIsDueFollowsSavesDeletionsAndTheSetting() async throws {
+        let store = SearchIndexStore(directory: directory)
+        let made = Date(timeIntervalSince1970: 123), interval: TimeInterval = 900
+        func due(_ store: SearchIndexStore, at offset: TimeInterval, root: String = "/r") async throws -> Bool {
+            try await store.isDueForAutomaticUpdate(profile: profile, root: root, now: made.addingTimeInterval(offset), interval: interval)
+        }
+        let unsaved = try await due(store, at: interval)
+        XCTAssertFalse(unsaved)
+        try await store.save(snapshot([document("/r/a.txt")]), profile: profile, root: "/r")
+        let notAutomatic = try await due(store, at: interval)
+        XCTAssertFalse(notAutomatic, "Only an index set to update automatically is ever due")
+        try await store.setUpdatesAutomatically(true, profile: profile, root: "/r")
+        let early = try await due(store, at: interval - 1), onTime = try await due(store, at: interval), clockBack = try await due(store, at: -60)
+        XCTAssertFalse(early); XCTAssertTrue(onTime); XCTAssertTrue(clockBack)
+        let otherRoot = try await due(store, at: interval, root: "/s")
+        XCTAssertFalse(otherRoot)
+
+        // Another store on the same files, as after a relaunch, reads it from the file.
+        let reopened = SearchIndexStore(directory: directory)
+        let reopenedEarly = try await due(reopened, at: interval - 1), reopenedDue = try await due(reopened, at: interval)
+        XCTAssertFalse(reopenedEarly); XCTAssertTrue(reopenedDue)
+
+        // A newer index saved through one store is seen by the other, which remembered the older one.
+        let later = SearchIndexSnapshot(createdAt: made.addingTimeInterval(600), documents: [document("/r/b.txt")],
+                                        includeHidden: false, extraction: .init(includePDF: true, includeOCR: true), isPartial: false)
+        try await reopened.save(later, profile: profile, root: "/r")
+        let afterUpdate = try await due(store, at: interval), afterUpdateLater = try await due(store, at: 600 + interval)
+        XCTAssertFalse(afterUpdate, "The saved index is newer than the one last asked about")
+        XCTAssertTrue(afterUpdateLater)
+        let loaded = try await store.load(profile: profile, root: "/r")
+        XCTAssertEqual(loaded?.createdAt, later.createdAt)
+
+        try await store.setUpdatesAutomatically(false, profile: profile, root: "/r")
+        let turnedOff = try await due(store, at: 10_000)
+        XCTAssertFalse(turnedOff)
+        try await store.setUpdatesAutomatically(true, profile: profile, root: "/r")
+        try await store.remove(profile: profile, root: "/r")
+        let removed = try await due(store, at: 10_000)
+        XCTAssertFalse(removed)
+
+        // A file that can't be read isn't due: nothing can be updated from it.
+        try await store.save(snapshot([document("/r/c.txt")]), profile: profile, root: "/r")
+        try await store.setUpdatesAutomatically(true, profile: profile, root: "/r")
+        try Data("{".utf8).write(to: try XCTUnwrap(files().first { $0.lastPathComponent.count == 69 }))
+        do { _ = try await due(SearchIndexStore(directory: directory), at: interval); XCTFail("A damaged index was reported as due") }
+        catch SearchIndexError.damaged {}
+    }
+
+    /// A process that ends between writing a save's temporary file and renaming it leaves extracted
+    /// text that no limit counts and no deletion finds.
+    func testTemporaryFilesLeftByAnEarlierProcessAreRemoved() async throws {
+        let store = SearchIndexStore(directory: directory)
+        try await store.save(snapshot([document("/r/a.txt")]), profile: profile, root: "/r")
+        func plant(_ name: String, age: TimeInterval) throws -> URL {
+            let file = directory.appendingPathComponent(name)
+            try Data("left behind".utf8).write(to: file)
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-age)], ofItemAtPath: file.path)
+            return file
+        }
+        var old = try plant(".pending-" + UUID().uuidString, age: SearchIndexStore.abandonedWriteAge + 60)
+        var recent = try plant(".pending-" + UUID().uuidString, age: 5)
+        try await store.save(snapshot([document("/r/b.txt")]), profile: profile, root: "/r")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: old.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recent.path), "It may be another store's save under way")
+        try FileManager.default.removeItem(at: recent)
+
+        old = try plant(".pending-" + UUID().uuidString, age: SearchIndexStore.abandonedWriteAge + 60)
+        recent = try plant(".pending-" + UUID().uuidString, age: 5)
+        try await store.remove(connectionID: UUID())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: old.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recent.path))
+        let kept = try await store.load(profile: profile, root: "/r")
+        XCTAssertEqual(kept?.documents.map(\.entry.path), ["/r/b.txt"])
+        // A save leaves nothing of its own behind.
+        try FileManager.default.removeItem(at: recent)
+        try await store.save(snapshot([document("/r/c.txt")]), profile: profile, root: "/r")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.hasPrefix(".") }, [])
     }
 
     func testDeletionInvalidatesPendingBuildBeforeAnyIndexExists() async throws {

@@ -122,7 +122,9 @@ struct RemoteMediaView: View {
                        retry: { retryID += 1 })
         .task(id: "\(model.isForeground)-\(model.sessionRevision)-\(refreshID)-\(retryID)") { await load() }
         .onDisappear { if !fullScreenPlayback { requestID = UUID(); playback.stop() } }
-        .onChange(of: scenePhase) { _, phase in if phase != .active { playback.stop() } }
+        // Inactive is Control Centre or a system prompt, with the connection still open: playback waits
+        // where it is. Only the background ends it, when the model leaves the foreground below.
+        .onChange(of: scenePhase) { _, phase in if phase != .active { playback.pause() } }
         .onChange(of: model.isForeground) { _, active in if !active { playback.stop() } }
         .onChange(of: model.mediaSecurityFailure(profile.id)) { _, message in
             guard let message else { return }

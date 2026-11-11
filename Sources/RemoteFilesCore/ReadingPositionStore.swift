@@ -75,6 +75,13 @@ public actor ReadingPositionStore {
     private let capacity: Int
     private var records: [Record]
     private var deletedConnections: Set<UUID> = []
+    private static let stores = SharedFileStores<ReadingPositionStore>()
+
+    /// App windows use the same store for a history file. With one each, history deleted with its
+    /// connection in one window was written back by the next save from another.
+    public static func shared(fileURL: URL) -> ReadingPositionStore {
+        stores.store(at: fileURL) { ReadingPositionStore(fileURL: $0) }
+    }
 
     public init(fileURL: URL, capacity: Int = 200) {
         self.fileURL = fileURL

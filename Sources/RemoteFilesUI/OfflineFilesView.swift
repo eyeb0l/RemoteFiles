@@ -567,8 +567,9 @@ struct OfflineReaderView: View {
                 guard requestID == token else { return }
                 image = decoded
             case .pdf:
-                // Hash the leased bytes before PDFKit opens them: a changed copy starts at the top.
-                let restorable = await readingPosition.preparePDF(fileURL: local.url, store: readingPositions,
+                // A changed copy starts at the top. The lease has just hashed these bytes against the
+                // copy's digest, which is the same hash a PDF's saved position is kept under.
+                let restorable = await readingPosition.preparePDF(verifiedDigest: local.verifiedDigest, store: readingPositions,
                                                                   connectionID: local.pin.connectionID, path: local.pin.path)
                 try Task.checkCancellation()
                 guard requestID == token else { return }

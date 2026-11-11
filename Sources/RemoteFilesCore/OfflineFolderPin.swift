@@ -50,8 +50,10 @@ public struct OfflineLibrarySnapshot: Sendable {
 
 extension OfflineFolderPin {
     static func validPath(_ path: String) -> Bool {
-        path.hasPrefix("/") && !path.hasPrefix("//") && (path == "/" || !path.hasSuffix("/")) &&
-        !path.contains("\\") && !path.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }) &&
-        !path.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) && !path.contains("//")
+        // By bytes: a slash beside a combining mark is still a slash to the server.
+        RemotePath.isAbsolute(path) && !RemotePath.hasDoubledSeparator(path) &&
+        (path.utf8.elementsEqual("/".utf8) || !RemotePath.endsWithSeparator(path)) &&
+        !RemotePath.hasBackslash(path) && !RemotePath.components(of: path).contains(where: RemotePath.isDotName) &&
+        !path.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 })
     }
 }

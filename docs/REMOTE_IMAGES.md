@@ -81,6 +81,8 @@ pixel size, orientation transform and immediate thumbnail decode.
 ## Interaction
 
 Failure is local to the image: filename, reason, **Tap to retry**, and **Open file**.
+Each tap of **Tap to retry** discards the cached copy once and fetches the image again;
+scrolling it out of view and back, or leaving and returning to the app, then uses that copy.
 Open file presents the focused image viewer and retries the same safely resolved
 resource; it cannot bypass path restrictions. On an explicit **Open file** action,
 the resolver first checks the exact referenced path through SFTP metadata, including

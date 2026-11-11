@@ -102,6 +102,13 @@ final class AppModel {
     private var pinToken: UUID?
     private var offlineObservation: OfflineLibraryObservation?
     private var offlineLibraryToken = UUID()
+    @ObservationIgnored private var libraryObservation: OfflineLibraryObservation?
+    /// Names this window's own saves among those the shared library reports.
+    @ObservationIgnored private let libraryOrigin = UUID()
+    /// The newest save of the library this window has taken in. See `takeIn`.
+    @ObservationIgnored private var libraryRevision = 0
+    /// Counts the times this window's copy of the library was replaced by a saved one.
+    @ObservationIgnored private var libraryReplacements = 0
     private var resourceService: RemoteResourceResolver?
     private var exportService: RemoteOriginalExporter?
     var originalExporter: RemoteOriginalExporter {
@@ -185,18 +192,80 @@ final class AppModel {
         downloadDirectory = directory.appendingPathComponent("Downloads-v1", isDirectory: true)
         offlineDirectory = directory.appendingPathComponent("Offline-v1", isDirectory: true)
         resourceDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("RemoteImages-v1")
-        metadataStore = try MetadataStore(fileURL: directory.appendingPathComponent("library-v1.json"))
-        readingPositions = ReadingPositionStore(fileURL: directory.appendingPathComponent("reading-positions-v1.json"))
-        trust = try HostTrustStore(fileURL: directory.appendingPathComponent("known-hosts-v1.json"))
+        // Shared with every other window on this library: each has its own model, and with a store
+        // apiece each would write back its own copy of these files over what another had saved.
+        metadataStore = try MetadataStore.shared(fileURL: directory.appendingPathComponent("library-v1.json"))
+        readingPositions = ReadingPositionStore.shared(fileURL: directory.appendingPathComponent("reading-positions-v1.json"))
+        trust = try HostTrustStore.shared(fileURL: directory.appendingPathComponent("known-hosts-v1.json"))
         self.publicKeyInstaller = publicKeyInstaller ?? SSHPublicKeyInstaller(trust: trust)
         connectionService = fileService ?? CoalescingFileService(base: SFTPRemoteFileService(identityStore: identities, trustStore: trust, metadataStore: metadataStore))
         service = connectionService
         downloadTransport = fileService ?? SFTPRemoteFileService(identityStore: identities, trustStore: trust, metadataStore: metadataStore)
     }
     func load() async {
-        metadata = await metadataStore.snapshot()
+        let saved = await metadataStore.current()
+        metadata = saved.metadata; libraryRevision = saved.revision
+        observeLibrary()
         await loadOfflineLibrary()
         loadDownloads()
+    }
+    /// Follows the saved library, so a connection, key, favourite or recent changed in another window
+    /// shows in this one.
+    private func observeLibrary() {
+        let store = metadataStore
+        libraryObservation = OfflineLibraryObservation(Task { [weak self] in
+            for await saved in await store.changes() {
+                guard !Task.isCancelled, let self else { return }
+                self.takeIn(saved)
+            }
+        })
+    }
+    /// Takes in a save of the library, reported by the store or returned from this window's own change.
+    /// Saves are numbered. One this window already has is ignored, however late it is reported, so it
+    /// can't replace what was saved since. This window's own, when nothing else was saved before it, is
+    /// already in its copy. Anything else replaces the copy: it holds what another window changed.
+    private func takeIn(_ saved: MetadataStore.Saved) {
+        guard saved.revision > libraryRevision else { return }
+        let nothingBetween = saved.revision == libraryRevision + 1
+        libraryRevision = saved.revision
+        if saved.origin == libraryOrigin, nothingBetween { return }
+        libraryChanged(to: saved.metadata)
+    }
+    private func libraryChanged(to value: AppMetadata) {
+        // Demo shows its own library; the real one is kept current for leaving it.
+        if demo { libraryReplacements += 1; realMetadata = value; return }
+        guard value != metadata else { return }
+        let previous = metadata.connections
+        metadata = value
+        libraryReplacements += 1
+        // A connection edited or removed elsewhere is treated as one edited or removed here: what
+        // was read through its old settings isn't shown under the new ones, and its session ends.
+        let affected = Set(previous.filter { !value.connections.contains($0) }.map(\.id))
+        guard !affected.isEmpty else { return }
+        routes.removeAll { affected.contains($0.connectionID) }
+        affected.forEach { forgetListings(of: $0) }
+        guard affected.contains(where: { connectionStates[$0] != nil || foregroundConnectionID == $0 }) else { return }
+        sessionRevision += 1
+        Task { await disconnect(preservingDownloads: true) }
+    }
+    /// Changes this window's copy of the library at once and then the saved one. The change is made
+    /// to the library as it is saved now, never by writing this copy over it, so a window that hasn't
+    /// yet heard of a connection or key added in another can't remove it by saving something else.
+    private func updateLibrary(_ change: @escaping @Sendable (inout AppMetadata) -> Void) async {
+        change(&metadata)
+        guard !demo else { return }
+        let replacements = libraryReplacements
+        do { ownSaveFinished(try await metadataStore.update(origin: libraryOrigin, change), replacements: replacements) }
+        catch { errorMessage = error.localizedDescription }
+    }
+    /// This window's copy held its own change before it was saved. If another window's save replaced
+    /// the copy while this one waited, the copy no longer does, and the save just made is the one
+    /// that holds both. A newer save already taken in holds it too.
+    private func ownSaveFinished(_ saved: MetadataStore.Saved, replacements: Int) {
+        guard libraryReplacements != replacements else { takeIn(saved); return }
+        guard saved.revision >= libraryRevision else { return }
+        libraryRevision = saved.revision
+        libraryChanged(to: saved.metadata)
     }
     private func loadDownloads() {
         do {
@@ -237,6 +306,20 @@ final class AppModel {
         handleTransferFailure(error, profile: profile)
     }
     func foregroundDownloads() { downloads?.setForeground(true, sceneID: downloadSceneRegistration?.id) }
+    /// The scene is active again. Only the background ends a session, so only a return from it starts
+    /// a new one, which has every folder, reader and search on screen read again. Control Centre,
+    /// Notification Centre, a system prompt and Face ID leave the scene inactive with its connection
+    /// open: starting again then would list the folder again, restart a search from nothing, close
+    /// the Saved Search Index sheet on its build and reload a video from its first frame.
+    /// A connection that had failed is still tried again, since what made the scene inactive may be
+    /// what it was waiting for: the Local Network prompt, or Wi-Fi turned on in Control Centre.
+    func sceneBecameActive() {
+        let returning = !isForeground
+        isForeground = true
+        foregroundDownloads()
+        if returning || connectionStates.values.contains(Self.disconnectedState) { sessionRevision += 1 }
+    }
+    private static let disconnectedState = "Disconnected"
     private func loadOfflineLibrary() async {
         offlineObservation = nil
         let token = UUID(); offlineLibraryToken = token
@@ -365,9 +448,14 @@ final class AppModel {
     func installationConnection(for identity: IdentityMetadata) -> ConnectionProfile? {
         metadata.connections.first { $0.identityID == identity.id }
     }
+    /// Saves this window's whole copy of the library, replacing whatever is saved. That is only
+    /// right for the library's one writer, which a test seeding a library is. The app's own changes
+    /// go through `updateLibrary`.
     func persist() async {
         guard !demo else { return }
-        do { try await metadataStore.save(metadata) } catch { errorMessage = error.localizedDescription }
+        let replacements = libraryReplacements
+        do { ownSaveFinished(try await metadataStore.save(metadata, origin: libraryOrigin), replacements: replacements) }
+        catch { errorMessage = error.localizedDescription }
     }
     func saveConnection(_ value: ConnectionProfile) async {
         await disconnect()
@@ -376,9 +464,10 @@ final class AppModel {
         sessionRevision += 1
         do { try await searchIndexStore().remove(connectionID: value.id) }
         catch { errorMessage = error.localizedDescription }
-        metadata.connections.removeAll { $0.id == value.id }
-        metadata.connections.append(value)
-        await persist()
+        await updateLibrary { library in
+            library.connections.removeAll { $0.id == value.id }
+            library.connections.append(value)
+        }
     }
     func removeConnection(_ profile: ConnectionProfile) async {
         await disconnect()
@@ -386,15 +475,17 @@ final class AppModel {
         sessionRevision += 1
         do { try await searchIndexStore().remove(connectionID: profile.id) }
         catch { errorMessage = error.localizedDescription }
-        metadata.connections.removeAll { $0.id == profile.id }
-        metadata.favourites.removeAll { $0.connectionID == profile.id }
-        metadata.recents.removeAll { $0.connectionID == profile.id }
+        let id = profile.id
         if !demo {
-            do { try await readingPositions.remove(connectionID: profile.id) }
+            do { try await readingPositions.remove(connectionID: id) }
             catch { errorMessage = error.localizedDescription }
-            storeFolderSortOrders(folderSortOrders().filter { !$0[0].hasPrefix(profile.id.uuidString + "|") })
+            storeFolderSortOrders(folderSortOrders().filter { !$0[0].hasPrefix(id.uuidString + "|") })
         }
-        await persist()
+        await updateLibrary { library in
+            library.connections.removeAll { $0.id == id }
+            library.favourites.removeAll { $0.connectionID == id }
+            library.recents.removeAll { $0.connectionID == id }
+        }
     }
     private static let folderSortKey = "folderSortOrders-v1"
     /// Most folders whose sort choice is remembered; the least recently changed is dropped first.
@@ -440,36 +531,53 @@ final class AppModel {
     }
     func addIdentity(_ value: IdentityMetadata) async throws {
         guard !demo else { throw RemoteFileError.unavailable("Leave Demo before saving keys.") }
-        var candidate = metadata
-        candidate.identities.append(value)
-        try await metadataStore.save(candidate)
-        metadata = candidate
+        // Shown only once it's saved.
+        let saved = try await metadataStore.update(origin: libraryOrigin) { $0.identities.append(value) }
+        if !metadata.identities.contains(where: { $0.id == value.id }) { metadata.identities.append(value) }
+        takeIn(saved)
     }
     func deleteIdentity(_ value: IdentityMetadata) async {
         do {
-            try await identities.delete(value, referencedBy: Set(metadata.connections.flatMap { $0.identityIDs }))
-            metadata.identities.removeAll { $0.id == value.id }
-            await persist()
+            // Asked of the saved library as well as this window's copy: a connection made in another
+            // window a moment ago uses its key too.
+            let saved = demo ? [] : await metadataStore.snapshot().connections
+            try await identities.delete(value, referencedBy: Set((metadata.connections + saved).flatMap { $0.identityIDs }))
+            let id = value.id
+            await updateLibrary { $0.identities.removeAll { $0.id == id } }
         } catch { errorMessage = error.localizedDescription }
     }
     func favourite(profile: ConnectionProfile, path: String) async {
-        if let index = metadata.favourites.firstIndex(where: { $0.connectionID == profile.id && $0.path == path }) {
-            metadata.favourites.remove(at: index)
+        let id = profile.id
+        if metadata.favourites.contains(where: { $0.connectionID == id && $0.path == path }) {
+            await updateLibrary { $0.favourites.removeAll { $0.connectionID == id && $0.path == path } }
         } else {
-            metadata.favourites.append(.init(connectionID: profile.id, path: path, name: RemotePath.name(of: path)))
+            // Made once, so this window's copy and the saved library hold the same entry.
+            let added = SavedLocation(connectionID: id, path: path, name: RemotePath.name(of: path))
+            await updateLibrary { library in
+                if !library.favourites.contains(where: { $0.connectionID == id && $0.path == path }) { library.favourites.append(added) }
+            }
         }
-        await persist()
     }
     func isFavourite(_ id: UUID, path: String) -> Bool { metadata.favourites.contains { $0.connectionID == id && $0.path == path } }
     func recordRecent(profile: ConnectionProfile, entry: RemoteEntry) async {
-        metadata.recents.removeAll { $0.connectionID == profile.id && $0.path == entry.path }
-        metadata.recents.insert(.init(connectionID: profile.id, path: entry.path, name: entry.name), at: 0)
-        metadata.recents = Array(metadata.recents.prefix(8)); await persist()
+        // Every load and every check of an open file comes here. When it's already the newest recent
+        // there is nothing to record, and recording it anyway would rewrite the library, give the
+        // row a new identity and have every screen that reads the library made again.
+        if let newest = metadata.recents.first, newest.connectionID == profile.id,
+           newest.path.utf8.elementsEqual(entry.path.utf8), newest.name == entry.name { return }
+        let id = profile.id, path = entry.path
+        let added = SavedLocation(connectionID: id, path: path, name: entry.name)
+        await updateLibrary { library in
+            library.recents.removeAll { $0.connectionID == id && $0.path == path }
+            library.recents.insert(added, at: 0)
+            library.recents = Array(library.recents.prefix(8))
+        }
     }
     func removeRecent(_ location: SavedLocation) async {
         do {
-            if !demo { try await metadataStore.removeRecent(id: location.id) }
+            if !demo { try await metadataStore.removeRecent(id: location.id, origin: libraryOrigin) }
             metadata.recents.removeAll { $0.id == location.id }
+            if !demo { takeIn(await metadataStore.current()) }
         } catch { errorMessage = "Couldn’t remove this recent entry. \(error.localizedDescription)" }
     }
     /// Escalates like `handle`, but describes a chosen file or folder that moved or now leads
@@ -489,7 +597,7 @@ final class AppModel {
     func handle(_ error: Error, profile: ConnectionProfile) {
         guard !isDisconnecting else { return }
         connectionFailureRevisions[profile.id, default: 0] += 1
-        connectionStates[profile.id] = "Disconnected"
+        connectionStates[profile.id] = Self.disconnectedState
         // A path outside its boundary says nothing about the connection; these do.
         if isConnectionSecurityError(error) {
             mediaSecurityFailures[profile.id] = error.localizedDescription

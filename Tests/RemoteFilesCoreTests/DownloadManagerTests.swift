@@ -86,6 +86,25 @@ final class DownloadManagerTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: restored.completedURL(id)), Data([1]))
     }
 
+    /// A name an earlier version let into the queue, with a separator beside a joiner, must not make
+    /// the whole queue unavailable now that names are judged by their bytes. New ones are refused.
+    func testAQueueHoldingANameAnEarlierVersionAcceptedStillOpens() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let manager = try DownloadManager(service: DownloadFixture(bytes: Data([1])), directory: directory)
+        manager.setForeground(false)
+        let id = try manager.enqueue(profile: profile, entry: entry())
+        let manifest = directory.appendingPathComponent("downloads.json")
+        var records = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: manifest)) as? [[String: Any]])
+        records[0]["filename"] = "docs/\u{200D}join.txt"
+        try JSONSerialization.data(withJSONObject: records).write(to: manifest)
+        let restored = try DownloadManager(directory: directory)
+        XCTAssertEqual(restored.items.map(\.id), [id])
+        XCTAssertThrowsError(try restored.enqueue(profile: profile, entry: .init(name: "docs/\u{200D}join.txt", path: "/safe/x", kind: .file)))
+        records[0]["filename"] = "../escaped.txt"
+        try JSONSerialization.data(withJSONObject: records).write(to: manifest)
+        XCTAssertThrowsError(try DownloadManager(directory: directory), "What was always refused still is")
+    }
+
     func testManagedAdapterWithoutCanonicalOptInFailsClosed() async throws {
         let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
         let base = IndexedDownloadFixture()

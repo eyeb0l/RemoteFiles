@@ -226,7 +226,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         for (number, link) in scan {
             do {
                 let target = try await link.get()
-                if target.hasPrefix("/") { descriptors[number] = target }
+                if RemotePath.isAbsolute(target) { descriptors[number] = target }
             } catch {
                 switch mapped(error) {
                 case RemoteFileError.notFound, RemoteFileError.permissionDenied: continue // Not open, or not ours to see.
@@ -732,13 +732,22 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         try Task.checkCancellation()
         let session = try await session(for: profile)
         return try await perform(session: session) { sftp in
-            let root = try await sftp.getRealPath(atPath: Self.validated(profile.startingDirectory))
-            let document = try await sftp.getRealPath(atPath: Self.validated(documentPath))
+            // Two round trips, not four: the root and the document are asked for together, then the target
+            // and what it is. Each answer is still judged in the order it was before, the boundary first.
+            let rootPath = sftp.sendRealPath(atPath: try Self.validated(profile.startingDirectory))
+            let documentCanonical = sftp.sendRealPath(atPath: try Self.validated(documentPath))
+            let root = try await rootPath.get()
+            let document = try await documentCanonical.get()
             guard RemoteResourcePath.contains(document, in: root) else { throw RemoteDocumentLinkError.outsideConnection }
             let requested = try RemoteDocumentLinkPath.resolve(reference, relativeTo: document, connectionRoot: root)
-            let canonical = try await sftp.getRealPath(atPath: Self.validated(requested))
+            let target = try Self.validated(requested)
+            let canonicalPath = sftp.sendRealPath(atPath: target)
+            // Both follow links from the same path, so they describe the same file. It is only a
+            // description: reading the file checks the boundary again on the handle it opens.
+            let describing = sftp.sendAttributes(at: target)
+            let canonical = try await canonicalPath.get()
             guard RemoteResourcePath.contains(canonical, in: root) else { throw RemoteDocumentLinkError.outsideConnection }
-            let attributes = try await sftp.getAttributes(at: canonical)
+            let attributes = try await describing.get()
             let entry = Self.entry(name: RemotePath.name(of: canonical), path: canonical, attributes: attributes)
             guard entry.kind == .file, DocumentPolicy.kind(filename: entry.name) != .unsupported else {
                 throw RemoteDocumentLinkError.unsupportedFile
@@ -752,8 +761,12 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     public func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
         let session = try await session(for: profile)
         return try await perform(session: session) { sftp in
-            let canonical = try await sftp.getRealPath(atPath: Self.validated(path))
-            let attributes = try await sftp.getAttributes(at: canonical)
+            // One round trip: both follow links from the same path, so they describe the same entry.
+            let requested = try Self.validated(path)
+            let canonicalPath = sftp.sendRealPath(atPath: requested)
+            let describing = sftp.sendAttributes(at: requested)
+            let canonical = try await canonicalPath.get()
+            let attributes = try await describing.get()
             return Self.entry(name: RemotePath.name(of: canonical), path: canonical, attributes: attributes)
         }
     }
@@ -788,9 +801,19 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         if let pending, pendingProfile == profile, !pending.isCancelled {
             let joinedGeneration = generation
             let joinedControl = pendingControl
-            let session = try await withTaskCancellationHandler { try await pending.value } onCancel: {
-                pending.cancel()
-                joinedControl?.close()
+            let session: LiveSession
+            do {
+                session = try await withTaskCancellationHandler { try await pending.value } onCancel: {
+                    pending.cancel()
+                    joinedControl?.close()
+                }
+            } catch {
+                // Cancelled if this caller was, or if the attempt it joined was given up, as by Disconnect.
+                // A newer attempt started since by another request doesn't make this one's failure any
+                // less a failure.
+                if Task.isCancelled || pending.isCancelled { throw CancellationError() }
+                // The same failure as the caller that started this connection reports, in the same words.
+                throw Self.connectionFailure(error, profile: profile)
             }
             guard generation == joinedGeneration, !Task.isCancelled else { throw CancellationError() }
             return session
@@ -880,23 +903,28 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                 pending = nil; pendingProfile = nil; pendingControl = nil
             }
             if Task.isCancelled { throw CancellationError() }
-            switch error {
-            case SSHClientError.allAuthenticationOptionsFailed, SSHClientError.unsupportedPrivateKeyAuthentication,
-                 is AuthenticationFailed, CitadelError.unauthorized:
-                throw RemoteFileError.authenticationFailed
-            default: break
-            }
-            if profile.jumpHost != nil, let sshError = error as? NIOSSHError, sshError.type == .channelSetupRejected {
-                throw RemoteFileError.unavailable("The jump host couldn't reach the destination. Check its hostname and port, and that the jump host permits TCP forwarding to it.")
-            }
-            if let sshError = error as? NIOSSHError, sshError.type == .keyExchangeNegotiationFailure {
-                throw RemoteFileError.unavailable(Self.noCommonAlgorithms(jumpHost: profile.jumpHost != nil))
-            }
-            if error is NIOConnectionError {
-                throw RemoteFileError.unavailable("Couldn't connect to this server. Check its address and network. For local Wi-Fi, allow RemoteFiles in Settings → Privacy & Security → Local Network, then try again.")
-            }
-            throw error
+            throw Self.connectionFailure(error, profile: profile)
         }
+    }
+
+    /// What a failed connection is reported as, to the caller that started it and to any that joined it.
+    nonisolated static func connectionFailure(_ error: Error, profile: ConnectionProfile) -> Error {
+        switch error {
+        case SSHClientError.allAuthenticationOptionsFailed, SSHClientError.unsupportedPrivateKeyAuthentication,
+             is AuthenticationFailed, CitadelError.unauthorized:
+            return RemoteFileError.authenticationFailed
+        default: break
+        }
+        if profile.jumpHost != nil, let sshError = error as? NIOSSHError, sshError.type == .channelSetupRejected {
+            return RemoteFileError.unavailable("The jump host couldn't reach the destination. Check its hostname and port, and that the jump host permits TCP forwarding to it.")
+        }
+        if let sshError = error as? NIOSSHError, sshError.type == .keyExchangeNegotiationFailure {
+            return RemoteFileError.unavailable(noCommonAlgorithms(jumpHost: profile.jumpHost != nil))
+        }
+        if error is NIOConnectionError {
+            return RemoteFileError.unavailable("Couldn't connect to this server. Check its address and network. For local Wi-Fi, allow RemoteFiles in Settings → Privacy & Security → Local Network, then try again.")
+        }
+        return error
     }
 
     /// The SSH stack reports every key-exchange, host-key, cipher and MAC mismatch as the same error, without
@@ -1917,8 +1945,11 @@ enum BoundedPreviewReader {
                 guard let (id, buffer) = try await group.next() else { throw RemoteFileError.tooLarge(limit) }
                 observe(pacing.window, inFlight)
                 inFlight -= 1
-                received[id] = buffer
                 let request = issued[id]!
+                // Refused on arrival, not when its turn comes: replies wait here for the ones before them, and a
+                // server answering each read with far more than was asked could otherwise fill memory meanwhile.
+                guard buffer.readableBytes <= request.amount else { throw RemoteFileError.tooLarge(limit) }
+                received[id] = buffer
                 if let started = sentAt.removeValue(forKey: id) {
                     let now = clock.now
                     pacing.received(bytes: buffer.readableBytes, latency: started.duration(to: now), at: now)

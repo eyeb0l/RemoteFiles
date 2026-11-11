@@ -345,7 +345,7 @@ struct FolderView: View {
     }
     /// The path's ancestors, nearest first, from the folder's title.
     @ViewBuilder private var ancestorsMenu: some View {
-        let components = path.split(separator: "/")
+        let components = RemotePath.components(of: path)
         Section(path) {
             ForEach(Array(components.indices.dropLast().reversed()), id: \.self) { index in
                 let ancestor = "/" + components.prefix(index + 1).joined(separator: "/")

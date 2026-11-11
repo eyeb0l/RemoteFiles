@@ -2,7 +2,7 @@
 
 [Documentation](README.md) · [Build and test](DEVELOPMENT.md)
 
-What limits each operation, what was measured on 7 November 2026, and how to benchmark a change. Measured on iPhone means a physical iPhone 17 Pro; measured on Mac means the same code on a Mac, which says little about absolute speed on a phone. Raw samples are in [`performance/2026-11-07`](performance/2026-11-07), for the [follow-ups](#follow-ups-7-november) in [`performance/2026-11-07-followups`](performance/2026-11-07-followups), for [the phone's download cap](#the-phones-download-cap-not-the-client) in [`performance/2026-11-07-download-cap`](performance/2026-11-07-download-cap), for [offline folders](#offline-folders-one-channel-sixteen-files-at-a-time) and [the follow-up report](#follow-up-report-8-november) in [`performance/2026-11-08-offline`](performance/2026-11-08-offline), for [live content searches](#live-content-searches-listing-ahead-while-reading) in [`performance/2026-11-08-search`](performance/2026-11-08-search), for [read-window pacing on the phone](#read-window-pacing-on-the-phone-at-150-ms-keep-transferpacing) in [`performance/2026-11-08-phone-window`](performance/2026-11-08-phone-window), and for [offline folders' listings](#offline-folders-listing-ahead-while-files-run) in [`performance/2026-11-08-offline-listing`](performance/2026-11-08-offline-listing).
+What limits each operation, what was measured on 7 November 2026, and how to benchmark a change. Measured on iPhone means a physical iPhone 17 Pro; measured on Mac means the same code on a Mac, which says little about absolute speed on a phone. Raw samples are in [`performance/2026-11-07`](performance/2026-11-07), for the [follow-ups](#follow-ups-7-november) in [`performance/2026-11-07-followups`](performance/2026-11-07-followups), for [the phone's download cap](#the-phones-download-cap-not-the-client) in [`performance/2026-11-07-download-cap`](performance/2026-11-07-download-cap), for [offline folders](#offline-folders-one-channel-sixteen-files-at-a-time) and [the follow-up report](#follow-up-report-8-november) in [`performance/2026-11-08-offline`](performance/2026-11-08-offline), for [live content searches](#live-content-searches-listing-ahead-while-reading) in [`performance/2026-11-08-search`](performance/2026-11-08-search), for [read-window pacing on the phone](#read-window-pacing-on-the-phone-at-150-ms-keep-transferpacing) in [`performance/2026-11-08-phone-window`](performance/2026-11-08-phone-window), for [offline folders' listings](#offline-folders-listing-ahead-while-files-run) in [`performance/2026-11-08-offline-listing`](performance/2026-11-08-offline-listing), and for [the audit of 11 November](#an-audit-of-what-was-left-11-november) in [`performance/2026-11-11`](performance/2026-11-11).
 
 ## What limits what
 
@@ -15,6 +15,7 @@ What limits each operation, what was measured on 7 November 2026, and how to ben
 | Offline folders | Round trips per file, overlapped, with folders listed four ahead | About 5 each on one shared channel, 16 files at once, where it was 11 each in turn. 50 small files at 40 ms: 1.4 s, from 22.1 s; 400 tiny files in 25 folders at 150 ms: 21.9 s, from 25.5 s with folders listed in turn (Mac). [Details](#offline-folders-one-channel-sixteen-files-at-a-time), [listings](#offline-folders-listing-ahead-while-files-run) |
 | Opening a connection | The protocol | 9 round trips at 40 ms to the first rows, all but one fixed by SSH, the server or SFTP. [The ledger](#connection-setup) |
 | Opening a file or small folder | Round trips | 3.5 to 10 round trips each before this work |
+| Following a link, in a folder or a document | Round trips | 1 for a link row and 2 for a document's link, from 2 and 4. [Details](#an-audit-of-what-was-left-11-november) |
 | Opening a very large folder (first frame) | SwiftUI on the main thread | 2.6 s stall at 50,000 rows (iPhone); none of it in sorting, the network or layout of the data |
 | Listing 10,000 names on OpenSSH | The server | 850 ms, of which about 18 ms is client CPU (Mac) or 80 ms (iPhone). `sftp-server` looks up the owner and group of every entry |
 | Preparing rows | Formatting, then sorting | 127 ms per 10,000 rows on iPhone, over half of it formatting sizes and dates no one was looking at |
@@ -518,6 +519,41 @@ A live search now takes about as long as an index build of the same files (3.67 
 
 **Decision.** Nothing changed. The phone shows a real gain for a fixed 64 only where the link has room to spare, and the same setting costs browsing wherever the link is full. Which of the two a person is on can't be known before the transfer starts, and the growing window keeps taps fast on both. *Would reverse it:* a rule that starts nearer 64 where the link has room, without queueing more where it is full; carrying the last settled window between transfers on one connection is the candidate, not tried.
 
+## An audit of what was left: 11 November
+
+Four read-only audits of the transport, storage, search and interface code, each finding checked against the code before anything changed. Only link resolution was timed against a baseline, on a MacBook Air (M3, 16 GB, macOS 27.2.1) against the loopback OpenSSH fixture through `latency_proxy.py`; no phone was used. Where the rest says what a change avoids, that is counted from the code or by a test, and no time is claimed for it.
+
+**Following a link: half the round trips.** Tapping a link row, checking a media file before previewing it and starting an export each asked for the canonical path and then, one round trip later, for what was there. They now go together. A link inside a document took four requests in turn: the starting folder, the document, the target, and what the target is. The first two now go together, and so do the last two. Every answer is judged in the order it was before, the boundary first. Five runs a line, in the order after, before, before, after ([raw](performance/2026-11-11/resolve-40-150ms.txt)):
+
+| Mac → fixture through the proxy | Added | Before | After |
+|---|---:|---:|---:|
+| A link row, or a file about to be previewed or exported | 40 ms | 88 and 100 ms | 43 and 45 ms |
+| | 150 ms | 308 and 311 ms | 155 and 156 ms |
+| A link in a document | 40 ms | 175 and 177 ms | 90 ms, and 168 ms on the first pass, whose fastest run was 103 ms |
+| | 150 ms | 617 and 621 ms | 310 and 310 ms |
+
+*Cost:* what a link leads to is now described from the path as asked for, not from its canonical form. Both follow links from the same place, so they describe the same file unless it is replaced between the two requests, which could already happen over the longer wait. Reading the file still checks the boundary again on the handle it opens.
+
+**Scrolling a rendered document: its content was built again on every frame.** The scroll offset is saved as a document scrolls. It was an observed property that the rendered view read as it was made, so each frame's write had the whole document's content built again, every paragraph of it. A hosted test that scrolls a 300-section document in 40 steps counted 40 builds before and none after (iPhone 18 Pro simulator, iOS 27.2). The two offsets are no longer observed; nothing on screen shows them, and views take them when they appear and when they restore a position. No frame times were measured, on the simulator or a phone, so how much smoother a long document scrolls isn't claimed.
+
+**Becoming active is no longer a return from the background.** Control Centre, Notification Centre, a system prompt and Face ID make the app inactive and then active again with its connection open. Each time, the app started a new session as if it had been in the background: the folder on screen was listed again (about 850 ms of server time for 10,000 names on OpenSSH), a search began again from nothing, the Saved Search Index sheet closed on its build, an open document was checked with the server, and a video was reloaded from its first frame. Only a return from the background does that now. A connection that had failed is still tried again, since the prompt or setting that made the app inactive may be what it was waiting for. *Cost:* a video pauses under Control Centre where it used to stop; a folder that changed on the server during those seconds shows it at the next refresh or check, not at once.
+
+**Smaller ones, none timed.**
+
+- *Whether an index is due.* Opening the folder of an index set to update automatically read and decoded the whole index, up to 32 MiB with 16 MiB of text checked for private keys, to learn when it was made. The store now reads only the fields before the text, once, and remembers the answer for as long as the file's size and date stand. Removing a connection's indexes reads the same few fields of each.
+- *An index build's progress.* A report after every folder and file, up to about 1,500 a build, each a task on the main actor and a redraw of the sheet. The newest now goes at most ten times a second, as for search, transfers and offline folders.
+- *The newest recent.* Every load and every check of an open file recorded it again, which rewrote the library file and gave the row a new identity. Recording what is already newest does nothing.
+- *A saved PDF.* Opening one read and hashed the file twice, up to 128 MiB each time: once to verify the copy and once to find its reading position, by the same hash. The second is gone.
+- *Images in rich Markdown.* Each was encoded as PNG and then as text on the main actor as it came into view. That now happens off it.
+- *An inline image after Retry.* Once Retry had been tapped, the image was deleted from the cache and downloaded again each time it scrolled back into view or the app became active. It is discarded once for each tap.
+
+**Left alone.**
+
+- *Starting a transfer at the window the last one settled at* (the third of the remaining opportunities). Read from the code, it needs a floor apart from the starting window, the window as it was when the last new range was issued and not its final value, and no shrinking until a first full window is answered; that last is what also queues more behind a link that has since filled. A server's TCP slow start after idle may take much of the gain away. It stays a benchmark arm to try on the phone, not a change.
+- *The `CLOSE` of a transfer on a channel of its own*, one round trip in about ten for a small image, since closing the channel releases the handle. It would stop a failed `CLOSE` failing a complete download, which is a change in what is reported for a small gain.
+- *Sorting only what a walk reports.* A name search sorts every name in each folder, though only folders and matches need an order. By estimate, not measurement, that is about 4% of a search of the benchmark's 1,000 folders; it would matter for trees of very large folders, and the walk's order is covered by tests that would all have to move with it.
+- *The rich renderer's second parse.* Choosing the renderer parses a Markdown document again after its index did. It is off the main actor and small for ordinary documents.
+
 ## Remaining opportunities
 
 Theoretical until measured, most promising first.
@@ -525,6 +561,7 @@ Theoretical until measured, most promising first.
 1. **Repeated server searches of one folder.** About six of nine round trips, but see the risks above before keeping anything open.
 2. **The first requests with `INIT`.** One round trip per channel, measured on seven implementations; see [why it was left out](#connection-setup-nothing-to-adopt).
 3. **Read-window growth on a long phone path.** At 150 ms on a free link it reaches 87% of a fixed 64 on the phone, the price of starting at 16 on every transfer. Starting a transfer at the window the last one on the same connection settled at might close it without queueing more on a full link; not tried. See [the phone measurements](#read-window-pacing-on-the-phone-at-150-ms-keep-transferpacing).
+4. **A transfer's own `CLOSE`, a walk's sorting and the rich renderer's second parse.** Each is described, with why it was left, under [the audit of 11 November](#an-audit-of-what-was-left-11-november).
 
 ## Run it
 

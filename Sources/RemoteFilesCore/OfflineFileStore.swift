@@ -60,6 +60,9 @@ public final class OfflineFileLease: @unchecked Sendable {
     public let url: URL
     /// The metadata of these exact bytes, even if the pin is refreshed after this lease opens.
     public let pin: OfflinePin
+    /// The SHA-256 of these bytes in lowercase hexadecimal, which the store checked them against
+    /// before handing them over.
+    public var verifiedDigest: String { pin.digest }
     private let directory: URL
     fileprivate init(url: URL, directory: URL, pin: OfflinePin) { self.url = url; self.directory = directory; self.pin = pin }
     deinit { try? FileManager.default.removeItem(at: directory) }
@@ -113,7 +116,9 @@ public actor OfflineFileStore {
                   Set(value.pins.map(\.blobID)).count == value.pins.count else { throw OfflineFileError.invalidLibrary }
             var total = 0
             for pin in value.pins {
-                guard Self.validFilename(pin.filename), pin.previewFilename.map(Self.validFilename) ?? true, pin.path.hasPrefix("/"),
+                // Names are judged here as the version that saved them judged them. See `lease`.
+                guard RemotePath.wasAcceptedAsFilename(pin.filename), pin.previewFilename.map(RemotePath.wasAcceptedAsFilename) ?? true,
+                      RemotePath.isAbsolute(pin.path),
                       pin.byteCount >= 0, pin.byteCount <= self.fileLimit, pin.byteCount <= self.storageLimit - total,
                       pin.digest.count == 64, pin.digest.allSatisfy({ $0.isHexDigit }),
                       pin.routeKey.count == 64, pin.routeKey.allSatisfy({ $0.isHexDigit }) else { throw OfflineFileError.invalidLibrary }
@@ -194,7 +199,7 @@ public actor OfflineFileStore {
                     progress: @escaping DownloadProgressHandler = { _ in }) async throws -> OfflinePin {
         try Task.checkCancellation()
         guard operation == nil else { throw OfflineFileError.busy }
-        guard entry.path.hasPrefix("/") else { throw RemoteFileError.invalidPath }
+        guard RemotePath.isAbsolute(entry.path) else { throw RemoteFileError.invalidPath }
         if let size = entry.size, size > UInt64(fileLimit) { throw OfflineFileError.tooLarge(fileLimit) }
         let members = Set(folders.flatMap(\.fileIDs))
         let previous = pins.first { !members.contains($0.id) && $0.matches(profile, path: entry.path) }
@@ -291,6 +296,9 @@ public actor OfflineFileStore {
         leases.removeAll { $0.value == nil }
         guard leases.count < 4 else { throw OfflineFileError.tooManyReaders }
         guard let pin = pins.first(where: { $0.id == id }) else { throw OfflineFileError.missing }
+        // A copy saved under a name holding a separator, which an earlier version let through, could
+        // never be opened: its name isn't one file's. It stays that one copy's failure.
+        guard Self.validFilename(pin.filename) else { throw OfflineFileError.damaged }
         let package = directory.appendingPathComponent(pin.blobID.uuidString)
         guard (try? FileManager.default.attributesOfItem(atPath: package.path)[.type]) as? FileAttributeType == .typeDirectory else {
             throw OfflineFileError.missing
@@ -335,7 +343,8 @@ public actor OfflineFileStore {
         }
     }
     static func validFilename(_ value: String) -> Bool {
-        !value.isEmpty && value != "." && value != ".." && !value.contains("/") && !value.contains("\\") &&
+        // By bytes: this names a local file, and a slash beside a combining mark still separates folders.
+        !value.isEmpty && !RemotePath.isDotName(value) && !RemotePath.hasSeparator(value) &&
         !value.unicodeScalars.contains { $0.value < 32 || $0.value == 127 }
     }
     static func protectDirectory(_ url: URL) throws {
@@ -466,14 +475,15 @@ extension OfflineFileStore {
         var owned = Set<UUID>(), routes = Set<Data>()
         for folder in folders {
             let dirs = Set(folder.directories.map { Data($0.utf8) })
-            guard OfflineFolderPin.validPath(folder.path), !folder.name.isEmpty,
+            // Paths are judged as the version that saved them judged them; none of them names a local file.
+            guard RemotePath.wasAcceptedAsPath(folder.path), !folder.name.isEmpty,
                   folder.routeKey.count == 64, folder.routeKey.allSatisfy({ $0.isHexDigit }),
                   folder.directories.count <= 256, dirs.count == folder.directories.count, dirs.contains(Data(folder.path.utf8)),
                   folder.skippedLinks >= 0, folder.skippedLinks <= 10_000,
                   folder.skippedOtherEntries >= 0, folder.skippedOtherEntries <= 10_000,
                   routes.insert(Data((folder.routeKey + folder.path).utf8)).inserted else { throw OfflineFileError.invalidLibrary }
             for path in folder.directories {
-                guard OfflineFolderPin.validPath(path), RemoteResourcePath.contains(path, in: folder.path),
+                guard RemotePath.wasAcceptedAsPath(path), RemoteResourcePath.contains(path, in: folder.path),
                       path.utf8.elementsEqual(folder.path.utf8) || dirs.contains(Data(RemotePath.parent(of: path).utf8)) else {
                     throw OfflineFileError.invalidLibrary
                 }

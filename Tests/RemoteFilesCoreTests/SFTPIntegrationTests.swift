@@ -2804,6 +2804,61 @@ final class BoundedPreviewReaderTests: XCTestCase {
         XCTAssertEqual(result.0.count, 300_000)
     }
 
+    /// Replies wait for the ones before them. A reply larger than its request is refused when it arrives,
+    /// so a server can't have many of them held while it keeps the first one back.
+    func testAReplyLargerThanItsRequestIsRefusedWithoutWaitingForEarlierReplies() async throws {
+        let started = ContinuousClock.now
+        do {
+            _ = try await BoundedPreviewReader.read(initialSize: nil, limit: 4 * 1024 * 1024, window: 8) { offset, amount in
+                // The first read is never answered; every other one gets sixteen times what it asked for.
+                if offset == 0 { try await Task.sleep(for: .seconds(120)) }
+                return ByteBuffer(repeating: 7, count: Int(amount) * 16)
+            }
+            XCTFail("More bytes than were requested must be refused")
+        } catch RemoteFileError.tooLarge(let limit) { XCTAssertEqual(limit, 4 * 1024 * 1024) }
+        XCTAssertLessThan(started.duration(to: .now), .seconds(60), "Refused on arrival, not once the first read was answered")
+    }
+
+    func testConnectionFailuresAreReportedTheSameToEveryCaller() async throws {
+        let profile = ConnectionProfile(name: "Direct", host: "example.invalid", username: "reader", identityID: UUID())
+        for raw in [SSHClientError.allAuthenticationOptionsFailed, SSHClientError.unsupportedPrivateKeyAuthentication] as [Error] {
+            guard case RemoteFileError.authenticationFailed = SFTPRemoteFileService.connectionFailure(raw, profile: profile) else {
+                return XCTFail("\(raw) must be reported as a failed authentication")
+            }
+        }
+        XCTAssertTrue(SFTPRemoteFileService.connectionFailure(CancellationError(), profile: profile) is CancellationError)
+        if case HostTrustError.invalidKey = SFTPRemoteFileService.connectionFailure(HostTrustError.invalidKey, profile: profile) { }
+        else { XCTFail("A host-key failure keeps its own meaning") }
+
+        // Several requests of one connection that fails: the ones that joined it get what the first gets.
+        let fixture = try Fixture(), stores = try Stores(fixture: fixture)
+        let identity = try await stores.identity.generate(name: "Not authorized")
+        let joined = try await stores.profile(identity: identity)
+        try await stores.trustFixtureHost()
+        let service = stores.service()
+        addTeardownBlock { await service.disconnect() }
+        let failures = await withTaskGroup(of: Error?.self) { group -> [Error?] in
+            for index in 0..<4 {
+                group.addTask {
+                    do {
+                        if index.isMultiple(of: 2) { _ = try await service.listDirectory(profile: joined, path: fixture.files) }
+                        else { _ = try await service.readFile(profile: joined, path: fixture.files + "/report.md", limit: 1024) }
+                        return nil
+                    } catch { return error }
+                }
+            }
+            var found: [Error?] = []
+            for await failure in group { found.append(failure) }
+            return found
+        }
+        XCTAssertEqual(failures.count, 4)
+        for failure in failures {
+            guard case RemoteFileError.authenticationFailed? = failure else {
+                XCTFail("Every caller must be told authentication failed, not \(String(describing: failure))"); continue
+            }
+        }
+    }
+
     func testDetachedDeadlineReturnsOnCancellationWhileOperationDrains() async throws {
         let finished = ProgressFlag()
         let started = Date()

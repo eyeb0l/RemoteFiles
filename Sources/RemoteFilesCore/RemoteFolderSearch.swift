@@ -209,7 +209,7 @@ public enum RemoteFolderSearch {
                             ready[accepted] = .outside // A listed folder may have become a link since its parent was read.
                             break
                         }
-                        let visible = snapshot.entries.filter { includeHidden || !$0.name.hasPrefix(".") }
+                        let visible = snapshot.entries.filter { includeHidden || !RemotePath.isHidden($0.name) }
                             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
                         if folder.depth < limits.maxDepth {
                             for entry in visible where entry.kind == .directory { queue.append(Folder(path: entry.path, depth: folder.depth + 1)) }

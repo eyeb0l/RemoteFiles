@@ -20,6 +20,8 @@ struct RemoteInlineImage: View {
     @State private var loading = false
     @State private var reservedHeight: CGFloat?
     @State private var retry = 0
+    /// The last retry whose stale copy was already discarded.
+    @State private var discardedRetry = 0
     @State private var viewer: ImagePresentation?
     private enum ImageAction: Hashable { case image, openFile }
     @AccessibilityFocusState(for: .voiceOver) private var focusedAction: ImageAction?
@@ -67,7 +69,14 @@ struct RemoteInlineImage: View {
             loading = true; failure = nil
             defer { loading = false }
             do {
-                if retry > 0 { await resolver.invalidate(reference, in: location) }
+                // Once per tap of Retry. This task also runs again whenever the image scrolls back into
+                // view or the app becomes active, and discarding the copy each time would download the
+                // image again on every one of those for as long as the document stayed open.
+                let wanted = retry
+                if wanted > discardedRetry {
+                    await resolver.invalidate(reference, in: location)
+                    try Task.checkCancellation(); discardedRetry = wanted
+                }
                 let file = try await resolver.localFile(for: reference, in: location)
                 let decoded = try await RemoteImageDecoder.shared.decode(file, maxPixel: 1600)
                 try Task.checkCancellation(); image = decoded
@@ -109,6 +118,7 @@ struct RemoteImageViewer: View {
     @State private var image: DisplayImage?
     @State private var failure: String?
     @State private var retry = 0
+    @State private var discardedRetry = 0
     /// A failed reload discards the preview too, so a stale picture never stands in for an error.
     private var shown: DisplayImage? { image ?? (failure == nil ? item.preview : nil) }
     var body: some View {
@@ -130,7 +140,12 @@ struct RemoteImageViewer: View {
             guard scenePhase == .active else { return }
             failure = nil
             do {
-                if retry > 0 { await resolver.invalidate(item.reference, in: item.location) }
+                // Once per tap of Retry, not again each time the app becomes active.
+                let wanted = retry
+                if wanted > discardedRetry {
+                    await resolver.invalidate(item.reference, in: item.location)
+                    try Task.checkCancellation(); discardedRetry = wanted
+                }
                 let file: URL
                 if item.checkExistence {
                     file = try await resolver.localFileForOpening(for: item.reference, in: item.location)

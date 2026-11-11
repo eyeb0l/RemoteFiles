@@ -30,8 +30,12 @@ Relative paths resolve from the canonical source document directory. SFTP resolv
 both the connection's starting directory and source document with REALPATH before
 lexical resolution. `..` may reach a parent within that starting directory, but
 cannot leave it. Percent escapes decode exactly once. Unicode and spaces are
-preserved. The target is canonicalized again and must be a regular file within
+preserved. Names are separated at the slash byte, as the server separates them,
+so a `..` next to a combining mark or joiner is still a `..`. The target is
+canonicalized again and must be a regular file within
 the canonical starting directory. Symlinks outside it fail before navigation.
+The two REALPATH requests travel together, and so do the target's REALPATH and
+the request for what it is: two round trips in all, judged in the same order.
 Markdown, supported UTF-8 text/source, images, PDFs, supported audio/video files and [certificate files](CERTIFICATE_PREVIEWS.md) are valid destinations.
 
 Linked entries carry their canonical navigation root. Text reads and refreshes

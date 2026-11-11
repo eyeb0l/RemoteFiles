@@ -17,9 +17,10 @@ public enum RemoteResourcePath {
     public static func resolve(_ reference: String, relativeTo document: RemoteDocumentLocation) throws -> String {
         let decoded = try decodedPath(reference, in: document)
         var relative = decoded
-        if decoded.hasPrefix("/") {
+        if RemotePath.isAbsolute(decoded) {
             guard contains(decoded, in: document.resourceRoot) else { throw RemoteResourceError.outsideDocument }
-            relative = String(decoded.dropFirst(document.resourceRoot == "/" ? 1 : document.resourceRoot.count + 1))
+            let root = document.resourceRoot
+            relative = String(Substring(decoded.utf8.dropFirst(root.utf8.elementsEqual("/".utf8) ? 1 : root.utf8.count + 1)))
         }
         let parts = try normalizedParts(relative, startingAt: [])
         guard !parts.isEmpty else { throw RemoteResourceError.outsideDocument }
@@ -30,7 +31,7 @@ public enum RemoteResourcePath {
     /// does not grant permission to download outside the document's directory tree.
     public static func pathForExistenceCheck(_ reference: String, relativeTo document: RemoteDocumentLocation) throws -> String {
         let decoded = try decodedPath(reference, in: document)
-        let base = decoded.hasPrefix("/") ? [] : document.resourceRoot.split(separator: "/").map(String.init)
+        let base = RemotePath.isAbsolute(decoded) ? [] : RemotePath.components(of: document.resourceRoot).map(String.init)
         let parts = try normalizedParts(decoded, startingAt: base)
         guard !parts.isEmpty else { throw RemoteResourceError.outsideDocument }
         return "/" + parts.joined(separator: "/")
@@ -39,19 +40,20 @@ public enum RemoteResourcePath {
     private static func decodedPath(_ reference: String, in document: RemoteDocumentLocation) throws -> String {
         guard let components = URLComponents(string: reference), components.scheme == nil,
               components.host == nil, components.query == nil, components.fragment == nil,
-              !reference.hasPrefix("//"), !reference.hasPrefix("\\"),
+              !RemotePath.startsWithDoubledSeparator(reference), reference.utf8.first != 0x5C,
               let decoded = components.percentEncodedPath.removingPercentEncoding,
-              !decoded.isEmpty, !decoded.hasPrefix("//"), !decoded.contains("\\"),
+              !decoded.isEmpty, !RemotePath.startsWithDoubledSeparator(decoded), !RemotePath.hasBackslash(decoded),
               !decoded.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
-              document.path.hasPrefix("/") else { throw RemoteResourceError.outsideDocument }
+              RemotePath.isAbsolute(document.path) else { throw RemoteResourceError.outsideDocument }
         return decoded
     }
 
     private static func normalizedParts(_ path: String, startingAt base: [String]) throws -> [String] {
         var parts = base
-        for part in path.split(separator: "/") {
-            if part == "." { continue }
-            if part == ".." {
+        // By bytes, so no ".." hides beside a combining mark and goes to the server unresolved.
+        for part in RemotePath.components(of: path) {
+            if RemotePath.isCurrentName(part) { continue }
+            if RemotePath.isParentName(part) {
                 guard !parts.isEmpty else { throw RemoteResourceError.outsideDocument }
                 parts.removeLast()
             } else { parts.append(String(part)) }

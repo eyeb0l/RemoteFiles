@@ -47,9 +47,7 @@ public struct RemoteFilesRootView: View {
                 Task {
                     await lifecycleTask?.value
                     guard scenePhase == .active else { return }
-                    model?.isForeground = true
-                    model?.foregroundDownloads()
-                    model?.sessionRevision += 1
+                    model?.sceneBecameActive()
                 }
             }
         }
