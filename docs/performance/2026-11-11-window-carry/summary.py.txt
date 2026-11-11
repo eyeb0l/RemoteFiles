@@ -1,0 +1,35 @@
+"""Medians and ranges of `windowcarry` samples by condition and arm. Usage: summary.py FILE.jsonl [FILE.jsonl ...]
+A label is CONDITION@ORDER or ORDER@CONDITION; whichever part is `forward`/`reverse` (or ends in it) is dropped, so both orders pool."""
+import collections, json, statistics, sys
+
+data = collections.defaultdict(list)
+for path in sys.argv[1:]:
+    for line in open(path):
+        record = json.loads(line)
+        if record["scenario"].startswith("#") or not record["scenario"].startswith("windowcarry."):
+            continue
+        parts = [part for part in record["label"].replace("mac-forward", "forward").replace("mac-reverse", "reverse").split("@")
+                 if part not in ("forward", "reverse")]
+        condition = "@".join(parts)
+        _, arm, metric = record["scenario"].split(".", 2)
+        data[(condition, arm, metric)].extend(record["samples"])
+
+def cell(samples, digits=1):
+    if not samples:
+        return "-"
+    return f"{statistics.median(samples):.{digits}f} ({min(samples):.{digits}f}-{max(samples):.{digits}f}) n={len(samples)}"
+
+conditions = sorted({key[0] for key in data})
+for condition in conditions:
+    arms = []
+    for key in data:
+        if key[0] == condition and key[1] not in arms:
+            arms.append(key[1])
+    print(f"\n## {condition}")
+    print("| arm | first MiB/s | second MiB/s | second start/peak/settled | second in flight | to 8 MiB, ms | to 32 MiB, ms | tap, first five | tap, all | worst tap |")
+    print("|---|---|---|---|---|---|---|---|---|---|")
+    for arm in sorted(arms):
+        get = lambda metric: data.get((condition, arm, metric), [])
+        windows = "/".join(f"{statistics.median(get('second.' + name)):.0f}" if get("second." + name) else "-" for name in ("startWindow", "peakWindow", "settledWindow"))
+        print(f"| {arm} | {cell(get('first.MiBps'), 2)} | {cell(get('second.MiBps'), 2)} | {windows} | {cell(get('second.meanInFlight'))} | "
+              f"{cell(get('second.to8MiB'), 0)} | {cell(get('second.to32MiB'), 0)} | {cell(get('tap'), 0)} | {cell(get('tapAll'), 0)} | {cell(get('tapWorst'), 0)} |")

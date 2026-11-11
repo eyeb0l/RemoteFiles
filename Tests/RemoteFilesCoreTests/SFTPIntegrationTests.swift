@@ -2703,6 +2703,70 @@ final class BoundedPreviewReaderTests: XCTestCase {
         XCTAssertEqual(pacing.window, 8)
     }
 
+    /// The benchmark-only carry (`TransferWindowCarry`): a transfer that starts above its floor.
+    func testAWindowStartedAboveItsFloorShrinksToTheFloorOnALinkThatCarriesLittle() {
+        let chunk = 64 * 1024, clock = ContinuousClock()
+        var now = clock.now
+        // The link carries 4 chunks per round trip however many are queued, as one that has slowed since would.
+        var pacing = TransferPacing(window: 64, limit: 64, chunkSize: chunk, floor: 16)
+        XCTAssertFalse(pacing.isJudged)
+        for _ in 0..<12 {
+            pacing.received(bytes: chunk, latency: .milliseconds(150), at: now)
+            now += .milliseconds(150) / 4
+        }
+        XCTAssertEqual(pacing.window, 16, "Judged after one round trip of replies, and never below the floor")
+        XCTAssertTrue(pacing.isJudged)
+        // Where the link still delivers what it did, the window stays.
+        pacing = TransferPacing(window: 48, limit: 64, chunkSize: chunk, floor: 16)
+        for _ in 0..<4 {
+            for _ in 0..<pacing.window { pacing.received(bytes: chunk, latency: .milliseconds(150), at: now) }
+            now += .milliseconds(150)
+        }
+        XCTAssertEqual(pacing.window, 64, "And grows on from where it started")
+        // Held, it keeps its start until that many replies have come back, then follows the link.
+        pacing = TransferPacing(window: 64, limit: 64, chunkSize: chunk, floor: 16, holdsFirstWindow: true)
+        for reply in 1...64 {
+            pacing.received(bytes: chunk, latency: .milliseconds(150), at: now)
+            now += .milliseconds(150) / 4
+            if reply < 64 { XCTAssertEqual(pacing.window, 64, "Reply \(reply)"); XCTAssertFalse(pacing.isJudged) }
+        }
+        for _ in 0..<8 {
+            pacing.received(bytes: chunk, latency: .milliseconds(150), at: now)
+            now += .milliseconds(150) / 4
+        }
+        XCTAssertEqual(pacing.window, 16)
+        XCTAssertTrue(pacing.isJudged)
+        // A floor above the start is the start: a window is never below where it began unless a floor says so.
+        pacing = TransferPacing(window: 16, limit: 64, chunkSize: chunk, floor: 32)
+        for _ in 0..<12 {
+            pacing.received(bytes: chunk, latency: .milliseconds(150), at: now)
+            now += .milliseconds(150) / 4
+        }
+        XCTAssertEqual(pacing.window, 16)
+    }
+
+    func testStreamReportsASettledWindowOnlyWhenTheWindowHeldItBackAndWasJudged() async throws {
+        let chunk = 1024, size = 400 * chunk
+        let bytes = (0..<size).map { UInt8(truncatingIfNeeded: $0 &* 13) }
+        func settled(_ count: Int, window: Int, limit: Int?) async throws -> Int? {
+            let file = PipelinedPreviewFile(Array(bytes.prefix(count)))
+            let result = try await BoundedPreviewReader.stream(initialSize: UInt64(count), limit: count, chunkSize: chunk, window: window, windowLimit: limit,
+                                                               readChunk: { offset, amount in await file.read(offset: offset, length: amount) }) { _ in }
+            XCTAssertEqual(result.bytes, count)
+            return result.settledWindow
+        }
+        // No timing is asserted: only that a long file's window was judged while ranges were still going out.
+        let judged = try await settled(size, window: 4, limit: 64)
+        let grown = try XCTUnwrap(judged)
+        XCTAssertTrue((4...64).contains(grown), "\(grown)")
+        // A file that fits in the window it starts with was sent whole before any reply could judge the connection.
+        let small = try await settled(3 * chunk, window: 16, limit: 64)
+        XCTAssertNil(small)
+        // Nor does a window that can't change say anything.
+        let fixed = try await settled(size, window: 16, limit: nil)
+        XCTAssertNil(fixed)
+    }
+
     func testExactLimitRequiresEOFProbeAndHandlesShortReads() async throws {
         let chunks = ControlledPreviewChunks(["12", "345678", ""])
         let result = try await BoundedPreviewReader.read(initialSize: nil, limit: 8) { _, amount in
