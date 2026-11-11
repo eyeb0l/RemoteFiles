@@ -33,24 +33,27 @@ final class DownloadManagerTests: XCTestCase {
         XCTAssertEqual(manager.items.map(\.state), [.downloading, .interrupted, .queued])
         XCTAssertEqual(manager.items[1].message, "Changed")
         XCTAssertEqual(manager.activeID, running)
-        var cancellations = await service.cancellations, disconnects = await service.disconnects
-        XCTAssertEqual(cancellations, 0); XCTAssertEqual(disconnects, 0)
+        var cancellations = await service.cancellations, closes = await service.sessionCloses
+        XCTAssertEqual(cancellations, 0); XCTAssertEqual(closes, 0)
         // Nothing the selection leaves out is stopped, nor is a finished download.
         await manager.interrupt(reason: "Nothing", where: { _ in false })
         XCTAssertEqual(manager.items.map(\.state), [.downloading, .interrupted, .queued])
 
-        // The active transfer is cancelled and its connection closed only when it is one of them.
+        // The active transfer is cancelled and its connection closed only when it is one of them, keeping
+        // unlocked keys for the downloads left: only an explicit Disconnect locks them.
         try manager.retry(queued, profile: profile)
         await manager.interrupt(reason: "Removed", where: { $0.profile.id == other.id })
         XCTAssertEqual(manager.items.map(\.state)[0], .interrupted)
         XCTAssertEqual(manager.items[0].message, "Removed")
         XCTAssertEqual(manager.items[2].state, .interrupted, "A queued download of the same connection stops too")
-        cancellations = await service.cancellations; disconnects = await service.disconnects
-        XCTAssertEqual(cancellations, 1); XCTAssertGreaterThanOrEqual(disconnects, 1)
+        cancellations = await service.cancellations; closes = await service.sessionCloses
+        XCTAssertEqual(cancellations, 1); XCTAssertGreaterThanOrEqual(closes, 1)
         // The queue isn't stopped: the remaining download of the other connection starts and finishes.
         try await wait { manager.items.first { $0.id == queued }?.state == .completed }
         XCTAssertEqual(manager.items.first { $0.id == next }?.state, .interrupted)
         XCTAssertEqual(manager.items.first { $0.id == running }?.state, .interrupted)
+        let disconnects = await service.disconnects
+        XCTAssertEqual(disconnects, 0, "Stopping some downloads must not lock keys the others use")
     }
 
     func testIndexedDownloadsUseSnapshotContractInsteadOfOrdinaryFallback() async throws {
@@ -618,11 +621,12 @@ final class DownloadManagerTests: XCTestCase {
 }
 
 /// Downloads named in `held` wait until their task is cancelled, as a transfer drains when its worker is.
-private actor HeldDownloadFixture: RemoteFileService {
+private actor HeldDownloadFixture: RemoteFileService, RemoteFileSessionClosing {
     let held: Set<String>
     private(set) var waiting: [String] = []
     private(set) var cancellations = 0
     private(set) var disconnects = 0
+    private(set) var sessionCloses = 0
     init(held: Set<String>) { self.held = held }
     func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
         if held.contains(path) {
@@ -635,6 +639,7 @@ private actor HeldDownloadFixture: RemoteFileService {
         return .init(name: RemotePath.name(of: path), path: path, kind: .file)
     }
     func disconnect() { disconnects += 1 }
+    func closeSessionPreservingUnlockedIdentities() { sessionCloses += 1 }
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
     func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.unsupportedFile }

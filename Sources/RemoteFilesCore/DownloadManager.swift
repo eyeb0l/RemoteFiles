@@ -262,7 +262,12 @@ public final class DownloadManager {
         // As in `interrupt(reason:)`, retire only these contexts, before yielding.
         for id in selected { contexts.removeValue(forKey: id) }
         activeWorker?.cancel(); publish()
-        if activeWorker != nil { await activeService?.disconnect() }
+        // Its connection is closed so the transfer drains, but keys stay unlocked: the queued downloads left,
+        // and browsing in the window that started it, still use them. Only an explicit Disconnect locks them.
+        if activeWorker != nil {
+            if let closer = activeService as? any RemoteFileSessionClosing { await closer.closeSessionPreservingUnlockedIdentities() }
+            else { await activeService?.disconnect() }
+        }
         await activeWorker?.value
     }
 
