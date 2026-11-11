@@ -16,6 +16,46 @@ final class DownloadManagerTests: XCTestCase {
         }
         XCTFail("Timed out waiting for downloads")
     }
+    /// Editing, removing or forgetting the host key of one connection stops only its downloads. Another
+    /// connection's transfer keeps running, and its queued downloads start when the stopped one drains.
+    func testInterruptingOneConnectionsDownloadsLeavesOthersRunning() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let other = ConnectionProfile(name: "Other", host: "other.invalid", username: "reader", identityID: UUID(), startingDirectory: "/safe")
+        let service = HeldDownloadFixture(held: ["/safe/held.bin", "/safe/other-held.bin"])
+        let manager = try DownloadManager(service: service, directory: directory)
+        let running = try manager.enqueue(profile: other, entry: entry("other-held.bin"))
+        let queued = try manager.enqueue(profile: profile, entry: entry("queued.bin"))
+        let next = try manager.enqueue(profile: other, entry: entry("next.bin"))
+        try await wait { await service.waiting == ["/safe/other-held.bin"] }
+
+        // A queued download of the connection is stopped; the other connection's transfer isn't touched.
+        await manager.interrupt(reason: "Changed", where: { $0.profile.id == self.profile.id })
+        XCTAssertEqual(manager.items.map(\.state), [.downloading, .interrupted, .queued])
+        XCTAssertEqual(manager.items[1].message, "Changed")
+        XCTAssertEqual(manager.activeID, running)
+        var cancellations = await service.cancellations, closes = await service.sessionCloses
+        XCTAssertEqual(cancellations, 0); XCTAssertEqual(closes, 0)
+        // Nothing the selection leaves out is stopped, nor is a finished download.
+        await manager.interrupt(reason: "Nothing", where: { _ in false })
+        XCTAssertEqual(manager.items.map(\.state), [.downloading, .interrupted, .queued])
+
+        // The active transfer is cancelled and its connection closed only when it is one of them, keeping
+        // unlocked keys for the downloads left: only an explicit Disconnect locks them.
+        try manager.retry(queued, profile: profile)
+        await manager.interrupt(reason: "Removed", where: { $0.profile.id == other.id })
+        XCTAssertEqual(manager.items.map(\.state)[0], .interrupted)
+        XCTAssertEqual(manager.items[0].message, "Removed")
+        XCTAssertEqual(manager.items[2].state, .interrupted, "A queued download of the same connection stops too")
+        cancellations = await service.cancellations; closes = await service.sessionCloses
+        XCTAssertEqual(cancellations, 1); XCTAssertGreaterThanOrEqual(closes, 1)
+        // The queue isn't stopped: the remaining download of the other connection starts and finishes.
+        try await wait { manager.items.first { $0.id == queued }?.state == .completed }
+        XCTAssertEqual(manager.items.first { $0.id == next }?.state, .interrupted)
+        XCTAssertEqual(manager.items.first { $0.id == running }?.state, .interrupted)
+        let disconnects = await service.disconnects
+        XCTAssertEqual(disconnects, 0, "Stopping some downloads must not lock keys the others use")
+    }
+
     func testIndexedDownloadsUseSnapshotContractInsteadOfOrdinaryFallback() async throws {
         let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
         let service = IndexedDownloadFixture()
@@ -578,6 +618,31 @@ final class DownloadManagerTests: XCTestCase {
         let starts = await service.starts
         XCTAssertEqual(starts, [0, 6])
     }
+}
+
+/// Downloads named in `held` wait until their task is cancelled, as a transfer drains when its worker is.
+private actor HeldDownloadFixture: RemoteFileService, RemoteFileSessionClosing {
+    let held: Set<String>
+    private(set) var waiting: [String] = []
+    private(set) var cancellations = 0
+    private(set) var disconnects = 0
+    private(set) var sessionCloses = 0
+    init(held: Set<String>) { self.held = held }
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
+        if held.contains(path) {
+            waiting.append(path)
+            defer { waiting.removeAll { $0 == path } }
+            do { while true { try await Task.sleep(for: .seconds(60)) } }
+            catch { cancellations += 1; throw CancellationError() }
+        }
+        try Data("bytes".utf8).write(to: destination)
+        return .init(name: RemotePath.name(of: path), path: path, kind: .file)
+    }
+    func disconnect() { disconnects += 1 }
+    func closeSessionPreservingUnlockedIdentities() { sessionCloses += 1 }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.unsupportedFile }
 }
 
 private actor DownloadFixture: RemoteFileService, RemoteFileSessionClosing {

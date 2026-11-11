@@ -242,6 +242,13 @@ final class AppModel {
         // was read through its old settings isn't shown under the new ones, and its session ends.
         let affected = Set(previous.filter { !value.connections.contains($0) }.map(\.id))
         guard !affected.isEmpty else { return }
+        // Its downloads stop as they did in the window that changed it. That window stopped those it knew of;
+        // these are any this one started on the connection as it was, before it heard. A download started on the
+        // connection as it is now goes on, however late this window hears.
+        let current = value.connections
+        if let downloads {
+            Task { await downloads.interrupt(reason: Self.changedConnectionDownloadMessage) { affected.contains($0.profile.id) && !current.contains($0.profile) } }
+        }
         routes.removeAll { affected.contains($0.connectionID) }
         affected.forEach { forgetListings(of: $0) }
         guard affected.contains(where: { connectionStates[$0] != nil || foregroundConnectionID == $0 }) else { return }
@@ -288,7 +295,7 @@ final class AppModel {
         guard isForeground, !isDisconnecting, disconnectWork == nil, let downloads else { return }
         do {
             try downloads.enqueue(profile: profile, entry: entry.selectedForTransfer, service: demo ? demoDownloadTransport : downloadTransport,
-                onFailure: { [weak self] error, profile in self?.handleDownloadFailure(error, profile: profile) })
+                onFailure: downloadFailureHandler())
             sheet = .downloads
         }
         catch { errorMessage = error.localizedDescription }
@@ -297,9 +304,19 @@ final class AppModel {
         guard isForeground, !isDisconnecting, disconnectWork == nil, let profile = profile(item.profile.id) else { return }
         do {
             try downloads?.retry(item.id, profile: profile, service: demo ? demoDownloadTransport : downloadTransport,
-                onFailure: { [weak self] error, profile in self?.handleDownloadFailure(error, profile: profile) })
+                onFailure: downloadFailureHandler())
         }
         catch { errorMessage = error.localizedDescription }
+    }
+    /// A download this window queued keeps its place if the window enters or leaves Demo, as when it goes to the
+    /// background, and other windows keep the queue going. Its failure is then shown only in Downloads: a trust
+    /// or unlock prompt for a real server doesn't appear over Demo, nor one for Demo's over the real library.
+    private func downloadFailureHandler() -> (Error, ConnectionProfile) -> Void {
+        let queuedInDemo = demo
+        return { [weak self] error, profile in
+            guard let self, self.demo == queuedInDemo else { return }
+            self.handleDownloadFailure(error, profile: profile)
+        }
     }
     private func handleDownloadFailure(_ error: Error, profile: ConnectionProfile) {
         guard isForeground, isSecurityError(error) else { return }
@@ -458,7 +475,10 @@ final class AppModel {
         catch { errorMessage = error.localizedDescription }
     }
     func saveConnection(_ value: ConnectionProfile) async {
-        await disconnect()
+        // Its downloads stop, in every window: its server, account or key may have changed, and Retry won't
+        // continue one across a changed connection. Other connections' downloads go on.
+        await downloads?.interrupt(reason: Self.changedConnectionDownloadMessage) { $0.profile.id == value.id }
+        await disconnect(preservingDownloads: true)
         // The iPad sidebar can edit the connection whose reader is still on screen.
         routes.removeAll { $0.connectionID == value.id }
         sessionRevision += 1
@@ -470,7 +490,8 @@ final class AppModel {
         }
     }
     func removeConnection(_ profile: ConnectionProfile) async {
-        await disconnect()
+        await downloads?.interrupt(reason: Self.changedConnectionDownloadMessage) { $0.profile.id == profile.id }
+        await disconnect(preservingDownloads: true)
         routes.removeAll { $0.connectionID == profile.id }
         sessionRevision += 1
         do { try await searchIndexStore().remove(connectionID: profile.id) }
@@ -514,7 +535,8 @@ final class AppModel {
     }
     /// Forgets the trusted key of the saved endpoint, never unsaved edits in the connection form.
     func resetTrust(for profile: ConnectionProfile) async {
-        await disconnect()
+        await interruptDownloads(through: HostEndpoint(host: profile.host, port: profile.port))
+        await disconnect(preservingDownloads: true)
         do { try await searchIndexStore().remove(connectionID: profile.id) }
         catch { errorMessage = error.localizedDescription }
         // Forgetting trust must remain possible even when the local search cache is damaged.
@@ -523,12 +545,23 @@ final class AppModel {
     }
     func resetJumpHostTrust(for profile: ConnectionProfile) async {
         guard let jump = profile.jumpHost else { return }
-        await disconnect()
+        await interruptDownloads(through: HostEndpoint(host: jump.host, port: jump.port))
+        await disconnect(preservingDownloads: true)
         do { try await searchIndexStore().remove(connectionID: profile.id) }
         catch { errorMessage = error.localizedDescription }
         do { try await trust.reset(endpoint: HostEndpoint(host: jump.host, port: jump.port)) }
         catch { errorMessage = error.localizedDescription }
     }
+    /// Stops every download that reaches a server whose trusted key is being forgotten, directly or through it
+    /// as a jump host, whichever connection it was started from. Downloads from other servers go on.
+    private func interruptDownloads(through endpoint: HostEndpoint) async {
+        func reaches(_ profile: ConnectionProfile) -> Bool {
+            HostEndpoint(host: profile.host, port: profile.port) == endpoint ||
+            profile.jumpHost.map { HostEndpoint(host: $0.host, port: $0.port) == endpoint } == true
+        }
+        await downloads?.interrupt(reason: "This server's trusted key was forgotten. Retry to check it again and continue.") { reaches($0.profile) }
+    }
+    static let changedConnectionDownloadMessage = "This download's connection was changed or removed. Download the file again."
     func addIdentity(_ value: IdentityMetadata) async throws {
         guard !demo else { throw RemoteFileError.unavailable("Leave Demo before saving keys.") }
         // Shown only once it's saved.
@@ -869,7 +902,10 @@ final class AppModel {
         }
     }
     func setDemo(_ enabled: Bool) async {
-        await disconnect(); routes = []
+        // Other windows' downloads go on. This window's place among the queue's windows goes when `loadDownloads`
+        // replaces its registration; if no window is then left in the foreground, the queue is interrupted as when
+        // the last window closes.
+        await disconnect(preservingDownloads: true); routes = []
         if enabled {
             realMetadata = metadata
             metadata = AppMetadata()

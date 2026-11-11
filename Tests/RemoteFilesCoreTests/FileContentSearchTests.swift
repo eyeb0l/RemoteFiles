@@ -73,6 +73,16 @@ final class FileContentSearchTests: XCTestCase {
         return (matches, try XCTUnwrap(final))
     }
 
+    /// A backslash is an ordinary byte in a name on the server, as in a file copied from Windows.
+    func testFilesHoldingABackslashInTheirPathAreRead() async throws {
+        let paths = ["/r/C:\\notes.txt", "/r/dir\\name/a\\..\\notes.md"]
+        let service = ContentTreeService(["/r": [file(paths[0]), folder("/r/dir\\name")], "/r/dir\\name": [file(paths[1])]],
+                                         contents: Dictionary(uniqueKeysWithValues: paths.map { ($0, bytes("a needle here")) }))
+        let result = try await search(service)
+        XCTAssertEqual(result.matches.map(\.entry.path), paths)
+        XCTAssertEqual(result.final.filesSearched, 2); XCTAssertEqual(result.final.unreadableFiles, 0)
+    }
+
     func testContentSearchConsumesFoldersDiscoveredAfterTheLastListingFinishes() async throws {
         var tree: [String: [RemoteEntry]] = [:], data: [String: Data] = [:], expected: [String] = []
         var path = "/r"

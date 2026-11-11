@@ -173,6 +173,57 @@ final class OfflineFolderTests: XCTestCase {
         let lease = try await store.lease(try XCTUnwrap(nested.fileIDs.first))
         XCTAssertEqual(try Data(contentsOf: lease.url), Data("old\r\n".utf8))
     }
+    /// A backslash is an ordinary byte in a name on the server, so a folder holding one is walked and saved like
+    /// any other. A saved file takes its own name on this device, where a backslash is refused, so a file named
+    /// with one is skipped and counted rather than failing the whole folder. One such file once did.
+    func testBackslashFoldersAreSavedAndBackslashFilesAreSkippedAndCounted() async throws {
+        let (dir, store, service) = try setup()
+        let windows = path + "/C:\\share"
+        await service.set(path, entries: [
+            .init(name: "C:\\notes.txt", path: path + "/C:\\notes.txt", kind: .file),
+            .init(name: ".\\hidden.txt", path: path + "/.\\hidden.txt", kind: .file),
+            .init(name: "guide.md", path: path + "/guide.md", kind: .file),
+            .init(name: "C:\\share", path: windows, kind: .directory)])
+        await service.set(windows, entries: [.init(name: "inside.md", path: windows + "/inside.md", kind: .file),
+                                             .init(name: "a\\b.txt", path: windows + "/a\\b.txt", kind: .file)])
+        let folder = try await store.pinFolder(profile: profile, path: path, service: service)
+        XCTAssertEqual(folder.directories, [path, windows])
+        XCTAssertEqual(folder.skippedNames, 2, "A hidden file left out by choice isn't counted")
+        XCTAssertEqual(folder.skippedOtherEntries, 0)
+        let pins = await store.snapshot()
+        XCTAssertEqual(Set(pins.map(\.path)), [path + "/guide.md", windows + "/inside.md"])
+        let requested = await service.downloads.map(\.0)
+        XCTAssertEqual(Set(requested), [path + "/guide.md", windows + "/inside.md"], "A skipped file is never transferred")
+        // Links resolve beside a backslash in the saved folder's paths, though a reference still can't hold one.
+        let inside = try XCTUnwrap(pins.first { $0.path == windows + "/inside.md" })
+        let guide = try await store.resolveDocumentLink(from: inside, reference: "../guide.md")
+        XCTAssertEqual(guide.path, path + "/guide.md")
+        let lease = try await store.lease(inside.id)
+        XCTAssertEqual(lease.url.lastPathComponent, "inside.md")
+        // The library this saves loads again, and so does a folder saved at a path holding a backslash.
+        await service.set(windows + "/Sub\\dir", entries: [.init(name: "deep.md", path: windows + "/Sub\\dir/deep.md", kind: .file)])
+        let nested = try await store.pinFolder(profile: profile, path: windows + "/Sub\\dir", service: service)
+        let reopened = try OfflineFileStore(directory: dir), restored = await reopened.librarySnapshot()
+        XCTAssertEqual(Set(restored.folders), [folder, nested]); XCTAssertEqual(restored.files.count, 3)
+        // A name holding a slash isn't a name at all, whatever else it holds: that still fails the folder.
+        await service.set(path, entries: [.init(name: "..\\/escape", path: "/root/Docs/..\\/escape", kind: .file)])
+        do { _ = try await store.pinFolder(profile: profile, path: path, service: service); XCTFail("A name holding a slash was saved") }
+        catch RemoteFileError.invalidPath { }
+    }
+
+    func testOfflineFolderPinsSavedWithoutSkippedNamesStillLoad() async throws {
+        let (dir, store, service) = try setup()
+        let folder = try await store.pinFolder(profile: profile, path: path, service: service)
+        let index = dir.appendingPathComponent("index-v1.json")
+        var manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: index)) as? [String: Any])
+        var folders = try XCTUnwrap(manifest["folders"] as? [[String: Any]])
+        XCTAssertNotNil(folders[0].removeValue(forKey: "skippedNames"))
+        manifest["folders"] = folders
+        try JSONSerialization.data(withJSONObject: manifest).write(to: index)
+        let restored = await (try OfflineFileStore(directory: dir)).librarySnapshot()
+        XCTAssertEqual(restored.folders, [folder]); XCTAssertEqual(restored.folders.first?.skippedNames, 0)
+    }
+
     func testEmptySnapshotsAreBoundedAndUnicodeByteNamesStayDistinct() async throws {
         let (_, store, service) = try setup()
         let names = ["caf\u{e9}.txt", "cafe\u{301}.txt"]

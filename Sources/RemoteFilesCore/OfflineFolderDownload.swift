@@ -26,6 +26,7 @@ struct PreparedOfflineFolder: Sendable {
     var directories: [String] = []
     var skippedLinks = 0
     var skippedOtherEntries = 0
+    var skippedNames = 0
 }
 
 /// Owns all work and unpublished bytes until the final atomic manifest commit. Even an adapter
@@ -219,7 +220,8 @@ actor OfflineFolderDownload {
                 await publish()
                 for entry in listing.entries.sorted(by: { $0.path.utf8.lexicographicallyPrecedes($1.path.utf8) }) {
                     try Task.checkCancellation()
-                    guard OfflineFileStore.validFilename(entry.name), OfflineFolderPin.validPath(entry.path),
+                    // A listing that names something other than one member of this folder is refused whole.
+                    guard RemotePath.isSingleName(entry.name),
                           entry.path.utf8.elementsEqual(RemotePath.appending(entry.name, to: current).utf8),
                           RemoteResourcePath.contains(entry.path, in: path), seen.insert(Data(entry.path.utf8)).inserted else {
                         throw RemoteFileError.invalidPath
@@ -230,10 +232,15 @@ actor OfflineFolderDownload {
                         result.skippedLinks += 1; report.skippedLinks += 1
                     case .other: result.skippedOtherEntries += 1
                     case .directory:
+                        guard OfflineFolderPin.validPath(entry.path) else { throw RemoteFileError.invalidPath }
                         guard depth < limits.depth else { throw OfflineFileError.folderLimit("16 level depth") }
                         guard queue.count < limits.directories else { throw OfflineFileError.folderLimit("256 directory") }
                         queue.append((entry.path, depth + 1))
                     case .file:
+                        // A saved file takes its own name on this device. One that can't, such as a name holding a
+                        // backslash, is left out and counted rather than failing the folder.
+                        guard OfflineFileStore.validFilename(entry.name) else { result.skippedNames += 1; continue }
+                        guard OfflineFolderPin.validPath(entry.path) else { throw RemoteFileError.invalidPath }
                         guard found < countLimit else { throw OfflineFileError.tooManyFiles }
                         waiting.append(FileJob(index: found, entry: entry)); found += 1
                     }

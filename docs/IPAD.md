@@ -22,7 +22,7 @@ Automated navigation tests cover route projection, preview replacement, folder h
 
 ## Several windows
 
-Each window browses on its own connection and has its own folder, reader and search. They share one library: a connection, key, favourite or recent added, changed or removed in one window appears in the others, and no window saves an older copy of the library over a newer one. Trusted host keys and reading history are shared the same way, so a host whose trust is reset in one window must be accepted again in every window. A connection edited or removed in one window closes its folders and readers in the others, as it does where it was edited. Downloads, offline files and saved search indexes were already shared.
+Each window browses on its own connection and has its own folder, reader and search. They share one library: a connection, key, favourite or recent added, changed or removed in one window appears in the others, and no window saves an older copy of the library over a newer one. Trusted host keys and reading history are shared the same way, so a host whose trust is reset in one window must be accepted again in every window. A connection edited or removed in one window closes its folders and readers in the others, as it does where it was edited. Downloads, offline files and saved search indexes were already shared. Editing or removing a connection, or forgetting a host key, interrupts only the downloads it affects, in every window; entering Demo in one window leaves the others' downloads running ([Downloads](DOWNLOADS.md#background-behavior)).
 
 ## Keyboard shortcuts
 
