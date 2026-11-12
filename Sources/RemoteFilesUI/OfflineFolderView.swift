@@ -11,7 +11,7 @@ struct OfflineFolderPinActions: View {
         let folder = model.offlineFolder(profile: profile, path: path)
         Button(folder == nil ? "Keep Folder Offline" : "Update Offline Folder", systemImage: "pin") {
             if let folder { model.refreshOfflineFolder(folder) }
-            else { model.sheet = .offlineFolder(profile, path, includeHidden) }
+            else { model.pinOffline(profile: profile, entry: .init(name: RemotePath.name(of: path).isEmpty ? "Root" : RemotePath.name(of: path), path: path, kind: .directory), includeHidden: includeHidden) }
         }
         .disabled(model.pinningName != nil || model.offlineStore == nil || !model.isForeground)
         if let folder {
@@ -19,47 +19,6 @@ struct OfflineFolderPinActions: View {
                 Task { await model.removeOfflineFolder(folder) }
             }
         }
-    }
-}
-
-struct OfflineFolderSetupView: View {
-    let model: AppModel
-    let profile: ConnectionProfile
-    let path: String
-    @State private var includeHidden: Bool
-    @Environment(\.dismiss) private var dismiss
-    init(model: AppModel, profile: ConnectionProfile, path: String, includeHidden: Bool) {
-        self.model = model; self.profile = profile; self.path = path
-        _includeHidden = State(initialValue: includeHidden)
-    }
-    var body: some View {
-        Form {
-            Section {
-                LocationRow(name: RemotePath.name(of: path).isEmpty ? "Root" : RemotePath.name(of: path),
-                            subtitle: profile.name + " · " + path, symbol: "folder.fill", color: RemoteFilesStyle.accent)
-                Toggle("Include Hidden Files", isOn: $includeHidden)
-            } footer: {
-                Text("Saves this folder and its subfolders on this device. Copies update only when you choose Update.")
-            }
-            Section {
-                Text("Symbolic links and special files are skipped. If any regular file can’t be read, a limit is reached, or you cancel, the previous saved folder stays available.")
-                Text("The library holds up to 32 saved folders, 100 files and 512 MiB in total, with 128 MiB per file. A folder can contain up to 256 directories, 16 levels and 10,000 entries. Saves stop after 10 minutes.")
-                    .foregroundStyle(.secondary)
-            }
-            Section {
-                Button("Save Folder Offline", systemImage: "pin.fill") {
-                    model.sheet = nil
-                    model.pinOffline(profile: profile,
-                        entry: .init(name: RemotePath.name(of: path).isEmpty ? "Root" : RemotePath.name(of: path), path: path, kind: .directory),
-                        includeHidden: includeHidden)
-                    dismiss()
-                }
-                .disabled(model.pinningName != nil || !model.isForeground)
-            }
-        }
-        .navigationTitle("Keep Folder Offline")
-        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
-        .accessibilityIdentifier("offline-folder-setup")
     }
 }
 

@@ -45,15 +45,13 @@ final class AppModel {
         }
     }
     enum Sheet: Identifiable {
-        case offlineFolder(ConnectionProfile, String, Bool)
-        case connection(UUID?), keys, offlineFiles, downloads, trust(HostEndpoint, HostKeyDetails), changed(HostEndpoint, HostKeyDetails, HostKeyDetails), unlock(IdentityMetadata)
+        case connection(UUID?), settings, offlineFiles, downloads, trust(HostEndpoint, HostKeyDetails), changed(HostEndpoint, HostKeyDetails, HostKeyDetails), unlock(IdentityMetadata)
         var id: String {
             switch self {
             case .connection: return "connection"
-            case .keys: return "keys"
+            case .settings: return "settings"
             case .offlineFiles: return "offlineFiles"
             case .downloads: return "downloads"
-            case .offlineFolder: return "offlineFolder"
             case .trust: return "trust"
             case .changed: return "changed"
             case .unlock: return "unlock"

@@ -17,7 +17,7 @@ struct KeyManagerView: View {
                 Button { creation = .generate } label: { Label("Generate Key", systemImage: "key.fill") }.disabled(model.demo)
                 Button { creation = .importKey } label: { Label("Import Key", systemImage: "square.and.arrow.down") }.disabled(model.demo)
             } footer: {
-                Text(model.demo ? "Leave Demo to create or import an SSH identity." : "Create a dedicated identity for RemoteFiles, or import an existing OpenSSH Ed25519, RSA or ECDSA private key.")
+                Text(model.demo ? "Leave Demo to create or import an SSH identity." : "Generate a new key for RemoteFiles, or import an OpenSSH Ed25519, RSA or ECDSA key you already use.")
             }
             Section("Saved identities") {
                 if model.metadata.identities.isEmpty {
@@ -36,11 +36,6 @@ struct KeyManagerView: View {
         }
         .navigationTitle("SSH Keys")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            if case .keys = model.sheet {
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { model.sheet = nil } }
-            }
-        }
         .sheet(item: $creation, onDismiss: {
             if let createdIdentity { selectedIdentity = createdIdentity; self.createdIdentity = nil }
         }) { mode in

@@ -11,6 +11,7 @@ struct ConnectionEditor: View {
     @State private var username = ""
     @State private var port = "22"
     @State private var directory = ""
+    /// No longer shown, but kept so saving an older connection doesn't change it.
     @State private var tailscale = false
     @State private var identityID: UUID?
     @State private var resetTrust = false
@@ -55,11 +56,11 @@ struct ConnectionEditor: View {
                 TextField("Account username", text: $username).textInputAutocapitalization(.never).autocorrectionDisabled()
                 TextField("Starting directory (optional)", text: $directory).textInputAutocapitalization(.never).autocorrectionDisabled()
             } header: { Text("Server") } footer: {
-                Text("Read-only browsing over SFTP. Leave the directory blank for the server’s default; ~ is not expanded.")
+                Text("Leave the directory blank to start in the account’s home folder, or enter a full path such as /srv/files.")
             }
             Section("SSH identity") {
                 if model.metadata.identities.isEmpty {
-                    Text("Generate a dedicated key or import an OpenSSH Ed25519, RSA or ECDSA private key.").font(.footnote).foregroundStyle(.secondary)
+                    Text("Generate a new key, or import one you already use.").font(.footnote).foregroundStyle(.secondary)
                 } else {
                     Picker("Choose Existing Key", selection: $identityID) {
                         Text("Choose a key").tag(nil as UUID?)
@@ -70,7 +71,7 @@ struct ConnectionEditor: View {
                 if !useJumpHost {
                     Toggle("Install Public Key When Saving", isOn: $installWhenSaving)
                     if installWhenSaving {
-                        Text("Review and confirm installation using the server account’s password. The connection saves after the key is installed; cancelling leaves it unsaved.")
+                        Text("You’ll enter the account’s password once to add the key to the server. The connection is saved after that.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
@@ -81,7 +82,6 @@ struct ConnectionEditor: View {
                         TextField("22", text: $port).keyboardType(.numberPad)
                             .multilineTextAlignment(.trailing).frame(maxWidth: 80).accessibilityLabel("SSH port")
                     }
-                    Toggle("Show Tailscale Setup Tips", isOn: $tailscale)
                     Toggle("Use Jump Host", isOn: $useJumpHost)
                     if useJumpHost {
                         TextField("Jump hostname or IP address", text: $jumpHost).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
@@ -94,7 +94,7 @@ struct ConnectionEditor: View {
                             Text("Choose a key").tag(nil as UUID?)
                             ForEach(model.metadata.identities) { key in Text(key.name).tag(Optional(key.id)) }
                         }
-                        Text("Connects through one SSH server, which must allow TCP forwarding. Each server’s fingerprint is verified separately; private keys stay on this device. The destination hostname is resolved from the jump host.")
+                        Text("Connects through another SSH server first. It must allow TCP forwarding and look up the hostname above.")
                             .font(.footnote).foregroundStyle(.secondary)
                         if existing?.jumpHost != nil {
                             Button("Reset Trusted Jump Host Key", role: .destructive) { resetJumpTrust = true }
@@ -106,13 +106,11 @@ struct ConnectionEditor: View {
             Section {
                 DisclosureGroup("Before you connect") {
                     Group {
-                        Text("The server must be reachable, with SSH and SFTP enabled for this account. Add the identity’s public key to the account’s ~/.ssh/authorized_keys file.")
-                        if tailscale {
-                            Text("Enable Tailscale on both devices and use the server’s MagicDNS name or Tailscale IP. Your tailnet must permit the SSH connection. Tailscale SSH is not required. These tips don’t change how the app connects.")
-                        }
+                        Text("The account needs SSH access with SFTP. RemoteFiles signs in with a key and only reads files.")
                         Text(useJumpHost
-                             ? "Install keys on each server separately using SSH Keys → Install Public Key on Server. Automatic setup requires a directly reachable server."
-                             : "Choose Install Public Key When Saving to set up key login using the account’s password. The server must already allow password login. Verify its fingerprint when connecting for the first time.")
+                             ? "Add the key to each server from SSH Keys → Install Public Key on Server."
+                             : "To set up the key, turn on Install Public Key When Saving, or add the public key to the account’s ~/.ssh/authorized_keys yourself.")
+                        Text("Using Tailscale? Enter the server’s MagicDNS name or Tailscale IP address.")
                     }
                     .font(.footnote).foregroundStyle(.secondary)
                 }
@@ -151,7 +149,7 @@ struct ConnectionEditor: View {
                 }
                 port = String(existing.port); directory = existing.startingDirectory; tailscale = existing.usesTailscale; identityID = existing.identityID
                 // Anything set here shouldn't be hidden from whoever is editing it.
-                advancedExpanded = existing.port != 22 || existing.usesTailscale || existing.jumpHost != nil
+                advancedExpanded = existing.port != 22 || existing.jumpHost != nil
             }
             if identityID == nil { identityID = model.metadata.identities.first?.id }
             if jumpIdentityID == nil { jumpIdentityID = identityID }
