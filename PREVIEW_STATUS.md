@@ -2,6 +2,12 @@
 
 This is a dated record of feature work and validation, not a live test dashboard. Each result applies to the build, environment and date described with it; an installation or Simulator pass does not establish later physical-device acceptance. For current behavior, start with the [documentation index](docs/README.md). For checks still to perform, see [manual acceptance](docs/MANUAL_ACCEPTANCE.md) and the [roadmap](ROADMAP.md).
 
+**12 November 2026: control characters in saved search indexes.**
+
+A file whose path contains a control character, such as a line break, no longer makes its folder's saved search index impossible to build, update or update automatically. An index can't save such a path, so the file is left out unread, counted with the skipped files, and the index is marked partial. It isn't read ahead either, where its bytes would have counted against the index's limit. Live searches still read and find it.
+
+`swift test` passed on macOS for `FileContentSearchTests`, `SearchReadAheadTests`, `FolderSearchTests` and `SearchIndexStoreTests` (101 tests, on a MacBook Air). Before the change the new regressions failed: the index kept those files, wasn't partial, and saving it threw `invalidSnapshot`; and with the read-ahead left unfiltered, it read them anyway.
+
 **12 November 2026: folders with control characters in offline saves, and earlier builds.**
 
 A folder whose name contains a control character, such as a line break, no longer fails a whole offline folder save. It is skipped and counted with everything in it, as a file with such a name already was, and the saved folder's footer counts both. A listing entry that isn't one name inside its folder still fails the save. [Offline files](docs/OFFLINE_FILES.md) now says what a TestFlight build made before #112 shows for a library holding a folder path with a backslash: it can't read any of the offline library, but changes and deletes nothing, and the current build reads it all again.

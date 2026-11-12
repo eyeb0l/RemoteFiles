@@ -83,6 +83,32 @@ final class FileContentSearchTests: XCTestCase {
         XCTAssertEqual(result.final.filesSearched, 2); XCTAssertEqual(result.final.unreadableFiles, 0)
     }
 
+    /// A saved index can't hold a path with a control character, such as a line break, and one such file once made
+    /// the whole folder's index impossible to save. It is left out unread and counted, so the index is partial.
+    /// A live search saves nothing, so it still reads such files.
+    func testIndexLeavesOutFilesWhosePathsHoldControlCharacters() async throws {
+        let plain = "/r/plain.txt", lineBreak = "/r/line\nbreak.txt", nested = "/r/dir\u{1}/inside.txt", deleted = "/r/del\u{7F}.md"
+        let paths = [plain, lineBreak, nested, deleted]
+        let service = ContentTreeService(["/r": [file(plain), file(lineBreak), file(deleted), folder("/r/dir\u{1}")],
+                                          "/r/dir\u{1}": [file(nested)]],
+                                         contents: Dictionary(uniqueKeysWithValues: paths.map { ($0, bytes("a needle here")) }))
+        var final = RemoteFolderSearch.Update()
+        let snapshot = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: service, includeHidden: false) { final = $0 }
+        XCTAssertEqual(snapshot.documents.map(\.entry.path), [plain])
+        XCTAssertTrue(snapshot.isPartial)
+        XCTAssertEqual(final.skippedFiles, 3)
+        let read = await service.reads.map(\.path)
+        XCTAssertEqual(read, [plain], "A file the index can't keep isn't read")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SearchIndexStore(directory: directory)
+        try await store.save(snapshot, profile: profile, root: "/r")
+        let loaded = try await store.load(profile: profile, root: "/r")
+        XCTAssertEqual(loaded?.documents.map(\.entry.path), [plain])
+        let live = try await search(service)
+        XCTAssertEqual(Set(live.matches.map(\.entry.path)), Set(paths))
+    }
+
     func testContentSearchConsumesFoldersDiscoveredAfterTheLastListingFinishes() async throws {
         var tree: [String: [RemoteEntry]] = [:], data: [String: Data] = [:], expected: [String] = []
         var path = "/r"
@@ -707,6 +733,26 @@ final class SearchReadAheadTests: XCTestCase {
         XCTAssertEqual(snapshot.isPartial, plain.isPartial)
         let reads = await overlapping.reads
         XCTAssertEqual(reads.count, 48, "Each file once: reads started in the order they're wanted are never repeated by hand")
+    }
+
+    /// An index leaves out a file whose path holds a control character, which it can't save. On a transport that
+    /// overlaps reads it isn't read ahead either, where it would be charged against the index's byte limit and
+    /// could crowd out files the index keeps.
+    func testAnIndexBuildNeverReadsAheadFilesItCannotKeep() async throws {
+        var (folders, contents) = tree(folders: 2, files: 3)
+        let unsavable = ["/r/folder-0/a\nbreak.txt", "/r/folder-1/a\u{7}bell.txt"]
+        for path in unsavable {
+            contents[path] = Data("needle".utf8)
+            folders[RemotePath.parent(of: path), default: []].insert(
+                RemoteEntry(name: RemotePath.name(of: path), path: path, kind: .file, size: 6), at: 0)
+        }
+        let service = ReadAheadService(folders: folders, contents: contents)
+        var final = RemoteFolderSearch.Update()
+        let snapshot = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: service, includeHidden: false) { final = $0 }
+        let reads = await service.reads.map(\.path)
+        XCTAssertTrue(Set(reads).isDisjoint(with: unsavable), "Read: \(reads)")
+        XCTAssertEqual(reads.count, 6)
+        XCTAssertEqual(snapshot.documents.count, 6); XCTAssertTrue(snapshot.isPartial); XCTAssertEqual(final.skippedFiles, 2)
     }
 
     /// A later folder listed first must not read ahead of an earlier one, or the earlier one's ordinary

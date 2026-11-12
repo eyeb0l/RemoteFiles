@@ -163,6 +163,11 @@ public enum RemoteFolderSearch {
         defer { readAhead?.cancelAll() }
         // Folders listed, or being listed, ahead of the one being reported. Only a live content search falls behind.
         let live = content != nil && !query.isEmpty
+        // A saved index can't hold a path with a control character, which `SearchIndexStore` refuses, so an index
+        // build leaves such a file out unread, read ahead included, and counts it rather than making the whole index
+        // impossible to save. A live search saves nothing and still reads it.
+        let indexing = content != nil && query.isEmpty
+        func indexKeeps(_ entry: RemoteEntry) -> Bool { !indexing || !RemotePath.hasControlCharacter(entry.path) }
         let lookahead = live ? max(1, Self.liveLookahead) : Int.max
         let list: @Sendable (Int, String) async -> Void = { index, path in
             let started = ContinuousClock.now
@@ -218,7 +223,7 @@ public enum RemoteFolderSearch {
                         // walk still has to read itself.
                         if let readAhead, let content {
                             readAhead.offer(visible.filter { scanReads($0, root: root, limits: content, options: options, extraction: extraction)
-                                && reusable?($0) == nil && !delivered.contains(Data($0.path.utf8)) })
+                                && indexKeeps($0) && reusable?($0) == nil && !delivered.contains(Data($0.path.utf8)) })
                         }
                         ready[accepted] = .listed(visible)
                     case .failure(let error):
@@ -272,7 +277,8 @@ public enum RemoteFolderSearch {
                         if let content, query.isEmpty {
                             // Building an index, with no first match to hurry for. The walk stops listing
                             // while it reads, so list everything first and let every read overlap.
-                            let readable = visible.filter { scanReads($0, root: root, limits: content, options: options, extraction: extraction) }
+                            let readable = visible.filter { scanReads($0, root: root, limits: content, options: options, extraction: extraction)
+                                && indexKeeps($0) }
                             let skipped = visible.filter { $0.kind != .directory && options.accepts($0) }.count - readable.count
                             let files = Array(readable.prefix(max(0, content.maxFiles + 1 - readableForIndex)))
                             listedForIndex.append((files, skipped))
