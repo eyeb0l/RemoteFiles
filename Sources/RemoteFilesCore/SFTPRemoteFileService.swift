@@ -29,6 +29,8 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     private var progressInterval: Duration = .milliseconds(100)
     private var transferWindowLimit = transferReadWindowLimit
     private var transferWindowFloor = transferReadWindow
+    /// Off unless a benchmark sets it. See `TransferWindowCarry`.
+    private var transferWindowCarry: TransferWindowCarry?
 
     public init(identityStore: IdentityStore, trustStore: HostTrustStore,
                 metadataStore: MetadataStore, timeoutSeconds: UInt64 = 15) {
@@ -47,6 +49,13 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     func setProgressInterval(_ interval: Duration) { progressInterval = interval }
     /// Lets a benchmark compare fixed and growing read windows in one process.
     func setTransferWindow(floor: Int, limit: Int) { transferWindowFloor = floor; transferWindowLimit = limit }
+    /// Lets a benchmark start each transfer at the window the last one on the connection settled at, or, with
+    /// `settled`, at a window it names, as if an earlier transfer had left it. Nil turns it off. Either way
+    /// the connection forgets what it had, so one policy's transfers never start from another's.
+    func setTransferWindowCarry(_ carry: TransferWindowCarry?, settled: Int? = nil) {
+        transferWindowCarry = carry
+        active?.settledTransferWindow = carry == nil ? nil : settled
+    }
 
     func searchFolders(query: String, root: String, profile: ConnectionProfile, includeHidden: Bool,
                        limits: RemoteFolderSearch.Limits, content: RemoteFolderSearch.ContentLimits?,
@@ -606,6 +615,10 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         let reportInterval = progressInterval, windowFloor = transferWindowFloor
         // Files that overlap keep the starting window, so together they hold no more in flight than one growing transfer.
         let windowLimit = overlapped ? transferWindowFloor : transferWindowLimit
+        // Measured and not adopted: see `TransferWindowCarry`. Only a transfer that grows takes or leaves a window.
+        let carry = windowLimit > windowFloor ? transferWindowCarry : nil
+        let windowStart = carry == nil ? windowFloor : min(windowLimit, max(windowFloor, session.settledTransferWindow ?? windowFloor))
+        let holdsFirstWindow = carry?.holdsFirstWindow ?? false
         let operation: @Sendable (SFTPClient, TransferActivity) async throws -> (RemoteEntry, Int, WindowSample) = { sftp, activity in
             batch?.fileStarted()
             defer { batch?.fileEnded() }
@@ -662,9 +675,10 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                 var count = start
                 await progress(.init(receivedBytes: UInt64(start), totalBytes: attributes.size))
                 var lastReport: ContinuousClock.Instant?
-                var window = WindowSample()
-                _ = try await BoundedPreviewReader.stream(initialSize: attributes.size, limit: limit, startOffset: start, window: windowFloor,
-                                                          windowLimit: windowLimit, observe: { window.add(window: $0, inFlight: $1) }, readChunk: { offset, amount in
+                var window = WindowSample(start: windowStart)
+                window.settled = try await BoundedPreviewReader.stream(initialSize: attributes.size, limit: limit, startOffset: start, window: windowStart,
+                                                          windowLimit: windowLimit, windowFloor: windowFloor, holdsFirstWindow: holdsFirstWindow,
+                                                          observe: { window.add(window: $0, inFlight: $1) }, readChunk: { offset, amount in
                     batch?.requested(Int(amount))
                     defer { batch?.answered(Int(amount)) }
                     let bytes = try await file.read(from: offset, length: amount)
@@ -680,7 +694,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                         lastReport = now
                         await progress(.init(receivedBytes: UInt64(count), totalBytes: attributes.size))
                     }
-                }
+                }.settledWindow
                 try await file.close()
                 try Task.checkCancellation()
                 await progress(.init(receivedBytes: UInt64(count), totalBytes: UInt64(count), isComplete: true))
@@ -698,6 +712,9 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         }
         measurements.fileOperations += 1; measurements.bytesReceived += result.1
         measurements.lastTransferPeakWindow = result.2.peak; measurements.lastTransferMeanInFlight = result.2.meanInFlight
+        measurements.lastTransferStartWindow = result.2.start; measurements.lastTransferSettledWindow = result.2.settled ?? 0
+        // Only a transfer that finished, and that the window held back, says anything about the connection.
+        if carry != nil, let settled = result.2.settled { session.settledTransferWindow = settled }
         return result.0
     }
 
@@ -1570,6 +1587,10 @@ public struct TransportMetrics: Sendable {
     /// The largest read window the last download reached, and the reads it had in flight on average when one returned.
     public fileprivate(set) var lastTransferPeakWindow = 0
     public fileprivate(set) var lastTransferMeanInFlight: Double = 0
+    /// The window the last download began with, and the one it had settled at when it issued its last new range
+    /// with a whole window outstanding; zero if the window never held it back or was never judged.
+    public fileprivate(set) var lastTransferStartWindow = 0
+    public fileprivate(set) var lastTransferSettledWindow = 0
     /// The most files, and bytes of reads, the last snapshot batch had in flight at once.
     public fileprivate(set) var lastBatchPeakFiles = 0
     public fileprivate(set) var lastBatchPeakBytes = 0
@@ -1627,6 +1648,8 @@ final class SnapshotTransferBatch: @unchecked Sendable {
 }
 
 private struct WindowSample {
+    let start: Int
+    var settled: Int?
     private(set) var peak = 0
     private var inFlightTotal = 0, samples = 0
     var meanInFlight: Double { samples == 0 ? 0 : Double(inFlightTotal) / Double(samples) }
@@ -1647,6 +1670,8 @@ private final class LiveSession: @unchecked Sendable {
     /// Operations using or opening the shared channels, and the slot browsing has lent a transfer, if any.
     var foregroundUsers = 0
     var foregroundLoan: ForegroundLoan?
+    /// The read window the last growing transfer settled at, when a benchmark carries it. A new connection has none.
+    var settledTransferWindow: Int?
     /// Set once browsing has had to lend its slot: the server allows one channel.
     var lendsForeground = false
     /// Dedicated channels the server may still count: the search helper's, and transfers'.
@@ -1847,19 +1872,30 @@ private final class LockedFlag: @unchecked Sendable {
 /// much again so that a faster link shows itself. The shortest latency seen stands for the round trip
 /// itself, so requests queueing at a slow link don't count: the window settles at a little over the
 /// link's capacity, and browsing over the same connection doesn't wait behind a long queue.
+///
+/// A transfer may start above its floor, at the window an earlier one settled at (`TransferWindowCarry`). The
+/// window then shrinks as far as the floor if the connection carries less than it did, at once or, with
+/// `holdsFirstWindow`, only after as many replies as the starting window have come back.
 struct TransferPacing {
     private(set) var window: Int
+    /// Whether the window is what the connection was last seen to carry, and not only where it started.
+    private(set) var isJudged = false
     private let floor: Int, limit: Int, chunkSize: Int
     private var shortestLatency: Duration?
     private var intervalStart: ContinuousClock.Instant?
     private var intervalBytes = 0
+    /// Replies still to come before the window may go below where it started.
+    private var held: Int
+    private let startWindow: Int
 
-    init(window: Int, limit: Int, chunkSize: Int) {
-        self.window = window; floor = window; self.limit = max(window, limit); self.chunkSize = chunkSize
+    init(window: Int, limit: Int, chunkSize: Int, floor: Int? = nil, holdsFirstWindow: Bool = false) {
+        self.window = window; self.floor = min(window, floor ?? window); self.limit = max(window, limit); self.chunkSize = chunkSize
+        startWindow = window; held = holdsFirstWindow ? window : 0
     }
 
     mutating func received(bytes: Int, latency: Duration, at now: ContinuousClock.Instant) {
         guard limit > floor else { return }
+        held = max(0, held - 1)
         let shortest = min(shortestLatency ?? latency, latency)
         shortestLatency = shortest
         guard let start = intervalStart else { intervalStart = now; return }
@@ -1868,9 +1904,19 @@ struct TransferPacing {
         guard elapsed >= shortest, elapsed > .zero else { return }
         let deliveredInRoundTrip = Double(intervalBytes) * (shortest / elapsed)
         let wanted = (deliveredInRoundTrip * 1.5 / Double(chunkSize)).rounded(.up)
-        window = max(floor, min(limit, wanted >= Double(limit) ? limit : Int(wanted)))
+        window = max(held > 0 ? startWindow : floor, min(limit, wanted >= Double(limit) ? limit : Int(wanted)))
+        isJudged = isJudged || held == 0
         intervalStart = now; intervalBytes = 0
     }
+}
+
+/// Benchmarks only, measured and not adopted (docs/PERFORMANCE.md, "Starting at the last transfer's window"):
+/// a transfer that grows starts at the read window the last one on the same connection settled at, with the
+/// usual starting window as its floor.
+struct TransferWindowCarry: Sendable, Equatable {
+    /// Keeps the window from shrinking until as many replies as it started with have come back, so that a
+    /// server whose TCP begins slowly again after an idle moment isn't taken for a slow link.
+    var holdsFirstWindow = false
 }
 
 /// Shared receive-time bound, independent of the server's initial size hint.
@@ -1897,17 +1943,23 @@ enum BoundedPreviewReader {
     ///
     /// A known size shapes the requests: they end exactly where the file should, with one probe just
     /// past it, so reading a small file takes one round trip. Growth past the size carries on as without one.
-    /// With `windowLimit`, `window` grows towards it for as long as the connection delivers more.
+    /// With `windowLimit`, `window` grows towards it for as long as the connection delivers more, and with a
+    /// `windowFloor` below `window` it also shrinks towards that. `settledWindow` is the window as the last new
+    /// range went out with a whole window outstanding, once the connection had been judged: the end of a file
+    /// always shrinks the window, because fewer reads are left to ask for, so its final value says nothing.
     static func stream(initialSize: UInt64?, limit: Int, startOffset: Int = 0, chunkSize: Int = 64 * 1024, window: Int = 8, windowLimit: Int? = nil,
+                       windowFloor: Int? = nil, holdsFirstWindow: Bool = false,
                        observe: (_ window: Int, _ inFlight: Int) -> Void = { _, _ in },
                        readChunk: @escaping @Sendable (UInt64, UInt32) async throws -> ByteBuffer,
-                       consume: (ByteBuffer) async throws -> Void) async throws -> (bytes: Int, requests: Int) {
+                       consume: (ByteBuffer) async throws -> Void) async throws -> (bytes: Int, requests: Int, settledWindow: Int?) {
         guard limit >= 0, limit < Int.max else { throw RemoteFileError.tooLarge(max(0, limit)) }
         guard startOffset >= 0, startOffset <= limit else { throw RemoteFileError.tooLarge(limit) }
         if let size = initialSize, size > UInt64(limit) { throw RemoteFileError.tooLarge(limit) }
         struct Request { let offset: Int; let amount: Int; let fillsShortRead: Int? }
         let clock = ContinuousClock()
-        var pacing = TransferPacing(window: max(1, window), limit: windowLimit ?? max(1, window), chunkSize: max(1, chunkSize))
+        var pacing = TransferPacing(window: max(1, window), limit: windowLimit ?? max(1, window), chunkSize: max(1, chunkSize),
+                                    floor: windowFloor.map { max(1, $0) }, holdsFirstWindow: holdsFirstWindow)
+        var settledWindow: Int?
         return try await withThrowingTaskGroup(of: (Int, ByteBuffer).self) { group in
             var issued: [Int: Request] = [:]
             var order: [Int] = []       // Unconsumed request IDs by ascending offset.
@@ -1940,6 +1992,7 @@ enum BoundedPreviewReader {
                     if let expectedEnd, nextOffset < expectedEnd { amount = min(amount, expectedEnd - nextOffset) }
                     send(register(Request(offset: nextOffset, amount: amount, fillsShortRead: nil), at: order.endIndex))
                     nextOffset += amount
+                    if pacing.isJudged, inFlight >= pacing.window { settledWindow = pacing.window }
                 }
                 // Every byte through the probe was requested and accepted: only growth gets here.
                 guard let (id, buffer) = try await group.next() else { throw RemoteFileError.tooLarge(limit) }
@@ -1976,7 +2029,7 @@ enum BoundedPreviewReader {
                     let request = issued.removeValue(forKey: head)!
                     if buffer.readableBytes == 0 {
                         group.cancelAll()
-                        return (consumed, sent)
+                        return (consumed, sent, settledWindow)
                     }
                     guard buffer.readableBytes <= request.amount, buffer.readableBytes <= limit - consumed else {
                         throw RemoteFileError.tooLarge(limit)

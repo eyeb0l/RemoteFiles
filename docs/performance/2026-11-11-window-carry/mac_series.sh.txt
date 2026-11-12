@@ -1,0 +1,19 @@
+#!/bin/bash
+# A Mac through latency_proxy.py: each condition twice, the second time with the arms in reverse order.
+# Usage: mac_series.sh CHECKOUT OUTPUT RUNS "RTT MBIT;RTT MBIT" FREE_ARMS CAPPED_ARMS [PORT]
+set -u
+checkout=$1; out=$2; runs=$3; conditions=$4; free=$5; capped=$6; port=${7:-22611}
+cd "$checkout"
+reverse() { echo "$1" | tr "," "\n" | tail -r | paste -sd, -; }
+IFS=";" read -ra list <<< "$conditions"
+for condition in "${list[@]}"; do
+  read -r rtt mbit <<< "$condition"
+  arms=$free; [ "$mbit" != 0 ] && arms=$capped
+  for order in forward reverse; do
+    [ $order = reverse ] && arms=$(reverse "$arms")
+    echo "$(date +%T) rtt=$rtt mbit=$mbit $order $arms load=$(sysctl -n vm.loadavg)"
+    REMOTEFILES_BENCHMARK_CARRY_ARMS=$arms python3 -B scripts/benchmark_performance.py run --skip-build --kind transport --only windowcarry \
+      --rtt "$rtt" --mbit "$mbit" --runs "$runs" --port "$port" --label "$order" --output "$out" 2>&1 | grep -E "rror|fixture ready"
+  done
+done
+echo "$(date +%T) DONE"

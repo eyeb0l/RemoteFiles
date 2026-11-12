@@ -1,0 +1,19 @@
+# A throwaway OpenSSH server for `windowcarry` with the delay on the packets. Beside it: client.pub (the key the benchmark
+# uses) and a host key pair, all made for the run with ssh-keygen. One container per setting, each on a port of its own:
+#   docker build -t rf-carry-bench .
+#   docker run -d --name NAME --cap-add NET_ADMIN --sysctl net.ipv4.tcp_slow_start_after_idle=1 -p LAN_ADDRESS:PORT:22 rf-carry-bench
+#   docker exec NAME tc qdisc replace dev eth0 root netem delay 150ms limit 100000          # add `rate 100mbit` for the cap
+# `--sysctl net.ipv4.tcp_slow_start_after_idle=0` turns slow start after idle off, and
+# `--sysctl "net.ipv4.tcp_wmem=4096 16384 33554432"` raises the send buffer limit. Both are per container. netem's default
+# limit of 1,000 packets drops at these rates. Without NET_ADMIN and netem the same image serves latency_proxy.py.
+FROM ubuntu:24.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server iproute2 && rm -rf /var/lib/apt/lists/* \
+ && useradd -m -s /bin/bash bench && usermod -p "*" bench && mkdir -p /run/sshd /home/bench/.ssh /srv/bench/d10 \
+ && head -c 67108864 /dev/urandom > /srv/bench/big-64m.bin \
+ && for i in 0 1 2 3 4 5 6 7 8 9; do echo "entry $i" > /srv/bench/d10/file-$i.txt; done
+COPY client.pub /home/bench/.ssh/authorized_keys
+COPY ssh_host_ed25519_key ssh_host_ed25519_key.pub /etc/ssh/bench/
+RUN chown -R bench:bench /home/bench/.ssh && chmod 700 /home/bench/.ssh && chmod 600 /home/bench/.ssh/authorized_keys /etc/ssh/bench/ssh_host_ed25519_key \
+ && printf 'Port 22\nHostKey /etc/ssh/bench/ssh_host_ed25519_key\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\nAllowUsers bench\nUsePAM no\nSubsystem sftp /usr/lib/openssh/sftp-server\nLogLevel VERBOSE\n' > /etc/ssh/bench/sshd_config
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D", "-e", "-f", "/etc/ssh/bench/sshd_config"]

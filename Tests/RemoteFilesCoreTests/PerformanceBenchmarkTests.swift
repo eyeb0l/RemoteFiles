@@ -321,6 +321,72 @@ final class PerformanceBenchmarkTests: XCTestCase {
             }
             await warm.setTransferWindow(floor: low, limit: high)
         }
+        // By name: whether a transfer should start at the read window the last one on its connection settled at.
+        // Each arm downloads the file twice on one connection, `REMOTEFILES_BENCHMARK_CARRY_IDLE_MS` apart, with folder
+        // taps during the second. `growing` is what ships. `carry` starts the second where the first settled, with the
+        // usual start as its floor, and `carryhold` also keeps that window until it has been answered once. `stale64`
+        // and `stale64hold` start the second at the limit whatever the first found, as a link that has slowed since
+        // would; `fixed64` never changes. `REMOTEFILES_BENCHMARK_CARRY_ARMS` names the arms, which rotate by pass.
+        if measuring, environment["REMOTEFILES_BENCHMARK_ONLY"]?.contains("windowcarry") == true {
+            let temp = folder.appendingPathComponent("windowcarry.bin")
+            let file = root + "/" + (environment["REMOTEFILES_BENCHMARK_CARRY_FILE"] ?? "big-64m.bin")
+            let idle = Duration.milliseconds(Int(environment["REMOTEFILES_BENCHMARK_CARRY_IDLE_MS"] ?? "") ?? 0)
+            let low = SFTPRemoteFileService.transferReadWindow, high = SFTPRemoteFileService.transferReadWindowLimit
+            let arms = (environment["REMOTEFILES_BENCHMARK_CARRY_ARMS"] ?? "growing,carry,carryhold,fixed\(high)").split(separator: ",").map(String.init)
+            await warm.setProgressInterval(.milliseconds(10))
+            for pass in 0..<runs {
+                for index in arms.indices {
+                    let name = arms[(index + pass) % arms.count]
+                    let fixed = name == "fixed\(high)", stale = name.hasPrefix("stale\(high)")
+                    guard fixed || stale || name == "growing" || name.hasPrefix("carry") else { throw XCTSkip("No window arm called \(name)") }
+                    let carry: TransferWindowCarry? = fixed || name == "growing" ? nil : .init(holdsFirstWindow: name.hasSuffix("hold"))
+                    await warm.setTransferWindow(floor: fixed ? high : low, limit: high)
+                    await warm.setTransferWindowCarry(carry)
+                    for order in ["first", "second"] {
+                        let second = order == "second"
+                        if second {
+                            try await Task.sleep(for: idle)
+                            if stale { await warm.setTransferWindowCarry(carry, settled: high) }
+                        }
+                        let marks = BenchmarkTransferMarks(megabytes: [1, 4, 8, 32])
+                        let transfer = Task { [profile] in
+                            defer { marks.finish() }
+                            return try await warm.downloadManagedFile(profile: profile, path: file, allowedRoot: root, destination: temp, limit: 1 << 30) {
+                                marks.record($0.receivedBytes)
+                            }
+                        }
+                        if second {
+                            // As `windowtaps` begins, and then until the file is done: its first five taps compare with that.
+                            try await Task.sleep(for: .milliseconds(500))
+                            var taps = 0, worst = 0.0
+                            while !marks.isFinished {
+                                let tapped = ContinuousClock.now
+                                blackHole(try await warm.listDirectory(profile: profile, path: root + "/d10").entries.count)
+                                let waited = tapped.elapsedMilliseconds
+                                taps += 1; worst = max(worst, waited)
+                                if taps <= 5 { recorder.add("windowcarry.\(name).tap", value: waited) }
+                                recorder.add("windowcarry.\(name).tapAll", value: waited)
+                                try await Task.sleep(for: .milliseconds(100))
+                            }
+                            recorder.add("windowcarry.\(name).tapWorst", value: worst)
+                        }
+                        let size = Double(try await transfer.value.size ?? 0) / 1_048_576
+                        let elapsed = marks.elapsed, metrics = await warm.metrics()
+                        let scenario = "windowcarry.\(name).\(order)"
+                        recorder.add("\(scenario).MiBps", value: size / (elapsed / 1000), unit: "MiB/s")
+                        recorder.add("\(scenario).ms", value: elapsed)
+                        for (megabytes, reached) in marks.reached { recorder.add("\(scenario).to\(megabytes)MiB", value: reached) }
+                        recorder.add("\(scenario).startWindow", value: Double(metrics.lastTransferStartWindow), unit: "reads")
+                        recorder.add("\(scenario).peakWindow", value: Double(metrics.lastTransferPeakWindow), unit: "reads")
+                        recorder.add("\(scenario).settledWindow", value: Double(metrics.lastTransferSettledWindow), unit: "reads")
+                        recorder.add("\(scenario).meanInFlight", value: metrics.lastTransferMeanInFlight, unit: "reads")
+                    }
+                }
+            }
+            await warm.setTransferWindow(floor: low, limit: high)
+            await warm.setTransferWindowCarry(nil)
+            await warm.setProgressInterval(.milliseconds(100))
+        }
         // By name: live content searches over SFTP against a saved index of the same tree, whose listings all come
         // before its reads, so its reads overlap across folders. `tree` holds empty files; `texts` holds text, about
         // one file in six from its third level down holding "kestrel". Each search records its first match, total,
@@ -1062,6 +1128,25 @@ enum OfflineBenchmarkArm {
             return
         }
         throw XCTSkip("No offline arm called \(name)")
+    }
+}
+
+/// When a transfer had received each of a few amounts, in milliseconds from its start, and whether it has ended.
+private final class BenchmarkTransferMarks: @unchecked Sendable {
+    let started = ContinuousClock.now
+    private let lock = NSLock()
+    private var pending: [Int], times: [(Int, Double)] = [], finished: Double?
+    init(megabytes: [Int]) { pending = megabytes.sorted() }
+    var reached: [(Int, Double)] { lock.withLock { times } }
+    var isFinished: Bool { lock.withLock { finished != nil } }
+    /// The transfer's own time: whoever waits for it may be busy with a folder tap when it ends.
+    var elapsed: Double { lock.withLock { finished } ?? started.elapsedMilliseconds }
+    func finish() { let now = started.elapsedMilliseconds; lock.withLock { finished = now } }
+    func record(_ received: UInt64) {
+        let now = started.elapsedMilliseconds
+        lock.withLock {
+            while let next = pending.first, received >= UInt64(next) << 20 { times.append((next, now)); pending.removeFirst() }
+        }
     }
 }
 
