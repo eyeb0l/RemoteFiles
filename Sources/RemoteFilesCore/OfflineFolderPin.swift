@@ -14,8 +14,9 @@ public struct OfflineFolderPin: Identifiable, Codable, Hashable, Sendable {
     public let fileIDs: [UUID]
     public let skippedLinks: Int
     public let skippedOtherEntries: Int
-    /// Files left out because their name can't name a file on this device, such as one holding a backslash.
-    /// Missing in what earlier versions saved, which never left a file out for its name.
+    /// Files left out because their name can't name a file on this device, such as one holding a backslash, and
+    /// folders left out with everything in them because their name holds a control character, which no saved
+    /// path may. Missing in what earlier versions saved, which never left anything out for its name.
     public let skippedNames: Int
 
     public init(id: UUID, connectionID: UUID, connectionName: String, routeKey: String, path: String, name: String,

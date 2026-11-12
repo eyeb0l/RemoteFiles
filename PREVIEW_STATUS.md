@@ -2,6 +2,12 @@
 
 This is a dated record of feature work and validation, not a live test dashboard. Each result applies to the build, environment and date described with it; an installation or Simulator pass does not establish later physical-device acceptance. For current behavior, start with the [documentation index](docs/README.md). For checks still to perform, see [manual acceptance](docs/MANUAL_ACCEPTANCE.md) and the [roadmap](ROADMAP.md).
 
+**12 November 2026: folders with control characters in offline saves, and earlier builds.**
+
+A folder whose name contains a control character, such as a line break, no longer fails a whole offline folder save. It is skipped and counted with everything in it, as a file with such a name already was, and the saved folder's footer counts both. A listing entry that isn't one name inside its folder still fails the save. [Offline files](docs/OFFLINE_FILES.md) now says what a TestFlight build made before #112 shows for a library holding a folder path with a backslash: it can't read any of the offline library, but changes and deletes nothing, and the current build reads it all again.
+
+`swift test --filter OfflineFolderTests` passed on macOS (18 tests, on a MacBook Air). The new regression failed without the change. An older build's reading of such a library was reproduced by restoring its path check: it refused the whole library, including a copy outside the folder, called the folder's search index damaged, and left every file and the manifest unchanged. No UI journey was run; the only UI change is the footer text.
+
 **11 November 2026: a carried read window, measured and not adopted.**
 
 No behaviour changed. A benchmark arm, off by default, starts a transfer at the read window the last one on the same connection settled at, where transfers otherwise start at 16. On the physical iPhone 17 Pro (iOS 27.2) at 150 ms through the delaying proxy, the second transfer was 13% faster on a free link (15.5 against 13.7 MiB/s) and folder taps on a link capped at 100 Mbit/s took 500 ms against 482 ms. Against a Linux OpenSSH server with the delay on the packets it gained 7 to 9% with no pause between transfers. After a 5 s pause with the server's slow start after idle on, which is Linux's default, it gained nothing and the worst tap took 1.26 s against 0.97 s. The Downloads queue opens a connection for every file, so it would never use one. [The record](docs/PERFORMANCE.md#starting-at-the-last-transfers-window-measured-not-adopted) has the figures, with the Mac's proxy figures kept apart from the phone's.

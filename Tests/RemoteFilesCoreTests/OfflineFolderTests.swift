@@ -211,6 +211,47 @@ final class OfflineFolderTests: XCTestCase {
         catch RemoteFileError.invalidPath { }
     }
 
+    /// Remote paths holding a control character, such as a line break, are never saved. A folder whose name
+    /// holds one is left out with everything in it and counted, as a file with such a name is, rather than
+    /// failing the whole save. It once did. An entry that isn't one member of its folder still fails the save.
+    func testFoldersWithControlCharactersAreSkippedAndCounted() async throws {
+        let (dir, store, service) = try setup()
+        let lineBreak = path + "/Line\nBreak", plain = path + "/Plain"
+        await service.set(path, entries: [
+            .init(name: "guide.md", path: path + "/guide.md", kind: .file),
+            .init(name: "Tab\there.txt", path: path + "/Tab\there.txt", kind: .file),
+            .init(name: "Line\nBreak", path: lineBreak, kind: .directory),
+            .init(name: "Bell\u{7}", path: path + "/Bell\u{7}", kind: .directory),
+            .init(name: "Delete\u{7F}", path: path + "/Delete\u{7F}", kind: .directory),
+            .init(name: ".hidden\r", path: path + "/.hidden\r", kind: .directory),
+            .init(name: "Plain", path: plain, kind: .directory)])
+        await service.set(lineBreak, entries: [.init(name: "inside.md", path: lineBreak + "/inside.md", kind: .file)])
+        await service.set(plain, entries: [.init(name: "kept.md", path: plain + "/kept.md", kind: .file)])
+        let folder = try await store.pinFolder(profile: profile, path: path, service: service)
+        XCTAssertEqual(folder.directories, [path, plain])
+        XCTAssertEqual(folder.skippedNames, 4, "Three folders and a file; a hidden folder left out by choice isn't counted")
+        let listed = await service.lists
+        XCTAssertEqual(listed, [path, plain], "A skipped folder is never listed")
+        let pins = await store.snapshot()
+        XCTAssertEqual(Set(pins.map(\.path)), [path + "/guide.md", plain + "/kept.md"])
+        let restored = await (try OfflineFileStore(directory: dir)).librarySnapshot()
+        XCTAssertEqual(restored.folders, [folder])
+        // The folder chosen can't be left out of its own save.
+        do { _ = try await store.pinFolder(profile: profile, path: lineBreak, service: service); XCTFail("A control character in the root was saved") }
+        catch RemoteFileError.invalidPath { }
+        // Neither a control character nor anything else makes a listing that names something other than one
+        // member of its folder acceptable. A failed save drains before the store takes another, so each has its own.
+        for entry in [RemoteEntry(name: "a\n/b", path: path + "/a\n/b", kind: .directory),
+                      RemoteEntry(name: "Line\nBreak", path: path + "/Other\nName", kind: .directory),
+                      RemoteEntry(name: "..", path: path + "/..", kind: .directory)] {
+            let (_, store, service) = try setup()
+            await service.set(path, entries: [entry])
+            do { _ = try await store.pinFolder(profile: profile, path: path, service: service); XCTFail(entry.path) }
+            catch RemoteFileError.invalidPath { }
+        }
+    }
+
+
     func testOfflineFolderPinsSavedWithoutSkippedNamesStillLoad() async throws {
         let (dir, store, service) = try setup()
         let folder = try await store.pinFolder(profile: profile, path: path, service: service)

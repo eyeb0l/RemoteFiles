@@ -232,6 +232,9 @@ actor OfflineFolderDownload {
                         result.skippedLinks += 1; report.skippedLinks += 1
                     case .other: result.skippedOtherEntries += 1
                     case .directory:
+                        // Remote paths holding a control character are never saved. A folder named with one is
+                        // left out with everything in it and counted, as a file is, rather than failing the folder.
+                        guard !RemotePath.hasControlCharacter(entry.name) else { result.skippedNames += 1; continue }
                         guard OfflineFolderPin.validPath(entry.path) else { throw RemoteFileError.invalidPath }
                         guard depth < limits.depth else { throw OfflineFileError.folderLimit("16 level depth") }
                         guard queue.count < limits.directories else { throw OfflineFileError.folderLimit("256 directory") }
