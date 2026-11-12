@@ -735,6 +735,26 @@ final class SearchReadAheadTests: XCTestCase {
         XCTAssertEqual(reads.count, 48, "Each file once: reads started in the order they're wanted are never repeated by hand")
     }
 
+    /// An index leaves out a file whose path holds a control character, which it can't save. On a transport that
+    /// overlaps reads it isn't read ahead either, where it would be charged against the index's byte limit and
+    /// could crowd out files the index keeps.
+    func testAnIndexBuildNeverReadsAheadFilesItCannotKeep() async throws {
+        var (folders, contents) = tree(folders: 2, files: 3)
+        let unsavable = ["/r/folder-0/a\nbreak.txt", "/r/folder-1/a\u{7}bell.txt"]
+        for path in unsavable {
+            contents[path] = Data("needle".utf8)
+            folders[RemotePath.parent(of: path), default: []].insert(
+                RemoteEntry(name: RemotePath.name(of: path), path: path, kind: .file, size: 6), at: 0)
+        }
+        let service = ReadAheadService(folders: folders, contents: contents)
+        var final = RemoteFolderSearch.Update()
+        let snapshot = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: service, includeHidden: false) { final = $0 }
+        let reads = await service.reads.map(\.path)
+        XCTAssertTrue(Set(reads).isDisjoint(with: unsavable), "Read: \(reads)")
+        XCTAssertEqual(reads.count, 6)
+        XCTAssertEqual(snapshot.documents.count, 6); XCTAssertTrue(snapshot.isPartial); XCTAssertEqual(final.skippedFiles, 2)
+    }
+
     /// A later folder listed first must not read ahead of an earlier one, or the earlier one's ordinary
     /// read would go over the limits.
     func testReadsAheadOfALaterFolderCountTowardsTheLimits() async throws {
