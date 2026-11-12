@@ -126,7 +126,7 @@ struct OfflineFolderView: View {
                                 Text("\(folder.skippedLinks) symbolic links and \(folder.skippedOtherEntries) special files skipped.")
                             }
                             if folder.skippedNames > 0 {
-                                Text("\(folder.skippedNames) files skipped because their names can’t be saved on this device, such as names containing a backslash.")
+                                Text("\(folder.skippedNames) files or folders skipped because their names can’t be saved on this device, such as a file name containing a backslash or any name containing a line break.")
                             }
                         }
                         .font(.footnote).foregroundStyle(.secondary)

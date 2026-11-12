@@ -320,6 +320,9 @@ public enum RemotePath {
     /// saved or shared from here can reach a share or provider that takes a backslash to separate folders.
     public static func hasSeparator<Name: StringProtocol>(_ name: Name) -> Bool { name.utf8.contains { $0 == 0x2F || $0 == 0x5C } }
     public static func hasBackslash<Path: StringProtocol>(_ path: Path) -> Bool { path.utf8.contains(0x5C) }
+    /// Whether any byte is a C0 control character or DEL, as `OfflineFolderPin.validPath` refuses in a saved path.
+    /// Every such character is one byte below 0x80 in UTF-8, so its scalar and its byte are the same.
+    public static func hasControlCharacter<Name: StringProtocol>(_ name: Name) -> Bool { name.utf8.contains { $0 < 0x20 || $0 == 0x7F } }
     /// Whether this is one name from a listing: not empty, "." or "..", and holding no slash byte. A backslash
     /// is a byte of the name.
     public static func isSingleName<Name: StringProtocol>(_ name: Name) -> Bool {
