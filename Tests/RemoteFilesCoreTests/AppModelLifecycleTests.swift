@@ -145,6 +145,42 @@ private actor WindowDownloadService: RemoteFileService {
     }
 }
 
+/// Downloads that need a key, as the SFTP transport does: an encrypted key that isn't unlocked asks for its
+/// passphrase. `disconnect()` locks every key, as `SFTPRemoteFileService.disconnect()` does; closing the
+/// session while keeping unlocked identities does not. One path can be held to keep the queue busy.
+private actor KeyedDownloadService: RemoteFileService, RemoteFileSessionClosing {
+    private let identities: IdentityStore
+    private var keys: [UUID: IdentityMetadata] = [:]
+    private var held: Set<String> = []
+    private(set) var finished: [String] = []
+    init(identities: IdentityStore) { self.identities = identities }
+    func know(_ keys: [IdentityMetadata]) { self.keys = Dictionary(uniqueKeysWithValues: keys.map { ($0.id, $0) }) }
+    func hold(_ path: String) { held.insert(path) }
+    func release(_ path: String) { held.remove(path) }
+    func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL,
+                              limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        guard RemoteResourcePath.contains(path, in: canonicalRoot) else { throw RemoteDocumentLinkError.outsideConnection }
+        return try await downloadFile(profile: profile, path: path, allowedRoot: canonicalRoot, destination: destination, limit: limit)
+    }
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
+        while held.contains(path) { try await Task.sleep(for: .milliseconds(10)) }
+        if let key = keys[profile.identityID] {
+            do { _ = try await identities.unlock(key) }
+            catch IdentityError.missingPassphrase { throw ConnectionIdentityUnlockRequired(identity: key) }
+        }
+        try Data("bytes".utf8).write(to: destination)
+        finished.append(path)
+        return .init(name: RemotePath.name(of: path), path: path, kind: .file, size: 5)
+    }
+    func disconnect() async { await identities.clearSession() }
+    func closeSessionPreservingUnlockedIdentities() {}
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { .init(path: path, entries: []) }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { Data() }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
+        .init(name: RemotePath.name(of: path), path: path, kind: .directory)
+    }
+}
+
 @MainActor final class AppModelLifecycleTests: XCTestCase {
     func testCachedMediaAfterFailedConnectionCheckStaysDisconnectedAndRecoversWithoutDownloading() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -1254,6 +1290,227 @@ private actor WindowDownloadService: RemoteFileService {
         onDisk = try await saved()
         XCTAssertEqual(second.metadata, onDisk)
     }
+
+    // MARK: Keys stay unlocked through changes to connections
+
+    /// A window with connections X (its own key, and a jump host key) and Y (its own key), all encrypted, and
+    /// the keys of Y, X and the jump host unlocked. Saved in the library, as the app has them.
+    private struct KeyedLibrary {
+        let model: AppModel
+        let store: IdentityStore
+        let x: ConnectionProfile, y: ConnectionProfile
+        let xKey: IdentityMetadata, yKey: IdentityMetadata, jumpKey: IdentityMetadata
+        let directory: URL
+        var all: [IdentityMetadata] { [xKey, yKey, jumpKey] }
+    }
+
+    private func keyedLibrary(fileService: (any RemoteFileService)? = nil, store existing: IdentityStore? = nil) async throws -> KeyedLibrary {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let store = existing ?? EncryptedKeyFixture.makeStore()
+        let xKey = try await EncryptedKeyFixture.importKey(into: store, name: "X")
+        let yKey = try await EncryptedKeyFixture.importKey(into: store, name: "Y")
+        let jumpKey = try await EncryptedKeyFixture.importKey(into: store, name: "Jump")
+        for key in [xKey, yKey, jumpKey] { try await EncryptedKeyFixture.unlock(key, in: store) }
+        let x = ConnectionProfile(name: "X", host: "x.invalid", username: "reader", identityID: xKey.id,
+                                  jumpHost: JumpHost(host: "jump.invalid", username: "reader", identityID: jumpKey.id))
+        let y = ConnectionProfile(name: "Y", host: "y.invalid", username: "reader", identityID: yKey.id)
+        let model = try AppModel(directory: directory, fileService: fileService, identities: store)
+        _ = try await model.metadataStore.update(origin: UUID()) { $0.identities = [xKey, yKey, jumpKey]; $0.connections = [x, y] }
+        await model.load()
+        return KeyedLibrary(model: model, store: store, x: x, y: y, xKey: xKey, yKey: yKey, jumpKey: jumpKey, directory: directory)
+    }
+
+    private func assertUnlocked(_ keys: [IdentityMetadata], in store: IdentityStore, _ context: String,
+                                file: StaticString = #filePath, line: UInt = #line) async throws {
+        for key in keys {
+            let unlocked = try await EncryptedKeyFixture.isUnlocked(key, in: store)
+            XCTAssertTrue(unlocked, "\(context): \(key.name) locked", file: file, line: line)
+        }
+    }
+    private func assertLocked(_ keys: [IdentityMetadata], in store: IdentityStore, _ context: String,
+                              file: StaticString = #filePath, line: UInt = #line) async throws {
+        for key in keys {
+            let unlocked = try await EncryptedKeyFixture.isUnlocked(key, in: store)
+            XCTAssertFalse(unlocked, "\(context): \(key.name) still unlocked", file: file, line: line)
+        }
+    }
+
+    /// Editing, removing, forgetting trust, entering or leaving Demo and hearing another window edit a
+    /// connection each close this window's connection, but the keys other connections use stay unlocked.
+    func testChangingConnectionsKeepsTheKeysOfOtherConnectionsUnlocked() async throws {
+        enum Action: CaseIterable { case edit, remove, resetTrust, resetJumpHostTrust, enterDemo, leaveDemo, editedElsewhere }
+        for action in Action.allCases {
+            let library = try await keyedLibrary()
+            let model = library.model, store = library.store, context = "\(action)"
+            switch action {
+            case .edit:
+                var edited = library.x; edited.host = "moved.invalid"
+                await model.saveConnection(edited)
+                try await assertUnlocked(library.all, in: store, context)
+            case .remove:
+                await model.removeConnection(library.x)
+                try await assertUnlocked([library.yKey], in: store, context)
+                // Nothing uses X's own key or its jump host's any more.
+                try await assertLocked([library.xKey, library.jumpKey], in: store, context)
+            case .resetTrust:
+                await model.resetTrust(for: library.x)
+                try await assertUnlocked(library.all, in: store, context)
+            case .resetJumpHostTrust:
+                await model.resetJumpHostTrust(for: library.x)
+                try await assertUnlocked(library.all, in: store, context)
+            case .enterDemo:
+                await model.setDemo(true)
+                try await assertUnlocked(library.all, in: store, context)
+            case .leaveDemo:
+                await model.setDemo(true)
+                await model.setDemo(false)
+                try await assertUnlocked(library.all, in: store, context)
+            case .editedElsewhere:
+                // Another window moves X to another key. This window had X open, so its session ends; the keys
+                // other connections use stay unlocked, and the one no connection uses any more does not.
+                let other = try await EncryptedKeyFixture.importKey(into: library.store, name: "Other")
+                let second = try AppModel(directory: library.directory, identities: EncryptedKeyFixture.makeStore())
+                await second.load()
+                model.connectionStates = [library.x.id: "Connected"]
+                var edited = library.x; edited.identityID = other.id
+                _ = try await model.metadataStore.update(origin: UUID()) { $0.identities.append(other) }
+                await second.saveConnection(edited)
+                try await waitUntil("\(context): the window ended X's session") { model.connectionStates.isEmpty && model.metadata.connections.contains(edited) }
+                try await waitUntil("\(context): X's old key locked") { (try? await EncryptedKeyFixture.isUnlocked(library.xKey, in: store)) == false }
+                try await assertUnlocked([library.yKey, library.jumpKey], in: store, context)
+            }
+        }
+    }
+
+    /// Demo shows its own library, but the keys in use are the real library's: editing or removing a Demo
+    /// connection must not lock a real connection's key.
+    func testEditingInDemoKeepsTheRealLibrarysKeysUnlocked() async throws {
+        let library = try await keyedLibrary()
+        let model = library.model
+        await model.setDemo(true)
+        var demoConnection = try XCTUnwrap(model.metadata.connections.first)
+        XCTAssertFalse(model.metadata.connections.contains(library.y), "Demo has its own library")
+        demoConnection.name = "Renamed demo"
+        await model.saveConnection(demoConnection)
+        try await assertUnlocked(library.all, in: library.store, "Editing in Demo")
+        await model.removeConnection(demoConnection)
+        try await assertUnlocked(library.all, in: library.store, "Removing in Demo")
+        await model.setDemo(false)
+        XCTAssertEqual(Set(model.metadata.connections.map(\.id)), [library.x.id, library.y.id])
+    }
+
+    /// Explicit Disconnect and backgrounding still lock every key, as does deleting the key itself.
+    func testDisconnectAndBackgroundStillLockEveryKey() async throws {
+        let library = try await keyedLibrary()
+        await library.model.disconnectAndGoHome()
+        try await assertLocked(library.all, in: library.store, "Disconnect")
+        for key in library.all { try await EncryptedKeyFixture.unlock(key, in: library.store) }
+        await library.model.background()
+        try await assertLocked(library.all, in: library.store, "Background")
+        for key in library.all { try await EncryptedKeyFixture.unlock(key, in: library.store) }
+        try await library.store.delete(library.yKey, referencedBy: [])
+        do { _ = try await library.store.unlock(library.yKey); XCTFail("A deleted key must not stay unlocked") }
+        catch IdentityError.missingSecret { }
+    }
+
+    /// An explicit Disconnect that arrives while an edit's close is still running locks the keys once it ends.
+    func testDisconnectJoiningAnEditsCloseStillLocksTheKeys() async throws {
+        let base = NestedDisconnectService()
+        let library = try await keyedLibrary(fileService: base)
+        var edited = library.x; edited.host = "moved.invalid"
+        let edit = Task { await library.model.saveConnection(edited) }
+        try await wait { await base.closing() }
+        try await assertUnlocked(library.all, in: library.store, "While the edit's close runs")
+        let home = Task { await library.model.disconnectAndGoHome() }
+        try await Task.sleep(for: .milliseconds(50))
+        await base.finishClose()
+        await edit.value; await home.value
+        try await assertLocked(library.all, in: library.store, "Disconnect after an edit's close")
+    }
+
+    /// An edit or removal drops the key a connection used when nothing else saved uses it, whether the
+    /// other use is a connection's own key or a jump host's. The new key unlocks as usual.
+    func testEditingOrRemovingAConnectionDropsItsOldKeyOnlyWhenNothingElseUsesIt() async throws {
+        enum Other: CaseIterable { case nothing, connection, jumpHost }
+        for removal in [false, true] {
+            for other in Other.allCases {
+                let store = EncryptedKeyFixture.makeStore()
+                let library = try await keyedLibrary(store: store)
+                let k1 = library.xKey, k2 = try await EncryptedKeyFixture.importKey(into: store, name: "K2")
+                let model = library.model
+                // X uses K1 alone; Z may use it too.
+                let x = ConnectionProfile(name: "X", host: "x.invalid", username: "reader", identityID: k1.id)
+                let z: ConnectionProfile?
+                switch other {
+                case .nothing: z = nil
+                case .connection: z = ConnectionProfile(name: "Z", host: "z.invalid", username: "reader", identityID: k1.id)
+                case .jumpHost: z = ConnectionProfile(name: "Z", host: "z.invalid", username: "reader", identityID: library.yKey.id,
+                                                      jumpHost: JumpHost(host: "jump.invalid", username: "reader", identityID: k1.id))
+                }
+                _ = try await model.metadataStore.update(origin: UUID()) {
+                    $0.identities.append(k2); $0.connections = [x, library.y] + (z.map { [$0] } ?? [])
+                }
+                await model.load()
+                let context = "\(removal ? "Removing" : "Editing") with \(other)"
+                if removal { await model.removeConnection(x) }
+                else { var edited = x; edited.identityID = k2.id; await model.saveConnection(edited) }
+                if other == .nothing { try await assertLocked([k1], in: store, context) }
+                else { try await assertUnlocked([k1], in: store, context) }
+                try await assertUnlocked([library.yKey], in: store, context)
+                if !removal {
+                    // The new key was not unlocked, and unlocks as any key does.
+                    try await assertLocked([k2], in: store, context)
+                    try await EncryptedKeyFixture.unlock(k2, in: store)
+                    try await assertUnlocked([k2], in: store, context)
+                }
+            }
+        }
+    }
+
+    /// Keys outlive the connection that used them (after a trust reset or Demo), so a window that hears of
+    /// another's edit or removal of that connection locks the key even with no session to end, in Demo too.
+    func testKeyOfAConnectionRemovedElsewhereLocksWithoutAnActiveSession() async throws {
+        for inDemo in [false, true] {
+            let library = try await keyedLibrary()
+            let model = library.model
+            let second = try AppModel(directory: library.directory, identities: EncryptedKeyFixture.makeStore())
+            await second.load()
+            await model.resetTrust(for: library.x)
+            if inDemo { await model.setDemo(true) }
+            try await assertUnlocked(library.all, in: library.store, "Demo \(inDemo): before")
+            await second.removeConnection(library.x)
+            try await waitUntil("Demo \(inDemo): X's key locked") {
+                (try? await EncryptedKeyFixture.isUnlocked(library.xKey, in: library.store)) == false
+            }
+            try await assertLocked([library.jumpKey], in: library.store, "Demo \(inDemo)")
+            try await assertUnlocked([library.yKey], in: library.store, "Demo \(inDemo)")
+        }
+    }
+
+    /// A download of another connection that is queued while one connection is edited still has its key when
+    /// it starts, instead of failing for a passphrase.
+    func testQueuedDownloadNeedingAKeyCompletesAfterAnotherConnectionIsEdited() async throws {
+        let store = EncryptedKeyFixture.makeStore()
+        let service = KeyedDownloadService(identities: store)
+        let library = try await keyedLibrary(fileService: service, store: store)
+        await service.know(library.all)
+        let model = library.model
+        await service.hold("/first.bin")
+        model.enqueueDownload(profile: library.y, entry: file("first.bin"))
+        model.enqueueDownload(profile: library.y, entry: file("second.bin"))
+        let manager = try XCTUnwrap(model.downloads)
+        try await waitUntil("The first download started") { manager.items.first?.state == .downloading }
+        var edited = library.x; edited.host = "moved.invalid"
+        await model.saveConnection(edited)
+        await model.resetTrust(for: library.x)
+        await service.release("/first.bin")
+        try await waitUntil("The queued download finished") { manager.items.last?.state == .completed }
+        XCTAssertEqual(manager.items.map(\.state), [.completed, .completed])
+        let finished = await service.finished
+        XCTAssertEqual(finished, ["/first.bin", "/second.bin"])
+    }
+
 }
 
 private final class JumpLifecycleSecrets: IdentitySecretStore, @unchecked Sendable {

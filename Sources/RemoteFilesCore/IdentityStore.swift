@@ -193,6 +193,12 @@ public actor IdentityStore {
     private let biometricStore: (any BiometricKeyStore)?
     private var unlocked: [UUID: IdentityPrivateKey] = [:]
     private var sessionGeneration: UInt64 = 0
+    /// Counts the times a selective clear locked or discarded one identity. An unlock that began before
+    /// that caches nothing, as one that began before `clearSession()` doesn't, while unlocks of other
+    /// identities carry on.
+    private var identityGenerations: [UUID: UInt64] = [:]
+    /// Unlocks that have begun and not finished, per identity, so a selective clear knows to end them.
+    private var unlocking: [UUID: Int] = [:]
 
     public init(secretStore: any IdentitySecretStore = KeychainIdentitySecretStore(),
                 biometricStore: (any BiometricKeyStore)? = IdentityStore.defaultBiometricStore) {
@@ -237,7 +243,9 @@ public actor IdentityStore {
         guard let secret = try? JSONDecoder().decode(StoredSecret.self, from: data), secret.version == 1 else {
             throw IdentityError.malformedKey
         }
-        let generation = sessionGeneration
+        let generation = sessionGeneration, identityGeneration = identityGenerations[metadata.id, default: 0]
+        unlocking[metadata.id, default: 0] += 1
+        defer { finishedUnlocking(metadata.id) }
         let key = try await Task.detached(priority: .userInitiated) {
             switch secret.format {
             case .generatedEd25519:
@@ -250,7 +258,9 @@ public actor IdentityStore {
             }
         }.value
         try Task.checkCancellation()
-        guard generation == sessionGeneration else { throw IdentityError.sessionEnded }
+        guard generation == sessionGeneration, identityGeneration == identityGenerations[metadata.id, default: 0] else {
+            throw IdentityError.sessionEnded
+        }
         guard String(openSSHPublicKey: key.nioPrivateKey.publicKey) == metadata.publicKey else {
             throw IdentityError.malformedKey
         }
@@ -318,10 +328,14 @@ public actor IdentityStore {
     public func unlockWithBiometrics(_ metadata: IdentityMetadata, reason: String) async throws -> IdentityPrivateKey {
         if let key = unlocked[metadata.id] { return key }
         guard let biometricStore else { throw IdentityError.biometricsUnavailable }
-        let generation = sessionGeneration
+        let generation = sessionGeneration, identityGeneration = identityGenerations[metadata.id, default: 0]
+        unlocking[metadata.id, default: 0] += 1
+        defer { finishedUnlocking(metadata.id) }
         let data = try await biometricStore.load(reference: metadata.keychainReference, reason: reason)
         try Task.checkCancellation()
-        guard generation == sessionGeneration else { throw IdentityError.sessionEnded }
+        guard generation == sessionGeneration, identityGeneration == identityGenerations[metadata.id, default: 0] else {
+            throw IdentityError.sessionEnded
+        }
         guard let secret = try? JSONDecoder().decode(StoredSecret.self, from: data), secret.version == 1,
               (secret.format == .biometricSigningKey || secret.format == .generatedEd25519 && metadata.algorithm == "ssh-ed25519"),
               let key = try? IdentityPrivateKey(algorithm: metadata.algorithm, bytes: secret.bytes),
@@ -338,6 +352,21 @@ public actor IdentityStore {
     public func clearSession() {
         sessionGeneration &+= 1
         unlocked.removeAll(keepingCapacity: false)
+    }
+
+    /// Locks every unlocked key except those in `retained`, and ends any unlock of one of them that is still
+    /// in progress, so it caches nothing and throws `sessionEnded` as it would after `clearSession()`. Unlocks
+    /// of retained keys are untouched. For when connections change but the session goes on: the keys still
+    /// in use stay unlocked, and one no saved connection or jump host uses any more does not.
+    public func clearSession(keeping retained: Set<UUID>) {
+        for id in Set(unlocked.keys).union(unlocking.keys) where !retained.contains(id) {
+            identityGenerations[id, default: 0] &+= 1
+            unlocked.removeValue(forKey: id)
+        }
+    }
+
+    private func finishedUnlocking(_ id: UUID) {
+        if let count = unlocking[id], count > 1 { unlocking[id] = count - 1 } else { unlocking.removeValue(forKey: id) }
     }
 
     private func makeMetadata(name: String, key: IdentityPrivateKey, requiresPassphrase: Bool) throws -> IdentityMetadata {

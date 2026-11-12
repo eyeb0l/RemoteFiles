@@ -168,6 +168,7 @@ final class AppModel {
     var isForeground = true
     private(set) var isDisconnecting = false
     private var disconnectWork: Task<Void, Never>?
+    private var disconnectKeepsKeys = false
     private var realMetadata = AppMetadata()
     // Read while a view is being made, and written from the background. Observing them would remake
     // every mounted folder each time one more listing is remembered.
@@ -233,7 +234,14 @@ final class AppModel {
     }
     private func libraryChanged(to value: AppMetadata) {
         // Demo shows its own library; the real one is kept current for leaving it.
-        if demo { libraryReplacements += 1; realMetadata = value; return }
+        if demo {
+            libraryReplacements += 1
+            let changed = realMetadata.connections.contains { !value.connections.contains($0) }
+            realMetadata = value
+            // Keys are kept through Demo, so one the connection edited or removed elsewhere used must go now.
+            if changed { Task { await lockUnreferencedKeys() } }
+            return
+        }
         guard value != metadata else { return }
         let previous = metadata.connections
         metadata = value
@@ -251,9 +259,16 @@ final class AppModel {
         }
         routes.removeAll { affected.contains($0.connectionID) }
         affected.forEach { forgetListings(of: $0) }
-        guard affected.contains(where: { connectionStates[$0] != nil || foregroundConnectionID == $0 }) else { return }
+        guard affected.contains(where: { connectionStates[$0] != nil || foregroundConnectionID == $0 }) else {
+            // No session to end, but keys are kept after a reset or Demo, so one nothing uses now is locked.
+            Task { await lockUnreferencedKeys() }
+            return
+        }
         sessionRevision += 1
-        Task { await disconnect(preservingDownloads: true) }
+        Task {
+            await disconnect(preservingDownloads: true, keepingKeys: true)
+            await lockUnreferencedKeys()
+        }
     }
     /// Changes this window's copy of the library at once and then the saved one. The change is made
     /// to the library as it is saved now, never by writing this copy over it, so a window that hasn't
@@ -478,7 +493,7 @@ final class AppModel {
         // Its downloads stop, in every window: its server, account or key may have changed, and Retry won't
         // continue one across a changed connection. Other connections' downloads go on.
         await downloads?.interrupt(reason: Self.changedConnectionDownloadMessage) { $0.profile.id == value.id }
-        await disconnect(preservingDownloads: true)
+        await disconnect(preservingDownloads: true, keepingKeys: true)
         // The iPad sidebar can edit the connection whose reader is still on screen.
         routes.removeAll { $0.connectionID == value.id }
         sessionRevision += 1
@@ -488,10 +503,13 @@ final class AppModel {
             library.connections.removeAll { $0.id == value.id }
             library.connections.append(value)
         }
+        // An edit may have moved the connection to another key. The old one stays unlocked only while
+        // something else uses it.
+        await lockUnreferencedKeys()
     }
     func removeConnection(_ profile: ConnectionProfile) async {
         await downloads?.interrupt(reason: Self.changedConnectionDownloadMessage) { $0.profile.id == profile.id }
-        await disconnect(preservingDownloads: true)
+        await disconnect(preservingDownloads: true, keepingKeys: true)
         routes.removeAll { $0.connectionID == profile.id }
         sessionRevision += 1
         do { try await searchIndexStore().remove(connectionID: profile.id) }
@@ -507,6 +525,7 @@ final class AppModel {
             library.favourites.removeAll { $0.connectionID == id }
             library.recents.removeAll { $0.connectionID == id }
         }
+        await lockUnreferencedKeys()
     }
     private static let folderSortKey = "folderSortOrders-v1"
     /// Most folders whose sort choice is remembered; the least recently changed is dropped first.
@@ -536,7 +555,7 @@ final class AppModel {
     /// Forgets the trusted key of the saved endpoint, never unsaved edits in the connection form.
     func resetTrust(for profile: ConnectionProfile) async {
         await interruptDownloads(through: HostEndpoint(host: profile.host, port: profile.port))
-        await disconnect(preservingDownloads: true)
+        await disconnect(preservingDownloads: true, keepingKeys: true)
         do { try await searchIndexStore().remove(connectionID: profile.id) }
         catch { errorMessage = error.localizedDescription }
         // Forgetting trust must remain possible even when the local search cache is damaged.
@@ -546,7 +565,7 @@ final class AppModel {
     func resetJumpHostTrust(for profile: ConnectionProfile) async {
         guard let jump = profile.jumpHost else { return }
         await interruptDownloads(through: HostEndpoint(host: jump.host, port: jump.port))
-        await disconnect(preservingDownloads: true)
+        await disconnect(preservingDownloads: true, keepingKeys: true)
         do { try await searchIndexStore().remove(connectionID: profile.id) }
         catch { errorMessage = error.localizedDescription }
         do { try await trust.reset(endpoint: HostEndpoint(host: jump.host, port: jump.port)) }
@@ -677,19 +696,39 @@ final class AppModel {
         if case RemoteResourceError.outsideDocument = error { return true }
         return false
     }
-    func disconnect(preservingDownloads: Bool = false, keepingListings: Bool = false) async {
-        if let disconnectWork { await disconnectWork.value; return }
+    /// Ends this window's session. Unlocked keys lock again unless `keepingKeys`: that is for changes to
+    /// connections, trust or Demo, which close the connection but must not make every key in this window,
+    /// including those downloads and other connections use, ask for its passphrase again. Disconnect and
+    /// backgrounding lock them.
+    func disconnect(preservingDownloads: Bool = false, keepingListings: Bool = false, keepingKeys: Bool = false) async {
+        if let disconnectWork {
+            // Joining a close that keeps keys must not leave them unlocked for a call that locks them.
+            let joinedKeepsKeys = disconnectKeepsKeys
+            await disconnectWork.value
+            if joinedKeepsKeys, !keepingKeys { await identities.clearSession() }
+            return
+        }
         let task = Task {
             if !preservingDownloads {
                 await downloads?.interrupt(reason: "Transfer interrupted. Retry to continue.")
                 backgroundDownloads.finish(success: false)
             }
-            await closeSession(keepingListings: keepingListings)
+            await closeSession(keepingListings: keepingListings, keepingKeys: keepingKeys)
         }
-        disconnectWork = task
+        disconnectWork = task; disconnectKeepsKeys = keepingKeys
         await task.value
         disconnectWork = nil
     }
+    /// Locks the keys no saved connection or jump host uses. Used after an edit or removal, so a key whose
+    /// last connection moved to another key or went doesn't stay unlocked. What counts as used is the real
+    /// library, even in Demo, whose own connections use no real key, and the saved one as well as this
+    /// window's copy: a connection another window has just made uses its key too.
+    private func lockUnreferencedKeys() async {
+        let saved = await metadataStore.snapshot()
+        let referenced = Set((realLibrary.connections + saved.connections).flatMap(\.identityIDs))
+        await identities.clearSession(keeping: referenced)
+    }
+    private var realLibrary: AppMetadata { demo ? realMetadata : metadata }
     /// Explicit Disconnect differs from background suspension: discard the whole route stack.
     func disconnectAndGoHome() async {
         guard !isDisconnecting else { return }
@@ -700,7 +739,7 @@ final class AppModel {
         await disconnect()
         isDisconnecting = false
     }
-    private func closeSession(keepingListings: Bool = false) async {
+    private func closeSession(keepingListings: Bool = false, keepingKeys: Bool = false) async {
         let previousPin = pinTask
         cancelPrefetch()
         cancelOfflinePin()
@@ -709,13 +748,16 @@ final class AppModel {
         await previousExporter?.cancelAll()
         await resourceService?.cancelAll(); resourceService = nil
         await publicKeyInstaller.cancelAll()
-        await service.disconnect()
+        // The base service's own disconnect locks keys, so a close that keeps them uses the one that doesn't.
+        // A service without one, such as Demo's, holds no keys.
+        if keepingKeys, let closer = service as? any RemoteFileSessionClosing { await closer.closeSessionPreservingUnlockedIdentities() }
+        else { await service.disconnect() }
         await previousPin?.value
         await RemoteImageDecoder.shared.clear()
         await SourceHighlighting.shared.clear()
         await previousExporter?.cancelAndDrain()
         exportService = nil
-        await identities.clearSession()
+        if !keepingKeys { await identities.clearSession() }
         connectionStates = [:]
         // Names already seen stay in memory for an instant return from the background, unless they
         // were read with a key that locks again now. All are checked with the server when next
@@ -905,7 +947,7 @@ final class AppModel {
         // Other windows' downloads go on. This window's place among the queue's windows goes when `loadDownloads`
         // replaces its registration; if no window is then left in the foreground, the queue is interrupted as when
         // the last window closes.
-        await disconnect(preservingDownloads: true); routes = []
+        await disconnect(preservingDownloads: true, keepingKeys: true); routes = []
         if enabled {
             realMetadata = metadata
             metadata = AppMetadata()

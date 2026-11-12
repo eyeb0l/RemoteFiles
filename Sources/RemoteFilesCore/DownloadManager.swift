@@ -1,8 +1,8 @@
 import Foundation
 import Observation
 
-/// Opt-in transport cleanup for a completed foreground job. Explicit disconnect
-/// and background lifecycle still clear unlocked identities.
+/// Opt-in transport cleanup for a completed foreground job, or a window's connection changed, reset or
+/// edited. Explicit disconnect and background lifecycle still clear unlocked identities.
 public protocol RemoteFileSessionClosing: Sendable {
     func closeSessionPreservingUnlockedIdentities() async
 }
