@@ -806,16 +806,20 @@ final class SearchReadAheadTests: XCTestCase {
     func testAnIndexKeepsOnlyWhatItCanReadAndStopsListingThere() async throws {
         let (folders, contents) = tree(folders: 30, files: 20)
         let service = ReadAheadService(folders: folders, contents: contents)
+        // With adaptive concurrent listings, later folders can all start before the first one returns.
+        // List one folder at a time so this checks the stop decision, independent of task scheduling;
+        // the FolderWalking service still overlaps file reads.
+        let limits = RemoteFolderSearch.Limits(concurrentListings: 1, concurrentListingLimit: 1)
         let snapshot = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: service, includeHidden: false,
-                                                               contentLimits: .init(maxFiles: 10))
+                                                               limits: limits, contentLimits: .init(maxFiles: 10))
         let plain = try await RemoteFolderSearch.buildIndex(below: "/r", profile: profile, service: PlainTreeService(folders: folders, contents: contents),
-                                                            includeHidden: false, contentLimits: .init(maxFiles: 10))
+                                                            includeHidden: false, limits: limits, contentLimits: .init(maxFiles: 10))
         XCTAssertEqual(snapshot.documents.map(\.entry.path), plain.documents.map(\.entry.path), "The same ten, as one at a time")
         XCTAssertEqual(snapshot.documents.count, 10)
         XCTAssertTrue(snapshot.isPartial)
         let reads = await service.reads, listed = await service.listed
         XCTAssertEqual(reads.count, 10)
-        XCTAssertLessThan(listed.count, 30, "Listing stops once the reads can't go further")
+        XCTAssertEqual(listed, ["/r", "/r/folder-0"], "No folder starts after the file limit is known")
     }
 
     func testAFileThatGrewPastItsListingGetsAnOrdinaryRead() async throws {

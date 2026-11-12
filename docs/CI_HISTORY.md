@@ -10,6 +10,36 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 12 November 2026: index stop-listing test assumed a listing completion order
+
+Main run [43317582167, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/43317582167/attempts/1)
+failed only `SearchReadAheadTests.testAnIndexKeepsOnlyWhatItCanReadAndStopsListingThere`
+in `Quick / macos-openssh`: 549 tests passed, but the test counted 31 listings
+(the root and all 30 children) where it expected fewer than 30. Its ten-file read
+limit, document order and partial-index assertions passed. The simulator-core job passed.
+
+**Cause.** The test used the default adaptive listing window of 8 to 64, but assumed
+the first child's listing would be accepted before most later children started.
+Later completions can free slots and grow that window while the first child is
+still outstanding. The file limit is not known until that child's entries are
+accepted in walk order, so all 30 children can legitimately have started already.
+The unchanged 11-test read-ahead suite passed locally; a diagnostic-only 100 ms
+delay on `/r/folder-0` reproduced the exact 31-versus-30 failure with production
+code unchanged. The original logs and fixture evidence were retained before testing.
+
+**Fix.** This test fixes both listing concurrency settings at one, while retaining
+the service's concurrent file reads, and now requires exactly `/r` and `/r/folder-0`
+to be listed. That tests the stop decision independently of completion order and
+still checks the same ten documents and reads. Other read-ahead and listing-ahead
+tests continue to exercise concurrent listings. No production limit, wait or retry
+changes are needed; simply rerunning the original test would leave the race in place.
+
+**Validation.** All 11 corrected read-ahead tests passed locally. Temporarily
+removing the outer index stop-listing check made the corrected test fail with all
+31 paths instead of the expected two, confirming it still detects a broken stop
+decision. The diagnostic delay was removed, production code restored, and the
+corrected test passed again.
+
 ## 10 November 2026: lost mode taps, ignored switch presses and idle waits traced to their causes
 
 An independent pass over the items [9 November](#9-november-2026-unresolved-control-input-and-playback-causes)
