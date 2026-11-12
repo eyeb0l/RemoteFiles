@@ -302,10 +302,11 @@ public struct RemoteFilesCommands: Commands {
 /// UIKit's Edit › Find items own ⌘F, ⌘G and ⇧⌘G, so UIKit drops SwiftUI commands that use those
 /// keys. The items send `find:`, `findNext:` and `findPrevious:` up the responder chain, which
 /// ends at the app delegate; SwiftUI's delegate passes them on to this adaptor. Install it with
-/// `@UIApplicationDelegateAdaptor`.
+/// `@UIApplicationDelegateAdaptor`. It also sets the app's UIKit appearance as the app launches.
 public final class RemoteFilesAppDelegate: UIResponder, UIApplicationDelegate {
     public func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         _ = PlainKeyCommands.shared // Watches for the window that becomes key.
+        RemoteFilesStyle.installSearchFieldBackground()
         return true
     }
     @objc func closeReaderFind(_ sender: Any?) { PlainKeyCommands.shared.frontmostCloseFind?() }

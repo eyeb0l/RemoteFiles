@@ -1,5 +1,6 @@
 #if os(iOS)
 import SwiftUI
+import UIKit
 
 /// The app's few shared decisions: one accent, one row, quiet status, and motion that respects
 /// Reduce Motion. Everything else is the system's own material, type and spacing.
@@ -8,6 +9,40 @@ enum RemoteFilesStyle {
     static let iconColumn: CGFloat = 26
     static let contentFade = Animation.easeOut(duration: 0.18)
     static let statusSpring = Animation.snappy(duration: 0.28)
+
+    /// iOS 27 hides the glass behind a navigation bar's search field for every push and pop, then
+    /// grows it back about half a second after the transition ends, so the folder filter field
+    /// flickers each time the folder changes. A drawn capsule close to that glass at rest stays
+    /// visible throughout. Install it before any search bar is made.
+    static func installSearchFieldBackground() {
+        UISearchBar.appearance(whenContainedInInstancesOf: [UINavigationBar.self])
+            .setSearchFieldBackgroundImage(searchFieldBackground(), for: .normal)
+    }
+
+    /// One resizable capsule per appearance. Each is registered with its display scale too:
+    /// without it, the asset returns the image at scale 1, three times too tall.
+    static func searchFieldBackground() -> UIImage {
+        // The field takes this height at standard text sizes, as the system's own field has.
+        let height: CGFloat = 44, radius = height / 2
+        let size = CGSize(width: height + 2, height: height)
+        let format = UIGraphicsImageRendererFormat.preferred()
+        let asset = UIImageAsset()
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let traits = UITraitCollection { $0.userInterfaceStyle = style; $0.displayScale = format.scale }
+            let image = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+                let bounds = CGRect(origin: .zero, size: size)
+                (style == .dark ? UIColor.tertiarySystemFill.resolvedColor(with: traits) : .white).setFill()
+                UIBezierPath(roundedRect: bounds, cornerRadius: radius).fill()
+                let rim = UIBezierPath(roundedRect: bounds.insetBy(dx: 0.25, dy: 0.25), cornerRadius: radius - 0.25)
+                rim.lineWidth = 0.5
+                UIColor(white: style == .dark ? 1 : 0, alpha: style == .dark ? 0.1 : 0.12).setStroke()
+                rim.stroke()
+            }
+            let insets = UIEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+            asset.register(image.resizableImage(withCapInsets: insets, resizingMode: .stretch), with: traits)
+        }
+        return asset.image(with: UITraitCollection { $0.userInterfaceStyle = .light; $0.displayScale = format.scale })
+    }
 }
 
 /// One line of a list: an icon, a name and at most one quiet line beneath it. The spoken label can
