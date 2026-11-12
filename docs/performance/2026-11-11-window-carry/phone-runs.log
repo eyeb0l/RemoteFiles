@@ -1,0 +1,58 @@
+# phone, proxy on the mini (run stopped after its first process; see the load figures)
+22:55:58 phone-mini-150ms-free forward growing,carry,carryhold,fixed64 idle=0 server: { 3.51 3.14 2.83 }
+phone-mini-150ms-free@forward: exit 0, 92 scenarios
+22:59:29 phone-mini-150ms-free reverse fixed64,carryhold,carry,growing idle=0 server: { 83.08 34.41 15.41 }
+# phone, proxy on the Linux box
+23:07:02 phone-linux-proxy-150ms-free forward growing,carry,carryhold,fixed64 idle=0 server: 0.16 0.23 0.23 1/597 715361
+phone-linux-proxy-150ms-free@forward: exit 0, 92 scenarios
+23:09:36 phone-linux-proxy-150ms-free reverse fixed64,carryhold,carry,growing idle=0 server: 0.42 0.28 0.25 1/672 723017
+phone-linux-proxy-150ms-free@reverse: exit 0, 92 scenarios
+23:12:09 DONE phone-linux-proxy-150ms-free
+23:12:09 phone-linux-proxy-150ms-100mbit forward growing,carry,carryhold,fixed64,stale64,stale64hold idle=0 server: 0.55 0.36 0.28 1/641 729639
+phone-linux-proxy-150ms-100mbit@forward: exit 0, 138 scenarios
+23:17:56 phone-linux-proxy-150ms-100mbit reverse stale64hold,stale64,fixed64,carryhold,carry,growing idle=0 server: 3.79 2.71 1.25 4/789 747103
+phone-linux-proxy-150ms-100mbit@reverse: exit 0, 138 scenarios
+23:23:42 DONE phone-linux-proxy-150ms-100mbit
+# phone, Linux containers with netem
+23:24:31 phone-netem-150ms-free-ssai1-idle5s forward growing,carry,fixed64 idle=5000 server: 0.44 1.78 1.39 1/862 767946
+phone-netem-150ms-free-ssai1-idle5s@forward: exit 0, 69 scenarios
+23:27:12 phone-netem-150ms-free-ssai1-idle5s reverse fixed64,carry,growing idle=5000 server: 0.11 1.07 1.18 1/850 774888
+phone-netem-150ms-free-ssai1-idle5s@reverse: exit 0, 69 scenarios
+23:29:52 DONE phone-netem-150ms-free-ssai1-idle5s
+23:29:52 phone-netem-150ms-free-ssai0-idle5s forward growing,carry,fixed64 idle=5000 server: 0.13 0.71 1.02 2/852 781687
+phone-netem-150ms-free-ssai0-idle5s@forward: exit 0, 69 scenarios
+23:32:22 phone-netem-150ms-free-ssai0-idle5s reverse fixed64,carry,growing idle=5000 server: 0.08 0.47 0.88 1/855 788351
+phone-netem-150ms-free-ssai0-idle5s@reverse: exit 0, 69 scenarios
+23:34:53 DONE phone-netem-150ms-free-ssai0-idle5s
+23:34:53 phone-netem-150ms-free-ssai1-idle0 forward growing,carry,fixed64 idle=0 server: 0.48 0.46 0.81 1/845 795001
+phone-netem-150ms-free-ssai1-idle0@forward: exit 0, 69 scenarios
+23:36:37 phone-netem-150ms-free-ssai1-idle0 reverse fixed64,carry,growing idle=0 server: 0.27 0.42 0.76 3/685 799538
+phone-netem-150ms-free-ssai1-idle0@reverse: exit 0, 69 scenarios
+23:38:24 DONE phone-netem-150ms-free-ssai1-idle0
+23:38:25 phone-netem-150ms-free-ssai0-idle0 forward growing,carry,fixed64 idle=0 server: 1.03 0.62 0.79 1/681 804308
+phone-netem-150ms-free-ssai0-idle0@forward: exit 0, 69 scenarios
+23:40:12 phone-netem-150ms-free-ssai0-idle0 reverse fixed64,carry,growing idle=0 server: 0.75 0.67 0.80 1/683 809155
+phone-netem-150ms-free-ssai0-idle0@reverse: exit 0, 69 scenarios
+23:41:59 DONE phone-netem-150ms-free-ssai0-idle0
+23:42:16 phone-netem-150ms-free-ssai1-idle1s forward growing,carry,fixed64 idle=1000 server: 0.12 0.46 0.70 1/667 814414
+phone-netem-150ms-free-ssai1-idle1s@forward: exit 0, 69 scenarios
+23:43:38 phone-netem-150ms-free-ssai1-idle1s reverse fixed64,carry,growing idle=1000 server: 0.18 0.37 0.65 1/667 818143
+phone-netem-150ms-free-ssai1-idle1s@reverse: exit 0, 69 scenarios
+23:45:00 DONE phone-netem-150ms-free-ssai1-idle1s
+qdisc netem 8005: root refcnt 7 limit 100000 delay 150ms rate 100Mbit
+qdisc netem 8006: root refcnt 7 limit 100000 delay 150ms rate 100Mbit
+23:45:01 phone-netem-150ms-100mbit-ssai1-idle5s forward growing,carry,fixed64 idle=5000 server: 0.25 0.36 0.62 1/671 821905
+phone-netem-150ms-100mbit-ssai1-idle5s@forward: exit 0, 69 scenarios
+23:47:12 phone-netem-150ms-100mbit-ssai1-idle5s reverse fixed64,carry,growing idle=5000 server: 0.11 0.26 0.54 1/668 827476
+phone-netem-150ms-100mbit-ssai1-idle5s@reverse: exit 0, 69 scenarios
+23:49:23 DONE phone-netem-150ms-100mbit-ssai1-idle5s
+23:49:23 phone-netem-150ms-100mbit-ssai0-idle5s forward growing,carry,fixed64 idle=5000 server: 0.26 0.26 0.50 1/662 833157
+phone-netem-150ms-100mbit-ssai0-idle5s@forward: exit 0, 69 scenarios
+23:51:30 phone-netem-150ms-100mbit-ssai0-idle5s reverse fixed64,carry,growing idle=5000 server: 0.10 0.20 0.45 1/665 839288
+phone-netem-150ms-100mbit-ssai0-idle5s@reverse: exit 0, 69 scenarios
+23:53:39 DONE phone-netem-150ms-100mbit-ssai0-idle5s
+23:53:53 phone-netem-150ms-free-ssai0-idle0-wmem32m forward growing,carry,fixed64 idle=0 server: 0.23 0.28 0.44 1/711 845894
+phone-netem-150ms-free-ssai0-idle0-wmem32m@forward: exit 0, 69 scenarios
+23:54:56 phone-netem-150ms-free-ssai0-idle0-wmem32m reverse fixed64,carry,growing idle=0 server: 0.27 0.27 0.43 2/724 848802
+phone-netem-150ms-free-ssai0-idle0-wmem32m@reverse: exit 0, 69 scenarios
+23:55:59 DONE phone-netem-150ms-free-ssai0-idle0-wmem32m

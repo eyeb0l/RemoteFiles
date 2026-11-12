@@ -1,0 +1,34 @@
+#!/bin/bash
+# The wired Mac's side of a phone run. Under scripts/test-openssh.sh it writes the two things `windowcarry` reads into the
+# loopback fixture, adds a key for the phone, starts latency_proxy.py on loopback at 150 ms (free and capped at 100 Mbit/s)
+# and relays three ports on the LAN address with nc: BASE to the fixture, BASE+1 to the free proxy, BASE+2 to the capped one.
+# It stops when the file STOP appears.
+# Usage: REMOTEFILES_TEST_PORT=22631 scripts/test-openssh.sh phone_host.sh LAN_ADDRESS BASE STOP KEYS_OUT
+set -u
+lan=$1; base=$2; stop=$3; keys=$4
+fixture=$REMOTEFILES_SFTP_FIXTURE; port=$REMOTEFILES_SFTP_PORT; bench=$fixture/files/bench
+mkdir -p "$bench/d10" "$keys"
+python3 -B - "$bench" <<'PY'
+import pathlib, random, sys
+bench, rng = pathlib.Path(sys.argv[1]), random.Random(0x5EED)
+for index in range(10):
+    (bench / "d10" / f"file-{index}.txt").write_text(f"entry {index}\n")
+with open(bench / "big-64m.bin", "wb") as handle:
+    for _ in range(64):
+        handle.write(rng.randbytes(1 << 20))
+PY
+ssh-keygen -q -t ed25519 -N '' -C phone -f "$fixture/device-key"
+cat "$fixture/device-key.pub" >> "$fixture/authorized_keys"
+cp "$fixture/device-key" "$fixture/host.pub" "$keys/"; echo "$bench" > "$keys/root"; echo "$REMOTEFILES_SFTP_USER" > "$keys/user"
+python3 -B scripts/latency_proxy.py --listen $((port + 1001)) --target "$port" --rtt-ms 150 > /dev/null &
+python3 -B scripts/latency_proxy.py --listen $((port + 1002)) --target "$port" --rtt-ms 150 --mbit 100 > /dev/null &
+relay() {
+  local pipe="$fixture/relay-$1"; mkfifo "$pipe"
+  while [ ! -e "$stop" ]; do /usr/bin/nc -l "$lan" "$1" < "$pipe" | /usr/bin/nc 127.0.0.1 "$2" > "$pipe"; done
+}
+relay "$base" "$port" & relay $((base + 1)) $((port + 1001)) & relay $((base + 2)) $((port + 1002)) &
+echo "ready $(date +%T)"
+until [ -e "$stop" ]; do sleep 2; done
+pkill -P $$ 2>/dev/null; kill $(jobs -p) 2>/dev/null
+pkill -f "nc -l $lan $base" 2>/dev/null; pkill -f "nc -l $lan $((base + 1))" 2>/dev/null; pkill -f "nc -l $lan $((base + 2))" 2>/dev/null
+echo "stopped $(date +%T)"

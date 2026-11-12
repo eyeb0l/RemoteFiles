@@ -1,3 +1,11 @@
+# A throwaway OpenSSH server for `windowcarry` with the delay on the packets. Beside it: client.pub (the key the benchmark
+# uses) and a host key pair, all made for the run with ssh-keygen. One container per setting, each on a port of its own:
+#   docker build -t rf-carry-bench .
+#   docker run -d --name NAME --cap-add NET_ADMIN --sysctl net.ipv4.tcp_slow_start_after_idle=1 -p LAN_ADDRESS:PORT:22 rf-carry-bench
+#   docker exec NAME tc qdisc replace dev eth0 root netem delay 150ms limit 100000          # add `rate 100mbit` for the cap
+# `--sysctl net.ipv4.tcp_slow_start_after_idle=0` turns slow start after idle off, and
+# `--sysctl "net.ipv4.tcp_wmem=4096 16384 33554432"` raises the send buffer limit. Both are per container. netem's default
+# limit of 1,000 packets drops at these rates. Without NET_ADMIN and netem the same image serves latency_proxy.py.
 FROM ubuntu:24.04
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server iproute2 && rm -rf /var/lib/apt/lists/* \
  && useradd -m -s /bin/bash bench && usermod -p "*" bench && mkdir -p /run/sshd /home/bench/.ssh /srv/bench/d10 \

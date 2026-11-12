@@ -1,0 +1,15 @@
+#!/bin/bash
+# The phone against a server that is already up: one process with the arms in the order given, one with them reversed.
+# Usage: phone_series.sh HOST PORT USER KEY HOST_KEY ROOT CONDITION OUTPUT RUNS ARMS IDLE_MS XCTESTRUN UDID [LOAD_COMMAND]
+set -u
+host=$1; port=$2; user=$3; key=$4; hostkey=$5; root=$6; condition=$7; out=$8; runs=$9; arms=${10}; idle=${11}; xctestrun=${12}; udid=${13}; load=${14:-true}
+here=$(cd "$(dirname "$0")" && pwd)
+reverse() { echo "$1" | tr "," "\n" | tail -r | paste -sd, -; }
+for order in forward reverse; do
+  [ $order = reverse ] && arms=$(reverse "$arms")
+  nc -z -G 3 "$host" "$port" > /dev/null 2>&1   # an nc relay that has waited too long drops its first connection
+  echo "$(date +%T) $condition $order $arms idle=$idle server: $($load 2>/dev/null)"
+  python3 -B "$here/carry_run.py" phone --host "$host" --port "$port" --user "$user" --key "$key" --host-key "$hostkey" --root "$root" \
+    --label "$condition@$order" --output "$out" --runs "$runs" --arms "$arms" --idle-ms "$idle" --xctestrun "$xctestrun" --udid "$udid" 2>&1 | cut -c1-500
+done
+echo "$(date +%T) DONE $condition"
