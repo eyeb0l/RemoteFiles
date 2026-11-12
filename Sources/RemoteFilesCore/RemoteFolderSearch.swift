@@ -272,7 +272,11 @@ public enum RemoteFolderSearch {
                         if let content, query.isEmpty {
                             // Building an index, with no first match to hurry for. The walk stops listing
                             // while it reads, so list everything first and let every read overlap.
-                            let readable = visible.filter { scanReads($0, root: root, limits: content, options: options, extraction: extraction) }
+                            // A saved index can't hold a path with a control character, which `SearchIndexStore`
+                            // refuses, so such a file is left out unread and counted rather than making the whole
+                            // index impossible to save. A live search saves nothing and still reads it.
+                            let readable = visible.filter { scanReads($0, root: root, limits: content, options: options, extraction: extraction)
+                                && !RemotePath.hasControlCharacter($0.path) }
                             let skipped = visible.filter { $0.kind != .directory && options.accepts($0) }.count - readable.count
                             let files = Array(readable.prefix(max(0, content.maxFiles + 1 - readableForIndex)))
                             listedForIndex.append((files, skipped))
