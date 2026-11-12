@@ -1468,6 +1468,26 @@ private actor KeyedDownloadService: RemoteFileService, RemoteFileSessionClosing 
         }
     }
 
+    /// Keys outlive the connection that used them (after a trust reset or Demo), so a window that hears of
+    /// another's edit or removal of that connection locks the key even with no session to end, in Demo too.
+    func testKeyOfAConnectionRemovedElsewhereLocksWithoutAnActiveSession() async throws {
+        for inDemo in [false, true] {
+            let library = try await keyedLibrary()
+            let model = library.model
+            let second = try AppModel(directory: library.directory, identities: EncryptedKeyFixture.makeStore())
+            await second.load()
+            await model.resetTrust(for: library.x)
+            if inDemo { await model.setDemo(true) }
+            try await assertUnlocked(library.all, in: library.store, "Demo \(inDemo): before")
+            await second.removeConnection(library.x)
+            try await waitUntil("Demo \(inDemo): X's key locked") {
+                (try? await EncryptedKeyFixture.isUnlocked(library.xKey, in: library.store)) == false
+            }
+            try await assertLocked([library.jumpKey], in: library.store, "Demo \(inDemo)")
+            try await assertUnlocked([library.yKey], in: library.store, "Demo \(inDemo)")
+        }
+    }
+
     /// A download of another connection that is queued while one connection is edited still has its key when
     /// it starts, instead of failing for a passphrase.
     func testQueuedDownloadNeedingAKeyCompletesAfterAnotherConnectionIsEdited() async throws {

@@ -234,7 +234,14 @@ final class AppModel {
     }
     private func libraryChanged(to value: AppMetadata) {
         // Demo shows its own library; the real one is kept current for leaving it.
-        if demo { libraryReplacements += 1; realMetadata = value; return }
+        if demo {
+            libraryReplacements += 1
+            let changed = realMetadata.connections.contains { !value.connections.contains($0) }
+            realMetadata = value
+            // Keys are kept through Demo, so one the connection edited or removed elsewhere used must go now.
+            if changed { Task { await lockUnreferencedKeys() } }
+            return
+        }
         guard value != metadata else { return }
         let previous = metadata.connections
         metadata = value
@@ -252,7 +259,11 @@ final class AppModel {
         }
         routes.removeAll { affected.contains($0.connectionID) }
         affected.forEach { forgetListings(of: $0) }
-        guard affected.contains(where: { connectionStates[$0] != nil || foregroundConnectionID == $0 }) else { return }
+        guard affected.contains(where: { connectionStates[$0] != nil || foregroundConnectionID == $0 }) else {
+            // No session to end, but keys are kept after a reset or Demo, so one nothing uses now is locked.
+            Task { await lockUnreferencedKeys() }
+            return
+        }
         sessionRevision += 1
         Task {
             await disconnect(preservingDownloads: true, keepingKeys: true)
