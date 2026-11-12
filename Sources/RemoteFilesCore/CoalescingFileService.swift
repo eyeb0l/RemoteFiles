@@ -16,7 +16,7 @@ public protocol ProgressiveFolderListing: Sendable {
 
 /// Shares an in-flight request for the same resource. Cancellation retires the shared request;
 /// all its waiters observe cancellation, and the next explicit request starts fresh work.
-public actor CoalescingFileService: RemoteFileService, ProgressiveFolderListing {
+public actor CoalescingFileService: RemoteFileService, ProgressiveFolderListing, RemoteFileSessionClosing {
     private struct Key: Hashable { let profile: ConnectionProfile; let path: String; let limit: Int }
     private struct VersionedKey: Hashable { let read: Key; let allowedRoot: String?; let since: RemoteFileVersion? }
     /// The wrapped service, for background work that must neither join nor cancel others' requests.
@@ -109,10 +109,20 @@ public actor CoalescingFileService: RemoteFileService, ProgressiveFolderListing 
         try await base.downloadFile(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination, limit: limit, progress: progress)
     }
     public func disconnect() async {
+        cancelCoalesced()
+        await base.disconnect()
+    }
+    /// As `disconnect()`, but a base that can close its transport without locking keys does. A base that
+    /// can't, such as Demo's, has no keys to lock.
+    public func closeSessionPreservingUnlockedIdentities() async {
+        cancelCoalesced()
+        if let closer = base as? any RemoteFileSessionClosing { await closer.closeSessionPreservingUnlockedIdentities() }
+        else { await base.disconnect() }
+    }
+    private func cancelCoalesced() {
         lists.values.forEach { $0.1.cancel() }; reads.values.forEach { $0.1.cancel() }
         versionedReads.values.forEach { $0.1.cancel() }
         lists.removeAll(); reads.removeAll(); versionedReads.removeAll()
-        await base.disconnect()
     }
     // Snapshot downloads, like original exports, never join foreground coalesced reads.
     public func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL,
