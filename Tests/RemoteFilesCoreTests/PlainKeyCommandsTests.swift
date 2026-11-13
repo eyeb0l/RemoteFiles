@@ -5,6 +5,10 @@ import SwiftUI
 @testable import RemoteFilesUI
 
 @MainActor final class PlainKeyCommandsTests: XCTestCase {
+    // A hosted focus wait returned after 14 seconds with the required state. These tests
+    // assert responder ownership, not a five-second performance target. See docs/CI_HISTORY.md.
+    private let focusTimeout: TimeInterval = 30
+
     func testArrowsMoveSelectionAndStopAtEitherEnd() {
         let ids = ["a", "b", "c"]
         XCTAssertEqual(FolderKeyboardSelection.moved(nil, by: 1, in: ids), "a", "Down starts at the top")
@@ -250,7 +254,7 @@ import SwiftUI
                         && cancelResponder(in: host.view)?.canBecomeFirstResponder == !covered
                 }, object: nil)
                 changed.expectationDescription = "\(phase): Find field first responder == \(expected), covered == \(covered)"
-                wait(for: [changed], timeout: 5)
+                wait(for: [changed], timeout: focusTimeout)
                 record("end")
             }
         }
@@ -290,7 +294,7 @@ import SwiftUI
             responder(in: host.view)?.window != nil && findField(in: host.view)?.isFirstResponder == true
         }, object: nil)
         attached.expectationDescription = "Find is attached and its initial editing focus has arrived"
-        wait(for: [attached], timeout: 5)
+        wait(for: [attached], timeout: focusTimeout)
         host.rootView = ReaderFindBar(navigation: navigation, inSource: false, isCovered: true)
         // Assigning rootView only schedules a SwiftUI update. Wait for that update and the
         // initial text-field focus to settle before starting the presentation lifecycle.
@@ -299,7 +303,7 @@ import SwiftUI
                 && findField(in: host.view)?.isFirstResponder == false
         }, object: nil)
         covered.expectationDescription = "Covered Find has relinquished editing and cancel focus"
-        wait(for: [covered], timeout: 5)
+        wait(for: [covered], timeout: focusTimeout)
         let headings = UIViewController()
         present(headings, from: host)
         dismiss(headings)
@@ -309,13 +313,13 @@ import SwiftUI
                 && findField(in: host.view)?.isFirstResponder == false
         }, object: nil)
         uncovered.expectationDescription = "Uncovered Find has applied its enabled state before restoration"
-        wait(for: [uncovered], timeout: 5)
+        wait(for: [uncovered], timeout: focusTimeout)
         navigation.restoreFindKeyboard()
         let restored = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             responder(in: host.view)?.isFirstResponder == true
         }, object: nil)
         restored.expectationDescription = "Headings dismissal restores Find's native Escape responder"
-        wait(for: [restored], timeout: 5)
+        wait(for: [restored], timeout: focusTimeout)
         XCTAssertEqual(navigation.query, "paragraph")
         let key = try XCTUnwrap(responder(in: host.view)?.keyCommands?.first)
         XCTAssertEqual(key.input, UIKeyCommand.inputEscape)

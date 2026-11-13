@@ -63,6 +63,25 @@ their five-second deadlines, actual first-responder assertion, Escape dispatch,
 query preservation and reader-preservation checks. CI must verify the corrected
 fixture; the warning's causal role remains unconfirmed.
 
+Run [43443777813](https://github.com/eyeb0l/RemoteFiles/actions/runs/43443777813)
+identified the failing phase as **Headings relinquishes Find focus**. The wait
+returned after 13.992 seconds with the field attached, no longer first responder,
+and the cancel responder disabled: both required states had arrived by the end
+of the wait, after XCTest had reported its five-second deadline failure. Initial
+editing focus took 8.163 seconds; uncovering and explicit refocus then passed in
+1.086 and 1.617 seconds. Native Escape restoration passed in 5.492 seconds, and
+the log contained no state-during-view-update warning. Host load was 79.6 near
+the start and 92.7 after the two tests; keyboard-service invalidation appeared in
+the log. This does not isolate the service's internal cause, but it does show
+that a five-second test deadline rejects an eventually correct focus transition.
+
+The two hosted focus tests now allow 30 seconds for each asserted focus/coverage
+state. This deliberately relaxes the test-only timing bound, which is not a
+product performance requirement. It retains every state predicate, setup
+ordering check, Escape action, query assertion and reader assertion, with phase
+diagnostics kept for future failures. Presentation/dismissal completion waits
+and production behaviour are unchanged. No retries or skips were added.
+
 ## 13 November 2026: live search dismissal exposed as Cancel rather than Close
 
 After #118, main run [43328502119, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/43328502119/attempts/1)
