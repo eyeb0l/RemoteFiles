@@ -73,6 +73,7 @@ extension FocusedValues {
 extension FocusedValues {
     /// Set by sheets and full-screen covers a reader or folder presents itself.
     @Entry var keyboardCommandsCovered: Bool?
+    @Entry var keyboardWindow: KeyboardWindowReference?
 }
 
 extension View {
@@ -87,6 +88,7 @@ public struct RemoteFilesCommands: Commands {
     @FocusedValue(\.folderCommands) private var publishedFolder
     @FocusedValue(\.navigationCommands) private var publishedNavigation
     @FocusedValue(\.keyboardCommandsCovered) private var covered
+    @FocusedValue(\.keyboardWindow) private var window
     @ObservedObject private var keys = PlainKeyCommands.shared
     private var reader: ReaderCommandActions? {
         covered == true ? nil : keys.offlineFilesShows ? keys.frontmostOfflineReader : publishedReader
@@ -101,6 +103,9 @@ public struct RemoteFilesCommands: Commands {
     public init() {}
 
     public var body: some Commands {
+        // On Mac, each scene can retain a key UIWindow. Scene focus, rather than the last
+        // didBecomeKey notification, identifies the window whose menus are being built.
+        let _ = window?.window?.rootViewController.map { keys.attach($0) }
         // Find, Find Next and Find Previous are the system's own Edit › Find items (⌘F, ⌘G, ⇧⌘G);
         // RemoteFilesAppDelegate answers them for this reader, or for Offline Files' while its sheet is in front.
         let _ = SystemFindRouter.shared.reader = reader
@@ -166,26 +171,49 @@ public struct RemoteFilesCommands: Commands {
 @MainActor final class PlainKeyCommands: NSObject, ObservableObject {
     static let shared = PlainKeyCommands()
     private weak var root: UIViewController?
-    /// Set while the Offline Files sheet shows. Focused values published inside that sheet never
-    /// reach the scene's commands, so the sheet and its reader hand their actions over directly,
-    /// and the menu observes those same actions. The keys are UIKit key commands on the sheet,
-    /// installed while it shows and declined while their action is unavailable: ⌘[ for Back, ⌘F, ⌘G, ⇧⌘G, ⌥⌘U and ⇧⌘J for the reader on
-    /// screen, and Escape while its Find is open. The system Find items act on the same reader
-    /// when they take the key instead. The sheet takes Escape to dismiss itself before the root
-    /// sees it, so with Find closed, Escape still dismisses it.
-    @Published var offlineFilesShows = false { didSet { installOnOfflineFiles() } }
-    /// Pops the sheet's navigation, while it has somewhere to go back to.
-    @Published var offlineBack: (() -> Void)?
-    /// The commands of the readers on screen in Offline Files, by reader. During a push or pop
-    /// two can be listed for a moment, since the one leaving may hand over nil after the one
-    /// arriving handed over its commands; otherwise at most one is.
-    @Published private var offlineReaders: [UUID: ReaderCommandActions] = [:]
-    func setOfflineReader(_ reader: UUID, _ commands: ReaderCommandActions?) {
-        offlineReaders[reader] = commands
+    /// Each Offline Files presentation owns its reader and navigation actions. Other windows
+    /// can remain key on Mac, so neither presentation discovery nor actions may be global.
+    private struct OfflineSession {
+        weak var controller: UIViewController?
+        var back: (() -> Void)?
+        var readers: [UUID: ReaderCommandActions] = [:]
+    }
+    private var offlineSessions: [UUID: OfflineSession] = [:]
+    private var activeOfflineSession: OfflineSession? {
+        guard let root else { return nil }
+        return offlineSessions.values.first {
+            $0.controller?.viewIfLoaded?.window?.rootViewController === root
+        }
+    }
+    var offlineFilesShows: Bool { activeOfflineSession != nil }
+    var offlineReader: ReaderCommandActions? { activeOfflineSession?.readers.values.first }
+    var offlineCloseFind: (() -> Void)? { offlineReader?.closeFind }
+
+    func setOfflineBack(_ action: (() -> Void)?, in scope: UUID) {
+        objectWillChange.send()
+        offlineSessions[scope, default: OfflineSession()].back = action
+    }
+    func setOfflineReader(_ reader: UUID, _ commands: ReaderCommandActions?, in scope: UUID) {
+        // A disappearing reader can report nil after its presentation has been dismantled.
+        guard commands != nil || offlineSessions[scope] != nil else { return }
+        objectWillChange.send()
+        offlineSessions[scope, default: OfflineSession()].readers[reader] = commands
         installOnOfflineFiles()
     }
-    var offlineReader: ReaderCommandActions? { offlineReaders.values.first }
-    var offlineCloseFind: (() -> Void)? { offlineReader?.closeFind }
+    /// Called from the sheet's own UIKit hierarchy, after presentation attaches it to a window.
+    func attachOfflineFiles(_ controller: UIViewController, in scope: UUID) {
+        guard offlineSessions[scope]?.controller !== controller else { return }
+        objectWillChange.send()
+        if let previous = offlineSessions[scope]?.controller { removeOfflineKeys(from: previous) }
+        offlineSessions[scope, default: OfflineSession()].controller = controller
+        installOnOfflineFiles()
+    }
+    func removeOfflineFiles(_ scope: UUID) {
+        objectWillChange.send()
+        if let controller = offlineSessions.removeValue(forKey: scope)?.controller {
+            removeOfflineKeys(from: controller)
+        }
+    }
     private let sheetEscape = command("Close Find", UIKeyCommand.inputEscape, [], #selector(RemoteFilesAppDelegate.closeReaderFind(_:)))
     let sheetBack = command("Back", "[", .command, #selector(RemoteFilesAppDelegate.goBackInOfflineFiles(_:)))
     /// The reader shortcuts the sheet takes, each with the reader action it runs.
@@ -196,27 +224,29 @@ public struct RemoteFilesCommands: Commands {
         (command("Show Source", "u", [.command, .alternate], #selector(RemoteFilesAppDelegate.toggleOfflineReaderSource(_:))), \.toggleSource),
         (command("Headings…", "j", [.command, .shift], #selector(RemoteFilesAppDelegate.showOfflineReaderHeadings(_:))), \.headings),
     ]
-    private weak var sheet: UIViewController?
-    /// Installs the sheet's keys as soon as it shows; `canPerform` decides as each arrives.
+    private var offlineKeys: [UIKeyCommand] { [sheetEscape, sheetBack] + sheetReader.map(\.key) }
+    private func removeOfflineKeys(from controller: UIViewController) {
+        for key in offlineKeys { controller.removeKeyCommand(key) }
+    }
     private func installOnOfflineFiles() {
-        let keys = [sheetEscape, sheetBack] + sheetReader.map(\.key)
-        let presented = offlineFilesShows ? root?.presentedViewController : nil
-        if let sheet, sheet !== presented { for key in keys { sheet.removeKeyCommand(key) } }
-        sheet = presented
-        guard let presented else { return }
-        for (key, _) in sheetReader where key.input == "u" { key.title = offlineReader?.showsSource == true ? "Show Rendered" : "Show Source" }
-        for key in keys where presented.keyCommands?.contains(key) != true { presented.addKeyCommand(key) }
+        for (key, _) in sheetReader where key.input == "u" {
+            key.title = offlineReader?.showsSource == true ? "Show Rendered" : "Show Source"
+        }
+        for session in offlineSessions.values {
+            guard let controller = session.controller else { continue }
+            for key in offlineKeys where controller.keyCommands?.contains(key) != true {
+                controller.addKeyCommand(key)
+            }
+        }
     }
-    /// Whether the Offline Files sheet is in front, with nothing presented over it.
+    /// A covering Headings/share sheet keeps its keys until it has been dismissed.
     private var offlineFilesInFront: Bool {
-        guard offlineFilesShows, let presented = root?.presentedViewController else { return false }
-        return presented.presentedViewController == nil
+        guard let controller = activeOfflineSession?.controller else { return false }
+        return controller.presentedViewController == nil
     }
-    /// The Offline Files reader its sheet's keys act on: the one on screen while the sheet is in front.
     var frontmostOfflineReader: ReaderCommandActions? { offlineFilesInFront ? offlineReader : nil }
-    /// The reader the system Find items act on: Offline Files' while its sheet is in front, else the scene's.
     var frontmostReader: ReaderCommandActions? { offlineFilesShows ? frontmostOfflineReader : SystemFindRouter.shared.reader }
-    var frontmostOfflineBack: (() -> Void)? { offlineFilesInFront ? offlineBack : nil }
+    var frontmostOfflineBack: (() -> Void)? { offlineFilesInFront ? activeOfflineSession?.back : nil }
     /// Set while the scene's commands update.
     var folder: FolderCommandActions?
     var closeFind: (() -> Void)?
@@ -255,6 +285,7 @@ public struct RemoteFilesCommands: Commands {
     func attach(_ root: UIViewController) {
         guard root !== self.root else { return }
         self.root = root
+        installOnOfflineFiles()
         for command in tabs + [escape, next, previous, open] where root.keyCommands?.contains(command) != true {
             root.addKeyCommand(command)
         }
@@ -262,11 +293,9 @@ public struct RemoteFilesCommands: Commands {
 
     /// Closes Find in the reader in front: the root's, or Offline Files' while that sheet is in front.
     var frontmostCloseFind: (() -> Void)? {
-        guard let root else { return nil }
-        var top = root
-        while let presented = top.presentedViewController { top = presented }
-        if top === root { return closeFind }
-        return offlineFilesShows && top.presentingViewController === root ? offlineCloseFind : nil
+        if offlineFilesShows { return frontmostOfflineReader?.closeFind }
+        guard let root, root.presentedViewController == nil else { return nil }
+        return closeFind
     }
 
     /// Whether the key for `action` acts now, checked as it arrives.
@@ -335,4 +364,57 @@ public final class RemoteFilesAppDelegate: UIResponder, UIApplicationDelegate {
     override public func findNext(_ sender: Any?) { PlainKeyCommands.shared.frontmostReader?.findNext?() }
     override public func findPrevious(_ sender: Any?) { PlainKeyCommands.shared.frontmostReader?.findPrevious?() }
 }
+
+/// Focused state belongs to the window's view tree; retaining its window would form a cycle.
+struct KeyboardWindowReference: Equatable {
+    weak var window: UIWindow?
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.window === rhs.window }
+}
+
+/// Reports the scene's actual window to SwiftUI's focused values. UIWindow's key notification
+/// alone does not track switches between iPad-app windows on Mac.
+struct KeyboardWindowReader: UIViewRepresentable {
+    var changed: (UIWindow?) -> Void
+    func makeUIView(context: Context) -> WindowView { WindowView() }
+    func updateUIView(_ view: WindowView, context: Context) { view.changed = changed }
+    final class WindowView: UIView {
+        var changed: ((UIWindow?) -> Void)?
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            let window = window
+            Task { @MainActor [weak self] in self?.changed?(window) }
+        }
+    }
+}
+
+extension EnvironmentValues {
+    @Entry var offlineKeyboardScope: UUID?
+}
+
+/// Registers the presentation that actually contains Offline Files, not whichever controller
+/// happened to become key last. Appearance runs after SwiftUI has attached the presentation.
+struct OfflineKeyboardHost: UIViewControllerRepresentable {
+    let scope: UUID
+    func makeUIViewController(context: Context) -> Controller { Controller(scope: scope) }
+    func updateUIViewController(_ controller: Controller, context: Context) {}
+    static func dismantleUIViewController(_ controller: Controller, coordinator: ()) {
+        PlainKeyCommands.shared.removeOfflineFiles(controller.scope)
+    }
+    final class Controller: UIViewController {
+        let scope: UUID
+        init(scope: UUID) { self.scope = scope; super.init(nibName: nil, bundle: nil) }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+        override func loadView() {
+            view = UIView()
+            view.isUserInteractionEnabled = false
+        }
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            var presentation: UIViewController = self
+            while let parent = presentation.parent { presentation = parent }
+            PlainKeyCommands.shared.attachOfflineFiles(presentation, in: scope)
+        }
+    }
+}
+
 #endif

@@ -15,6 +15,7 @@ struct ReaderTextReveal: Equatable {
     var isFinding = false
     /// Bumped by each Find request, so an open Find field takes focus again.
     private(set) var findFocusRequest = 0
+    private(set) var findKeyboardRestoreRequest = 0
     private(set) var matches: [DocumentTextTarget] = []
     private(set) var selected = 0
     private(set) var truncated = false
@@ -59,6 +60,7 @@ struct ReaderTextReveal: Equatable {
         reveal = .init(target: heading.target, inSource: false)
     }
     func startFind() { isFinding = true; findFocusRequest += 1 }
+    func restoreFindKeyboard() { if isFinding { findKeyboardRestoreRequest += 1 } }
     func closeFind() { isFinding = false; query = ""; reveal = nil; matches = [] }
     func didReveal(_ id: UUID) { if reveal?.id == id { completedReveal = id } }
     func clear() {
@@ -83,8 +85,10 @@ struct ReaderTextReveal: Equatable {
 struct ReaderFindBar: View {
     @Bindable var navigation: ReaderNavigationState
     let inSource: Bool
+    let isCovered: Bool
     @FocusState private var focused: Bool
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.offlineKeyboardScope) private var offlineKeyboardScope
     var body: some View {
         // Large text needs the whole width for what's being typed.
         let large = dynamicTypeSize.isAccessibilitySize
@@ -113,12 +117,24 @@ struct ReaderFindBar: View {
                 Button { focused = false; navigation.closeFind() } label: {
                     Text("Done").frame(minHeight: 44).padding(.horizontal, 6).contentShape(Rectangle())
                 }
+                // Offline Files needs a native cancel binding ahead of its sheet's dismissal.
+                // The live reader already has the root's priority Escape command.
+                .keyboardShortcut(offlineKeyboardScope != nil && !isCovered ? .cancelAction : nil)
             }
             .buttonStyle(.borderless)
         }
         .padding(.horizontal, 16).padding(.vertical, 6)
-        .onAppear { focused = true }
-        .onChange(of: navigation.findFocusRequest) { _, _ in focused = true }
+        .background {
+            FindCancelResponder(request: navigation.findKeyboardRestoreRequest, enabled: !isCovered) {
+                navigation.closeFind()
+            }
+        }
+        .onAppear { focused = !isCovered }
+        .onChange(of: navigation.findFocusRequest) { _, _ in focused = !isCovered }
+        // iPad apps on Mac can leave this hidden field first responder under Headings.
+        // Its responder chain then bypasses the covering sheet and takes Escape underneath it.
+        // The presenting reader restores a native responder after the sheet's dismissal.
+        .onChange(of: isCovered) { _, covered in if covered { focused = false } }
         // Closing Find removes the focused field, which hides the keyboard, and UIKit animates
         // every change made while it hides. Animations it started on this bar's layers never
         // reported stopping once the bar had gone, and XCTest then waited a minute before each
@@ -138,6 +154,37 @@ struct ReaderFindBar: View {
         if navigation.searching { return "Searching…" }
         if navigation.matches.isEmpty { return "No results" }
         return "\(navigation.selected + 1) of \(navigation.matches.count)\(navigation.truncated ? "+" : "")"
+    }
+}
+
+/// Restores keyboard handling after a sheet without relying on a stale SwiftUI FocusState.
+/// It lives inside Find, so Escape reaches it before the containing presentation's cancel action.
+struct FindCancelResponder: UIViewRepresentable {
+    let request: Int
+    let enabled: Bool
+    let cancel: () -> Void
+
+    func makeUIView(context: Context) -> KeyView { KeyView() }
+    func updateUIView(_ view: KeyView, context: Context) {
+        view.cancel = enabled ? cancel : nil
+        if !enabled { view.resignFirstResponder() }
+        if view.request != request {
+            view.request = request
+            if request > 0 && enabled { view.becomeFirstResponder() }
+        }
+    }
+
+    final class KeyView: UIView {
+        var request = 0
+        var cancel: (() -> Void)?
+        override var canBecomeFirstResponder: Bool { cancel != nil }
+        override var keyCommands: [UIKeyCommand]? {
+            guard cancel != nil else { return nil }
+            let key = UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(closeFind(_:)))
+            key.wantsPriorityOverSystemBehavior = true
+            return [key]
+        }
+        @objc func closeFind(_ sender: Any?) { cancel?() }
     }
 }
 
