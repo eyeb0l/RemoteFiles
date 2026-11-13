@@ -234,8 +234,8 @@ struct FolderView: View {
         .safeAreaBar(edge: .top, spacing: 0) {
             if searchPresented, searchScope == .contents, searchQuery.isEmpty {
                 Text(extraction.includePDF || extraction.includeOCR
-                     ? "Searches text, selected PDFs and images on this device. Up to 2 MB per file, 20 PDF pages and 16 MB per search."
-                     : "Searches text in this folder and subfolders. Up to 256 KB per file and 16 MB per search.")
+                     ? "Searches text files, PDFs and images in this folder and its subfolders."
+                     : "Searches text files in this folder and its subfolders.")
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 20).padding(.vertical, 6)

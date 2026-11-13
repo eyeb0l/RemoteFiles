@@ -41,29 +41,23 @@ struct SearchIndexView: View {
     @State private var buildSession = 0
     @State private var progress = RemoteFolderSearch.Update()
     @State private var updatesAutomatically = false
+    @State private var optionsExpanded = false
 
     var body: some View {
         NavigationStack {
             List {
                 Section {
-                    Text(root).font(.caption).textSelection(.enabled)
+                    Text(root).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     if let snapshot {
                         Text("Saved \(snapshot.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(snapshot.documents.count) files")
                             .accessibilityIdentifier("saved-search-index-date")
-                        Text(snapshot.isPartial ? "Partial index. Some files or pages were skipped or a limit was reached." : "Snapshot of supported files at build time.")
-                        Text(updatesAutomatically
-                             ? "Remote files may have changed. This index updates automatically when you open this folder and it is more than \(Self.automaticMinutes) minutes old. Opening a result reads the current remote file."
-                             : "Remote files may have changed. Update to refresh. Opening a result reads the current remote file.")
-                        Text("PDF text: \(snapshot.extraction.includePDF ? "included" : "off") · OCR: \(snapshot.extraction.includeOCR ? "included" : "off") · Hidden files: \(snapshot.includeHidden ? "included" : "excluded")")
+                        if snapshot.isPartial {
+                            Text("Some files were skipped or a limit was reached.").font(.footnote).foregroundStyle(.secondary)
+                        }
                     } else {
-                        Text("Build an index to search saved text without rereading remote files. Extracted text stays on this device until removed or evicted by storage limits.")
+                        Text("Build an index to search the text in this folder’s files without reading them all again.")
+                            .font(.footnote).foregroundStyle(.secondary)
                     }
-                }.font(.footnote).foregroundStyle(.secondary)
-                Section("Build Options") {
-                    Toggle("Include PDF Text", isOn: $extraction.includePDF)
-                    Toggle("Recognize Text in Images and Scans", isOn: $extraction.includeOCR)
-                    Text("Up to 500 files, 2 MB per file, 16 MB transferred, 20 pages per PDF and 30 seconds to schedule work. Hidden files follow the folder setting. OCR runs on this device.")
-                        .font(.caption).foregroundStyle(.secondary)
                     if building {
                         ProgressView("Indexing… \(progress.filesSearched) files checked" +
                                      (progress.reusedFiles > 0 ? ", \(progress.reusedFiles) unchanged" : ""))
@@ -78,8 +72,6 @@ struct SearchIndexView: View {
                         if snapshot != nil {
                             Button("Update Index") { startBuild(rereadingEverything: false) }
                                 .disabled(!model.isForeground || model.isDisconnecting)
-                            Text("Update reads only new files and files whose size or modification date changed, and drops removed files. Changing these options reads every file. Rebuild reads every file, including one changed without a new size or date.")
-                                .font(.caption).foregroundStyle(.secondary)
                         }
                         Button(snapshot == nil ? "Build Index" : "Rebuild Index") { startBuild(rereadingEverything: true) }
                             .disabled(!model.isForeground || model.isDisconnecting)
@@ -99,10 +91,20 @@ struct SearchIndexView: View {
                     Section {
                         Toggle("Update Automatically", isOn: automaticBinding).disabled(building)
                     } footer: {
-                        Text("When you open this folder and the index is more than \(Self.automaticMinutes) minutes old, it updates in the background while the app is open and connected, using the index’s own options. Indexes don’t update while the app is closed.")
+                        Text("Updates while the app is open, when you visit this folder and the index is over \(Self.automaticMinutes) minutes old.")
                     }
                 }
-                Section("Search Options") { SearchOptionsControls(options: $options) }
+                Section {
+                    DisclosureGroup("Options", isExpanded: $optionsExpanded) {
+                        Toggle("Include PDF Text", isOn: $extraction.includePDF)
+                        Toggle("Recognize Text in Images and Scans", isOn: $extraction.includeOCR)
+                        SearchOptionsControls(options: $options)
+                    }
+                } footer: {
+                    if optionsExpanded {
+                        Text("PDF and image choices take effect the next time you build or update.")
+                    }
+                }
                 if let error { Section { Text(error).foregroundStyle(.red) } }
                 Section("Matches in Saved Text") {
                     if !query.isEmpty && results.isEmpty { Text("No matches in this index.").foregroundStyle(.secondary) }

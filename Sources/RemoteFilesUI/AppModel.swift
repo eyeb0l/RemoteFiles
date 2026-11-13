@@ -45,15 +45,13 @@ final class AppModel {
         }
     }
     enum Sheet: Identifiable {
-        case offlineFolder(ConnectionProfile, String, Bool)
-        case connection(UUID?), keys, offlineFiles, downloads, trust(HostEndpoint, HostKeyDetails), changed(HostEndpoint, HostKeyDetails, HostKeyDetails), unlock(IdentityMetadata)
+        case connection(UUID?), settings, offlineFiles, downloads, trust(HostEndpoint, HostKeyDetails), changed(HostEndpoint, HostKeyDetails, HostKeyDetails), unlock(IdentityMetadata)
         var id: String {
             switch self {
             case .connection: return "connection"
-            case .keys: return "keys"
+            case .settings: return "settings"
             case .offlineFiles: return "offlineFiles"
             case .downloads: return "downloads"
-            case .offlineFolder: return "offlineFolder"
             case .trust: return "trust"
             case .changed: return "changed"
             case .unlock: return "unlock"
@@ -943,7 +941,19 @@ final class AppModel {
             documents.removeValue(forKey: k); documentOrder.removeAll { $0 == k }
         }
     }
+    /// The switch under way. Requests run one at a time, so a second request made while the first
+    /// is disconnecting can't save the Demo library as the one to restore.
+    private var demoSwitch: Task<Void, Never>?
     func setDemo(_ enabled: Bool) async {
+        while let pending = demoSwitch { await pending.value }
+        guard enabled != demo else { return }
+        // Cleared by the switch itself, before any waiting request resumes: one that found it still
+        // set would await the finished task again without suspending, and never let this one finish.
+        let work = Task { await switchDemo(to: enabled); demoSwitch = nil }
+        demoSwitch = work
+        await work.value
+    }
+    private func switchDemo(to enabled: Bool) async {
         // Other windows' downloads go on. This window's place among the queue's windows goes when `loadDownloads`
         // replaces its registration; if no window is then left in the foreground, the queue is interrupted as when
         // the last window closes.

@@ -30,10 +30,7 @@ struct DownloadsView: View {
                                     })
                     }
                 } footer: {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(model.backgroundDownloads.status)
-                        Text("Up to 4\u{00A0}GiB per file and 16\u{00A0}GiB total, always leaving 1\u{00A0}GiB free. Retry continues where a download stopped, unless the file has changed.")
-                    }
+                    Text(model.backgroundDownloads.status)
                     .font(.footnote).foregroundStyle(.secondary)
                     .padding(.top, 8)
                 }

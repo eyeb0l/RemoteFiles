@@ -6,7 +6,11 @@ Connect to an existing SSH/SFTP server, verify its identity, and understand how 
 
 ## Before you connect
 
-The connection form shows what every connection needs. **Advanced** holds the SSH port, Tailscale tips and jump host; it opens by itself when editing a connection that uses them.
+The connection form shows what every connection needs. **Advanced** holds the SSH port and jump host; it opens by itself when editing a connection that uses them. **Before you connect** summarises the requirements below, including a Tailscale tip. Connections saved with the former **Show Tailscale Setup Tips** option keep that stored value, which never changed how the app connects.
+
+<img src="screenshots/simplified-ui/connection.png" width="240" alt="Add Connection form with Server and SSH identity sections, and Advanced expanded to show only the SSH port and Use Jump Host">
+
+*Simulator screenshot of a new connection with Advanced expanded.*
 
 You'll need:
 
@@ -27,7 +31,7 @@ Browsing is read only. The optional [public-key installer](PUBLIC_KEY_INSTALLATI
 
    If the server already supports SSH password authentication, **Settings → SSH Keys → select identity → Install Public Key on Server** can append the public key after host verification and explicit confirmation.
 
-3. **Check the network route.** For example, to use Tailscale away from home, install and sign in independently on both devices, then use the server's MagicDNS hostname or Tailscale IP. Tailnet policy must permit the SSH port (22 by default). This is ordinary OpenSSH over Tailscale, not the separate Tailscale SSH service; no router port forwarding is needed. The editor's **Show Tailscale Setup Tips** switch only shows guidance. RemoteFiles uses the network path iOS provides to the hostname you enter.
+3. **Check the network route.** For example, to use Tailscale away from home, install and sign in independently on both devices, then use the server's MagicDNS hostname or Tailscale IP. Tailnet policy must permit the SSH port (22 by default). This is ordinary OpenSSH over Tailscale, not the separate Tailscale SSH service; no router port forwarding is needed. RemoteFiles uses the network path iOS provides to the hostname you enter.
 
 4. **Enter connection details.** Supply the server account's username, hostname, identity and optional absolute project directory. An empty starting directory uses the server's default directory; literal `~` is not expanded locally.
 

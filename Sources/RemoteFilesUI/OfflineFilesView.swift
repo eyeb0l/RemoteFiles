@@ -274,7 +274,7 @@ struct OfflineFilesView: View {
                         }
                     }
                     if model.demo { Text("Demo copies are separate from your files.") }
-                    Text("Copies update only when you choose Update, which needs a connection. Up to 128 MiB per file. Removing a copy never touches the server. Document links open copies saved here; Markdown images aren’t loaded.")
+                    Text("Saved copies stay as they are until you update them. Removing a copy never changes the server.")
                 }
                 .font(.footnote).foregroundStyle(.secondary)
                 .padding(.top, 8)

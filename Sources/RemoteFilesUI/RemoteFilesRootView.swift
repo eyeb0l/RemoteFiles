@@ -193,10 +193,9 @@ struct AppNavigation: View {
                     NavigationStack {
                         switch sheet {
                         case .connection(let id): ConnectionEditor(model: model, existing: id.flatMap(model.profile))
-                        case .keys: KeyManagerView(model: model)
+                        case .settings: SettingsView(model: model)
                         case .offlineFiles: EmptyView()
                         case .downloads: DownloadsView(model: model)
-                        case .offlineFolder(let profile, let path, let hidden): OfflineFolderSetupView(model: model, profile: profile, path: path, includeHidden: hidden)
                         case .trust(let endpoint, let key): TrustView(model: model, endpoint: endpoint, key: key)
                         case .changed(let endpoint, let previous, let current): ChangedHostView(model: model, endpoint: endpoint, previous: previous, current: current)
                         case .unlock(let identity): UnlockKeyView(model: model, identity: identity)
@@ -484,10 +483,7 @@ struct HomeView: View {
                 }
             }
             ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    if !model.demo { Button("SSH Keys", systemImage: "key") { model.sheet = .keys } }
-                    Button(model.demo ? "Leave Demo" : "Explore Demo", systemImage: "sparkles") { Task { await model.setDemo(!model.demo) } }
-                } label: { Label("Settings", systemImage: "ellipsis") }
+                Button("Settings", systemImage: "gearshape") { model.sheet = .settings }
             }
             ToolbarItem(placement: .bottomBar) {
                 Button { model.sheet = .offlineFiles } label: { BarLabel(title: "Offline", symbol: "pin") }

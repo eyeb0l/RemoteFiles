@@ -29,7 +29,7 @@ extension XCUIApplication {
         return app
     }
 
-    /// The connection form keeps its port, Tailscale and jump-host options under Advanced.
+    /// The connection form keeps its port and jump-host options under Advanced.
     func expandAdvancedConnectionOptions() {
         let advanced = buttons["Advanced"]
         for _ in 0..<4 { if advanced.exists && advanced.isHittable { break }; swipeUp() }
@@ -52,9 +52,8 @@ final class RemoteFilesUITests: XCTestCase {
             app.buttons["Remove Offline Folder"].tap()
             app.buttons["Folder actions"].tap()
         }
+        // Saving starts straight away, following the folder's Show Hidden Files setting.
         XCTAssertTrue(app.buttons["Keep Folder Offline"].waitForExistence(timeout: 5)); app.buttons["Keep Folder Offline"].tap()
-        XCTAssertTrue(app.switches["Include Hidden Files"].waitForExistence(timeout: 5))
-        app.buttons["Save Folder Offline"].tap()
         let saved = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.otherElements["offline-save-progress"])
         wait(for: [saved], timeout: 15)
         app.buttons["Folder actions"].tap()
@@ -1240,6 +1239,9 @@ final class RemoteFilesUITests: XCTestCase {
             reveal(delete); delete.tap()
             XCTAssertTrue(build.waitForExistence(timeout: 5))
         }
+        // Extraction choices sit under Options, collapsed by default.
+        let options = app.buttons["Options"]
+        reveal(options); options.tap()
         let ocr = app.switches["Recognize Text in Images and Scans"]
         reveal(ocr)
         pressSwitch(ocr, name: "OCR")
@@ -1861,10 +1863,6 @@ extension RealServerUITests {
                 if !field.isHittable { app.swipeUp() }
                 field.tap(); field.typeText(value)
             }
-            app.expandAdvancedConnectionOptions()
-            let tailscale = app.switches["Show Tailscale Setup Tips"]
-            if !tailscale.isHittable { app.swipeUp() }
-            if tailscale.value as? String == "0" { tailscale.tap() }
             app.buttons["Save"].tap()
         }
         XCTAssertTrue(connection.waitForExistence(timeout: 10))

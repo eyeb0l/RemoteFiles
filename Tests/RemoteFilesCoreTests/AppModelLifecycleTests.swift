@@ -539,6 +539,24 @@ private actor KeyedDownloadService: RemoteFileService, RemoteFileSessionClosing 
         XCTAssertTrue(model.offlineFolders.isEmpty); XCTAssertTrue(model.offlinePins.isEmpty)
     }
 
+    func testRepeatedDemoRequestsWhileSwitchingKeepTheRealLibraryToRestore() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try AppModel(directory: directory, fileService: BackgroundExportService())
+        await model.load()
+        let profile = ConnectionProfile(name: "Real", host: "real.invalid", username: "me", identityID: UUID())
+        model.metadata.connections = [profile]
+        // Settings' Explore Demo stays on screen while the first request disconnects, so it can be chosen twice.
+        async let first: Void = model.setDemo(true)
+        async let second: Void = model.setDemo(true)
+        _ = await (first, second)
+        XCTAssertTrue(model.demo)
+        XCTAssertNotEqual(model.metadata.connections, [profile])
+        await model.setDemo(false)
+        XCTAssertFalse(model.demo)
+        XCTAssertEqual(model.metadata.connections, [profile], "Leaving Demo restores the library it replaced")
+    }
+
     func testWorkspaceKeepsFolderAlongsidePreviewAndSharesRoutesWithCompactNavigation() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -641,7 +659,7 @@ private actor KeyedDownloadService: RemoteFileService, RemoteFileSessionClosing 
         model.metadata.connections = [profile]
         let recent = SavedLocation(connectionID: profile.id, path: entry.path, name: entry.name); model.metadata.recents = [recent]
         model.routes = [.folder(profile.id, "/"), .folder(profile.id, "/nested"), .file(profile.id, entry)]
-        model.sheet = .keys; model.errorMessage = "old failure"; model.cache(Data("stale".utf8), id: profile.id, path: entry.path)
+        model.sheet = .settings; model.errorMessage = "old failure"; model.cache(Data("stale".utf8), id: profile.id, path: entry.path)
         let read = Task { try await service.readFile(profile: profile, path: entry.path, limit: 1024) }
         try await wait { await base.reading() }
         let revision = model.sessionRevision
@@ -931,7 +949,7 @@ private actor KeyedDownloadService: RemoteFileService, RemoteFileSessionClosing 
         XCTAssertEqual(model.sheet?.id, "offlineFiles")
         let disconnects = await service.disconnects
         XCTAssertEqual(disconnects, 1, "Keeping the local reader must not keep the SSH session alive")
-        model.sheet = .keys
+        model.sheet = .settings
         await model.background()
         XCTAssertNil(model.sheet, "Credential presentation remains transient")
     }
