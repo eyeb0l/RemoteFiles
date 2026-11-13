@@ -25,6 +25,10 @@ The preview does not ask users to remove protection from existing keys or silent
 
 Choose **Settings → SSH Keys → Import Key**, then choose a file or use the native **Paste** control. Give the identity a name and enter its passphrase if encrypted. Validation finishes before anything is saved. The details screen shows the actual algorithm, canonical public key and SHA-256 fingerprint.
 
+<img src="screenshots/simplified-ui/settings.png" width="240" alt="Settings screen listing SSH Keys, Explore Demo and the app version">
+
+*Settings, where SSH Keys and Demo live.*
+
 | Import | RSA | ECDSA |
 | --- | --- | --- |
 | <img src="screenshots/ssh-identities/import.png" width="240" alt="Import form using the native paste control"> | <img src="screenshots/ssh-identities/rsa.png" width="240" alt="Imported RSA identity with its public key and fingerprint"> | <img src="screenshots/ssh-identities/ecdsa.png" width="240" alt="Imported ECDSA P-256 identity with its public key and fingerprint"> |

@@ -135,6 +135,10 @@ Choose **Folder actions → Saved Search Index**, then tap **Build Index**. PDF 
 
 The saved view shows when the index was built, how many files it contains and whether coverage is partial. **Options** opens on the PDF and OCR choices the index was built with; changing them applies to the next build or update. Search its saved contents with the same case, whole-word and file-type controls; these queries perform no remote reads. Indexes persist across app launches. To reflect remote changes, choose **Update Index** or **Rebuild Index**, or turn on [**Update Automatically**](#updating-automatically); **Delete Index** removes the saved text.
 
+<img src="screenshots/simplified-ui/index-options.png" width="240" alt="Saved Search Index with Options expanded, showing Include PDF Text on, Recognize Text in Images and Scans off, Match Case, Whole Words and File Type">
+
+*Saved Search Index with **Options** expanded, from a Demo simulator run.*
+
 <a id="updating-an-index"></a>
 **Update Index** lists every folder again, so it adds new files and drops removed ones, but it reads a file only when it is new or the listing shows a different size or modification date. Other files keep their saved text, and the view then says how many files it read and how many it kept. Files the listing gives no modification date for, and files whose saved text stopped at a limit, are always read again. Changing the PDF, OCR or hidden-file choices makes the next update read every file; reopening the sheet starts from the saved index's choices. **Rebuild Index** reads every file. Use it after a change that keeps a file's size and modification date, such as an edit within the same second as the last read, or a copy that preserves dates.
 

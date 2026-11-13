@@ -8,6 +8,10 @@ Connect to an existing SSH/SFTP server, verify its identity, and understand how 
 
 The connection form shows what every connection needs. **Advanced** holds the SSH port and jump host; it opens by itself when editing a connection that uses them. **Before you connect** summarises the requirements below, including a Tailscale tip. Connections saved with the former **Show Tailscale Setup Tips** option keep that stored value, which never changed how the app connects.
 
+<img src="screenshots/simplified-ui/connection.png" width="240" alt="Add Connection form with Server and SSH identity sections, and Advanced expanded to show only the SSH port and Use Jump Host">
+
+*Simulator screenshot of a new connection with Advanced expanded.*
+
 You'll need:
 
 - An SSH server with SFTP enabled and an account that can read the files you want.
