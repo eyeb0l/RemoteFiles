@@ -10,6 +10,28 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 13 November 2026: live search dismissal exposed as Cancel rather than Close
+
+After #118, main run [43328502119, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/43328502119/attempts/1)
+passed both quick lanes but failed
+`RemoteFilesUITests.testLivePDFAndOCRSearchFindsPagesWithExplicitOptions` at its
+first `closeLiveSearch()` call. The UI lane had 35 passing methods, one failure
+and nine expected skips. The failure was unrelated to #118's core-test-only fix.
+
+The retained xcresult accessibility hierarchy shows the `Search samples`
+navigation bar containing a search field with `INVOICE`, the selected `Contents`
+scope and a button labelled **Cancel**. The completed search correctly reported
+no matching contents and three excluded files. The test instead waited five
+seconds for a button labelled **Close**, which was absent throughout the wait.
+This is a locator mismatch, not evidence of a search timeout or OCR failure;
+extraction had not yet been enabled.
+
+The dismissal query now accepts either native label, scoped to buttons in that
+same navigation bar. Its five-second wait, both dismissal taps and all PDF/OCR
+result and page assertions remain unchanged. No retry or production change was
+added. The original logs, xcresult, recording and accessibility attachments were
+preserved before editing the test.
+
 ## 12 November 2026: index stop-listing test assumed a listing completion order
 
 Main run [43317582167, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/43317582167/attempts/1)
