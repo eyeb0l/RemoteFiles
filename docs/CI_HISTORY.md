@@ -42,6 +42,27 @@ into the enclosing actor-isolated helper preserves isolation without scheduling
 another task. The corrected diagnostic structure type-checks against the iOS
 simulator SDK in Swift 5 language mode; the original focus failure remains open.
 
+Run [43439431031](https://github.com/eyeb0l/RemoteFiles/actions/runs/43439431031)
+passed all four labelled focus phases: initial editing focus took 3.273 seconds,
+covering took 1.543 seconds, uncovering 1.007 seconds and the explicit Find
+request 1.037 seconds. Instead,
+`testFindRestoresANativeEscapeResponderAfterHeadings` failed its native-responder
+wait. Its log also recorded SwiftUI's state-during-view-update warning at the
+responder handoff. Again, the lane had 755 passes, four allowed skips and one
+failure; neither a timeout increase nor a production workaround is justified
+by these observations alone.
+
+The restoration fixture had waited only for view attachment before presenting
+Headings, and assigned a new hosting root without checking that its covered or
+uncovered state had reached UIKit. It now waits for initial editing focus, then
+for the field to relinquish focus and the cancel responder to become disabled,
+and finally for the uncovered state before requesting native restoration. The
+editing-focus test also checks that the cancel responder reflects each coverage
+transition. This removes unverified setup ordering from the tests while retaining
+their five-second deadlines, actual first-responder assertion, Escape dispatch,
+query preservation and reader-preservation checks. CI must verify the corrected
+fixture; the warning's causal role remains unconfirmed.
+
 ## 13 November 2026: live search dismissal exposed as Cancel rather than Close
 
 After #118, main run [43328502119, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/43328502119/attempts/1)

@@ -229,28 +229,34 @@ import SwiftUI
             if let field = view as? UITextField { return field }
             return view.subviews.lazy.compactMap { findField(in: $0) }.first
         }
-        func awaitFocus(_ expected: Bool, phase: String) {
+        func cancelResponder(in view: UIView) -> FindCancelResponder.KeyView? {
+            if let responder = view as? FindCancelResponder.KeyView { return responder }
+            return view.subviews.lazy.compactMap { cancelResponder(in: $0) }.first
+        }
+        func awaitFocus(_ expected: Bool, covered: Bool = false, phase: String) {
             let started = ProcessInfo.processInfo.systemUptime
             func record(_ point: String) {
                 let field = findField(in: host.view)
                 print("Find focus \(phase) \(point): elapsed=\(ProcessInfo.processInfo.systemUptime - started), "
                       + "field=\(field != nil), attached=\(field?.window != nil), "
                       + "firstResponder=\(String(describing: field?.isFirstResponder)), "
-                      + "keyWindow=\(window.isKeyWindow), request=\(navigation.findFocusRequest)")
+                      + "keyWindow=\(window.isKeyWindow), request=\(navigation.findFocusRequest), "
+                      + "cancelEnabled=\(String(describing: cancelResponder(in: host.view)?.canBecomeFirstResponder))")
             }
             XCTContext.runActivity(named: phase) { _ in
                 record("start")
                 let changed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
                     findField(in: host.view)?.isFirstResponder == expected
+                        && cancelResponder(in: host.view)?.canBecomeFirstResponder == !covered
                 }, object: nil)
-                changed.expectationDescription = "\(phase): Find field first responder == \(expected)"
+                changed.expectationDescription = "\(phase): Find field first responder == \(expected), covered == \(covered)"
                 wait(for: [changed], timeout: 5)
                 record("end")
             }
         }
         awaitFocus(true, phase: "Initial Find focus")
         host.rootView = ReaderFindBar(navigation: navigation, inSource: false, isCovered: true)
-        awaitFocus(false, phase: "Headings relinquishes Find focus")
+        awaitFocus(false, covered: true, phase: "Headings relinquishes Find focus")
         XCTAssertTrue(navigation.isFinding, "Covering Find keeps the bar and query for its return")
         XCTAssertEqual(navigation.query, "paragraph")
         host.rootView = ReaderFindBar(navigation: navigation, inSource: false, isCovered: false)
@@ -275,20 +281,40 @@ import SwiftUI
             if let keyView = view as? FindCancelResponder.KeyView { return keyView }
             return view.subviews.lazy.compactMap { responder(in: $0) }.first
         }
+        func findField(in view: UIView) -> UITextField? {
+            if let field = view as? UITextField { return field }
+            return view.subviews.lazy.compactMap { findField(in: $0) }.first
+        }
         host.loadViewIfNeeded()
         let attached = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            responder(in: host.view)?.window != nil
+            responder(in: host.view)?.window != nil && findField(in: host.view)?.isFirstResponder == true
         }, object: nil)
+        attached.expectationDescription = "Find is attached and its initial editing focus has arrived"
         wait(for: [attached], timeout: 5)
         host.rootView = ReaderFindBar(navigation: navigation, inSource: false, isCovered: true)
+        // Assigning rootView only schedules a SwiftUI update. Wait for that update and the
+        // initial text-field focus to settle before starting the presentation lifecycle.
+        let covered = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            responder(in: host.view)?.canBecomeFirstResponder == false
+                && findField(in: host.view)?.isFirstResponder == false
+        }, object: nil)
+        covered.expectationDescription = "Covered Find has relinquished editing and cancel focus"
+        wait(for: [covered], timeout: 5)
         let headings = UIViewController()
         present(headings, from: host)
         dismiss(headings)
         host.rootView = ReaderFindBar(navigation: navigation, inSource: false, isCovered: false)
+        let uncovered = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            responder(in: host.view)?.canBecomeFirstResponder == true
+                && findField(in: host.view)?.isFirstResponder == false
+        }, object: nil)
+        uncovered.expectationDescription = "Uncovered Find has applied its enabled state before restoration"
+        wait(for: [uncovered], timeout: 5)
         navigation.restoreFindKeyboard()
         let restored = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             responder(in: host.view)?.isFirstResponder == true
         }, object: nil)
+        restored.expectationDescription = "Headings dismissal restores Find's native Escape responder"
         wait(for: [restored], timeout: 5)
         XCTAssertEqual(navigation.query, "paragraph")
         let key = try XCTUnwrap(responder(in: host.view)?.keyCommands?.first)
