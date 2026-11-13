@@ -539,6 +539,24 @@ private actor KeyedDownloadService: RemoteFileService, RemoteFileSessionClosing 
         XCTAssertTrue(model.offlineFolders.isEmpty); XCTAssertTrue(model.offlinePins.isEmpty)
     }
 
+    func testRepeatedDemoRequestsWhileSwitchingKeepTheRealLibraryToRestore() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try AppModel(directory: directory, fileService: BackgroundExportService())
+        await model.load()
+        let profile = ConnectionProfile(name: "Real", host: "real.invalid", username: "me", identityID: UUID())
+        model.metadata.connections = [profile]
+        // Settings' Explore Demo stays on screen while the first request disconnects, so it can be chosen twice.
+        async let first: Void = model.setDemo(true)
+        async let second: Void = model.setDemo(true)
+        _ = await (first, second)
+        XCTAssertTrue(model.demo)
+        XCTAssertNotEqual(model.metadata.connections, [profile])
+        await model.setDemo(false)
+        XCTAssertFalse(model.demo)
+        XCTAssertEqual(model.metadata.connections, [profile], "Leaving Demo restores the library it replaced")
+    }
+
     func testWorkspaceKeepsFolderAlongsidePreviewAndSharesRoutesWithCompactNavigation() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
