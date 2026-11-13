@@ -10,6 +10,30 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 13 November 2026: Find focus regression needs phase-specific CI evidence
+
+PR #121 run [43432298598, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/43432298598/attempts/1)
+passed 755 simulator-core tests, skipped four allowed methods and failed only
+`PlainKeyCommandsTests.testFindRelinquishesFocusWhenCoveredAndCanBeFocusedAgain`.
+Nine of the ten keyboard tests passed, including native Escape responder
+restoration. The failing method took 15.107 seconds and reported a five-second
+predicate timeout at the shared helper, which served four different focus waits.
+
+The retained log contains keyboard-service XPC invalidation near the assertion,
+but neither the activity tree nor the unsymbolicated call stack identifies the
+failed phase. Those messages and the runner's load do not establish causation.
+The same ten-test patch had passed on iOS 27.2; this hosted run used iOS 27.0.
+The attempted follow-up on the MacBook executed no tests because no local
+simulator was available; its older checkout also lacked settings definitions
+referenced by the rebased source.
+
+The focus helper now names each phase in XCTest activities and expectation
+descriptions, and records elapsed time, field attachment, first-responder state,
+key-window state and the Find request counter before and after the wait. The
+four predicates, five-second deadlines and query assertions are unchanged.
+This is diagnostic coverage, not a confirmed fix or an assertion that a rerun
+will pass. Production code is unchanged.
+
 ## 13 November 2026: live search dismissal exposed as Cancel rather than Close
 
 After #118, main run [43328502119, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/43328502119/attempts/1)

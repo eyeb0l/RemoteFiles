@@ -229,22 +229,35 @@ import SwiftUI
             if let field = view as? UITextField { return field }
             return view.subviews.lazy.compactMap { findField(in: $0) }.first
         }
-        func awaitFocus(_ expected: Bool) {
-            let changed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-                findField(in: host.view)?.isFirstResponder == expected
-            }, object: nil)
-            wait(for: [changed], timeout: 5)
+        func awaitFocus(_ expected: Bool, phase: String) {
+            XCTContext.runActivity(named: phase) { _ in
+                let started = ProcessInfo.processInfo.systemUptime
+                func record(_ point: String) {
+                    let field = findField(in: host.view)
+                    print("Find focus \(phase) \(point): elapsed=\(ProcessInfo.processInfo.systemUptime - started), "
+                          + "field=\(field != nil), attached=\(field?.window != nil), "
+                          + "firstResponder=\(String(describing: field?.isFirstResponder)), "
+                          + "keyWindow=\(window.isKeyWindow), request=\(navigation.findFocusRequest)")
+                }
+                record("start")
+                let changed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                    findField(in: host.view)?.isFirstResponder == expected
+                }, object: nil)
+                changed.expectationDescription = "\(phase): Find field first responder == \(expected)"
+                wait(for: [changed], timeout: 5)
+                record("end")
+            }
         }
-        awaitFocus(true)
+        awaitFocus(true, phase: "Initial Find focus")
         host.rootView = ReaderFindBar(navigation: navigation, inSource: false, isCovered: true)
-        awaitFocus(false)
+        awaitFocus(false, phase: "Headings relinquishes Find focus")
         XCTAssertTrue(navigation.isFinding, "Covering Find keeps the bar and query for its return")
         XCTAssertEqual(navigation.query, "paragraph")
         host.rootView = ReaderFindBar(navigation: navigation, inSource: false, isCovered: false)
         // Uncovering starts dismissal; the reader requests focus only when it completes.
-        awaitFocus(false)
+        awaitFocus(false, phase: "Uncovered Find waits for an editing request")
         navigation.startFind()
-        awaitFocus(true)
+        awaitFocus(true, phase: "Explicit Find request restores editing focus")
         XCTAssertEqual(try XCTUnwrap(findField(in: host.view)).text, "paragraph")
     }
 
