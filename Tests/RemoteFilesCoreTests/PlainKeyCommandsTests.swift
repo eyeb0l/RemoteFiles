@@ -230,15 +230,15 @@ import SwiftUI
             return view.subviews.lazy.compactMap { findField(in: $0) }.first
         }
         func awaitFocus(_ expected: Bool, phase: String) {
+            let started = ProcessInfo.processInfo.systemUptime
+            func record(_ point: String) {
+                let field = findField(in: host.view)
+                print("Find focus \(phase) \(point): elapsed=\(ProcessInfo.processInfo.systemUptime - started), "
+                      + "field=\(field != nil), attached=\(field?.window != nil), "
+                      + "firstResponder=\(String(describing: field?.isFirstResponder)), "
+                      + "keyWindow=\(window.isKeyWindow), request=\(navigation.findFocusRequest)")
+            }
             XCTContext.runActivity(named: phase) { _ in
-                let started = ProcessInfo.processInfo.systemUptime
-                func record(_ point: String) {
-                    let field = findField(in: host.view)
-                    print("Find focus \(phase) \(point): elapsed=\(ProcessInfo.processInfo.systemUptime - started), "
-                          + "field=\(field != nil), attached=\(field?.window != nil), "
-                          + "firstResponder=\(String(describing: field?.isFirstResponder)), "
-                          + "keyWindow=\(window.isKeyWindow), request=\(navigation.findFocusRequest)")
-                }
                 record("start")
                 let changed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
                     findField(in: host.view)?.isFirstResponder == expected

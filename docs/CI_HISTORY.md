@@ -34,6 +34,14 @@ four predicates, five-second deadlines and query assertions are unchanged.
 This is diagnostic coverage, not a confirmed fix or an assertion that a rerun
 will pass. Production code is unchanged.
 
+The first diagnostic push, run
+[43438262146](https://github.com/eyeb0l/RemoteFiles/actions/runs/43438262146),
+failed compilation before executing tests: the logging function nested inside
+the XCTest activity closure lost main-actor isolation. Moving its declaration
+into the enclosing actor-isolated helper preserves isolation without scheduling
+another task. The corrected diagnostic structure type-checks against the iOS
+simulator SDK in Swift 5 language mode; the original focus failure remains open.
+
 ## 13 November 2026: live search dismissal exposed as Cancel rather than Close
 
 After #118, main run [43328502119, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/43328502119/attempts/1)
