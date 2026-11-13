@@ -1,9 +1,14 @@
 #if os(iOS)
 import XCTest
 import UIKit
+import SwiftUI
 @testable import RemoteFilesUI
 
 @MainActor final class PlainKeyCommandsTests: XCTestCase {
+    // A hosted focus wait returned after 14 seconds with the required state. These tests
+    // assert responder ownership, not a five-second performance target. See docs/CI_HISTORY.md.
+    private let focusTimeout: TimeInterval = 30
+
     func testArrowsMoveSelectionAndStopAtEitherEnd() {
         let ids = ["a", "b", "c"]
         XCTAssertEqual(FolderKeyboardSelection.moved(nil, by: 1, in: ids), "a", "Down starts at the top")
@@ -49,8 +54,8 @@ import UIKit
 
         // With nothing presented, Escape closes the root's reader's Find, never Offline Files'.
         var closed = ""
-        keys.closeFind = { closed = "root" }; keys.offlineFilesShows = true
-        keys.setOfflineReader(UUID(), ReaderCommandActions(context: "offline", closeFind: { closed = "offline" }))
+        keys.closeFind = { closed = "root" }
+        keys.setOfflineReader(UUID(), ReaderCommandActions(context: "offline", closeFind: { closed = "offline" }), in: UUID())
         keys.frontmostCloseFind?()
         XCTAssertEqual(closed, "root")
         keys.closeFind = nil
@@ -110,17 +115,17 @@ import UIKit
         window.rootViewController = root; window.makeKeyAndVisible()
         defer { window.isHidden = true }
         keys.attach(root)
-        root.present(sheet, animated: false)
-        settle { root.presentedViewController === sheet }
+        present(sheet, from: root)
         XCTAssertTrue(root.presentedViewController === sheet)
-        keys.offlineFilesShows = true
+        let scope = UUID()
+        keys.attachOfflineFiles(sheet, in: scope)
         let titles = { Set(sheet.keyCommands?.map(\.title) ?? []) }
         XCTAssertEqual(titles(), ["Close Find", "Back", "Find", "Find Next", "Find Previous", "Show Source", "Headings…"], "The sheet's keys are installed as soon as it shows")
         XCTAssertTrue(sheet.keyCommands?.allSatisfy(\.wantsPriorityOverSystemBehavior) == true)
         XCTAssertFalse(keys.canPerform(find) || keys.canPerform(escape) || keys.canPerform(back), "Nothing to act on, so every key declines")
 
         var ran = ""
-        keys.offlineBack = { ran = "back" }
+        keys.setOfflineBack({ ran = "back" }, in: scope)
         XCTAssertTrue(keys.canPerform(back))
         keys.frontmostOfflineBack?(); XCTAssertEqual(ran, "back")
 
@@ -132,7 +137,7 @@ import UIKit
 
         let reader = UUID()
         var actions = ReaderCommandActions(context: "offline|a", find: { ran = "find" }, toggleSource: { ran = "source" })
-        keys.setOfflineReader(reader, actions)
+        keys.setOfflineReader(reader, actions, in: scope)
         XCTAssertEqual(sheet.keyCommands?.count, 7, "Handing over keeps each key installed once")
         XCTAssertTrue(keys.canPerform(find) && keys.canPerform(toggleSource))
         XCTAssertFalse(keys.canPerform(findNext) || keys.canPerform(escape), "Keys for actions the reader lacks decline; Escape waits for Find")
@@ -140,42 +145,203 @@ import UIKit
         keys.frontmostReader?.find?(); XCTAssertEqual(ran, "find")
 
         actions.findNext = {}; actions.closeFind = { ran = "close" }; actions.showsSource = true
-        keys.setOfflineReader(reader, actions)
+        keys.setOfflineReader(reader, actions, in: scope)
         XCTAssertTrue(titles().contains("Show Rendered") && !titles().contains("Show Source"), "The source key's title follows the reader")
         XCTAssertTrue(keys.canPerform(escape) && keys.canPerform(findNext))
         keys.frontmostCloseFind?(); XCTAssertEqual(ran, "close")
 
         // Something presented over the sheet keeps the keys.
         let headings = UIViewController()
-        sheet.present(headings, animated: false)
-        settle { sheet.presentedViewController === headings }
+        present(headings, from: sheet)
         XCTAssertTrue(sheet.presentedViewController === headings)
         XCTAssertFalse(keys.canPerform(find) || keys.canPerform(escape) || keys.canPerform(back))
         XCTAssertNil(keys.frontmostOfflineReader)
         XCTAssertNil(keys.frontmostReader, "A covering sheet must not restore the scene's Find actions")
-        headings.dismiss(animated: false)
-        settle { sheet.presentedViewController == nil }
+        dismiss(headings)
+        XCTAssertNil(sheet.presentedViewController)
         XCTAssertTrue(keys.canPerform(find) && keys.canPerform(back))
 
         // A reader pushed over another keeps its commands when the first hands over nil after it.
         let second = UUID()
-        keys.setOfflineReader(second, ReaderCommandActions(context: "offline|b", find: { ran = "second" }))
-        keys.setOfflineReader(reader, nil)
+        keys.setOfflineReader(second, ReaderCommandActions(context: "offline|b", find: { ran = "second" }), in: scope)
+        keys.setOfflineReader(reader, nil, in: scope)
         keys.frontmostOfflineReader?.find?(); XCTAssertEqual(ran, "second")
 
         // A reader leaving the screen leaves the keys declining; the sheet closing removes them.
-        keys.setOfflineReader(second, nil)
+        keys.setOfflineReader(second, nil, in: scope)
         XCTAssertFalse(keys.canPerform(find))
         XCTAssertEqual(sheet.keyCommands?.count, 7)
-        keys.offlineFilesShows = false
+        keys.removeOfflineFiles(scope)
         XCTAssertEqual(sheet.keyCommands ?? [], [])
         keys.frontmostReader?.find?(); XCTAssertEqual(ran, "scene", "With the sheet gone, the Find items act on the scene's reader")
-        sheet.dismiss(animated: false)
-        settle { root.presentedViewController == nil }
+        dismiss(sheet)
+        XCTAssertNil(root.presentedViewController)
     }
-    private func settle(_ done: () -> Bool) {
-        let deadline = Date().addingTimeInterval(2)
-        while !done() && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+    func testOfflineCommandsFollowTheirWindowAndInstallAfterActionsArrive() {
+        let keys = PlainKeyCommands()
+        let first = UIViewController(), second = UIViewController()
+        let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene
+        let windows = [first, second].map { root in
+            let window = scene.map(UIWindow.init(windowScene:)) ?? UIWindow(frame: UIScreen.main.bounds)
+            window.rootViewController = root
+            window.makeKeyAndVisible()
+            return window
+        }
+        defer { windows.forEach { $0.isHidden = true } }
+        let firstSheet = UIViewController(), secondSheet = UIViewController()
+        present(firstSheet, from: first)
+        present(secondSheet, from: second)
+        let firstScope = UUID(), secondScope = UUID(), reader = UUID()
+        var ran = ""
+        // SwiftUI can publish actions before the presentation appears, with another root active.
+        keys.attach(second)
+        keys.setOfflineReader(reader, ReaderCommandActions(context: "first", find: { ran = "first find" },
+                                                          closeFind: { ran = "first close" }), in: firstScope)
+        keys.attachOfflineFiles(firstSheet, in: firstScope)
+        XCTAssertEqual(firstSheet.keyCommands?.count, 7)
+        XCTAssertFalse(keys.offlineFilesShows, "Another window's offline sheet does not cover this one")
+        XCTAssertFalse(keys.canPerform(find) || keys.canPerform(escape))
+        keys.attach(first)
+        XCTAssertTrue(keys.canPerform(find) && keys.canPerform(escape))
+        keys.frontmostCloseFind?(); XCTAssertEqual(ran, "first close")
+
+        keys.setOfflineReader(reader, ReaderCommandActions(context: "second", find: { ran = "second find" }), in: secondScope)
+        keys.attachOfflineFiles(secondSheet, in: secondScope)
+        keys.attach(second)
+        keys.frontmostReader?.find?(); XCTAssertEqual(ran, "second find")
+        XCTAssertFalse(keys.canPerform(escape), "The other window's open Find cannot consume Escape here")
+        keys.attach(first)
+        keys.frontmostReader?.find?(); XCTAssertEqual(ran, "first find")
+        XCTAssertTrue(keys.canPerform(escape))
+        keys.removeOfflineFiles(secondScope)
+        XCTAssertTrue(keys.canPerform(find) && keys.canPerform(escape), "Closing another sheet preserves this one's actions")
+        XCTAssertEqual(firstSheet.keyCommands?.count, 7)
+        keys.removeOfflineFiles(firstScope)
+    }
+
+    func testFindRelinquishesFocusWhenCoveredAndCanBeFocusedAgain() throws {
+        let navigation = ReaderNavigationState()
+        navigation.startFind()
+        navigation.query = "paragraph"
+        let host = UIHostingController(rootView: ReaderFindBar(navigation: navigation, inSource: false, isCovered: false))
+        let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene
+        let window = scene.map(UIWindow.init(windowScene:)) ?? UIWindow(frame: UIScreen.main.bounds)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        func findField(in view: UIView) -> UITextField? {
+            if let field = view as? UITextField { return field }
+            return view.subviews.lazy.compactMap { findField(in: $0) }.first
+        }
+        func cancelResponder(in view: UIView) -> FindCancelResponder.KeyView? {
+            if let responder = view as? FindCancelResponder.KeyView { return responder }
+            return view.subviews.lazy.compactMap { cancelResponder(in: $0) }.first
+        }
+        func awaitFocus(_ expected: Bool, covered: Bool = false, phase: String) {
+            let started = ProcessInfo.processInfo.systemUptime
+            func record(_ point: String) {
+                let field = findField(in: host.view)
+                print("Find focus \(phase) \(point): elapsed=\(ProcessInfo.processInfo.systemUptime - started), "
+                      + "field=\(field != nil), attached=\(field?.window != nil), "
+                      + "firstResponder=\(String(describing: field?.isFirstResponder)), "
+                      + "keyWindow=\(window.isKeyWindow), request=\(navigation.findFocusRequest), "
+                      + "cancelEnabled=\(String(describing: cancelResponder(in: host.view)?.canBecomeFirstResponder))")
+            }
+            XCTContext.runActivity(named: phase) { _ in
+                record("start")
+                let changed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                    findField(in: host.view)?.isFirstResponder == expected
+                        && cancelResponder(in: host.view)?.canBecomeFirstResponder == !covered
+                }, object: nil)
+                changed.expectationDescription = "\(phase): Find field first responder == \(expected), covered == \(covered)"
+                wait(for: [changed], timeout: focusTimeout)
+                record("end")
+            }
+        }
+        awaitFocus(true, phase: "Initial Find focus")
+        host.rootView = ReaderFindBar(navigation: navigation, inSource: false, isCovered: true)
+        awaitFocus(false, covered: true, phase: "Headings relinquishes Find focus")
+        XCTAssertTrue(navigation.isFinding, "Covering Find keeps the bar and query for its return")
+        XCTAssertEqual(navigation.query, "paragraph")
+        host.rootView = ReaderFindBar(navigation: navigation, inSource: false, isCovered: false)
+        // Uncovering starts dismissal; the reader requests focus only when it completes.
+        awaitFocus(false, phase: "Uncovered Find waits for an editing request")
+        navigation.startFind()
+        awaitFocus(true, phase: "Explicit Find request restores editing focus")
+        XCTAssertEqual(try XCTUnwrap(findField(in: host.view)).text, "paragraph")
+    }
+
+    func testFindRestoresANativeEscapeResponderAfterHeadings() throws {
+        let navigation = ReaderNavigationState()
+        navigation.startFind()
+        navigation.query = "paragraph"
+        let host = UIHostingController(rootView: ReaderFindBar(navigation: navigation, inSource: false, isCovered: false))
+        let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene
+        let window = scene.map(UIWindow.init(windowScene:)) ?? UIWindow(frame: UIScreen.main.bounds)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        func responder(in view: UIView) -> FindCancelResponder.KeyView? {
+            if let keyView = view as? FindCancelResponder.KeyView { return keyView }
+            return view.subviews.lazy.compactMap { responder(in: $0) }.first
+        }
+        func findField(in view: UIView) -> UITextField? {
+            if let field = view as? UITextField { return field }
+            return view.subviews.lazy.compactMap { findField(in: $0) }.first
+        }
+        host.loadViewIfNeeded()
+        let attached = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            responder(in: host.view)?.window != nil && findField(in: host.view)?.isFirstResponder == true
+        }, object: nil)
+        attached.expectationDescription = "Find is attached and its initial editing focus has arrived"
+        wait(for: [attached], timeout: focusTimeout)
+        host.rootView = ReaderFindBar(navigation: navigation, inSource: false, isCovered: true)
+        // Assigning rootView only schedules a SwiftUI update. Wait for that update and the
+        // initial text-field focus to settle before starting the presentation lifecycle.
+        let covered = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            responder(in: host.view)?.canBecomeFirstResponder == false
+                && findField(in: host.view)?.isFirstResponder == false
+        }, object: nil)
+        covered.expectationDescription = "Covered Find has relinquished editing and cancel focus"
+        wait(for: [covered], timeout: focusTimeout)
+        let headings = UIViewController()
+        present(headings, from: host)
+        dismiss(headings)
+        host.rootView = ReaderFindBar(navigation: navigation, inSource: false, isCovered: false)
+        let uncovered = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            responder(in: host.view)?.canBecomeFirstResponder == true
+                && findField(in: host.view)?.isFirstResponder == false
+        }, object: nil)
+        uncovered.expectationDescription = "Uncovered Find has applied its enabled state before restoration"
+        wait(for: [uncovered], timeout: focusTimeout)
+        navigation.restoreFindKeyboard()
+        let restored = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            responder(in: host.view)?.isFirstResponder == true
+        }, object: nil)
+        restored.expectationDescription = "Headings dismissal restores Find's native Escape responder"
+        wait(for: [restored], timeout: focusTimeout)
+        XCTAssertEqual(navigation.query, "paragraph")
+        let key = try XCTUnwrap(responder(in: host.view)?.keyCommands?.first)
+        XCTAssertEqual(key.input, UIKeyCommand.inputEscape)
+        let action = try XCTUnwrap(key.action)
+        XCTAssertTrue(UIApplication.shared.sendAction(action, to: nil, from: key, for: nil))
+        XCTAssertFalse(navigation.isFinding, "Escape reaches Find through the restored responder chain")
+        XCTAssertTrue(window.rootViewController === host, "Cancelling Find preserves the reader")
+    }
+
+    private func present(_ controller: UIViewController, from presenter: UIViewController) {
+        // presentedViewController is set before UIKit attaches the view to a window. Production
+        // registers in viewDidAppear, so exercise the same completed presentation lifecycle.
+        let completed = expectation(description: "Presentation completed")
+        presenter.present(controller, animated: false) { completed.fulfill() }
+        wait(for: [completed], timeout: 5)
+        XCTAssertNotNil(controller.viewIfLoaded?.window, "Commands register after the sheet is in its window")
+    }
+
+    private func dismiss(_ controller: UIViewController) {
+        let completed = expectation(description: "Dismissal completed")
+        controller.dismiss(animated: false) { completed.fulfill() }
+        wait(for: [completed], timeout: 5)
     }
 
     func testAppDelegateDeclinesTabSoItStillMovesFocus() {

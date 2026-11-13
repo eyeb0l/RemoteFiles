@@ -91,7 +91,7 @@ struct ReaderView: View {
         .animation(RemoteFilesStyle.contentFade, value: preview == nil)
         .safeAreaBar(edge: .top, spacing: 0) {
             VStack(spacing: 0) {
-                if navigation.isFinding { ReaderFindBar(navigation: navigation, inSource: showsSource) }
+                if navigation.isFinding { ReaderFindBar(navigation: navigation, inSource: showsSource, isCovered: headingsPresented) }
                 if openingLink {
                     HStack {
                         ProgressView().controlSize(.small)
@@ -170,7 +170,9 @@ struct ReaderView: View {
         .alert("Couldn’t open link", isPresented: Binding(get: { linkError != nil }, set: { if !$0 { linkError = nil } })) {
             Button("OK", role: .cancel) { linkError = nil }
         } message: { Text(linkError ?? "") }
-        .sheet(isPresented: $headingsPresented) {
+        .sheet(isPresented: $headingsPresented, onDismiss: {
+            navigation.restoreFindKeyboard()
+        }) {
             ReaderHeadingsView(headings: navigation.index?.headings ?? []) { heading in
                 source = false; navigation.show(heading)
             }

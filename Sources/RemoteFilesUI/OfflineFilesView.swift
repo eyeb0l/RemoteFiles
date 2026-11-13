@@ -177,6 +177,7 @@ struct OfflinePinProgress: View {
 struct OfflineFilesView: View {
     let model: AppModel
     @State private var path = NavigationPath()
+    @State private var keyboardScope = UUID()
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         NavigationStack(path: $path) {
@@ -195,13 +196,13 @@ struct OfflineFilesView: View {
                     }
                 }
         }
+        .environment(\.offlineKeyboardScope, keyboardScope)
+        .background { OfflineKeyboardHost(scope: keyboardScope).frame(width: 0, height: 0) }
         // The library's own navigation replaces the app's while this sheet covers it.
         .focusedSceneValue(\.navigationCommands, NavigationCommandActions(context: "offline", back: path.isEmpty ? nil : { path.removeLast() }))
-        // Nothing published in this sheet reaches the scene's commands, so its keys are UIKit key
-        // commands on the sheet; see PlainKeyCommands.offlineFilesShows.
-        .onChange(of: path.count, initial: true) { _, count in PlainKeyCommands.shared.offlineBack = count == 0 ? nil : { path.removeLast() } }
-        .onAppear { PlainKeyCommands.shared.offlineFilesShows = true }
-        .onDisappear { PlainKeyCommands.shared.offlineFilesShows = false; PlainKeyCommands.shared.offlineBack = nil }
+        .onChange(of: path.count, initial: true) { _, count in
+            PlainKeyCommands.shared.setOfflineBack(count == 0 ? nil : { path.removeLast() }, in: keyboardScope)
+        }
     }
 
     /// Names that appear more than once, whose rows also say where each copy came from.
@@ -301,6 +302,7 @@ struct OfflineReaderView: View {
     let openDocument: (OfflineDocumentRoute) -> Void
     /// Identifies this reader's commands in PlainKeyCommands while it is on screen.
     @State private var readerID = UUID()
+    @Environment(\.offlineKeyboardScope) private var keyboardScope
     @Environment(\.scenePhase) private var scenePhase
     @State private var leaseState = OfflineReaderLeaseState()
     @State private var share: OfflineShareItem?
@@ -397,7 +399,7 @@ struct OfflineReaderView: View {
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .safeAreaBar(edge: .top, spacing: 0) {
-            if navigation.isFinding { ReaderFindBar(navigation: navigation, inSource: showsSource) }
+            if navigation.isFinding { ReaderFindBar(navigation: navigation, inSource: showsSource, isCovered: headingsPresented) }
         }
         .navigationTitle(savedCopy.filename).navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -454,7 +456,9 @@ struct OfflineReaderView: View {
         // A full-screen image or video covers this reader; it keeps what's loaded for its return.
         .onDisappear { visible = false; if viewer == nil, !fullScreenPlayback { saveAndRelease() } }
         .onChange(of: scenePhase) { _, phase in if phase == .background { saveAndRelease() } }
-        .sheet(isPresented: $headingsPresented) {
+        .sheet(isPresented: $headingsPresented, onDismiss: {
+            navigation.restoreFindKeyboard()
+        }) {
             ReaderHeadingsView(headings: navigation.index?.headings ?? []) { heading in
                 source = false; navigation.show(heading)
             }
@@ -474,9 +478,11 @@ struct OfflineReaderView: View {
         // Nothing published in this sheet reaches the scene's commands, so the reader's commands are
         // handed over directly, and withheld while its Headings sheet or image viewer covers it.
         .onChange(of: canRead && !headingsPresented && viewer == nil && !fullScreenPlayback ? commands : nil, initial: true) { _, commands in
-            PlainKeyCommands.shared.setOfflineReader(readerID, commands)
+            if let keyboardScope { PlainKeyCommands.shared.setOfflineReader(readerID, commands, in: keyboardScope) }
         }
-        .onDisappear { PlainKeyCommands.shared.setOfflineReader(readerID, nil) }
+        .onDisappear {
+            if let keyboardScope { PlainKeyCommands.shared.setOfflineReader(readerID, nil, in: keyboardScope) }
+        }
     }
     private var findTitle: String { [.html, .svg].contains(kind) ? "Find in Source" : "Find in Document" }
     private func startFind() {

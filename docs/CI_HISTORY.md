@@ -10,6 +10,78 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 13 November 2026: Find focus regression needs phase-specific CI evidence
+
+PR #121 run [43432298598, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/43432298598/attempts/1)
+passed 755 simulator-core tests, skipped four allowed methods and failed only
+`PlainKeyCommandsTests.testFindRelinquishesFocusWhenCoveredAndCanBeFocusedAgain`.
+Nine of the ten keyboard tests passed, including native Escape responder
+restoration. The failing method took 15.107 seconds and reported a five-second
+predicate timeout at the shared helper, which served four different focus waits.
+
+The retained log contains keyboard-service XPC invalidation near the assertion,
+but neither the activity tree nor the unsymbolicated call stack identifies the
+failed phase. Those messages and the runner's load do not establish causation.
+The same ten-test patch had passed on iOS 27.2; this hosted run used iOS 27.0.
+The attempted follow-up on the MacBook executed no tests because no local
+simulator was available; its older checkout also lacked settings definitions
+referenced by the rebased source.
+
+The focus helper now names each phase in XCTest activities and expectation
+descriptions, and records elapsed time, field attachment, first-responder state,
+key-window state and the Find request counter before and after the wait. The
+four predicates, five-second deadlines and query assertions are unchanged.
+This is diagnostic coverage, not a confirmed fix or an assertion that a rerun
+will pass. Production code is unchanged.
+
+The first diagnostic push, run
+[43438262146](https://github.com/eyeb0l/RemoteFiles/actions/runs/43438262146),
+failed compilation before executing tests: the logging function nested inside
+the XCTest activity closure lost main-actor isolation. Moving its declaration
+into the enclosing actor-isolated helper preserves isolation without scheduling
+another task. The corrected diagnostic structure type-checks against the iOS
+simulator SDK in Swift 5 language mode; the original focus failure remains open.
+
+Run [43439431031](https://github.com/eyeb0l/RemoteFiles/actions/runs/43439431031)
+passed all four labelled focus phases: initial editing focus took 3.273 seconds,
+covering took 1.543 seconds, uncovering 1.007 seconds and the explicit Find
+request 1.037 seconds. Instead,
+`testFindRestoresANativeEscapeResponderAfterHeadings` failed its native-responder
+wait. Its log also recorded SwiftUI's state-during-view-update warning at the
+responder handoff. Again, the lane had 755 passes, four allowed skips and one
+failure; neither a timeout increase nor a production workaround is justified
+by these observations alone.
+
+The restoration fixture had waited only for view attachment before presenting
+Headings, and assigned a new hosting root without checking that its covered or
+uncovered state had reached UIKit. It now waits for initial editing focus, then
+for the field to relinquish focus and the cancel responder to become disabled,
+and finally for the uncovered state before requesting native restoration. The
+editing-focus test also checks that the cancel responder reflects each coverage
+transition. This removes unverified setup ordering from the tests while retaining
+their five-second deadlines, actual first-responder assertion, Escape dispatch,
+query preservation and reader-preservation checks. CI must verify the corrected
+fixture; the warning's causal role remains unconfirmed.
+
+Run [43443777813](https://github.com/eyeb0l/RemoteFiles/actions/runs/43443777813)
+identified the failing phase as **Headings relinquishes Find focus**. The wait
+returned after 13.992 seconds with the field attached, no longer first responder,
+and the cancel responder disabled: both required states had arrived by the end
+of the wait, after XCTest had reported its five-second deadline failure. Initial
+editing focus took 8.163 seconds; uncovering and explicit refocus then passed in
+1.086 and 1.617 seconds. Native Escape restoration passed in 5.492 seconds, and
+the log contained no state-during-view-update warning. Host load was 79.6 near
+the start and 92.7 after the two tests; keyboard-service invalidation appeared in
+the log. This does not isolate the service's internal cause, but it does show
+that a five-second test deadline rejects an eventually correct focus transition.
+
+The two hosted focus tests now allow 30 seconds for each asserted focus/coverage
+state. This deliberately relaxes the test-only timing bound, which is not a
+product performance requirement. It retains every state predicate, setup
+ordering check, Escape action, query assertion and reader assertion, with phase
+diagnostics kept for future failures. Presentation/dismissal completion waits
+and production behaviour are unchanged. No retries or skips were added.
+
 ## 13 November 2026: live search dismissal exposed as Cancel rather than Close
 
 After #118, main run [43328502119, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/43328502119/attempts/1)

@@ -9,6 +9,7 @@ public struct RemoteFilesRootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var model: AppModel?
     @State private var startupError: String?
+    @State private var keyboardWindow: KeyboardWindowReference?
     @State private var lifecycleTask: Task<Void, Never>?
     public init() {}
     public var body: some View {
@@ -18,6 +19,8 @@ public struct RemoteFilesRootView: View {
                 ContentUnavailableView("Library unavailable", systemImage: "exclamationmark.folder", description: Text(startupError))
             } else { LoadingPlaceholder(label: "Opening library…") }
         }
+        .background { KeyboardWindowReader { keyboardWindow = $0.map { KeyboardWindowReference(window: $0) } }.frame(width: 0, height: 0) }
+        .focusedSceneValue(\.keyboardWindow, keyboardWindow)
         .privacySensitive()
         .task {
             guard model == nil, startupError == nil else { return }

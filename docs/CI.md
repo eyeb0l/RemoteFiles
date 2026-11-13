@@ -184,6 +184,10 @@ Budget every wait for that:
 
 - Give a test's first WebKit navigation a 60-second cold-start bound; later
   navigations keep their ordinary waits.
+- Hosted Find-focus regression tests allow 30 seconds per state transition. A
+  covered-focus wait returned after 13.99 seconds with the expected UIKit state
+  after its former five-second deadline had already failed; initial editing focus
+  took 8.16 seconds. These assert responder ownership, not keyboard latency.
 - When an operation must succeed, never give the test a shorter wait than the
   production guard, and make UI waits outlast the app's own guard so the app reports
   the failure. The HTML preview guard is 30 seconds; SVG keeps 15 and Markdown 20.
