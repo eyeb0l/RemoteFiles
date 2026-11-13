@@ -1161,8 +1161,9 @@ final class RemoteFilesUITests: XCTestCase {
             search.typeText("\n")
         }
         func closeLiveSearch() {
-            // Navigation-bar search exposes "Close"; the index sheet uses "close".
-            let close = app.navigationBars["Search samples"].buttons["Close"]
+            // UIKit exposes this as Close or Cancel depending on the search bar presentation.
+            let close = app.navigationBars["Search samples"].buttons.matching(
+                NSPredicate(format: "label IN %@", ["Close", "Cancel"])).firstMatch
             XCTAssertTrue(close.waitForExistence(timeout: 5)); close.tap()
             XCTAssertTrue(app.navigationBars["Search samples"].waitForExistence(timeout: 5))
         }
