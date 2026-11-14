@@ -629,23 +629,25 @@ final class AppModel {
     }
     /// Forgets the trusted key of the saved endpoint, never unsaved edits in the connection form.
     func resetTrust(for profile: ConnectionProfile) async {
-        await resetTrust(endpoint: HostEndpoint(host: profile.host, port: profile.port))
+        await resetTrust(endpoint: HostEndpoint(host: profile.host, port: profile.port), of: profile)
     }
     func resetJumpHostTrust(for profile: ConnectionProfile) async {
         guard let jump = profile.jumpHost else { return }
-        await resetTrust(endpoint: HostEndpoint(host: jump.host, port: jump.port))
+        await resetTrust(endpoint: HostEndpoint(host: jump.host, port: jump.port), of: profile)
     }
     /// Forgets a server's trusted key, and with it what was read through that key and kept on the
     /// device: whatever is trusted next must not be shown, or searched, as the server before it.
     /// Every way of resetting trust comes through here. Returns whether the key was forgotten.
-    @discardableResult func resetTrust(endpoint: HostEndpoint) async -> Bool {
+    /// `profile` is the connection it was asked from, whose indexes go whether or not it is saved.
+    @discardableResult func resetTrust(endpoint: HostEndpoint, of profile: ConnectionProfile? = nil) async -> Bool {
         await interruptDownloads(through: endpoint)
         await disconnect(preservingDownloads: true, keepingKeys: true)
         let saved = demo ? [] : await metadataStore.snapshot().connections
+        var connections = (metadata.connections + saved).filter { Self.endpoints(of: $0).contains(endpoint) }.map(\.id)
+        if let profile { connections.insert(profile.id, at: 0) }
         var seen = Set<UUID>()
-        for connection in metadata.connections + saved
-        where seen.insert(connection.id).inserted && Self.endpoints(of: connection).contains(endpoint) {
-            do { try await searchIndexStore().remove(connectionID: connection.id) }
+        for id in connections where seen.insert(id).inserted {
+            do { try await searchIndexStore().remove(connectionID: id) }
             catch { errorMessage = error.localizedDescription }
         }
         await forgetPreviewedFiles()
