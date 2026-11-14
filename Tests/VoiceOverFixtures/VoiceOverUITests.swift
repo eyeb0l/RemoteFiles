@@ -567,7 +567,13 @@ extension XCUIApplication {
     func testPublicKeyConfirmationVoiceOverAccountKeyCancelAndResult() throws {
         let app = XCUIApplication.underTest(); app.launchArguments = ["--small-features-fixture", "--feature-case=vo-key-install"]; app.launch()
         XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 15))
-        app.buttons["Settings"].tap(); app.buttons["SSH Keys"].tap()
+        // The Settings screen can be seconds behind the tap on a loaded runner, and a synthesized tap is
+        // sometimes not delivered at all (docs/CI_HISTORY.md, 14 November 2026). Wait for the screen, and
+        // tap once more only if the home screen is still showing.
+        let settings = app.buttons["Settings"], keys = app.buttons["SSH Keys"]
+        settings.tap()
+        if !keys.waitForExistence(timeout: 15), settings.exists { settings.tap() }
+        XCTAssertTrue(keys.waitForExistence(timeout: 15), app.debugDescription); keys.tap()
         let identity = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Fixture Public Identity")).firstMatch
         XCTAssertTrue(identity.waitForExistence(timeout: 10)); identity.tap()
         let install = app.buttons["Install Public Key on Server"]
