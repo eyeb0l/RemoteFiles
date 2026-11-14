@@ -15,13 +15,25 @@ public enum EnhancedMarkdownPolicy {
 
     /// Uses the same CommonMark parser as the native reader to distinguish real notation
     /// from examples in fenced, indented and inline code, including nested list/quote blocks.
-    /// Call off the main actor along with Markdown preparation.
+    /// Call off the main actor along with Markdown preparation. The reader has this from
+    /// `DocumentTextIndex.requiresEnhancedRendering`, which shares one parse with the rest of preparation.
     public static func requiresEnhancedRendering(_ source: String) -> Bool {
-        guard source.utf8.count <= maximumSourceBytes,
-              source.contains("$") || source.contains("<") || source.contains("\\") || source.localizedCaseInsensitiveContains("mermaid"),
+        guard mayRequireEnhancedRendering(source),
               (try? MarkdownLimits.checkSource(source)) != nil,
               let document = try? AttributedString(markdown: source,
                   options: .init(appliesSourcePositionAttributes: true)) else { return false }
+        return requiresEnhancedRendering(parsed: document, source: source)
+    }
+
+    /// Whether the text holds anything the rich renderer is for. Most documents don't, and need no parse
+    /// with source positions.
+    static func mayRequireEnhancedRendering(_ source: String) -> Bool {
+        source.utf8.count <= maximumSourceBytes &&
+            (source.contains("$") || source.contains("<") || source.contains("\\") || source.localizedCaseInsensitiveContains("mermaid"))
+    }
+
+    /// `document` must be `source` parsed with source positions.
+    static func requiresEnhancedRendering(parsed document: AttributedString, source: String) -> Bool {
         var prose = Array(source.utf16)
         for run in document.runs {
             var isCode = run.inlinePresentationIntent?.contains(.code) == true

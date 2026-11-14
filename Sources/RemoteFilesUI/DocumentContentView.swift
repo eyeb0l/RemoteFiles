@@ -193,13 +193,14 @@ public struct DocumentContentView: View {
             (readingPosition ?? localReadingPosition).rendered == .zero
         preparationFailed = false
         do {
-            let result: [MarkdownPart]
-            // A refused document has no parts to reuse; preparing it here reports why it isn't rendered.
-            if let index = navigation?.index, index.source.utf8.elementsEqual(input.utf8), let parts = index.renderableParts { result = parts }
-            else { result = try await MarkdownPreparation.shared.prepare(input) }
-            let requiresEnhanced = await MarkdownPreparation.shared.requiresEnhancedRendering(input)
+            // The reader's index parsed this text already, and a refused document stays refused. Only
+            // a view without a matching index, as in tests and fixtures, parses the text itself.
+            let index: DocumentTextIndex
+            if let existing = navigation?.index, existing.source.utf8.elementsEqual(input.utf8) { index = existing }
+            else { index = try await MarkdownPreparation.shared.prepare(input) }
+            guard let result = index.renderableParts else { throw MarkdownPreparation.Refused() }
             guard !Task.isCancelled else { return }
-            enhancedRendering = requiresEnhanced
+            enhancedRendering = index.requiresEnhancedRendering
             linksToConfirm = ExternalLinkPolicy.linksNeedingConfirmation(in: result)
             prepared = result
             preparedSource = input
@@ -213,14 +214,10 @@ public struct DocumentContentView: View {
 
 private actor MarkdownPreparation {
     static let shared = MarkdownPreparation()
-    func requiresEnhancedRendering(_ text: String) -> Bool {
-        EnhancedMarkdownPolicy.requiresEnhancedRendering(text)
-    }
-    func prepare(_ text: String) throws -> [MarkdownPart] {
+    struct Refused: Error {}
+    func prepare(_ text: String) throws -> DocumentTextIndex {
         try Task.checkCancellation()
-        let result = try DocumentPolicy.remoteMarkdownParts(text)
-        try Task.checkCancellation()
-        return result
+        return try DocumentTextIndex(text: text, markdown: true)
     }
 }
 

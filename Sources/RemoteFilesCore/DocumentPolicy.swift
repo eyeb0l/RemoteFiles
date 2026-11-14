@@ -123,8 +123,24 @@ public enum DocumentPolicy {
     /// Throws `MarkdownLimitError` for a document whose structure costs far more than its size
     /// suggests; the reader then offers its source instead.
     public static func prepareMarkdown(_ source: String, preserveImages: Bool = false, preserveDocumentLinks: Bool = false) throws -> AttributedString {
+        try prepareMarkdown(source, preserveImages: preserveImages, preserveDocumentLinks: preserveDocumentLinks,
+                            checkingEnhancedRendering: false).document
+    }
+
+    /// The prepared document and, from the same parse, whether it needs the rich renderer, so the
+    /// reader parses a document once however much it derives from it.
+    static func prepareMarkdown(_ source: String, preserveImages: Bool, preserveDocumentLinks: Bool,
+                                checkingEnhancedRendering: Bool) throws -> (document: AttributedString, requiresEnhancedRendering: Bool) {
         try MarkdownLimits.checkSource(source)
-        var document = try AttributedString(markdown: source)
+        // Source positions are only for the renderer check, and only a document it might select needs them.
+        let positions = checkingEnhancedRendering && EnhancedMarkdownPolicy.mayRequireEnhancedRendering(source)
+        var document = try AttributedString(markdown: source, options: .init(appliesSourcePositionAttributes: positions))
+        var requiresEnhancedRendering = false
+        if positions {
+            requiresEnhancedRendering = EnhancedMarkdownPolicy.requiresEnhancedRendering(parsed: document, source: source)
+            // Without them the document is the one an ordinary parse gives: the runs they split join again.
+            document.markdownSourcePosition = nil
+        }
         let runs = Array(document.runs)
         try MarkdownLimits.checkStructure(runs)
         // Each kept image becomes a view of its own and divides the text around it.
@@ -171,7 +187,7 @@ public enum DocumentPolicy {
             replacement.setAttributes(attributes)
             document.replaceSubrange(range, with: replacement)
         }
-        return document
+        return (document, requiresEnhancedRendering)
     }
 }
 
