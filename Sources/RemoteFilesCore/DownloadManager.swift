@@ -504,7 +504,7 @@ public final class DownloadManager {
     }
     private static func validFilename(_ name: String) -> Bool {
         !name.isEmpty && !RemotePath.isDotName(name) && !RemotePath.hasSeparator(name) &&
-        !name.unicodeScalars.contains { $0.value < 32 || $0.value == 127 }
+        !name.unicodeScalars.contains { $0.value < 32 || $0.value == 127 || RemotePath.isDirectionControl($0) }
     }
     private static func makePrivateDirectory(_ directory: URL) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
