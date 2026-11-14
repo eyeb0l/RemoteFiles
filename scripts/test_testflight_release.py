@@ -135,7 +135,13 @@ class ReleaseFlowTests(unittest.TestCase):
                        capture_output=True)
         return key
 
-    def release_command(self, *arguments, checks=release.REQUIRED_CHECKS):
+    def record_checks(self, commit, names):
+        """What `gh` reports for one commit; any other commit gets the default."""
+        folder = self.root / "checks"
+        folder.mkdir(exist_ok=True)
+        (folder / (commit + ".json")).write_text(json.dumps({"check_runs": [check(name) for name in names]}))
+
+    def release_command(self, *arguments, checks=release.REQUIRED_CHECKS + release.CODE_CHECKS):
         """Run the real command against the local origin, with `gh` replaced by recorded check runs.
 
         Only the push address differs: the local origin stands in for GitHub over SSH.
@@ -144,7 +150,10 @@ class ReleaseFlowTests(unittest.TestCase):
         tools.mkdir(exist_ok=True)
         (self.root / "checks.json").write_text(json.dumps({"check_runs": [check(name) for name in checks]}))
         gh = tools / "gh"
-        gh.write_text('#!/bin/sh\ncat "' + str(self.root / "checks.json") + '"\n')
+        # The commit is the path component after "commits/".
+        gh.write_text('#!/bin/sh\ncommit=$(printf %s "$2" | sed -n "s|.*/commits/\\([0-9a-f]*\\)/.*|\\1|p")\n'
+                      'if [ -f "' + str(self.root / "checks") + '/$commit.json" ]; then cat "' + str(self.root / "checks") + '/$commit.json"\n'
+                      'else cat "' + str(self.root / "checks.json") + '"; fi\n')
         gh.chmod(0o755)
         env = {**self.env, "PATH": str(tools) + os.pathsep + self.env["PATH"]}
         launcher = ("import sys; sys.path.insert(0, sys.argv.pop(1)); import testflight_release as release; "
@@ -215,6 +224,47 @@ class ReleaseFlowTests(unittest.TestCase):
         self.assertEqual(env["GIT_SSH_VARIANT"], "ssh")
         self.assertNotEqual(subprocess.run(command, cwd=self.work, env=env, capture_output=True).returncode, 0)
         self.assertEqual(used.read_text().split(), [str(tools / "ssh")])
+
+    def commit_on_main(self, path, message):
+        self.git(self.work, "switch", "--quiet", "main")
+        target = self.work / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(message)
+        self.git(self.work, "add", ".")
+        commit = self.commit(self.work, message)
+        self.git(self.work, "push", "--quiet", "origin", "main")
+        return commit
+
+    def test_documentation_only_tip_is_released_on_the_strength_of_the_last_built_commit(self):
+        self.deploy_key()
+        docs = self.commit_on_main("docs/NOTES.md", "notes")
+        # Its required checks passed with every lane that builds the app skipped.
+        self.record_checks(docs, release.REQUIRED_CHECKS)
+        result = self.release_command("--push")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Built:   " + self.tip, result.stdout)
+        self.assertEqual(self.git(self.origin, "rev-parse", "testflight/0.1.0-3"), docs)
+
+    def test_code_that_no_run_built_is_not_released_behind_a_documentation_commit(self):
+        self.deploy_key()
+        code = self.commit_on_main("Sources/RemoteFilesCore/Change.swift", "code")
+        docs = self.commit_on_main("docs/NOTES.md", "notes")
+        # The code commit's run was cancelled by the push after it, which changed only documentation.
+        self.record_checks(code, ("Repository checks",))
+        self.record_checks(docs, release.REQUIRED_CHECKS)
+        result = self.release_command("--push")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("CI last built the app at " + self.tip, result.stderr)
+        self.assertIn("Sources/RemoteFilesCore/Change.swift", result.stderr)
+        self.assertNotIn("docs/NOTES.md", result.stderr)
+        self.assertEqual(self.origin_tags(), ["testflight/0.1.0-1", "testflight/0.1.0-2"])
+
+    def test_no_built_commit_in_history_pushes_nothing(self):
+        self.deploy_key()
+        result = self.release_command("--push", checks=release.REQUIRED_CHECKS)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("has passing Quick / macos-openssh and Quick / simulator-core runs", result.stderr)
+        self.assertEqual(self.origin_tags(), ["testflight/0.1.0-1", "testflight/0.1.0-2"])
 
     def test_failed_checks_and_unmerged_commits_push_nothing(self):
         self.deploy_key()
