@@ -73,6 +73,23 @@ final class RemoteResourceTests: XCTestCase {
         .init(profile: .init(name: "Test", host: "mac", username: "reader", identityID: UUID()),
               path: "/Users/iris/wardrobe/data/ui-audit-2026-09-21/audit.md")
     }
+    /// The age limit was applied only when something new was fetched, so files from a server no
+    /// longer visited stayed for as long as nothing was. It is also applied at launch.
+    func testTrimmingRemovesPreviewedFilesPastTheirAgeWithoutAFetch() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let old = dir.appendingPathComponent("old.resource"), fresh = dir.appendingPathComponent("fresh.resource")
+        try Data("previewed two days ago".utf8).write(to: old)
+        try Data("previewed just now".utf8).write(to: fresh)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-2 * 86_400)], ofItemAtPath: old.path)
+        let resolver = RemoteResourceResolver(service: FixedBytesTransportMock(bytes: Data()), directory: dir)
+        await resolver.trimCache()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: old.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fresh.path))
+        await RemoteResourceResolver(service: FixedBytesTransportMock(bytes: Data()), directory: dir.appendingPathComponent("missing")).trimCache()
+    }
+
     func testDecoderDownsamplesLargeDimensionsAndRejectsCorruptData() async throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
         defer { try? FileManager.default.removeItem(at: file) }

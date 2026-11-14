@@ -49,6 +49,7 @@ model in a later navigation change.
 - Source bytes stream to disk in order from up to sixteen pipelined 64 KiB reads, with a **128 MiB** per-file
   receive-time limit (also checked against FSTAT). A resource operation allows up to
   180 seconds; existing text operation deadlines are unchanged.
+- The size and age limits below are applied when something new is fetched and at launch. The whole cache is removed when a host's trust is reset or a connection is deleted.
 - Disk cache: **256 MiB** completed-file LRU, **5-minute** freshness, **24-hour** retention
   cleanup on insertion. Each cached file records the remote size and modification time it was
   downloaded at. After the freshness window, one metadata request revalidates it: a match whose

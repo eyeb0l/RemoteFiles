@@ -286,6 +286,9 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         try? FileManager.default.removeItem(at: directory)
         cleanedAbandonedPartials = false
     }
+    /// Applies the age and size limits now. They are otherwise applied only when something new
+    /// is fetched, so files from a server no longer visited would stay as long as nothing was.
+    public func trimCache() { trim(reserving: 0) }
     private func cancel(key: String, waiter: UUID) {
         guard let continuation = flights[key]?.waiters.removeValue(forKey: waiter) else { return }
         flights[key]?.observers.removeValue(forKey: waiter)
