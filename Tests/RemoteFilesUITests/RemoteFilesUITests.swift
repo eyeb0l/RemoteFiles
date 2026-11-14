@@ -2007,7 +2007,8 @@ extension RealServerUITests {
             let add = app.buttons["Add Connection"]
             if !add.isHittable { app.swipeUp() }
             add.tap()
-            for (label, value) in [("Display name", "Image checks"), ("Hostname or IP address", "100.125.79.6"), ("Account username", "iris"), ("Starting directory (optional)", "/Users/iris/Developer/RemoteFiles/.test-server/remote-images")] {
+            let host = try XCTUnwrap(ProcessInfo.processInfo.environment["REMOTEFILES_REAL_HOST"])
+            for (label, value) in [("Display name", "Image checks"), ("Hostname or IP address", host), ("Account username", "iris"), ("Starting directory (optional)", "/Users/iris/Developer/RemoteFiles/.test-server/remote-images")] {
                 let field = app.textFields[label]
                 if !field.isHittable { app.swipeUp() }
                 field.tap(); field.typeText(value)

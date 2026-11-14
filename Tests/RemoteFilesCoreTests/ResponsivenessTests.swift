@@ -377,6 +377,19 @@ private struct SourceFixture: View {
         XCTAssertNil(model.cachedListing(profile.id, path: "/p"), "Disconnect forgets what was browsed")
     }
 
+    /// Two names that differ only in Unicode normalisation are two folders on the server.
+    func testListingsOfNamesThatDifferOnlyInNormalisationAreRememberedApart() throws {
+        let service = CountingFolderService()
+        let (model, directory) = try model(service)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let composed = "/p/caf\u{E9}", decomposed = "/p/cafe\u{301}"
+        model.cache(listing(["one"], path: composed), id: profile.id, requestedPath: composed)
+        XCTAssertNil(model.cachedListing(profile.id, path: decomposed), "The other folder's rows must not be shown for it")
+        model.cache(listing(["two"], path: decomposed), id: profile.id, requestedPath: decomposed)
+        XCTAssertEqual(model.cachedListing(profile.id, path: composed)?.rows.map(\.entry.name), ["one"])
+        XCTAssertEqual(model.cachedListing(profile.id, path: decomposed)?.rows.map(\.entry.name), ["two"])
+    }
+
     func testListingCacheBoundsFoldersAndNames() throws {
         let service = CountingFolderService()
         let (model, directory) = try model(service)

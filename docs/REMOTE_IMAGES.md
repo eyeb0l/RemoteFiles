@@ -49,6 +49,7 @@ model in a later navigation change.
 - Source bytes stream to disk in order from up to sixteen pipelined 64 KiB reads, with a **128 MiB** per-file
   receive-time limit (also checked against FSTAT). A resource operation allows up to
   180 seconds; existing text operation deadlines are unchanged.
+- The size and age limits below are applied when something new is fetched and at launch. The whole cache is removed when a host's trust is reset or a connection is deleted.
 - Disk cache: **256 MiB** completed-file LRU, **5-minute** freshness, **24-hour** retention
   cleanup on insertion. Each cached file records the remote size and modification time it was
   downloaded at. After the freshness window, one metadata request revalidates it: a match whose
@@ -61,15 +62,30 @@ model in a later navigation change.
   are written; completed entries are revalidated before reuse. Failed/cancelled partials
   are removed, and partials abandoned by a previous process are removed on first use.
   Process-scoped names keep one window's cleanup from deleting another window's active transfer.
-  Cache filenames hash the normalized endpoint, username, identity, document root and
-  canonicalized lexical path, so renaming a connection or editing its starting folder keeps
-  cached images, while different accounts/identities/endpoints never share entries. This is `Library/Caches`,
-  excluded from backup, with complete iOS file protection.
+  A transfer that began before the cache was cleared, in any window, still gives its file to its own
+  readers, but under a name no later reader looks up, so it cannot stand in for what was cleared.
+  Cache filenames hash the normalized endpoint, username, identity, document root,
+  canonicalized lexical path and jump route, so renaming a connection or editing its starting folder keeps
+  cached images, while different accounts/identities/endpoints/routes never share entries. A second hash in
+  the name is of the host keys the bytes came through: the server's and, on a jump route, the jump host's,
+  as the transfer's own SSH connection verified them, not as trusted when it finished. A copy is looked up
+  under the keys trusted now, read from the trust store, so with no connection too: a copy that came
+  through any other key is never served, and none is while a key is untrusted. This matters on iPad, where
+  resetting trust disconnects only the window that asked: another window still connected to the server
+  keeps reading over the connection that verified the old key, and what it previews stays the old key's,
+  served again only if that key is trusted again. A transfer whose connection cannot name its keys keeps
+  its file under a name no later reader looks up. Files named before host keys were part of the name are
+  never looked up, and go within 24 hours, by the size limit, or on **Refresh**. Demo has no trust and
+  names no keys. This is `Library/Caches`, excluded from backup, with complete iOS file protection.
 - Decoded image cache: **32 MiB** explicit LRU. Rows/viewer also retain their currently
   displayed thumbnail. Memory warnings clear the decoded LRU along with document/folder caches. Background/disconnect clears decoded caches and cancels flights.
 - ImageIO downsamples from the disk URL, disables full-source caching, and decodes away
   from MainActor. Inline thumbnails have a **1600-pixel** longest edge; full-screen uses
-  **3072 pixels**. Sources over 400 million pixels are rejected to limit decoder exposure.
+  **3072 pixels**. ImageIO chooses a decoder from a file's contents, not its name, so only
+  JPEG, PNG, HEIC/HEIF, GIF, TIFF, WebP, BMP and ICO data is decoded; other formats ImageIO
+  knows, such as camera RAW, are refused. Sources over **64 million pixels** or 32,768 pixels
+  on a side are refused too, with a message saying so. OCR for search applies the same format
+  rule, with its own 40-million-pixel limit.
   Animated formats display their first frame. SVG/PDF are not image previews.
 - Retry invalidates the cached resource before re-fetching. Document Refresh clears image
   caches and rebuilds image rows after the document reload, even if Markdown is unchanged.

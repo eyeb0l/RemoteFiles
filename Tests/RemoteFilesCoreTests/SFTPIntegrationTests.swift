@@ -180,7 +180,15 @@ final class SFTPIntegrationTests: XCTestCase {
         server.standardOutput = log; server.standardError = log
         try server.run()
         addTeardownBlock {
-            if server.isRunning { server.terminate(); server.waitUntilExit() }
+            // Not `waitUntilExit()`: called here, on the main thread, it sometimes polls forever after sshd
+            // has exited and `isRunning` is already false (docs/CI_HISTORY.md, 14 November 2026).
+            if server.isRunning { server.terminate() }
+            let deadline = ContinuousClock.now + .seconds(60)
+            while server.isRunning, ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(20)) }
+            if server.isRunning {
+                kill(server.processIdentifier, SIGKILL)
+                XCTFail("The limited fixture \(name) did not exit within 60 seconds of SIGTERM")
+            }
             try? log.close()
             if let evidence = ProcessInfo.processInfo.environment["REMOTEFILES_SSHD_LOG"] {
                 let retained = URL(fileURLWithPath: evidence).deletingPathExtension().appendingPathExtension("\(name).log")
@@ -1457,6 +1465,45 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertEqual(metrics.fileOperations, 1, "Verification must preserve usable cached bytes")
     }
 
+    /// Over a real connection: a window still connected after trust is reset keeps what it reads
+    /// under the key its connection verified, so another window trusting a different key at that
+    /// address is not given it, and gets it again only once that key is trusted again.
+    func testPreviewsKeepTheKeyTheirConnectionVerifiedAfterATrustReset() async throws {
+        let fixture = try Fixture(), stores = try Stores(fixture: fixture)
+        let identity = try await stores.identity.generate(name: "Preview host keys")
+        try fixture.authorize(identity.publicKey)
+        let profile = try await stores.profile(identity: identity)
+        try await stores.trustFixtureHost()
+        let connected = stores.service(), other = stores.service()
+        addTeardownBlock { await connected.disconnect(); await other.disconnect() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clip = URL(fileURLWithPath: fixture.files + "/host-key-clip.mp4")
+        try Data("fixture server bytes".utf8).write(to: clip)
+        defer { try? FileManager.default.removeItem(at: clip) }
+        let location = RemoteDocumentLocation(profile: profile, path: fixture.files + "/report.md")
+        let connectedWindow = RemoteResourceResolver(service: connected, directory: directory)
+        let otherWindow = RemoteResourceResolver(service: other, directory: directory)
+        _ = try await connected.resolveEntry(profile: profile, path: fixture.files)
+
+        try await stores.trust.reset(endpoint: fixture.endpoint)
+        let read = try await connectedWindow.localFile(for: "host-key-clip.mp4", in: location)
+        XCTAssertEqual(try Data(contentsOf: read), Data("fixture server bytes".utf8), "The open connection still reads")
+        let wrong = try HostKeyDetails(publicKey: NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey)
+        try await stores.trust.trustUnknown(endpoint: fixture.endpoint, key: wrong)
+        do {
+            _ = try await otherWindow.localFile(for: "host-key-clip.mp4", in: location)
+            XCTFail("Bytes from the fixture's key must not be served while another key is trusted")
+        } catch HostTrustError.changed { }
+
+        try await stores.trust.reset(endpoint: fixture.endpoint)
+        try await stores.trustFixtureHost()
+        let served = try await otherWindow.localFile(for: "host-key-clip.mp4", in: location)
+        XCTAssertEqual(served, read, "Its own key is trusted again")
+        let metrics = await other.metrics()
+        XCTAssertEqual(metrics.fileOperations, 0, "Served from the copy the connected window kept")
+    }
+
     func testUnknownAndChangedHostFailBeforeAuthentication() async throws {
         let fixture = try Fixture()
         let stores = try Stores(fixture: fixture)
@@ -2634,15 +2681,16 @@ private final class ReplyStallingProxy: @unchecked Sendable {
 
 final class BoundedPreviewReaderTests: XCTestCase {
     func testGrowthBeyondInitialStatIsRejectedWhileReceiving() async throws {
-        let chunks = ControlledPreviewChunks(["1234", "56789"])
+        // The two reads start together, in either order, so the file answers each by its offset.
+        let file = PipelinedPreviewFile(Array("123456789".utf8))
         do {
-            _ = try await BoundedPreviewReader.read(initialSize: 4, limit: 8) { _, amount in
-                await chunks.next(maximum: amount)
+            _ = try await BoundedPreviewReader.read(initialSize: 4, limit: 8) { offset, amount in
+                await file.read(offset: offset, length: amount)
             }
             XCTFail("A file that grows beyond its stat size must be rejected")
         } catch RemoteFileError.tooLarge(let limit) { XCTAssertEqual(limit, 8) }
-        let requested = await chunks.requests
-        XCTAssertEqual(requested, [4, 5], "The expected size, then a probe up to one byte past the limit")
+        let requested = await file.requests.sorted { $0.0 < $1.0 }.map { [Int($0.0), Int($0.1)] }
+        XCTAssertEqual(requested, [[0, 4], [4, 5]], "The expected size, and a probe up to one byte past the limit")
     }
 
     func testKnownSizeFinishesWithoutASecondRoundOfReads() async throws {

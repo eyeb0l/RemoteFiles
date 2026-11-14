@@ -172,11 +172,27 @@ final class OriginalFileExportTests: XCTestCase {
         XCTAssertTrue(children(dir).isEmpty)
     }
 
+    /// A file prepared for Save Original and never handed over, such as after a crash, was
+    /// removed only by the next export. It is also removed at launch.
+    func testAbandonedExportsOfAPreviousProcessAreRemovedAndThisProcessesAreKept() throws {
+        let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let fm = FileManager.default
+        let abandoned = ["export-" + UUID().uuidString, "export-" + UUID().uuidString + "-" + UUID().uuidString]
+        let kept = [RemoteOriginalExporter.processPrefix + UUID().uuidString, "unrelated", "export-not-an-identifier"]
+        for name in abandoned + kept {
+            try fm.createDirectory(at: dir.appendingPathComponent(name), withIntermediateDirectories: true)
+            try Data("original".utf8).write(to: dir.appendingPathComponent(name).appendingPathComponent("file.bin"))
+        }
+        RemoteOriginalExporter.removeAbandonedExports(in: dir)
+        XCTAssertEqual(Set(try fm.contentsOfDirectory(atPath: dir.path)), Set(kept))
+        RemoteOriginalExporter.removeAbandonedExports(in: dir.appendingPathComponent("missing"))
+    }
+
     func testUnsafeLocalFilenamesDoNotStartTransfers() async throws {
         let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
         let service = OriginalExportTransportMock(bytes: Data([1]))
         let exporter = RemoteOriginalExporter(service: service, directory: dir)
-        for name in ["", ".", "..", "../secret", "folder/file", "folder\\file", "A\0B", "A\nB"] {
+        for name in ["", ".", "..", "../secret", "folder/file", "folder\\file", "A\0B", "A\nB", "invoice\u{202E}fdp.html"] {
             do { _ = try await exporter.prepare(profile: profile, entry: entry(name), allowedRoot: "/fixture"); XCTFail(name) }
             catch OriginalFileExportError.invalidFilename { }
         }

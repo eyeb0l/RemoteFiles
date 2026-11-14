@@ -332,7 +332,9 @@ private extension ASN1Node {
         if case .primitive(let bytes) = content { return bytes }
         return nil
     }
-    var oid: String? { (try? ASN1ObjectIdentifier(derEncoded: self)).map(String.init(describing:)) }
+    /// An identifier is as long as its encoding allows, and an unknown one is shown as it is, so
+    /// it is bounded like any other field.
+    var oid: String? { (try? ASN1ObjectIdentifier(derEncoded: self)).map { CertificateText.safe(String(describing: $0)) } }
 }
 
 private enum DERReading {
