@@ -10,6 +10,28 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 14 November 2026: a result line split by a system log line counted as missing
+
+PR #124 run [43538623080, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/43538623080/attempts/1)
+failed **Quick / simulator-core** with `Missing results:
+PlaybackTests/testCorruptRefreshPreservesPreviousPlayerAndReportsCodecError` and
+`xcresult/log count mismatch`: the xcresult held 760 passes and four allowed skips, the
+log 759. No test failed. In `simulator-core.log` the test's result line was split by an
+audio log line from the test host, written between the test's name and its outcome:
+
+```
+Test Case '-[RemoteFilesTests.PlaybackTests testCorruptRefresh…]'2026-11-14 01:24:21.111681+0000 RemoteFilesTestHost[35848:128845] [AQ]        LoudnessManager.mm:1222  IsHardwareSupported: no plist loaded, returning fa
+ passed (0.014 seconds).
+```
+
+`log_tests` in `scripts/test-acceptance.py` already removes such records from inside a
+test's identifier and from inside the `Test Case '-[` prefix. This one fell between the
+closing quote and the outcome, which it does not handle, so the test had a start and no
+result. The PR changed image decoding only. The job was rerun once, with this cause named
+on the PR. The runner is unchanged: one occurrence does not show how often a record lands
+in that position. If it recurs, extend `log_tests` to that position as well; the xcresult
+already had the right count.
+
 ## 14 November 2026: a preview-reader test assumed its two reads arrive in order
 
 `BoundedPreviewReaderTests.testGrowthBeyondInitialStatIsRejectedWhileReceiving` failed

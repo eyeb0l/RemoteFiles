@@ -7,6 +7,29 @@ public struct DisplayImage: @unchecked Sendable {
     public let image: CGImage
     public var cost: Int { image.bytesPerRow * image.height }
 }
+/// What ImageIO may decode for this app. ImageIO chooses a decoder from a file's bytes, not its
+/// name, so without this a file called `diagram.png` could reach its RAW, OpenEXR or Photoshop
+/// decoders. Only the formats the app names as images are let through, plus the icon format.
+public enum RemoteImageFormat {
+    static let allowedTypes: Set<String> = [
+        "public.jpeg", "public.png", "public.heic", "public.heif", "com.compuserve.gif",
+        "public.tiff", "org.webmproject.webp", "com.microsoft.bmp", "com.microsoft.ico"
+    ]
+    /// A whole frame can be held in memory while it is decoded, at four or more bytes a pixel.
+    /// This admits 48 and 61 megapixel camera photos and keeps that frame near 256 MiB.
+    public static let maximumPixels = 64_000_000.0
+    public static let maximumDimension = 32_768.0
+
+    /// Reads only enough of the source to identify its format.
+    static func isAllowed(_ source: CGImageSource) -> Bool {
+        guard let type = CGImageSourceGetType(source) as String? else { return false }
+        return allowedTypes.contains(type)
+    }
+    static func isWithinLimits(width: Double, height: Double) -> Bool {
+        width.isFinite && height.isFinite && width > 0 && height > 0
+            && width <= maximumDimension && height <= maximumDimension && width * height <= maximumPixels
+    }
+}
 public actor RemoteImageDecoder {
     public static let shared = RemoteImageDecoder()
     private var images: [String: DisplayImage] = [:]
@@ -26,12 +49,14 @@ public actor RemoteImageDecoder {
         let key = "\(file.path):\(stamp):\(maxPixel)"
         if let image = images[key] { order.removeAll { $0 == key }; order.append(key); return image }
         guard let source = CGImageSourceCreateWithURL(file as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              RemoteImageFormat.isAllowed(source),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
-              let height = properties[kCGImagePropertyPixelHeight] as? NSNumber,
-              width.doubleValue > 0, height.doubleValue > 0,
-              width.doubleValue * height.doubleValue <= 400_000_000,
-              let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+              let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else { throw RemoteResourceError.notImage }
+        guard RemoteImageFormat.isWithinLimits(width: width.doubleValue, height: height.doubleValue) else {
+            throw RemoteResourceError.imageTooLarge
+        }
+        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
                 kCGImageSourceShouldCacheImmediately: true,
                 kCGImageSourceCreateThumbnailWithTransform: true,
