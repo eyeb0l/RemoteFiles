@@ -61,11 +61,11 @@ The bottom bar switches Markdown, HTML and SVG between **Rendered** and **Source
 
 *Bundled demo source on the iPhone 18 Pro simulator, iOS 27.2.*
 
-Use **Source** where offered to see the original text. Supported languages are highlighted locally using the filename, including Swift, JavaScript/TypeScript, Python, JSON, YAML, shell, HTML/CSS and SQL. Selection and **Copy Source** retain the original text. For unfamiliar formats or large or complex sources, the reader displays plain text instead: highlighting is limited to 256 KiB and 16,000 tokens. The same limits apply to rendered Markdown code fences; they fall back to plain code without losing content. The text-preview limit remains 2 MiB.
+Use **Source** where offered to see the original text. Supported languages are highlighted locally using the filename, including Swift, JavaScript/TypeScript, Python, JSON, YAML, shell, HTML/CSS and SQL. **Copy Source** and the certificate **Copy** actions stay on this device (they are not sent to your other devices by Universal Clipboard) and leave the clipboard after ten minutes, because source can hold passwords and tokens that private-key hiding does not recognise. Selection and **Copy Source** retain the original text. For unfamiliar formats or large or complex sources, the reader displays plain text instead: highlighting is limited to 256 KiB and 16,000 tokens. The same limits apply to rendered Markdown code fences; they fall back to plain code without losing content. The text-preview limit remains 2 MiB.
 
 Lines wrap by default. Choose **Document actions → Wrap Lines** to turn wrapping off and scroll horizontally; the preference is remembered. Very long lines and large documents use a width-bounded read-only view to avoid an oversized layout surface. The actions menu explains when this limit applies. Malformed JSON remains readable as source.
 
-Source uses a selectable native text viewport for both short and long documents. Highlighting is prepared off the main actor; plain text appears first. The local token cache holds at most two documents within an estimated 2 MiB, and clears on disconnect, backgrounding or memory warning. No remote scripts are loaded for highlighting.
+Source uses a selectable native text viewport for both short and long documents. Highlighting is prepared off the main actor; plain text appears first. A file over 256 KiB, or with any line over 4,096 bytes (a minified script, an embedded image), stays plain: colouring a long line takes time that grows with the square of its length. The local token cache holds at most two documents within an estimated 2 MiB, and clears on disconnect, backgrounding or memory warning. No remote scripts are loaded for highlighting.
 
 ## Save the original
 

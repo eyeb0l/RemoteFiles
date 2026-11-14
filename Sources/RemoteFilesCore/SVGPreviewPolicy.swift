@@ -18,12 +18,28 @@ public enum SVGPreviewPolicy {
         }
     }
 
+    /// Whether the XML declaration, if there is one, names no encoding or UTF-8.
+    static func declaresOnlyUTF8(_ uppercased: String) -> Bool {
+        let text = uppercased.drop { $0 == "\u{FEFF}" || $0.isWhitespace }
+        guard text.hasPrefix("<?XML"), let close = text.range(of: "?>") else { return true }
+        let declaration = text[..<close.lowerBound]
+        guard let name = declaration.range(of: "ENCODING") else { return true }
+        let value = declaration[name.upperBound...].drop { $0.isWhitespace || $0 == "=" }
+        guard let quote = value.first, quote == "\"" || quote == "'" else { return false }
+        let encoding = value.dropFirst().prefix { $0 != quote }
+        return encoding == "UTF-8" || encoding == "UTF8"
+    }
+
     public static func prepare(_ source: String) throws -> String {
         guard source.utf8.count <= byteLimit else { throw Failure.tooLarge }
         try Task.checkCancellation()
         // Reject declarations before XMLParser can expand internal or external entities.
         let upper = source.uppercased()
         guard !upper.contains("<!DOCTYPE"), !upper.contains("<!ENTITY") else { throw Failure.unsupported }
+        // The parser honours a declared encoding and would read these UTF-8 bytes as something
+        // else, such as UTF-7, in which a declaration can be spelled so that the check above
+        // does not see it.
+        guard declaresOnlyUTF8(upper) else { throw Failure.unsupported }
         let parser = XMLParser(data: Data(source.utf8))
         parser.shouldResolveExternalEntities = false
         let delegate = StaticSVGParser()

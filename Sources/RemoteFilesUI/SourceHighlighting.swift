@@ -30,6 +30,18 @@ actor SourceHighlighting {
     static let shared = SourceHighlighting()
     static let byteLimit = 256 * 1024
     static let tokenLimit = 16_000
+    /// The grammars take time that grows with the square of a line's length, in one call that
+    /// cannot be interrupted: one 64 KiB line took 35 seconds. A line this long is data, such as
+    /// a minified script or an embedded image, and reads no better coloured.
+    static let lineByteLimit = 4_096
+    static func hasLongLine(_ source: String) -> Bool {
+        var length = 0
+        for byte in source.utf8 {
+            if byte == 0x0A || byte == 0x0D { length = 0 } else { length += 1 }
+            if length > lineByteLimit { return true }
+        }
+        return false
+    }
     // String equality folds canonically equivalent Unicode. Source bytes must remain exact.
     private struct Key: Hashable { let source: Data; let language: String }
     private struct Cached { let tokens: [SourceCodeToken]; let cost: Int }
@@ -49,7 +61,7 @@ actor SourceHighlighting {
 
     func highlight(_ source: String, language: String?, dark: Bool) async throws -> AttributedString? {
         try Task.checkCancellation()
-        guard let language, !source.isEmpty, source.utf8.count <= Self.byteLimit else { return nil }
+        guard let language, !source.isEmpty, source.utf8.count <= Self.byteLimit, !Self.hasLongLine(source) else { return nil }
         let epoch = generation
         let key = Key(source: Data(source.utf8), language: language)
         let tokens: [SourceCodeToken]

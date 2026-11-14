@@ -170,7 +170,7 @@ final class AppModel {
     private var realMetadata = AppMetadata()
     // Read while a view is being made, and written from the background. Observing them would remake
     // every mounted folder each time one more listing is remembered.
-    @ObservationIgnored private var directories: [String: (listing: FolderListing, storedAt: ContinuousClock.Instant?, nameBytes: Int)] = [:]
+    @ObservationIgnored private var directories: [CacheKey: (listing: FolderListing, storedAt: ContinuousClock.Instant?, nameBytes: Int)] = [:]
     @ObservationIgnored private var folderPrefetchQueue: [(profile: ConnectionProfile, path: String)] = []
     @ObservationIgnored private var folderPrefetch: Task<Void, Never>?
     @ObservationIgnored private var folderPrefetchToken: UUID?
@@ -178,9 +178,9 @@ final class AppModel {
     /// Counts how often a connection's listings were forgotten, so one read before that isn't kept.
     @ObservationIgnored private var forgottenListings: [UUID: Int] = [:]
     func listingGeneration(_ id: UUID) -> Int { forgottenListings[id, default: 0] }
-    @ObservationIgnored private var documents: [String: (bytes: Data, version: RemoteFileVersion?)] = [:]
-    @ObservationIgnored private var directoryOrder: [String] = []
-    @ObservationIgnored private var documentOrder: [String] = []
+    @ObservationIgnored private var documents: [CacheKey: (bytes: Data, version: RemoteFileVersion?)] = [:]
+    @ObservationIgnored private var directoryOrder: [CacheKey] = []
+    @ObservationIgnored private var documentOrder: [CacheKey] = []
 
     let preferences: UserDefaults
     /// Remote folder paths, so kept beside the library with its protection, not in the preferences file.
@@ -869,7 +869,9 @@ final class AppModel {
         directories.removeAll(); directoryOrder.removeAll()
         cancelPrefetch()
     }
-    private func key(_ id: UUID, _ path: String) -> String { "\(id.uuidString):\(path)" }
+    /// By the path's bytes: two names that differ only in Unicode normalisation are two files.
+    private struct CacheKey: Hashable { let id: UUID; let path: RemotePathKey }
+    private func key(_ id: UUID, _ path: String) -> CacheKey { CacheKey(id: id, path: RemotePathKey(path)) }
     func cachedListing(_ id: UUID, path: String) -> FolderListing? { directories[key(id, path)]?.listing }
     /// Whether a remembered listing is recent enough to show without asking the server again.
     func isListingFresh(_ id: UUID, path: String, within window: Duration = AppModel.listingFreshness) -> Bool {
@@ -955,11 +957,10 @@ final class AppModel {
     /// A key or host that fails verification takes what was read through it out of memory, so
     /// reopening a folder or file can't show it without getting past that check.
     private func forgetListings(of id: UUID) {
-        let prefix = id.uuidString + ":"
-        for key in directoryOrder where key.hasPrefix(prefix) { directories.removeValue(forKey: key) }
-        directoryOrder.removeAll { $0.hasPrefix(prefix) }
-        for key in documentOrder where key.hasPrefix(prefix) { documents.removeValue(forKey: key) }
-        documentOrder.removeAll { $0.hasPrefix(prefix) }
+        for key in directoryOrder where key.id == id { directories.removeValue(forKey: key) }
+        directoryOrder.removeAll { $0.id == id }
+        for key in documentOrder where key.id == id { documents.removeValue(forKey: key) }
+        documentOrder.removeAll { $0.id == id }
         folderPrefetchQueue.removeAll { $0.profile.id == id }
         forgottenListings[id, default: 0] += 1
     }

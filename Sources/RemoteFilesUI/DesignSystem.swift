@@ -1,6 +1,7 @@
 #if os(iOS)
 import SwiftUI
 import UIKit
+import RemoteFilesCore
 
 /// The app's few shared decisions: one accent, one row, quiet status, and motion that respects
 /// Reduce Motion. Everything else is the system's own material, type and spacing.
@@ -74,7 +75,8 @@ struct LocationRow: View {
                 }
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(name)
+                // A file's name is the server's to choose; show its letters in the order they are stored.
+                Text(RemotePath.displayName(name))
                     .foregroundStyle(.primary)
                     .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
                 if let shownSubtitle, !shownSubtitle.isEmpty {

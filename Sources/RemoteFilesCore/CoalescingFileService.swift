@@ -17,7 +17,10 @@ public protocol ProgressiveFolderListing: Sendable {
 /// Shares an in-flight request for the same resource. Cancellation retires the shared request;
 /// all its waiters observe cancellation, and the next explicit request starts fresh work.
 public actor CoalescingFileService: RemoteFileService, ProgressiveFolderListing, RemoteFileSessionClosing {
-    private struct Key: Hashable { let profile: ConnectionProfile; let path: String; let limit: Int }
+    private struct Key: Hashable {
+        let profile: ConnectionProfile; let path: RemotePathKey; let limit: Int
+        init(profile: ConnectionProfile, path: String, limit: Int) { self.profile = profile; self.path = RemotePathKey(path); self.limit = limit }
+    }
     private struct VersionedKey: Hashable { let read: Key; let allowedRoot: String?; let since: RemoteFileVersion? }
     /// The wrapped service, for background work that must neither join nor cancel others' requests.
     public nonisolated let base: any RemoteFileService

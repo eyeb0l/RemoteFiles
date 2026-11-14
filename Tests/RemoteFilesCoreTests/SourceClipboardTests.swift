@@ -25,5 +25,17 @@ import UniformTypeIdentifiers
             XCTAssertEqual(Array(try XCTUnwrap(clipboard.string).utf8), Array(visible.utf8))
         }
     }
+
+    /// A copy must not travel to other devices or wait on the clipboard indefinitely.
+    func testACopyStaysOnThisDeviceAndExpires() throws {
+        let clipboard = UIPasteboard.withUniqueName()
+        defer { UIPasteboard.remove(withName: clipboard.name) }
+        SourceClipboard.copy("API_TOKEN=example", to: clipboard, now: Date().addingTimeInterval(-SourceClipboard.lifetime - 5))
+        XCTAssertNil(clipboard.data(forPasteboardType: UTType.utf8PlainText.identifier), "A copy older than its lifetime is gone")
+        XCTAssertFalse(clipboard.hasStrings)
+        SourceClipboard.copy("API_TOKEN=example", to: clipboard)
+        XCTAssertEqual(clipboard.string, "API_TOKEN=example", "A fresh copy can be pasted")
+        XCTAssertLessThanOrEqual(SourceClipboard.lifetime, 15 * 60)
+    }
 }
 #endif

@@ -100,6 +100,8 @@ struct StaticHTMLWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let view = AnchoredHTMLWebView(frame: .zero, configuration: Self.configuration(rules: rules))
         context.coordinator.attach(view)
+        // A long press would otherwise offer a preview of a link, which may load its destination.
+        view.allowsLinkPreview = false
         view.navigationDelegate = context.coordinator
         view.scrollView.delegate = context.coordinator
         // Reading positions use native offsets, so UIKit must not shift the origin.
