@@ -25,14 +25,27 @@ public struct DocumentTextIndex: Sendable {
     public let source: String
     public let parts: [MarkdownPart]
     public let headings: [DocumentHeading]
+    /// The Markdown could not be prepared, for example past a structure limit, so nothing is
+    /// rendered: there are no parts or headings, and only the source can be searched.
+    public let isSourceOnly: Bool
+    /// The parts to render, or nil when the document was refused: no parts then means "not
+    /// rendered", which a reader must not show as an empty document.
+    public var renderableParts: [MarkdownPart]? { isSourceOnly ? nil : parts }
     private let rendered: [(Int, String)]
 
     public init(text: String, markdown: Bool) throws {
         source = text
-        guard markdown else { self.parts = []; self.headings = []; self.rendered = []; return }
+        guard markdown else { self.parts = []; self.headings = []; self.rendered = []; self.isSourceOnly = false; return }
         // Index the original structure before splitting images into their own views.
         // An inline image can divide one heading across several rendering parts.
-        let document = try DocumentPolicy.prepareMarkdown(text, preserveImages: true, preserveDocumentLinks: true)
+        let document: AttributedString
+        do {
+            document = try DocumentPolicy.prepareMarkdown(text, preserveImages: true, preserveDocumentLinks: true)
+        } catch {
+            // Source is then the only way to read the document, so Find must still work there.
+            self.parts = []; self.headings = []; self.rendered = []; self.isSourceOnly = true
+            return
+        }
         var preparedParts: [MarkdownPart] = []
         var textSlices: [(id: Int, range: Range<AttributedString.Index>)] = []
         var rendered: [(Int, String)] = []
@@ -108,7 +121,7 @@ public struct DocumentTextIndex: Sendable {
             }
         }
         finishHeading()
-        parts = preparedParts; self.rendered = rendered; self.headings = headings
+        parts = preparedParts; self.rendered = rendered; self.headings = headings; isSourceOnly = false
     }
 
     public func matches(_ query: String, inSource: Bool, limit: Int = 1_000) throws -> DocumentTextMatches {
