@@ -144,6 +144,31 @@ use Settings → Branches → Add branch protection rule, pattern `main`, and ap
 the requirements above. Run `python3 -B -m unittest discover -s scripts -p 'test_ci_gate.py' -v`
 for the focused gate and workflow-wiring regressions.
 
+## Gate guard
+
+Both required checks are defined by files a pull request can edit: the workflow and its
+actions, `scripts/ci_scope.py`, which chooses the lanes, `scripts/ci_gate.py`, which judges
+them, and the runner. A pull request that weakens one of them can then pass it, and a change
+to `ci_scripts/` alone starts no Mac lane at all, although those scripts run in Xcode Cloud
+with signing access.
+
+`.github/workflows/gate-guard.yml` reports this as a separate check, **Gate unchanged**. It runs
+on `pull_request_target`, so its definition and `scripts/gate_guard.py` come from the base
+branch and the pull request cannot alter them. It checks out only the base branch's `scripts`,
+never the pull request's code, holds a read-only token and uses no secret. It lists the pull
+request's changed files through the API and fails if any is part of the gate: everything
+`ci_scope.py` lists as `INFRASTRUCTURE`, `scripts/gate_guard.py` itself, and `ci_scripts/`. A
+file renamed out of the gate counts, and a pull request with too many files to list in full
+fails as well. It runs again when a pull request's base changes, because retargeting a stacked
+pull request can bring gate changes from its old base into its diff without a new commit.
+
+The check is deliberately not required. A failure does not mean the change is wrong; it means
+the other checks passing proves less than usual, so a person reads the diff and merges. GitHub
+then reports the pull request as unstable rather than clean, which stops an agent that merges
+only clean pull requests. Run `python3 -B -m unittest discover -s scripts -p 'test_gate_guard.py' -v`
+for its regressions. Because the workflow is read from the base branch, a change to it takes
+effect only after it merges, and cannot be tried on the pull request that makes it.
+
 ## Lanes
 
 Each Mac job runs one `scripts/test-acceptance.py --lane` against its dedicated
