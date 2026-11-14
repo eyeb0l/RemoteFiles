@@ -124,6 +124,9 @@ public data and validates every padding byte, accepting a complete padding block
 Citadel's pre-existing legacy RSA implementation is not used for identity signing.
 Its manifest now uses the local, pinned `../swift-nio-ssh` source because RSA SHA-2
 needs distinct authentication and public-key-format identifiers (RFC 8332).
+The manifest requires swift-crypto 5.1.1 or later where upstream requires 3.12.3. Citadel still
+imports `CCryptoBoringSSL` and `_CryptoExtras` directly; both are still shipped, and no source
+change was needed.
 Generated Ed25519 identities, cipher/KDF limits and host-key defaults are unchanged.
 Runtime `ssh-keygen` import/fingerprint tests and independent OpenSSH authentication
 cover every supported curve, encrypted/unencrypted originals and RSA SHA-2 fallback.

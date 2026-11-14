@@ -11,6 +11,9 @@ with `ssh-rsa` public keys. Built-in keys keep their existing algorithm. No host
 legacy RSA verification or algorithm defaults are changed. Regression coverage includes an
 independent OpenSSH server with SHA-1 RSA authentication explicitly disabled.
 
+The manifest accepts swift-crypto below 6.0.0 where the fork stopped at 4.0.0; Apple's package
+widened its own range the same way (#233, #259). No source change was needed for swift-crypto 5.1.1.
+
 Local security hardening validates encrypted packet-length arithmetic before sizing a read,
 rejects a peer channel maximum packet size of zero while preserving small nonzero values, and
 validates ECDSA signature mpints as canonical positive, nonzero, curve-width-bounded integers
