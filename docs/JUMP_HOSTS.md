@@ -12,7 +12,7 @@ Both servers use the existing host-key trust flow. Verify each hostname/port and
 
 The complete connection attempt has the existing connection deadline, covering both handshakes. During connection setup, cancellation, timeout or failed trust closes both the forwarded channel and the outer connection. Disconnect also closes the entire chain. After setup, the existing per-operation SFTP cancellation and channel-retirement rules apply. Successful browsing reuses the destination SSH/SFTP session. Backgrounding clears unlocked keys and disconnects as before.
 
-Resource caches include the jump endpoint, account and identity as well as the destination, preventing cached bytes from crossing routes when private hostnames overlap. Direct cache keys are unchanged.
+Resource caches include the jump endpoint, account and identity as well as the destination, preventing cached bytes from crossing routes when private hostnames overlap. A cached copy is also bound to the host keys of both the jump host and the destination that its connection verified, and is served only while both are the keys trusted for them; see [remote images](REMOTE_IMAGES.md).
 
 Saved profiles remain compatible: older profiles without `jumpHost` connect directly. No passwords or private material are stored in profile JSON. Identities used only by a jump host cannot be deleted while referenced.
 

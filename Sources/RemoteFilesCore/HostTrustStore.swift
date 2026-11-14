@@ -28,6 +28,35 @@ public struct HostKeyDetails: Codable, Hashable, Sendable {
     }
 }
 
+/// The host keys a connection authenticated its server, and its jump host if it has one, with.
+public struct ServerHostKeys: Hashable, Sendable {
+    public let destination: HostKeyDetails
+    public let jumpHost: HostKeyDetails?
+    public init(destination: HostKeyDetails, jumpHost: HostKeyDetails? = nil) {
+        self.destination = destination; self.jumpHost = jumpHost
+    }
+}
+
+/// A download, with the host keys of the connection its bytes came through: nil when the
+/// transport cannot say.
+public struct AttestedDownload: Sendable {
+    public let entry: RemoteEntry
+    public let hostKeys: ServerHostKeys?
+    public init(entry: RemoteEntry, hostKeys: ServerHostKeys?) { self.entry = entry; self.hostKeys = hostKeys }
+}
+
+/// A transport that can say which host keys a download's bytes came through, and which keys are
+/// trusted now. Keeping copies of what was read binds them to the first and looks them up by the
+/// second: a connection opened before a trust reset keeps the key it verified, whatever is trusted since.
+public protocol HostKeyAttesting: Sendable {
+    /// The keys trusted now for the profile's server and its jump host, or nil while either has none.
+    func trustedHostKeys(for profile: ConnectionProfile) async -> ServerHostKeys?
+    func attestedDownloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL,
+                              limit: Int, progress: @escaping DownloadProgressHandler) async throws -> AttestedDownload
+    func attestedDownloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL,
+                                      limit: Int, progress: @escaping DownloadProgressHandler) async throws -> AttestedDownload
+}
+
 public enum HostTrustError: LocalizedError, Sendable {
     case unknown(endpoint: HostEndpoint, key: HostKeyDetails)
     case changed(endpoint: HostEndpoint, previous: HostKeyDetails, current: HostKeyDetails)
@@ -75,12 +104,27 @@ public actor HostTrustStore {
     }
 
     /// Called by the transport's asynchronous server-authentication delegate before user auth.
-    public func validate(endpoint: HostEndpoint, publicKey: NIOSSHPublicKey) throws {
+    /// Returns the key it accepted, so the connection can record which key it is talking to.
+    @discardableResult
+    public func validate(endpoint: HostEndpoint, publicKey: NIOSSHPublicKey) throws -> HostKeyDetails {
         let current = try HostKeyDetails(publicKey: publicKey)
         guard let previous = keys[endpoint] else { throw HostTrustError.unknown(endpoint: endpoint, key: current) }
         guard previous.publicKey == current.publicKey else {
             throw HostTrustError.changed(endpoint: endpoint, previous: previous, current: current)
         }
+        return current
+    }
+
+    /// The key trusted for this endpoint now, if any.
+    public func trustedKey(for endpoint: HostEndpoint) -> HostKeyDetails? { keys[endpoint] }
+
+    /// The keys trusted now for a connection's server and its jump host, read together, or nil
+    /// while either has none.
+    public func trustedKeys(for profile: ConnectionProfile) -> ServerHostKeys? {
+        guard let destination = keys[HostEndpoint(host: profile.host, port: profile.port)] else { return nil }
+        guard let hop = profile.jumpHost else { return ServerHostKeys(destination: destination) }
+        guard let jump = keys[HostEndpoint(host: hop.host, port: hop.port)] else { return nil }
+        return ServerHostKeys(destination: destination, jumpHost: jump)
     }
 
     /// Explicit UI acceptance of an unknown key. A different already-trusted key cannot be overwritten.
