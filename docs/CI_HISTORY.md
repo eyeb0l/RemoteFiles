@@ -31,6 +31,7 @@ result. The PR changed image decoding only. The job was rerun once, with this ca
 on the PR. The runner is unchanged: one occurrence does not show how often a record lands
 in that position. If it recurs, extend `log_tests` to that position as well; the xcresult
 already had the right count.
+
 ## 14 November 2026: a preview-reader test assumed its two reads arrive in order
 
 `BoundedPreviewReaderTests.testGrowthBeyondInitialStatIsRejectedWhileReceiving` failed
