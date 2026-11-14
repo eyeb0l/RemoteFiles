@@ -896,11 +896,12 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
             if let hop = profile.jumpHost { jumpKey = try await key(hop.identityID) } else { jumpKey = nil }
             let privateKey = try await key(profile.identityID)
             return try await Self.deadline(seconds: timeout, close: { control.close() }) {
-                func settings(host: String, port: Int, username: String, key: IdentityPrivateKey, verified: VerifiedHostKey?) -> SSHClientSettings {
+                func settings(host: String, port: Int, username: String, key: IdentityPrivateKey, trusted: HostEndpoint,
+                              verified: VerifiedHostKey?) -> SSHClientSettings {
                     var value = SSHClientSettings(
                         host: host, port: port,
                         authenticationMethod: { key.authentication(username: username) },
-                        hostKeyValidator: .custom(TrustValidator(store: trustStore, endpoint: HostEndpoint(host: host, port: port), verified: verified))
+                        hostKeyValidator: .custom(TrustValidator(store: trustStore, endpoint: trusted, verified: verified))
                     )
                     value.connectTimeout = .seconds(Int64(timeout))
                     // NIOSSH also uses this as its receive window, which has to hold a full transfer window.
@@ -910,13 +911,14 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                 }
                 do {
                     try Task.checkCancellation()
+                    // Trusted as the server behind this jump host, not as that address reached directly.
                     let destination = settings(host: profile.host, port: profile.port, username: profile.username, key: privateKey,
-                                               verified: destinationKey)
+                                               trusted: .destination(of: profile), verified: destinationKey)
                     let client: SSHClient
                     var bastion: SSHClient?
                     if let hop = profile.jumpHost, let jumpKey {
                         let jump = try await SSHClient.connect(to: settings(host: hop.host, port: hop.port, username: hop.username, key: jumpKey,
-                                                                            verified: jumpHostKey))
+                                                                            trusted: HostEndpoint(host: hop.host, port: hop.port), verified: jumpHostKey))
                         bastion = jump
                         try Task.checkCancellation()
                         client = try await jump.jump(to: destination)

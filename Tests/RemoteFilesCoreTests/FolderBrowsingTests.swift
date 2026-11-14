@@ -381,7 +381,7 @@ final class FolderBrowsingTests: XCTestCase {
         let model = try AppModel(directory: directory, fileService: DemoRemoteFileService(delayNanoseconds: 0))
         let profile = ConnectionProfile(name: "Studio", host: "studio.invalid", username: "reader", identityID: UUID(),
             jumpHost: JumpHost(host: "jump.invalid", port: 2222, username: "jump", identityID: UUID()))
-        let target = HostEndpoint(host: profile.host, port: profile.port)
+        let target = HostEndpoint.destination(of: profile)
         let jump = HostEndpoint(host: "jump.invalid", port: 2222)
         let key = NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey
         let details = try HostKeyDetails(publicKey: key)
