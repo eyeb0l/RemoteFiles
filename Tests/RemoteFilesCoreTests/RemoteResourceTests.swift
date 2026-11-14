@@ -104,6 +104,29 @@ final class RemoteResourceTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), [live])
     }
 
+    /// The transfer left to finish must not put back what the clearing removed: the cache's key has
+    /// no host key in it, so the bytes of a server whose trust was reset would be served, for the
+    /// freshness window, as the copy of whatever is trusted at that address next.
+    func testATransferBegunBeforeAClearingIsNotKeptForLaterReaders() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let document = location // One identity, so one cache key, for both readers.
+        let slow = SuspendedDestinationTransportMock()
+        let otherWindow = RemoteResourceResolver(service: slow, directory: dir)
+        let reading = Task { try await otherWindow.localFile(for: "first.png", in: document) }
+        await slow.waitUntilStarted()
+
+        await RemoteResourceResolver(service: FixedBytesTransportMock(bytes: Data()), directory: dir).clearCache()
+        await slow.release()
+        let finished = try await reading.value
+        XCTAssertEqual(try Data(contentsOf: finished), Data("first image".utf8), "Its own reader still gets the file")
+
+        let later = RemoteResourceResolver(service: FixedBytesTransportMock(bytes: Data("from the server trusted now".utf8)), directory: dir)
+        let fetched = try await later.localFile(for: "first.png", in: document)
+        XCTAssertEqual(try Data(contentsOf: fetched), Data("from the server trusted now".utf8))
+        XCTAssertNotEqual(fetched, finished)
+    }
+
     func testDecoderDownsamplesLargeDimensionsAndRejectsCorruptData() async throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
         defer { try? FileManager.default.removeItem(at: file) }

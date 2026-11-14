@@ -62,6 +62,8 @@ model in a later navigation change.
   are written; completed entries are revalidated before reuse. Failed/cancelled partials
   are removed, and partials abandoned by a previous process are removed on first use.
   Process-scoped names keep one window's cleanup from deleting another window's active transfer.
+  A transfer that began before the cache was cleared, in any window, still gives its file to its own
+  readers, but under a name no later reader looks up, so it cannot stand in for what was cleared.
   Cache filenames hash the normalized endpoint, username, identity, document root and
   canonicalized lexical path, so renaming a connection or editing its starting folder keeps
   cached images, while different accounts/identities/endpoints never share entries. This is `Library/Caches`,
