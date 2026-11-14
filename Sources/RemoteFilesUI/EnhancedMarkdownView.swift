@@ -19,6 +19,7 @@ struct EnhancedMarkdownView: View {
     @State private var error: String?
     @State private var loaded = false
     @State private var imagePresentation: ImagePresentation?
+    @State private var linkToConfirm: URL?
 
     var body: some View {
         ZStack {
@@ -36,7 +37,7 @@ struct EnhancedMarkdownView: View {
                         imagePresentation = .init(reference: reference,
                             filename: URLComponents(string: reference)?.path.split(separator: "/").last.map(String.init) ?? reference,
                             location: location, alt: alt)
-                    })
+                    }, confirmExternalLink: { linkToConfirm = $0 })
                     // Scripts are fixed when a web view is made. New text that needs others gets a new one.
                     .id(diagrams)
                     // Run the page to the bottom edge; the web view's automatic content
@@ -45,6 +46,7 @@ struct EnhancedMarkdownView: View {
                 if !loaded { LoadingPlaceholder(label: "Rendering Markdown…", shape: .document) }
             } else { LoadingPlaceholder(label: "Preparing Markdown…", shape: .document) }
         }
+        .confirmingExternalLink($linkToConfirm)
         .task(id: ExactText(text: text)) {
             error = nil; loaded = false
             do {
@@ -89,6 +91,8 @@ struct EnhancedMarkdownWebView: UIViewRepresentable {
     let openExternalLink: (URL) -> Void
     let openDocumentLink: ((URL) -> Void)?
     let openImage: (String, String) -> Void
+    /// Given a link whose text calls for a look at where it leads first. Without this, every link opens.
+    var confirmExternalLink: ((URL) -> Void)? = nil
 
     static let html = """
     <!doctype html><html><head><meta charset="utf-8">
@@ -269,7 +273,9 @@ struct EnhancedMarkdownWebView: UIViewRepresentable {
                   let body = message.body as? [String: Any] else { return }
             if body["kind"] as? String == "link", let reference = body["reference"] as? String,
                let url = URL(string: reference) {
-                if DocumentPolicy.allowsExternalLink(url) { parent.openExternalLink(url) }
+                if DocumentPolicy.allowsExternalLink(url) {
+                    ExternalLinkText.open(url, from: message.webView, open: parent.openExternalLink, confirm: parent.confirmExternalLink)
+                }
                 else if DocumentPolicy.isRelativeDocumentLink(url) { parent.openDocumentLink?(url) }
                 return
             }
@@ -318,7 +324,9 @@ struct EnhancedMarkdownWebView: UIViewRepresentable {
                action.request.url?.absoluteString == "about:blank" { decisionHandler(.allow); return }
             if action.navigationType == .linkActivated, let url = action.request.url {
                 if url.scheme == "about", url.path == "blank", url.fragment != nil { decisionHandler(.allow); return }
-                if DocumentPolicy.allowsExternalLink(url) { parent.openExternalLink(url) }
+                if DocumentPolicy.allowsExternalLink(url) {
+                    ExternalLinkText.open(url, from: view, open: parent.openExternalLink, confirm: parent.confirmExternalLink)
+                }
                 else if DocumentPolicy.isRelativeDocumentLink(url) { parent.openDocumentLink?(url) }
             }
             decisionHandler(.cancel)
