@@ -207,6 +207,9 @@ final class AppModel {
     func load() async {
         let saved = await metadataStore.current()
         metadata = saved.metadata; libraryRevision = saved.revision
+        // Before anything connects. A failure leaves the file as it was, to be tried at the next launch;
+        // a connection through a jump host is then asked to verify its server's key again.
+        try? await trust.adoptJumpRoutes(of: saved.metadata.connections)
         observeLibrary()
         await loadOfflineLibrary()
         loadDownloads()
@@ -558,12 +561,9 @@ final class AppModel {
     private func forgetUnusedHostKeys(of removed: ConnectionProfile) async {
         guard !demo else { return }
         let remaining = metadata.connections + (await metadataStore.snapshot().connections)
-        for endpoint in Self.endpoints(of: removed) where !remaining.contains(where: { $0.id != removed.id && Self.endpoints(of: $0).contains(endpoint) }) {
+        for endpoint in HostEndpoint.all(of: removed) where !remaining.contains(where: { $0.id != removed.id && HostEndpoint.all(of: $0).contains(endpoint) }) {
             do { try await trust.reset(endpoint: endpoint) } catch { errorMessage = error.localizedDescription }
         }
-    }
-    private static func endpoints(of profile: ConnectionProfile) -> [HostEndpoint] {
-        [HostEndpoint(host: profile.host, port: profile.port)] + (profile.jumpHost.map { [HostEndpoint(host: $0.host, port: $0.port)] } ?? [])
     }
     private func forgetPreviewedFiles() async {
         await resources.clearCache()
@@ -629,11 +629,11 @@ final class AppModel {
     }
     /// Forgets the trusted key of the saved endpoint, never unsaved edits in the connection form.
     func resetTrust(for profile: ConnectionProfile) async {
-        await resetTrust(endpoint: HostEndpoint(host: profile.host, port: profile.port), of: profile)
+        await resetTrust(endpoint: .destination(of: profile), of: profile)
     }
     func resetJumpHostTrust(for profile: ConnectionProfile) async {
-        guard let jump = profile.jumpHost else { return }
-        await resetTrust(endpoint: HostEndpoint(host: jump.host, port: jump.port), of: profile)
+        guard let jump = HostEndpoint.jumpHost(of: profile) else { return }
+        await resetTrust(endpoint: jump, of: profile)
     }
     /// Forgets a server's trusted key, and with it what was read through that key and kept on the
     /// device: whatever is trusted next must not be shown, or searched, as the server before it.
@@ -643,7 +643,7 @@ final class AppModel {
         await interruptDownloads(through: endpoint)
         await disconnect(preservingDownloads: true, keepingKeys: true)
         let saved = demo ? [] : await metadataStore.snapshot().connections
-        var connections = (metadata.connections + saved).filter { Self.endpoints(of: $0).contains(endpoint) }.map(\.id)
+        var connections = (metadata.connections + saved).filter { HostEndpoint.all(of: $0).contains(endpoint) }.map(\.id)
         if let profile { connections.insert(profile.id, at: 0) }
         var seen = Set<UUID>()
         for id in connections where seen.insert(id).inserted {
@@ -658,11 +658,9 @@ final class AppModel {
     /// Stops every download that reaches a server whose trusted key is being forgotten, directly or through it
     /// as a jump host, whichever connection it was started from. Downloads from other servers go on.
     private func interruptDownloads(through endpoint: HostEndpoint) async {
-        func reaches(_ profile: ConnectionProfile) -> Bool {
-            HostEndpoint(host: profile.host, port: profile.port) == endpoint ||
-            profile.jumpHost.map { HostEndpoint(host: $0.host, port: $0.port) == endpoint } == true
+        await downloads?.interrupt(reason: "This server's trusted key was forgotten. Retry to check it again and continue.") {
+            HostEndpoint.all(of: $0.profile).contains(endpoint)
         }
-        await downloads?.interrupt(reason: "This server's trusted key was forgotten. Retry to check it again and continue.") { reaches($0.profile) }
     }
     static let changedConnectionDownloadMessage = "This download's connection was changed or removed. Download the file again."
     func addIdentity(_ value: IdentityMetadata) async throws {

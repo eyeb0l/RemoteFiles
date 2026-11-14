@@ -294,6 +294,7 @@ struct TrustView: View {
             Section("Server") {
                 LabeledContent("Host", value: endpoint.host)
                 LabeledContent("Port", value: String(endpoint.port))
+                if let via = endpoint.via { LabeledContent("Through Jump Host", value: "\(via.host):\(via.port)") }
                 LabeledContent("Algorithm", value: key.algorithm)
             }
             Section { FingerprintView(value: key.fingerprint) } header: { Text("Host fingerprint") } footer: {
@@ -331,7 +332,7 @@ struct ChangedHostView: View {
         Form {
             Section {
                 Label("Connection Blocked", systemImage: "exclamationmark.shield.fill").foregroundStyle(.red)
-                Text("The host key for \(endpoint.host):\(endpoint.port) differs from the saved key. Verify the change directly with the server or its administrator before resetting trust.")
+                Text("The host key for \(endpoint.displayName) differs from the saved key. Verify the change directly with the server or its administrator before resetting trust.")
             }
             Section("Previously trusted · \(previous.algorithm)") { FingerprintView(value: previous.fingerprint) }
             Section("Presented now · \(current.algorithm)") { FingerprintView(value: current.fingerprint) }

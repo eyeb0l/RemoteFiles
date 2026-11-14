@@ -284,7 +284,7 @@ final class RemoteResourceTests: XCTestCase {
         var profile = location.profile
         profile.jumpHost = JumpHost(host: "bastion.example", username: "jump", identityID: UUID())
         let document = RemoteDocumentLocation(profile: profile, path: location.path)
-        let destination = HostEndpoint(host: profile.host, port: profile.port)
+        let destination = HostEndpoint.destination(of: profile)
         let hop = try XCTUnwrap(profile.jumpHost), bastion = HostEndpoint(host: hop.host, port: hop.port)
         let trust = try trustStore(in: dir)
         let server = try hostKey(), firstJump = try hostKey(), secondJump = try hostKey()
