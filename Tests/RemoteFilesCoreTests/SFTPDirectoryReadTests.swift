@@ -176,9 +176,12 @@ final class SFTPDirectoryReadTests: XCTestCase {
     /// the connection stayed open, its requests never finished, and every later read was kept.
     func testAPacketThatFailsToDecryptAfterLoginClosesTheConnection() async throws {
         let server = try await FakeSFTPServer.start(FakeDirectory(entries: thousand, batch: 10, holdMilliseconds: 120_000))
+        addTeardownBlock { try? await server.stop() }
         let client = try await server.connect()
+        addTeardownBlock { try? await client.close() }
         let sftp = try await client.openSFTP(logger: FakeSFTPServer.quietLogger)
         let listing = Task { try await sftp.listDirectory(atPath: "/fake", resolvingPath: false, concurrentReads: 4) }
+        addTeardownBlock { listing.cancel() }
         let outcome = Task { () -> Error? in
             do { _ = try await listing.value; return nil } catch { return error }
         }
@@ -189,15 +192,10 @@ final class SFTPDirectoryReadTests: XCTestCase {
         let deadline = ContinuousClock.now + .seconds(30)
         while client.isConnected, ContinuousClock.now < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
         guard !client.isConnected else {
-            XCTFail("The connection stayed open after a packet that cannot be authenticated")
-            listing.cancel()
-            try? await client.close()
-            try await server.stop()
-            return
+            return XCTFail("The connection stayed open after a packet that cannot be authenticated")
         }
         let failure = await outcome.value
         XCTAssertNotNil(failure, "The request waiting on the connection fails rather than hanging")
-        try await server.stop()
     }
 
     func testEntryLimitDrainsOutstandingReadsAndCloses() async throws {
