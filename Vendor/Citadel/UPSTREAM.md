@@ -28,6 +28,18 @@ handshake handler while awaiting authentication. Upstream regression tests expos
 ten-second delay even after closing the forwarded child. The close-future observer captures only the
 promise and preserves an already completed authentication result.
 
+`ClientHandshakeHandler.errorCaught` also closes the channel after failing its promise, once
+login has completed. NIOSSH reports a transport failure, such as a packet that does not decrypt,
+with `fireErrorCaught` and leaves the connection open. After login the promise is already
+fulfilled, so upstream dropped the error: the connection stayed open, its requests never finished
+and the peer could keep it buffering. Before login nothing changes: the failed promise ends the
+connection attempt and the caller closes the socket, which lets a server finish reporting, for
+example, that no algorithm matched. Closing there as well made the two "no common algorithms"
+integration tests miss the server's message. A jump connection's handler sits on a forwarded
+child channel, where it also catches `tcpShutdown` as the outer connection ends; closing that
+child then is harmless. `SFTPDirectoryReadTests.testAPacketThatFailsToDecryptAfterLoginClosesTheConnection`
+sends such a packet from an in-process server and requires the client to disconnect.
+
 Reason: the upstream `SSHClient.connect(on:settings:)` alternative invokes NIO synchronous pipeline
 operations off the event loop. The unmodified source crashed the independent OpenSSH integration test
 with `NIOCore/ChannelPipeline.swift:1208: Precondition failed`. The normal `connect(to:)` flow initializes
@@ -99,6 +111,9 @@ hands over the `CLOSE` as a future and returns as soon as the listing is complet
 close must still make the caller retire the channel. A window is now topped up only once half of it has been
 answered: every read still outstanding at EOF must be drained, so one sent just before EOF would cost a round
 trip for nothing, and half a window keeps the server busy. RemoteFiles passes 16 for browsing and 8 for walks.
+A `NAME` answer that carries no names fails the listing with `invalidResponse`: the protocol answers EOF when
+nothing is left, and an empty batch moved neither limit while still refilling the window, so a server could keep
+a listing running indefinitely.
 
 `SFTPClient.sendRealPath`, `sendAttributes` and `sendOpenFile`, and `SFTPFile.sendReadAttributes` and `sendClose`,
 queue a request and return a future without waiting. They expose the existing `sendRequestFuture` ordering, so
@@ -119,6 +134,9 @@ and the crypto library's private-key consistency checks. ECDSA imports validate 
 curve, private scalar and derived public point. The app compares the derived public
 key with the outer container for every algorithm. `OpenSSHKey.swift` rejects trailing
 public data and validates every padding byte, accepting a complete padding block.
+It also refuses a cipher named without a key derivation, which had AES read its key and IV
+from empty arrays, and an empty passphrase, whose bytes were force-unwrapped as a pointer that empty data need not have. The
+app's own container check already rejects both before the parser sees them.
 
 `SSHAuthenticationMethod.rsaSHA2` offers SHA-512 then SHA-256, never SHA-1.
 Citadel's pre-existing legacy RSA implementation is not used for identity signing.

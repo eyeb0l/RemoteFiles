@@ -259,7 +259,7 @@ Evidence: `/private/tmp/remotefiles-physical-build.log` and `/private/tmp/remote
 
 ```sh
 xcodebuild test-without-building -project RemoteFiles.xcodeproj \
-  -scheme RemoteFiles -destination 'platform=iOS,name=Iris’ iPhone' \
+  -scheme RemoteFiles -destination 'platform=iOS,name=DEVICE_NAME' \
   -derivedDataPath DerivedData-device -parallel-testing-enabled NO \
   -collect-test-diagnostics never
 ```

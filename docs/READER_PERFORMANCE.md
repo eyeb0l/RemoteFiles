@@ -198,14 +198,15 @@ Run the tokenizer regression tests:
 swift test --package-path Vendor/Textual
 ```
 
-Build and test the phone with the existing signing configuration:
+Build and test the phone with the existing signing configuration, replacing `DEVICE_UDID` with
+the phone's identifier from `xcrun xctrace list devices`:
 
 ```sh
 xcodebuild build-for-testing -project RemoteFiles.xcodeproj -scheme RemoteFiles \
-  -configuration Release -destination 'id=00008150-000434162182401C' \
+  -configuration Release -destination 'id=DEVICE_UDID' \
   -derivedDataPath DerivedData-device -allowProvisioningUpdates ENABLE_TESTABILITY=YES
 xcodebuild test-without-building -project RemoteFiles.xcodeproj -scheme RemoteFiles \
-  -configuration Release -destination 'id=00008150-000434162182401C' \
+  -configuration Release -destination 'id=DEVICE_UDID' \
   -derivedDataPath DerivedData-device -parallel-testing-enabled NO \
   -collect-test-diagnostics never
 ```

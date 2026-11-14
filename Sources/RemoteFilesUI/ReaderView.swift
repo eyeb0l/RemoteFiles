@@ -68,6 +68,7 @@ struct ReaderView: View {
                 switch preview {
                 case .text(let text, let markdown, let hiddenKeys):
                     if hiddenKeys > 0 { HiddenPrivateKeyNotice(count: hiddenKeys, saveAction: "Save Original to Files") }
+                    DirectionCharacterNotice(text: text)
                     DocumentContentView(text: text, markdown: markdown, source: source, filename: entry.name, location: .init(profile: profile, path: entry.path, canonicalRoot: entry.canonicalRoot), resolver: model.resources, readingPosition: readingPosition, openDocumentLink: openLink, wrapLines: wrapLines, navigation: navigation).id(ContentIdentity(revision: contentRevision, images: imageVersion))
                     .textual.structuredTextStyle(.reader)
                     .transition(.opacity)

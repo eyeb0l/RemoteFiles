@@ -10,6 +10,26 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 14 November 2026: the VoiceOver key journey opened SSH Keys before Settings had appeared
+
+PR #145 run [43595831815](https://github.com/eyeb0l/RemoteFiles/actions/runs/43595831815) failed
+**Acceptance / voiceover** on a change that adds a workflow, a script and documentation; every
+other lane passed. Two tests were involved, 9 others passed, and that morning's nightly on `main`
+had passed all 11 with the same test code.
+
+- `VoiceOverChecks.testDemoReaderVoiceOverJourney` exceeded its three-minute allowance. After the
+  double tap on **Document actions**, the wait for the app to idle ran its full 60 seconds
+  (`App animations complete notification not received`), the stall described under
+  [10 November](#10-november-2026-lost-mode-taps-ignored-switch-presses-and-idle-waits-traced-to-their-causes).
+  The menu had opened. Nothing was changed for it.
+- `VoiceOverChecks.testPublicKeyConfirmationVoiceOverAccountKeyCancelAndResult` tapped **Settings**
+  and then **SSH Keys** with no wait between. The hierarchy captured 7.5 seconds after the first tap
+  was still the home screen, so the second found nothing. The log cannot tell a tap that was not
+  delivered from a push that was slow. The test now waits up to 15 seconds for the Settings screen
+  and taps **Settings** once more only if the home screen is still showing.
+
+Neither was reproduced.
+
 ## 14 November 2026: a download test read its fake before the transfer saw cancellation
 
 PR #141 run [43577671711](https://github.com/eyeb0l/RemoteFiles/actions/runs/43577671711) failed
