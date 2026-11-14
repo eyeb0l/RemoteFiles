@@ -54,7 +54,7 @@ log 759. No test failed. In `simulator-core.log` the test's result line was spli
 audio log line from the test host, written between the test's name and its outcome:
 
 ```
-Test Case '-[RemoteFilesTests.PlaybackTests testCorruptRefresh…]'2026-11-14 01:24:21.111681+0000 RemoteFilesTestHost[35848:128845] [AQ]        LoudnessManager.mm:1222  IsHardwareSupported: no plist loaded, returning fa
+Test Case '-[RemoteFilesTests.PlaybackTests testCorruptRefresh…]'2026-11-14 01:24:21.111681+0000 RemoteFilesTestHost[35848:128845] [AQ]        LoudnessManager.mm:1222  IsHardwareSupported: no plist loaded, returning false
  passed (0.014 seconds).
 ```
 
@@ -62,9 +62,13 @@ Test Case '-[RemoteFilesTests.PlaybackTests testCorruptRefresh…]'2026-11-14 01
 test's identifier and from inside the `Test Case '-[` prefix. This one fell between the
 closing quote and the outcome, which it does not handle, so the test had a start and no
 result. The PR changed image decoding only. The job was rerun once, with this cause named
-on the PR. The runner is unchanged: one occurrence does not show how often a record lands
-in that position. If it recurs, extend `log_tests` to that position as well; the xcresult
-already had the right count.
+on the PR.
+
+Later the same day, #138 replaced the position-specific cases with one rule: `log_tests`
+removes every complete structured record that starts mid-line, wherever it falls in a result
+line. Of the 90 simulator-core logs still retained (7–14 November), 29 had such a record in a
+result line, and this run's was the only one at this position; the old and new parsers agree
+on every other log. Interruptions that are not complete records still leave no result.
 
 ## 14 November 2026: a preview-reader test assumed its two reads arrive in order
 
