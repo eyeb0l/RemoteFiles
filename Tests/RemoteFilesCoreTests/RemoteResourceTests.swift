@@ -117,14 +117,20 @@ final class RemoteResourceTests: XCTestCase {
         await slow.waitUntilStarted()
 
         await RemoteResourceResolver(service: FixedBytesTransportMock(bytes: Data()), directory: dir).clearCache()
+        let current = Data("from the server trusted now".utf8)
+        let later = RemoteResourceResolver(service: FixedBytesTransportMock(bytes: current), directory: dir)
+        let fetched = try await later.localFile(for: "first.png", in: document)
+        XCTAssertEqual(try Data(contentsOf: fetched), current)
+
         await slow.release()
         let finished = try await reading.value
         XCTAssertEqual(try Data(contentsOf: finished), Data("first image".utf8), "Its own reader still gets the file")
-
-        let later = RemoteResourceResolver(service: FixedBytesTransportMock(bytes: Data("from the server trusted now".utf8)), directory: dir)
-        let fetched = try await later.localFile(for: "first.png", in: document)
-        XCTAssertEqual(try Data(contentsOf: fetched), Data("from the server trusted now".utf8))
         XCTAssertNotEqual(fetched, finished)
+        XCTAssertEqual(try Data(contentsOf: fetched), current, "Finishing must not remove or replace the copy kept since the clearing")
+        let again = try await RemoteResourceResolver(service: FixedBytesTransportMock(bytes: Data("not fetched".utf8)), directory: dir)
+            .localFile(for: "first.png", in: document)
+        XCTAssertEqual(again, fetched)
+        XCTAssertEqual(try Data(contentsOf: again), current)
     }
 
     func testDecoderDownsamplesLargeDimensionsAndRejectsCorruptData() async throws {

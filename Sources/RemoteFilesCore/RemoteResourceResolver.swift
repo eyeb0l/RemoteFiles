@@ -422,14 +422,20 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         // An invalidated transfer still belongs to its original consumers. Keep its
         // result at a separate URL so it cannot replace the current cached resource.
         let aside = directory.appendingPathComponent(key + "-" + id.uuidString).appendingPathExtension("resource")
-        var destination = generations[key] == generation ? target : aside
-        try? fm.removeItem(at: destination)
+        // The same goes for a transfer begun before the cache was cleared, in any window: the
+        // key has no host key in it, so these bytes may be from a server no longer trusted.
+        // It is decided before anything is removed, or this would take the copy kept since.
+        let isCurrent = generations[key] == generation
+        var destination = Self.clearings.holding(directory) { count in
+            let destination = isCurrent && count == clearing ? target : aside
+            try? fm.removeItem(at: destination)
+            return destination
+        }
         trim(reserving: size)
         if let version = RemoteFileVersion(size: downloaded.size, modifiedAt: downloaded.modifiedAt) {
             Self.storeVersion(version, at: temp)
         }
-        // The same goes for a transfer begun before the cache was cleared, in any window: the
-        // key has no host key in it, so these bytes may be from a server no longer trusted.
+        // And again at the move, for a clearing since the lines above.
         try Self.clearings.holding(directory) { count in
             if count != clearing { destination = aside }
             try fm.moveItem(at: temp, to: destination)
