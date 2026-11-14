@@ -8,8 +8,8 @@ spec = importlib.util.spec_from_file_location('cellular', Path(__file__).with_na
 cellular = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cellular)
 
-PHONE = {'HostName': 'localhost', 'DNSName': 'iris-iphone.example.ts.net.', 'OS': 'iOS', 'Online': True,
-         'TailscaleIPs': ['100.114.108.88', 'fd7a:115c:a1e0::1938:6c58']}
+PHONE = {'HostName': 'localhost', 'DNSName': 'test-iphone.example.ts.net.', 'OS': 'iOS', 'Online': True,
+         'TailscaleIPs': ['100.64.0.20', 'fd7a:115c:a1e0::20']}
 
 
 def sample(path='direct-public', rx=0, tx=0, sockets=(), usb=True):
@@ -19,7 +19,7 @@ def sample(path='direct-public', rx=0, tx=0, sockets=(), usb=True):
 
 class ClassifyPathTests(unittest.TestCase):
     def test_lan_endpoints_are_local(self):
-        for address in ('192.168.4.20:41641', '10.0.0.3:41641', '[fe80::1]:41641', '100.70.1.2:41641'):
+        for address in ('192.168.0.20:41641', '10.0.0.3:41641', '[fe80::1]:41641', '100.70.1.2:41641'):
             self.assertEqual(cellular.classify_path({'CurAddr': address}, set())[0], 'lan', address)
 
     def test_mac_public_address_means_the_same_network(self):
@@ -35,12 +35,12 @@ class ClassifyPathTests(unittest.TestCase):
             '\tinet6 fe80::1%lo0 prefixlen 64 scopeid 0x1',
             'en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500',
             '\tinet6 2a02:c7c:1234:5600:1c2a:3b4c:5d6e:7f80 prefixlen 64 autoconf secured',
-            '\tinet 192.168.4.28 netmask 0xffffff00 broadcast 192.168.4.255',
+            '\tinet 192.168.0.28 netmask 0xffffff00 broadcast 192.168.0.255',
             'utun4: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1280',
-            '\tinet 100.125.79.6 --> 100.125.79.6 netmask 0xffffffff',
+            '\tinet 100.64.0.10 --> 100.64.0.10 netmask 0xffffffff',
         ])
         networks = cellular.local_networks(ifconfig)
-        self.assertIn(ipaddress.ip_network('192.168.4.0/24'), networks)
+        self.assertIn(ipaddress.ip_network('192.168.0.0/24'), networks)
         self.assertIn(ipaddress.ip_network('2a02:c7c:1234:5600::/64'), networks)
         self.assertNotIn(ipaddress.ip_network('127.0.0.0/8'), networks)
         same_lan = {'CurAddr': '[2a02:c7c:1234:5600:aaaa:bbbb:cccc:dddd]:41641'}
@@ -59,7 +59,7 @@ class FindPeerTests(unittest.TestCase):
 
     def test_matches_magicdns_short_name_and_ip(self):
         status = self.status({'DNSName': 'mac.example.ts.net.', 'OS': 'macOS', 'TailscaleIPs': ['100.1.1.1']}, PHONE)
-        for name in ('iris-iphone', 'iris-iphone.example.ts.net.', '100.114.108.88'):
+        for name in ('test-iphone', 'test-iphone.example.ts.net.', '100.64.0.20'):
             self.assertIs(cellular.find_peer(status, name), PHONE)
         with self.assertRaises(SystemExit):
             cellular.find_peer(status, 'missing')
@@ -76,22 +76,22 @@ class OutputParsingTests(unittest.TestCase):
     def test_ssh_sockets_match_only_established_port_from_peer(self):
         netstat = '\n'.join([
             'Proto Recv-Q Send-Q  Local Address  Foreign Address  (state)',
-            'tcp4  0  0  100.125.79.6.22  100.114.108.88.51234  ESTABLISHED',
-            'tcp6  0  0  fd7a:115c:a1e0::1.22  fd7a:115c:a1e0::1938:6c58.51235  ESTABLISHED',
-            'tcp4  0  0  100.125.79.6.22  100.114.108.88.51236  TIME_WAIT',
-            'tcp4  0  0  100.125.79.6.2222  100.114.108.88.51237  ESTABLISHED',
-            'tcp4  0  0  192.168.4.28.22  192.168.4.20.51238  ESTABLISHED',
-            'tcp4  0  0  100.125.79.6.57848  100.114.108.88.22  ESTABLISHED',
+            'tcp4  0  0  100.64.0.10.22  100.64.0.20.51234  ESTABLISHED',
+            'tcp6  0  0  fd7a:115c:a1e0::1.22  fd7a:115c:a1e0::20.51235  ESTABLISHED',
+            'tcp4  0  0  100.64.0.10.22  100.64.0.20.51236  TIME_WAIT',
+            'tcp4  0  0  100.64.0.10.2222  100.64.0.20.51237  ESTABLISHED',
+            'tcp4  0  0  192.168.0.28.22  192.168.0.20.51238  ESTABLISHED',
+            'tcp4  0  0  100.64.0.10.57848  100.64.0.20.22  ESTABLISHED',
         ])
         self.assertEqual(cellular.ssh_sockets(netstat, set(PHONE['TailscaleIPs']), 22), [
-            '100.114.108.88.51234 -> 100.125.79.6.22',
-            'fd7a:115c:a1e0::1938:6c58.51235 -> fd7a:115c:a1e0::1.22'])
+            '100.64.0.20.51234 -> 100.64.0.10.22',
+            'fd7a:115c:a1e0::20.51235 -> fd7a:115c:a1e0::1.22'])
 
     def test_usb_connection_matches_the_udid_serial_number(self):
-        ioreg = '    |   "USB Serial Number" = "00008150000434162182401C"\n    |   "USB Product Name" = "iPhone"'
-        self.assertTrue(cellular.usb_connected(ioreg, '00008150-000434162182401C'))
-        self.assertFalse(cellular.usb_connected(ioreg, '00008150-000434162182401D'))
-        self.assertFalse(cellular.usb_connected('"USB Product Name" = "00008150000434162182401C"', '00008150-000434162182401C'))
+        ioreg = '    |   "USB Serial Number" = "000081500000000000000001"\n    |   "USB Product Name" = "iPhone"'
+        self.assertTrue(cellular.usb_connected(ioreg, '00008150-0000000000000001'))
+        self.assertFalse(cellular.usb_connected(ioreg, '00008150-0000000000000002'))
+        self.assertFalse(cellular.usb_connected('"USB Product Name" = "000081500000000000000001"', '00008150-0000000000000001'))
 
     def test_outcomes_report_skips_as_skips(self):
         log = ("Test Case '-[RemoteFilesUITests.RealServerUITests testA]' passed (12.0 seconds).\n"
