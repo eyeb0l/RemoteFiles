@@ -16,15 +16,45 @@ python3 -B scripts/testflight_release.py --push  # Pushes the tag, which starts 
 The command defaults to the tip of `main`; use `--commit SHA` for an earlier commit on `main`.
 It stops unless the commit is on `main` and both **Repository checks** and **CI gate** passed
 on it. A docs-only commit passes those with its Mac lanes skipped, so check that the last code
-commit's run passed too. It needs your `git` and `gh` logins.
+commit's run passed too. It needs your `gh` login to read those results and the
+[deploy key](#deploy-key) to push the tag; `ssh` asks for the key's passphrase each time.
 
 Xcode Cloud then runs `ci_scripts/ci_post_clone.sh`, which fails the build if the commit is
-not on `main`. This also covers a tag pushed by hand or a manual start, but it cannot check CI
-results.
+not on `main`. This also covers a manual start, but it cannot check CI results.
 
 Tags are named `testflight/<version>-<n>`, for example `testflight/0.1.0-3`. `<n>` counts
-releases of that version; it is not the build number. A ruleset stops `testflight/*` tags
-being moved or deleted, so each one permanently records what shipped.
+releases of that version; it is not the build number. One ruleset stops `testflight/*` tags
+being moved or deleted, so each one permanently records what shipped. A second lets only a
+deploy key create them.
+
+## Deploy key
+
+A pushed `testflight/*` tag is built, signed and sent to testers with no further step, so an
+ordinary login must not be able to push one. The **TestFlight tags need the deploy key** ruleset
+rejects the tag from every account and token, and lets a deploy key through. The release
+command pushes over SSH with that key alone.
+
+Create the key once, with a passphrase that is not saved on the Mac:
+
+```sh
+ssh-keygen -t ed25519 -C "RemoteFiles TestFlight tags" -f ~/.ssh/remotefiles_testflight_deploy
+gh repo deploy-key add ~/.ssh/remotefiles_testflight_deploy.pub --repo eyeb0l/RemoteFiles \
+  --allow-write --title "TestFlight tags"
+```
+
+- **Another location:** pass `--key PATH` or set `REMOTEFILES_TESTFLIGHT_KEY`.
+- **Passphrase:** the command refuses a key without one, because other tools on the Mac can
+  read the file. It runs `ssh` without your SSH configuration, agent or an exported
+  `GIT_SSH_COMMAND`, so the passphrase is asked for on the terminal each time and is not saved
+  to the Keychain.
+- **First use:** `ssh` asks you to accept GitHub's host key unless it is already in
+  `~/.ssh/known_hosts`. Compare it with
+  [GitHub's published fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints).
+- **Any deploy key counts:** the ruleset cannot name one key, so do not add other deploy keys
+  with write access to this repository.
+
+This stops a stray or automated push. It does not bind an account with admin rights, which
+can add a deploy key or change the ruleset.
 
 ## Version and build numbers
 

@@ -6,6 +6,7 @@ import NIOPosix
 @preconcurrency import NIOSSH
 import Citadel
 import Logging
+@testable import RemoteFilesCore
 
 /// Pipelined READDIR against an in-process SSH server whose SFTP subsystem is a scripted fake.
 /// The fake can hold requests to measure how many are in flight, answer them out of order,
@@ -203,6 +204,31 @@ final class SFTPDirectoryReadTests: XCTestCase {
         }
         XCTAssertEqual(recorder.requests.filter { $0 == "close" }.count, 1)
         XCTAssertEqual(recorder.requests.last, "close")
+    }
+
+    /// The server chooses every name and the path that goes in front of each, so both are bounded
+    /// before anything is kept.
+    func testAListingRefusesAnOverlongNameAndMoreNameBytesThanItMayKeep() throws {
+        func component(_ name: String) -> SFTPPathComponent { .init(filename: name, longname: "", attributes: .none) }
+        let longest = String(repeating: "n", count: 4_096)
+        let entries = CollectedEntries(nameLimit: 4_096, retainedLimit: 1_024 * 1_024)
+        XCTAssertEqual(try entries.add([component("."), component(".."), component(longest)], in: "/srv").map(\.path), ["/srv/" + longest])
+        XCTAssertThrowsError(try entries.add([component(longest + "n")], in: "/srv")) { error in
+            guard case RemoteFileError.listingTooLarge = error else { return XCTFail("Unexpected \(error)") }
+        }
+        XCTAssertEqual(entries.entries.count, 1, "The refused name is not kept")
+
+        // Each entry keeps its name twice, once inside its path, and the folder's path once.
+        let folder = "/" + String(repeating: "d", count: 99)
+        let exact = CollectedEntries(nameLimit: 4_096, retainedLimit: 3 * (2 * 10 + 101))
+        let names = ["aaaaaaaaaa", "bbbbbbbbbb", "cccccccccc"]
+        XCTAssertEqual(try exact.add(names.map(component), in: folder).count, 3)
+        XCTAssertEqual(exact.entries.reduce(0) { $0 + $1.nameBytes }, 3 * (2 * 10 + 101))
+        XCTAssertThrowsError(try exact.add([component("d")], in: folder)) { error in
+            guard case RemoteFileError.listingTooLarge = error else { return XCTFail("Unexpected \(error)") }
+        }
+        XCTAssertEqual(SFTPRemoteFileService.directoryNameLimit, 4_096)
+        XCTAssertLessThan(SFTPRemoteFileService.walkMetadataLimit, SFTPRemoteFileService.directoryMetadataLimit)
     }
 
     func testRejectsZeroAndOversizedSFTPPacketLengths() async throws {
