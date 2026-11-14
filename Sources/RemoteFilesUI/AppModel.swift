@@ -170,7 +170,7 @@ final class AppModel {
     private var realMetadata = AppMetadata()
     // Read while a view is being made, and written from the background. Observing them would remake
     // every mounted folder each time one more listing is remembered.
-    @ObservationIgnored private var directories: [String: (listing: FolderListing, storedAt: ContinuousClock.Instant?, nameBytes: Int)] = [:]
+    @ObservationIgnored private var directories: [CacheKey: (listing: FolderListing, storedAt: ContinuousClock.Instant?, nameBytes: Int)] = [:]
     @ObservationIgnored private var folderPrefetchQueue: [(profile: ConnectionProfile, path: String)] = []
     @ObservationIgnored private var folderPrefetch: Task<Void, Never>?
     @ObservationIgnored private var folderPrefetchToken: UUID?
@@ -178,14 +178,17 @@ final class AppModel {
     /// Counts how often a connection's listings were forgotten, so one read before that isn't kept.
     @ObservationIgnored private var forgottenListings: [UUID: Int] = [:]
     func listingGeneration(_ id: UUID) -> Int { forgottenListings[id, default: 0] }
-    @ObservationIgnored private var documents: [String: (bytes: Data, version: RemoteFileVersion?)] = [:]
-    @ObservationIgnored private var directoryOrder: [String] = []
-    @ObservationIgnored private var documentOrder: [String] = []
+    @ObservationIgnored private var documents: [CacheKey: (bytes: Data, version: RemoteFileVersion?)] = [:]
+    @ObservationIgnored private var directoryOrder: [CacheKey] = []
+    @ObservationIgnored private var documentOrder: [CacheKey] = []
 
     let preferences: UserDefaults
+    /// Remote folder paths, so kept beside the library with its protection, not in the preferences file.
+    private let folderSortFile: URL
     init(directory: URL, fileService: (any RemoteFileService)? = nil, publicKeyInstaller: (any PublicKeyInstalling)? = nil,
          preferences: UserDefaults = .standard, identities: IdentityStore = IdentityStore()) throws {
         searchIndexDirectory = directory.appendingPathComponent("SearchIndexes-v1", isDirectory: true)
+        folderSortFile = directory.appendingPathComponent("folder-sort-orders-v1.json")
         self.preferences = preferences
         self.identities = identities
         downloadDirectory = directory.appendingPathComponent("Downloads-v1", isDirectory: true)
@@ -543,12 +546,45 @@ final class AppModel {
         if order != .name { entries.append([key, order.rawValue]) }
         storeFolderSortOrders(Array(entries.suffix(Self.folderSortLimit)))
     }
-    /// Stored as [key, order] pairs, oldest first.
-    private func folderSortOrders() -> [[String]] {
-        (preferences.array(forKey: Self.folderSortKey) as? [[String]])?.filter { $0.count == 2 } ?? []
+    /// Stored as [key, order] pairs, oldest first. Read from the file each time: every window has
+    /// its own model, and a copy held here would be written back over another window's choice.
+    func folderSortOrders() -> [[String]] {
+        moveFolderSortOrdersOutOfPreferences()
+        guard let bytes = try? Data(contentsOf: folderSortFile),
+              let entries = try? JSONDecoder().decode([[String]].self, from: bytes) else { return [] }
+        return entries.filter { $0.count == 2 }
     }
     private func storeFolderSortOrders(_ entries: [[String]]) {
-        if entries.isEmpty { preferences.removeObject(forKey: Self.folderSortKey) } else { preferences.set(entries, forKey: Self.folderSortKey) }
+        moveFolderSortOrdersOutOfPreferences()
+        writeFolderSortOrders(entries)
+    }
+    @discardableResult private func writeFolderSortOrders(_ entries: [[String]]) -> Bool {
+        guard !entries.isEmpty else {
+            try? FileManager.default.removeItem(at: folderSortFile)
+            return !FileManager.default.fileExists(atPath: folderSortFile.path)
+        }
+        do {
+            try FileManager.default.createDirectory(at: folderSortFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let bytes = try JSONEncoder().encode(entries)
+            #if os(iOS)
+            try bytes.write(to: folderSortFile, options: [.atomic, .completeFileProtection])
+            #else
+            try bytes.write(to: folderSortFile, options: .atomic)
+            #endif
+            // Which folders exist on a server is not something a backup needs to carry.
+            var values = URLResourceValues(); values.isExcludedFromBackup = true
+            var file = folderSortFile
+            try? file.setResourceValues(values)
+            return true
+        } catch { return false }
+    }
+    /// Earlier versions kept these in the preferences file, the one place remote paths were stored
+    /// without complete file protection. The preference goes only once the file holds its entries.
+    private func moveFolderSortOrdersOutOfPreferences() {
+        guard let legacy = preferences.array(forKey: Self.folderSortKey) else { return }
+        let entries = (legacy as? [[String]])?.filter { $0.count == 2 } ?? []
+        guard FileManager.default.fileExists(atPath: folderSortFile.path) || writeFolderSortOrders(entries) else { return }
+        preferences.removeObject(forKey: Self.folderSortKey)
     }
     /// Forgets the trusted key of the saved endpoint, never unsaved edits in the connection form.
     func resetTrust(for profile: ConnectionProfile) async {
@@ -833,7 +869,9 @@ final class AppModel {
         directories.removeAll(); directoryOrder.removeAll()
         cancelPrefetch()
     }
-    private func key(_ id: UUID, _ path: String) -> String { "\(id.uuidString):\(path)" }
+    /// By the path's bytes: two names that differ only in Unicode normalisation are two files.
+    private struct CacheKey: Hashable { let id: UUID; let path: RemotePathKey }
+    private func key(_ id: UUID, _ path: String) -> CacheKey { CacheKey(id: id, path: RemotePathKey(path)) }
     func cachedListing(_ id: UUID, path: String) -> FolderListing? { directories[key(id, path)]?.listing }
     /// Whether a remembered listing is recent enough to show without asking the server again.
     func isListingFresh(_ id: UUID, path: String, within window: Duration = AppModel.listingFreshness) -> Bool {
@@ -919,11 +957,10 @@ final class AppModel {
     /// A key or host that fails verification takes what was read through it out of memory, so
     /// reopening a folder or file can't show it without getting past that check.
     private func forgetListings(of id: UUID) {
-        let prefix = id.uuidString + ":"
-        for key in directoryOrder where key.hasPrefix(prefix) { directories.removeValue(forKey: key) }
-        directoryOrder.removeAll { $0.hasPrefix(prefix) }
-        for key in documentOrder where key.hasPrefix(prefix) { documents.removeValue(forKey: key) }
-        documentOrder.removeAll { $0.hasPrefix(prefix) }
+        for key in directoryOrder where key.id == id { directories.removeValue(forKey: key) }
+        directoryOrder.removeAll { $0.id == id }
+        for key in documentOrder where key.id == id { documents.removeValue(forKey: key) }
+        documentOrder.removeAll { $0.id == id }
         folderPrefetchQueue.removeAll { $0.profile.id == id }
         forgottenListings[id, default: 0] += 1
     }

@@ -344,8 +344,9 @@ public actor OfflineFileStore {
     }
     static func validFilename(_ value: String) -> Bool {
         // By bytes: this names a local file, and a slash beside a combining mark still separates folders.
+        // A direction control would save the file under a name that reads as another type.
         !value.isEmpty && !RemotePath.isDotName(value) && !RemotePath.hasSeparator(value) &&
-        !value.unicodeScalars.contains { $0.value < 32 || $0.value == 127 }
+        !value.unicodeScalars.contains { $0.value < 32 || $0.value == 127 || RemotePath.isDirectionControl($0) }
     }
     static func protectDirectory(_ url: URL) throws {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])

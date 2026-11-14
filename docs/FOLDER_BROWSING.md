@@ -4,6 +4,8 @@
 
 Folders list their contents with folders first. Use **Folder actions** to refresh, show hidden files, add a favourite, or choose how the folder is sorted. The title menu lists the folder's ancestors and copies its path. The search field filters this folder, searches names in its subfolders, or searches file contents. **Search Options** adds matching filters, PDF text and on-device OCR; **Saved Search Index** builds a local text snapshot for repeated searches.
 
+A name is shown with its letters in the order they are stored. Characters that silently reverse or reorder text, with which `invoice…fdp.html` can be made to read as `invoicelmth.pdf`, appear as a replacement mark (`�`), so the real ending is at the end. A file with such a character in its name opens and previews as usual, but can't be downloaded, kept offline or saved to Files, because the copy would carry the misleading name; a folder kept offline leaves it out and counts it.
+
 A folder can contain up to 250,000 entries and 128 MiB of decoded name and attribute metadata, and its names and paths may take 128 MiB once listed. One name may be at most 4,096 bytes. If a folder exceeds a limit, the app shows an error rather than a silently incomplete listing. Listings nobody is waiting to see (a search or index walk, a folder listed ahead, a quiet check) have a 16 MiB limit instead, about 100,000 ordinary names, because many run at once. Individual SFTP frames are capped at 1 MiB before their declared body is buffered.
 
 | Linked folder | File and broken links | Sorted by size |

@@ -83,6 +83,7 @@ struct StaticSVGWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let config = Self.configuration(rules: rules)
         let view = WKWebView(frame: .zero, configuration: config)
+        view.allowsLinkPreview = false
         view.navigationDelegate = context.coordinator
         view.isOpaque = false; view.backgroundColor = .clear
         view.scrollView.backgroundColor = .clear

@@ -246,7 +246,7 @@ struct FolderView: View {
         .contentStatus(progress: listing != nil && loading && !pullRefreshing ? "Updating…" : nil,
                        failure: listing == nil ? nil : error.map { "Couldn’t update this folder · \($0)" },
                        retry: { refreshID += 1 })
-        .navigationTitle(RemotePath.name(of: path))
+        .navigationTitle(RemotePath.displayName(RemotePath.name(of: path)))
         .navigationSubtitle(profile.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarTitleMenu { ancestorsMenu }

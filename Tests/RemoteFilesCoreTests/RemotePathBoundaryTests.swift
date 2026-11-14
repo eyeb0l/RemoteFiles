@@ -59,6 +59,38 @@ final class RemotePathBoundaryTests: XCTestCase {
         XCTAssertTrue(OfflineFileStore.validFilename("..." + accent))
     }
 
+    /// `invoice` + U+202E + `fdp.html` is drawn as `invoicelmth.pdf`: the name is HTML and reads as a PDF.
+    func testDirectionControlsAreShownInNamesAndRefusedInSavedOnes() {
+        let spoofed = "invoice\u{202E}fdp.html"
+        XCTAssertTrue(RemotePath.hasDirectionControl(spoofed))
+        XCTAssertEqual(RemotePath.displayName(spoofed), "invoice\u{FFFD}fdp.html", "The letters are shown in stored order, with the control visible")
+        XCTAssertTrue(RemotePath.displayName(spoofed).hasSuffix(".html"))
+        for control in ["\u{202A}", "\u{202B}", "\u{202C}", "\u{202D}", "\u{202E}", "\u{2066}", "\u{2067}", "\u{2068}", "\u{2069}",
+                        "\u{200E}", "\u{200F}", "\u{061C}"] {
+            let name = "a" + control + "b.txt"
+            XCTAssertEqual(RemotePath.displayName(name), "a\u{FFFD}b.txt", name.debugDescription)
+            XCTAssertFalse(OfflineFileStore.validFilename(name), name.debugDescription)
+        }
+        // Joiners and the marks real names in other scripts depend on are left alone, as are right-to-left letters.
+        for name in ["family 👨‍👩‍👧.png", "می‌خواهم.txt", "שלום.txt", "مرحبا.pdf", "e\u{301}.md", "plain.txt"] {
+            XCTAssertFalse(RemotePath.hasDirectionControl(name), name)
+            XCTAssertEqual(Array(RemotePath.displayName(name).utf8), Array(name.utf8), name)
+            XCTAssertTrue(OfflineFileStore.validFilename(name), name)
+        }
+    }
+
+    /// `String` equality folds canonically equivalent names together; a server's file system does not.
+    func testPathKeysTellApartNamesThatDifferOnlyInNormalisation() {
+        let composed = "/r/caf\u{E9}.txt", decomposed = "/r/cafe\u{301}.txt"
+        XCTAssertEqual(composed, decomposed, "Swift treats these as the same string")
+        XCTAssertNotEqual(RemotePathKey(composed), RemotePathKey(decomposed))
+        XCTAssertEqual(RemotePathKey(composed), RemotePathKey("/r/caf\u{E9}.txt"))
+        var cache: [RemotePathKey: Int] = [:]
+        cache[RemotePathKey(composed)] = 1; cache[RemotePathKey(decomposed)] = 2
+        XCTAssertEqual(cache.count, 2)
+        XCTAssertEqual(cache[RemotePathKey(composed)], 1); XCTAssertEqual(cache[RemotePathKey(decomposed)], 2)
+    }
+
     /// On the server a backslash is a byte like any other, so a path holding one is still a path: saved
     /// indexes and offline folders keep it, and links resolve beside it. A link's own reference, written by
     /// whoever wrote the document, still may not hold one, and neither may a name made into a local file.

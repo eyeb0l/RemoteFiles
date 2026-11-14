@@ -17,7 +17,7 @@ public enum OriginalFileExportError: LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .alreadyPreparing: return "Finish or cancel the current export before preparing another file."
-        case .invalidFilename: return "This filename cannot be saved safely on this device."
+        case .invalidFilename: return "This filename cannot be saved safely on this device. It may contain characters that hide its real name."
         case .notRegularFile: return "Only regular files can be exported."
         case .outsideRoot: return "This file or its folder has moved or now leads somewhere else. Refresh the folder and choose it again."
         case .timedOut: return "Preparing this export timed out. Try again."
@@ -264,7 +264,7 @@ public actor RemoteOriginalExporter {
 
     private static func validFilename(_ value: String) -> Bool {
         !value.isEmpty && !RemotePath.isDotName(value) && !RemotePath.hasSeparator(value)
-            && !value.unicodeScalars.contains { $0.value < 32 || $0.value == 127 }
+            && !value.unicodeScalars.contains { $0.value < 32 || $0.value == 127 || RemotePath.isDirectionControl($0) }
     }
 
     private static func exportError(_ error: Error) -> Error {

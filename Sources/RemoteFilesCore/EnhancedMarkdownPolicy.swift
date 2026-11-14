@@ -3,7 +3,7 @@ import Foundation
 /// Selects the offline rich renderer without changing ordinary Markdown or its source bytes.
 public enum EnhancedMarkdownPolicy {
     public static let maximumSourceBytes = 2 * 1024 * 1024
-    public static let maximumImages = 128
+    public static let maximumImages = MarkdownLimits.maximumImages
 
     // Keep this list aligned with the semantic HTML allowlist in markdown-renderer.js.
     private static let htmlTags: Set<String> = [
@@ -19,6 +19,7 @@ public enum EnhancedMarkdownPolicy {
     public static func requiresEnhancedRendering(_ source: String) -> Bool {
         guard source.utf8.count <= maximumSourceBytes,
               source.contains("$") || source.contains("<") || source.contains("\\") || source.localizedCaseInsensitiveContains("mermaid"),
+              (try? MarkdownLimits.checkSource(source)) != nil,
               let document = try? AttributedString(markdown: source,
                   options: .init(appliesSourcePositionAttributes: true)) else { return false }
         var prose = Array(source.utf16)

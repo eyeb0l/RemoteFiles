@@ -115,6 +115,24 @@ private struct FindFixture: View {
         }.joined(separator: "\n\n")
     }
 
+    /// A document the renderer refuses can only be read as source, so Find has to work there.
+    func testFindWorksInSourceForADocumentThatIsNotRendered() async throws {
+        let refused = "# Title\n\n" + String(repeating: ">", count: MarkdownLimits.maximumDepth) + " quoted needle\n\nAnother needle\n"
+        let state = FindFixtureState(text: refused)
+        let previous = previousWindow()
+        let window = try await host(state)
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        XCTAssertEqual(state.navigation.index?.isSourceOnly, true)
+        XCTAssertNil(renderedScroll(window), "Nothing is rendered for it")
+
+        state.source = true
+        state.navigation.startFind()
+        state.navigation.query = "needle"
+        await state.navigation.search(inSource: true)
+        XCTAssertEqual(state.navigation.matches.count, 2)
+        try await waitUntil({ self.sourceView(window) != nil }, diagnostics: { self.diagnostics(window) })
+    }
+
     func testRenderedFindRevealsActualFarMatchesNextPreviousWrapAndNoResults() async throws {
         let state = FindFixtureState(text: renderedDocument), previous = previousWindow()
         let window = try await host(state)
