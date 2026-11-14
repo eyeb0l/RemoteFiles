@@ -352,8 +352,8 @@ private actor KeyedDownloadService: RemoteFileService, RemoteFileSessionClosing 
         await first.setDemo(true)
         await second.setDemo(true)
         try await waitUntil("The last window entering Demo stopped its download") { manager.items.first?.state == .interrupted }
-        cancelled = await secondService.cancelled
-        XCTAssertEqual(cancelled, ["/file.bin"])
+        // The queue marks the item before the transfer's own task has seen its cancellation.
+        try await waitUntil("The transfer was cancelled") { await secondService.cancelled == ["/file.bin"] }
     }
 
     /// Editing, removing or forgetting the host key of a connection in one window stops that connection's
