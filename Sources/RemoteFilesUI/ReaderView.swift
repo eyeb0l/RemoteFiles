@@ -68,6 +68,7 @@ struct ReaderView: View {
                 switch preview {
                 case .text(let text, let markdown, let hiddenKeys):
                     if hiddenKeys > 0 { HiddenPrivateKeyNotice(count: hiddenKeys, saveAction: "Save Original to Files") }
+                    DirectionCharacterNotice(text: text)
                     DocumentContentView(text: text, markdown: markdown, source: source, filename: entry.name, location: .init(profile: profile, path: entry.path, canonicalRoot: entry.canonicalRoot), resolver: model.resources, readingPosition: readingPosition, openDocumentLink: openLink, wrapLines: wrapLines, navigation: navigation).id(ContentIdentity(revision: contentRevision, images: imageVersion))
                     .textual.structuredTextStyle(.reader)
                     .transition(.opacity)
@@ -109,7 +110,7 @@ struct ReaderView: View {
                        failure: !loadsOwnContent && preview != nil ? error.map { "Previously loaded copy · \($0)" } : nil,
                        retry: { refreshID += 1 })
         .background(Color(uiColor: .systemBackground))
-        .navigationTitle(entry.name)
+        .navigationTitle(RemotePath.displayName(entry.name))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
@@ -282,7 +283,7 @@ struct ReaderView: View {
         source || ![.markdown, .html, .svg].contains(DocumentPolicy.kind(filename: entry.name))
     }
     private func infoView(_ title: String, detail: String) -> some View {
-        ContentUnavailableView(title, systemImage: "doc", description: Text("\(detail)\n\n\(entry.name)\n\(entry.size.map { ByteCountFormatter.string(fromByteCount: Int64(clamping: $0), countStyle: .file) } ?? "Size unavailable")"))
+        ContentUnavailableView(title, systemImage: "doc", description: Text("\(detail)\n\n\(RemotePath.displayName(entry.name))\n\(entry.size.map { ByteCountFormatter.string(fromByteCount: Int64(clamping: $0), countStyle: .file) } ?? "Size unavailable")"))
     }
     private func cancelLink() {
         linkRequestID = UUID()

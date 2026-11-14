@@ -81,7 +81,7 @@ struct RemoteMediaView: View {
                             VStack(spacing: 16) {
                                 Image(systemName: "waveform").font(.system(size: 64)).foregroundStyle(.secondary)
                                     .accessibilityHidden(true)
-                                Text(entry.name).font(.headline).multilineTextAlignment(.center)
+                                Text(RemotePath.displayName(entry.name)).font(.headline).multilineTextAlignment(.center)
                             }.padding().frame(maxHeight: .infinity)
                         }
                         if kind == .audio {
@@ -106,7 +106,7 @@ struct RemoteMediaView: View {
                     }.padding(24)
                 } else {
                     ContentUnavailableView {
-                        Label(entry.name, systemImage: symbol)
+                        Label(RemotePath.displayName(entry.name), systemImage: symbol)
                     } description: {
                         Text(previewFailure ?? "The preview is unavailable.")
                     } actions: {
@@ -391,11 +391,13 @@ struct PDFDocumentView: UIViewRepresentable {
         view.usePageViewController(false)
         view.document = document
         view.pendingRestoration = restoration
+        context.coordinator.openURL = context.environment.openURL
         context.coordinator.attach(view, parent: self)
         return view
     }
     func updateUIView(_ view: RestoringPDFView, context: Context) {
         context.coordinator.parent = self
+        context.coordinator.openURL = context.environment.openURL
         if view.document !== document {
             view.document = document
             view.restart(with: restoration)
@@ -406,12 +408,15 @@ struct PDFDocumentView: UIViewRepresentable {
         coordinator.detach()
     }
 
-    @MainActor final class Coordinator: NSObject {
+    @MainActor final class Coordinator: NSObject, PDFViewDelegate {
         var parent: PDFDocumentView?
+        var openURL: OpenURLAction?
         private weak var view: RestoringPDFView?
 
         func attach(_ view: RestoringPDFView, parent: PDFDocumentView) {
             self.view = view; self.parent = parent
+            // Without a delegate that takes link taps, PDFKit opens the URL itself, whatever its scheme.
+            view.delegate = self
             NotificationCenter.default.addObserver(self, selector: #selector(pageChanged), name: .PDFViewPageChanged, object: view)
             view.onRestored = { [weak self] in self?.pageChanged() }
             // The weak capture becomes a no-op once this view is gone; a newer view replaces it.
@@ -420,7 +425,14 @@ struct PDFDocumentView: UIViewRepresentable {
         func detach() {
             if let view { NotificationCenter.default.removeObserver(self, name: .PDFViewPageChanged, object: view) }
             view?.onRestored = nil
+            view?.delegate = nil
             view = nil
+        }
+        /// A link in a PDF gets the rule Markdown and HTML links get: web addresses only, so a
+        /// document cannot start another app, a shortcut or an install through a custom scheme.
+        func pdfViewWillClick(onLink sender: PDFView, with url: URL) {
+            guard DocumentPolicy.allowsExternalLink(url) else { return }
+            openURL?(url)
         }
         /// Saves where the reader is. Ignored until restoration so the initial layout at page 1
         /// never replaces a saved or requested position.

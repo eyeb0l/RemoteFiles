@@ -170,7 +170,7 @@ final class AppModel {
     private var realMetadata = AppMetadata()
     // Read while a view is being made, and written from the background. Observing them would remake
     // every mounted folder each time one more listing is remembered.
-    @ObservationIgnored private var directories: [String: (listing: FolderListing, storedAt: ContinuousClock.Instant?)] = [:]
+    @ObservationIgnored private var directories: [CacheKey: (listing: FolderListing, storedAt: ContinuousClock.Instant?, nameBytes: Int)] = [:]
     @ObservationIgnored private var folderPrefetchQueue: [(profile: ConnectionProfile, path: String)] = []
     @ObservationIgnored private var folderPrefetch: Task<Void, Never>?
     @ObservationIgnored private var folderPrefetchToken: UUID?
@@ -178,14 +178,17 @@ final class AppModel {
     /// Counts how often a connection's listings were forgotten, so one read before that isn't kept.
     @ObservationIgnored private var forgottenListings: [UUID: Int] = [:]
     func listingGeneration(_ id: UUID) -> Int { forgottenListings[id, default: 0] }
-    @ObservationIgnored private var documents: [String: (bytes: Data, version: RemoteFileVersion?)] = [:]
-    @ObservationIgnored private var directoryOrder: [String] = []
-    @ObservationIgnored private var documentOrder: [String] = []
+    @ObservationIgnored private var documents: [CacheKey: (bytes: Data, version: RemoteFileVersion?)] = [:]
+    @ObservationIgnored private var directoryOrder: [CacheKey] = []
+    @ObservationIgnored private var documentOrder: [CacheKey] = []
 
     let preferences: UserDefaults
+    /// Remote folder paths, so kept beside the library with its protection, not in the preferences file.
+    private let folderSortFile: URL
     init(directory: URL, fileService: (any RemoteFileService)? = nil, publicKeyInstaller: (any PublicKeyInstalling)? = nil,
          preferences: UserDefaults = .standard, identities: IdentityStore = IdentityStore()) throws {
         searchIndexDirectory = directory.appendingPathComponent("SearchIndexes-v1", isDirectory: true)
+        folderSortFile = directory.appendingPathComponent("folder-sort-orders-v1.json")
         self.preferences = preferences
         self.identities = identities
         downloadDirectory = directory.appendingPathComponent("Downloads-v1", isDirectory: true)
@@ -207,6 +210,19 @@ final class AppModel {
         observeLibrary()
         await loadOfflineLibrary()
         loadDownloads()
+        await removeLeftovers()
+    }
+    /// Once a process, before anything is played or exported: what a previous process left behind,
+    /// and previewed files past their age or size limit.
+    private static var removedLeftovers = false
+    private func removeLeftovers() async {
+        guard !Self.removedLeftovers else { return }
+        Self.removedLeftovers = true
+        #if os(iOS)
+        RemotePlaybackController.removeLeftovers()
+        #endif
+        RemoteOriginalExporter.removeAbandonedExports(in: FileManager.default.temporaryDirectory.appendingPathComponent("RemoteOriginalExports-v1", isDirectory: true))
+        await resources.trimCache()
     }
     /// Follows the saved library, so a connection, key, favourite or recent changed in another window
     /// shows in this one.
@@ -505,9 +521,20 @@ final class AppModel {
         // something else uses it.
         await lockUnreferencedKeys()
     }
-    func removeConnection(_ profile: ConnectionProfile) async {
+    /// The files downloaded through a connection that are still in the Downloads list.
+    func downloads(from profile: ConnectionProfile) -> [ManagedDownload] {
+        downloads?.items.filter { $0.profile.id == profile.id } ?? []
+    }
+    func removeConnection(_ profile: ConnectionProfile, removingDownloads: Bool = false) async {
         await downloads?.interrupt(reason: Self.changedConnectionDownloadMessage) { $0.profile.id == profile.id }
+        if removingDownloads {
+            for item in downloads(from: profile) {
+                do { try downloads?.remove(item.id) } catch { errorMessage = error.localizedDescription }
+            }
+        }
         await disconnect(preservingDownloads: true, keepingKeys: true)
+        // Images, PDFs and media previewed from it are on disk until they age out.
+        await forgetPreviewedFiles()
         routes.removeAll { $0.connectionID == profile.id }
         sessionRevision += 1
         do { try await searchIndexStore().remove(connectionID: profile.id) }
@@ -524,6 +551,23 @@ final class AppModel {
             library.recents.removeAll { $0.connectionID == id }
         }
         await lockUnreferencedKeys()
+        await forgetUnusedHostKeys(of: profile)
+    }
+    /// A trusted key can only be reset from a connection that uses it. Once the last one is gone
+    /// nothing in the app could remove it, so it goes with that connection.
+    private func forgetUnusedHostKeys(of removed: ConnectionProfile) async {
+        guard !demo else { return }
+        let remaining = metadata.connections + (await metadataStore.snapshot().connections)
+        for endpoint in Self.endpoints(of: removed) where !remaining.contains(where: { $0.id != removed.id && Self.endpoints(of: $0).contains(endpoint) }) {
+            do { try await trust.reset(endpoint: endpoint) } catch { errorMessage = error.localizedDescription }
+        }
+    }
+    private static func endpoints(of profile: ConnectionProfile) -> [HostEndpoint] {
+        [HostEndpoint(host: profile.host, port: profile.port)] + (profile.jumpHost.map { [HostEndpoint(host: $0.host, port: $0.port)] } ?? [])
+    }
+    private func forgetPreviewedFiles() async {
+        await resources.clearCache()
+        await RemoteImageDecoder.shared.clear()
     }
     private static let folderSortKey = "folderSortOrders-v1"
     /// Most folders whose sort choice is remembered; the least recently changed is dropped first.
@@ -543,31 +587,73 @@ final class AppModel {
         if order != .name { entries.append([key, order.rawValue]) }
         storeFolderSortOrders(Array(entries.suffix(Self.folderSortLimit)))
     }
-    /// Stored as [key, order] pairs, oldest first.
-    private func folderSortOrders() -> [[String]] {
-        (preferences.array(forKey: Self.folderSortKey) as? [[String]])?.filter { $0.count == 2 } ?? []
+    /// Stored as [key, order] pairs, oldest first. Read from the file each time: every window has
+    /// its own model, and a copy held here would be written back over another window's choice.
+    func folderSortOrders() -> [[String]] {
+        moveFolderSortOrdersOutOfPreferences()
+        guard let bytes = try? Data(contentsOf: folderSortFile),
+              let entries = try? JSONDecoder().decode([[String]].self, from: bytes) else { return [] }
+        return entries.filter { $0.count == 2 }
     }
     private func storeFolderSortOrders(_ entries: [[String]]) {
-        if entries.isEmpty { preferences.removeObject(forKey: Self.folderSortKey) } else { preferences.set(entries, forKey: Self.folderSortKey) }
+        moveFolderSortOrdersOutOfPreferences()
+        writeFolderSortOrders(entries)
+    }
+    @discardableResult private func writeFolderSortOrders(_ entries: [[String]]) -> Bool {
+        guard !entries.isEmpty else {
+            try? FileManager.default.removeItem(at: folderSortFile)
+            return !FileManager.default.fileExists(atPath: folderSortFile.path)
+        }
+        do {
+            try FileManager.default.createDirectory(at: folderSortFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let bytes = try JSONEncoder().encode(entries)
+            #if os(iOS)
+            try bytes.write(to: folderSortFile, options: [.atomic, .completeFileProtection])
+            #else
+            try bytes.write(to: folderSortFile, options: .atomic)
+            #endif
+            // Which folders exist on a server is not something a backup needs to carry.
+            var values = URLResourceValues(); values.isExcludedFromBackup = true
+            var file = folderSortFile
+            try? file.setResourceValues(values)
+            return true
+        } catch { return false }
+    }
+    /// Earlier versions kept these in the preferences file, the one place remote paths were stored
+    /// without complete file protection. The preference goes only once the file holds its entries.
+    private func moveFolderSortOrdersOutOfPreferences() {
+        guard let legacy = preferences.array(forKey: Self.folderSortKey) else { return }
+        let entries = (legacy as? [[String]])?.filter { $0.count == 2 } ?? []
+        guard FileManager.default.fileExists(atPath: folderSortFile.path) || writeFolderSortOrders(entries) else { return }
+        preferences.removeObject(forKey: Self.folderSortKey)
     }
     /// Forgets the trusted key of the saved endpoint, never unsaved edits in the connection form.
     func resetTrust(for profile: ConnectionProfile) async {
-        await interruptDownloads(through: HostEndpoint(host: profile.host, port: profile.port))
-        await disconnect(preservingDownloads: true, keepingKeys: true)
-        do { try await searchIndexStore().remove(connectionID: profile.id) }
-        catch { errorMessage = error.localizedDescription }
-        // Forgetting trust must remain possible even when the local search cache is damaged.
-        do { try await trust.reset(endpoint: HostEndpoint(host: profile.host, port: profile.port)) }
-        catch { errorMessage = error.localizedDescription }
+        await resetTrust(endpoint: HostEndpoint(host: profile.host, port: profile.port), of: profile)
     }
     func resetJumpHostTrust(for profile: ConnectionProfile) async {
         guard let jump = profile.jumpHost else { return }
-        await interruptDownloads(through: HostEndpoint(host: jump.host, port: jump.port))
+        await resetTrust(endpoint: HostEndpoint(host: jump.host, port: jump.port), of: profile)
+    }
+    /// Forgets a server's trusted key, and with it what was read through that key and kept on the
+    /// device: whatever is trusted next must not be shown, or searched, as the server before it.
+    /// Every way of resetting trust comes through here. Returns whether the key was forgotten.
+    /// `profile` is the connection it was asked from, whose indexes go whether or not it is saved.
+    @discardableResult func resetTrust(endpoint: HostEndpoint, of profile: ConnectionProfile? = nil) async -> Bool {
+        await interruptDownloads(through: endpoint)
         await disconnect(preservingDownloads: true, keepingKeys: true)
-        do { try await searchIndexStore().remove(connectionID: profile.id) }
-        catch { errorMessage = error.localizedDescription }
-        do { try await trust.reset(endpoint: HostEndpoint(host: jump.host, port: jump.port)) }
-        catch { errorMessage = error.localizedDescription }
+        let saved = demo ? [] : await metadataStore.snapshot().connections
+        var connections = (metadata.connections + saved).filter { Self.endpoints(of: $0).contains(endpoint) }.map(\.id)
+        if let profile { connections.insert(profile.id, at: 0) }
+        var seen = Set<UUID>()
+        for id in connections where seen.insert(id).inserted {
+            do { try await searchIndexStore().remove(connectionID: id) }
+            catch { errorMessage = error.localizedDescription }
+        }
+        await forgetPreviewedFiles()
+        // Forgetting trust must remain possible even when the local search cache is damaged.
+        do { try await trust.reset(endpoint: endpoint); return true }
+        catch { errorMessage = error.localizedDescription; return false }
     }
     /// Stops every download that reaches a server whose trusted key is being forgotten, directly or through it
     /// as a jump host, whichever connection it was started from. Downloads from other servers go on.
@@ -833,7 +919,9 @@ final class AppModel {
         directories.removeAll(); directoryOrder.removeAll()
         cancelPrefetch()
     }
-    private func key(_ id: UUID, _ path: String) -> String { "\(id.uuidString):\(path)" }
+    /// By the path's bytes: two names that differ only in Unicode normalisation are two files.
+    private struct CacheKey: Hashable { let id: UUID; let path: RemotePathKey }
+    private func key(_ id: UUID, _ path: String) -> CacheKey { CacheKey(id: id, path: RemotePathKey(path)) }
     func cachedListing(_ id: UUID, path: String) -> FolderListing? { directories[key(id, path)]?.listing }
     /// Whether a remembered listing is recent enough to show without asking the server again.
     func isListingFresh(_ id: UUID, path: String, within window: Duration = AppModel.listingFreshness) -> Bool {
@@ -843,12 +931,18 @@ final class AppModel {
     /// A listing younger than this was very likely prefetched moments ago.
     static let listingFreshness: Duration = .seconds(20)
     static let listingLimit = 48
+    /// Bytes of names and paths remembered across folders. Rows alone don't bound memory: a server
+    /// chooses how long each name is.
+    static let listingByteLimit = 16 * 1_024 * 1_024
     func cache(_ value: FolderListing, id: UUID, requestedPath: String) {
         let k = key(id, requestedPath)
-        directories[k] = (value, .now); directoryOrder.removeAll { $0 == k }; directoryOrder.append(k)
+        directories[k] = (value, .now, value.rows.reduce(0) { $0 + $1.entry.nameBytes })
+        directoryOrder.removeAll { $0 == k }; directoryOrder.append(k)
         // Bound the names kept in memory as well as the folders: a few huge listings can't pile up.
+        // The newest always stays, since it is on screen or about to be.
         while directoryOrder.count > Self.listingLimit
-                || (directoryOrder.count > 1 && directories.values.reduce(0, { $0 + $1.listing.rows.count }) > 40_000) {
+                || (directoryOrder.count > 1 && (directories.values.reduce(0, { $0 + $1.listing.rows.count }) > 40_000
+                                                  || directories.values.reduce(0, { $0 + $1.nameBytes }) > Self.listingByteLimit)) {
             directories.removeValue(forKey: directoryOrder.removeFirst())
         }
     }
@@ -913,11 +1007,10 @@ final class AppModel {
     /// A key or host that fails verification takes what was read through it out of memory, so
     /// reopening a folder or file can't show it without getting past that check.
     private func forgetListings(of id: UUID) {
-        let prefix = id.uuidString + ":"
-        for key in directoryOrder where key.hasPrefix(prefix) { directories.removeValue(forKey: key) }
-        directoryOrder.removeAll { $0.hasPrefix(prefix) }
-        for key in documentOrder where key.hasPrefix(prefix) { documents.removeValue(forKey: key) }
-        documentOrder.removeAll { $0.hasPrefix(prefix) }
+        for key in directoryOrder where key.id == id { directories.removeValue(forKey: key) }
+        directoryOrder.removeAll { $0.id == id }
+        for key in documentOrder where key.id == id { documents.removeValue(forKey: key) }
+        documentOrder.removeAll { $0.id == id }
         folderPrefetchQueue.removeAll { $0.profile.id == id }
         forgottenListings[id, default: 0] += 1
     }

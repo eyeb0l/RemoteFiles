@@ -9,7 +9,7 @@ import NIOSSH
 /// Read-only SFTP adapter. The SSH connection is reused, and listings, metadata and document
 /// reads share one SFTP channel per session. Streaming downloads own a child channel, so
 /// cancelling one also releases all of its remote file handles.
-public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing, FolderWalking, BackgroundFolderListing, ServerFolderSearching, RemoteFileSessionClosing, ResumableManagedDownloading {
+public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing, FolderWalking, BackgroundFolderListing, ServerFolderSearching, RemoteFileSessionClosing, ResumableManagedDownloading, HostKeyAttesting {
     private let identityStore: IdentityStore
     private let trustStore: HostTrustStore
     private let metadataStore: MetadataStore
@@ -309,8 +309,15 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     /// Entries a listing may hold before it fails. A folder's rows take roughly 200 bytes an entry,
     /// so even a full listing stays far below what the system allows the app.
     static let directoryEntryLimit = 250_000
-    /// Decoded names, longnames and attributes that the same listing may hold in total.
+    /// Decoded names, longnames and attributes that the same listing may hold in total, and the
+    /// bytes of names and paths its entries may keep afterwards.
     static let directoryMetadataLimit = 128 * 1024 * 1024
+    /// The same two bounds for a listing nobody is waiting to see: a search or index walk, a folder
+    /// listed ahead, or a quiet check. Many of those run at once, and about 100,000 ordinary names fit.
+    static let walkMetadataLimit = 16 * 1024 * 1024
+    /// Bytes one name may take. File systems allow a few hundred, and SFTP's frame about a mebibyte,
+    /// which is far more than a row can show or a folder of rows can sort.
+    static let directoryNameLimit = 4_096
     /// Symbolic links resolved per listing; later links stay unresolved and resolve when tapped.
     static let linkResolutionLimit = 256
     /// Links resolved at once, each sending REALPATH and STAT together. Enough for the whole of
@@ -350,6 +357,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         let progress = DeadlineExtension()
         let result = try await perform(session: session, role: role, progress: progress) { sftp, closes in
             try await Self.snapshot(path, sftp: sftp, readWindow: role == .walk ? Self.walkReadWindow : Self.directoryReadWindow,
+                                    metadataLimit: role == .walk ? Self.walkMetadataLimit : Self.directoryMetadataLimit,
                                     progress: progress, closes: closes, partial: partial, resolvesLinks: resolvesLinks)
         }
         measurements.directoryOperations += 1
@@ -365,31 +373,35 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         try Task.checkCancellation()
         guard let session = active, session.profile == profile, !session.control.isCancelled, session.client.isConnected else { return nil }
         return try await perform(session: session, role: .walk) { sftp, closes in
-            try await Self.snapshot(path, sftp: sftp, readWindow: Self.walkReadWindow, progress: nil, closes: closes, partial: nil, resolvesLinks: true)
+            try await Self.snapshot(path, sftp: sftp, readWindow: Self.walkReadWindow, metadataLimit: Self.walkMetadataLimit,
+                                    progress: nil, closes: closes, partial: nil, resolvesLinks: true)
         }
     }
 
     /// Names are ready after two round trips: REALPATH and OPENDIR together, then the READDIRs. With
     /// `closes`, the listing returns without waiting a third for CLOSE, whose reply is checked afterwards.
     /// `partial` receives what has arrived so far before links are resolved, each time with more entries.
-    private nonisolated static func snapshot(_ path: String, sftp: SFTPClient, readWindow: Int, progress: DeadlineExtension?, closes: DeferredCloses?,
+    private nonisolated static func snapshot(_ path: String, sftp: SFTPClient, readWindow: Int, metadataLimit: Int,
+                                             progress: DeadlineExtension?, closes: DeferredCloses?,
                                              partial: (@Sendable (DirectorySnapshot) -> Void)?, resolvesLinks: Bool) async throws -> DirectorySnapshot {
         let requested = try validated(path)
         // The server resolves both requests from the same path. If REALPATH fails, the listing still
         // drains and closes its handle.
         let resolved = sftp.sendRealPath(atPath: requested)
-        let collected = CollectedEntries()
+        let collected = CollectedEntries(nameLimit: directoryNameLimit, retainedLimit: metadataLimit)
         let listed: Result<Void, Error>
         do {
             _ = try await sftp.listDirectory(atPath: requested, resolvingPath: false, concurrentReads: readWindow,
-                                             maximumEntries: directoryEntryLimit, maximumMetadataBytes: directoryMetadataLimit,
+                                             maximumEntries: directoryEntryLimit, maximumMetadataBytes: metadataLimit,
                                              onBatch: { components in
                 progress?.record()
                 let canonical = try await resolved.get()
-                let entries = collected.add(components, in: canonical)
+                let entries = try collected.add(components, in: canonical)
                 if let partial { partial(DirectorySnapshot(path: canonical, entries: entries)) }
             }, deferringClose: closes.map { closes in { closes.add($0) } })
             listed = .success(())
+        } catch SFTPError.directoryListingMetadataLimitExceeded, SFTPError.directoryListingEntryLimitExceeded {
+            listed = .failure(RemoteFileError.listingTooLarge)
         } catch {
             listed = .failure(error)
         }
@@ -557,39 +569,55 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     public func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String,
                              destination: URL, limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
         try await download(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination,
-                           limit: limit, progress: progress, canonicalPaths: false)
+                           limit: limit, progress: progress, canonicalPaths: false).entry
     }
     public func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String,
                                      destination: URL, limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
         try await download(profile: profile, path: path, allowedRoot: canonicalRoot, destination: destination,
-                           limit: limit, progress: progress, canonicalPaths: true)
+                           limit: limit, progress: progress, canonicalPaths: true).entry
+    }
+    public func attestedDownloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL,
+                                     limit: Int, progress: @escaping DownloadProgressHandler) async throws -> AttestedDownload {
+        let result = try await download(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination,
+                                        limit: limit, progress: progress, canonicalPaths: false)
+        return AttestedDownload(entry: result.entry, hostKeys: result.hostKeys)
+    }
+    public func attestedDownloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL,
+                                             limit: Int, progress: @escaping DownloadProgressHandler) async throws -> AttestedDownload {
+        let result = try await download(profile: profile, path: path, allowedRoot: canonicalRoot, destination: destination,
+                                        limit: limit, progress: progress, canonicalPaths: true)
+        return AttestedDownload(entry: result.entry, hostKeys: result.hostKeys)
+    }
+    /// Read from the trust store alone, so it answers with no connection open.
+    public func trustedHostKeys(for profile: ConnectionProfile) async -> ServerHostKeys? {
+        await trustStore.trustedKeys(for: profile)
     }
     public func downloadManagedFile(profile: ConnectionProfile, path: String, allowedRoot: String,
                                     destination: URL, limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
         try await download(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination,
-                           limit: limit, progress: progress, canonicalPaths: false, managed: true)
+                           limit: limit, progress: progress, canonicalPaths: false, managed: true).entry
     }
     public func downloadManagedSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String,
                                             destination: URL, limit: Int, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
         try await download(profile: profile, path: path, allowedRoot: canonicalRoot, destination: destination,
-                           limit: limit, progress: progress, canonicalPaths: true, managed: true)
+                           limit: limit, progress: progress, canonicalPaths: true, managed: true).entry
     }
     public func downloadManagedFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int,
                                     resumeVersion: RemoteFileVersion?, started: @escaping ManagedDownloadStartHandler,
                                     progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
         try await download(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination, limit: limit,
-                           progress: progress, canonicalPaths: false, managed: true, resumeVersion: resumeVersion, started: started)
+                           progress: progress, canonicalPaths: false, managed: true, resumeVersion: resumeVersion, started: started).entry
     }
     public func downloadManagedSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL, limit: Int,
                                             resumeVersion: RemoteFileVersion?, started: @escaping ManagedDownloadStartHandler,
                                             progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
         try await download(profile: profile, path: path, allowedRoot: canonicalRoot, destination: destination, limit: limit,
-                           progress: progress, canonicalPaths: true, managed: true, resumeVersion: resumeVersion, started: started)
+                           progress: progress, canonicalPaths: true, managed: true, resumeVersion: resumeVersion, started: started).entry
     }
     func downloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL, limit: Int,
                               batch: SnapshotTransferBatch, overlapped: Bool, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
         try await download(profile: profile, path: path, allowedRoot: canonicalRoot, destination: destination,
-                           limit: limit, progress: progress, canonicalPaths: true, batch: batch, overlapped: overlapped)
+                           limit: limit, progress: progress, canonicalPaths: true, batch: batch, overlapped: overlapped).entry
     }
     /// Closes the batch's channel without waiting for the server: nothing on it is still running.
     func endSnapshotBatch(_ batch: SnapshotTransferBatch) {
@@ -609,8 +637,9 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                           limit: Int, progress: @escaping DownloadProgressHandler, canonicalPaths: Bool,
                           managed: Bool = false, resumeVersion: RemoteFileVersion? = nil,
                           started: @escaping ManagedDownloadStartHandler = { _, _ in },
-                          batch: SnapshotTransferBatch? = nil, overlapped: Bool = false) async throws -> RemoteEntry {
+                          batch: SnapshotTransferBatch? = nil, overlapped: Bool = false) async throws -> (entry: RemoteEntry, hostKeys: ServerHostKeys?) {
         guard limit > 0, limit < Int.max else { throw RemoteFileError.tooLarge(limit) }
+        // Every byte below goes through this one connection, so its keys are the ones they came through.
         let session = try await session(for: profile)
         let reportInterval = progressInterval, windowFloor = transferWindowFloor
         // Files that overlap keep the starting window, so together they hold no more in flight than one growing transfer.
@@ -715,7 +744,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         measurements.lastTransferStartWindow = result.2.start; measurements.lastTransferSettledWindow = result.2.settled ?? 0
         // Only a transfer that finished, and that the window held back, says anything about the connection.
         if carry != nil, let settled = result.2.settled { session.settledTransferWindow = settled }
-        return result.0
+        return (result.0, session.hostKeys)
     }
 
     /// The local length a transfer may continue from, or zero. The partial file must be a
@@ -852,6 +881,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         let trustStore = self.trustStore
         let timeout = timeoutSeconds
         let started = Date()
+        let destinationKey = VerifiedHostKey(), jumpHostKey = profile.jumpHost == nil ? nil : VerifiedHostKey()
         let task = Task<LiveSession, Error> {
             // Unlock both keys before opening sockets. Each error carries the identity needing UI.
             func key(_ id: UUID) async throws -> IdentityPrivateKey {
@@ -863,11 +893,11 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
             if let hop = profile.jumpHost { jumpKey = try await key(hop.identityID) } else { jumpKey = nil }
             let privateKey = try await key(profile.identityID)
             return try await Self.deadline(seconds: timeout, close: { control.close() }) {
-                func settings(host: String, port: Int, username: String, key: IdentityPrivateKey) -> SSHClientSettings {
+                func settings(host: String, port: Int, username: String, key: IdentityPrivateKey, verified: VerifiedHostKey?) -> SSHClientSettings {
                     var value = SSHClientSettings(
                         host: host, port: port,
                         authenticationMethod: { key.authentication(username: username) },
-                        hostKeyValidator: .custom(TrustValidator(store: trustStore, endpoint: HostEndpoint(host: host, port: port)))
+                        hostKeyValidator: .custom(TrustValidator(store: trustStore, endpoint: HostEndpoint(host: host, port: port), verified: verified))
                     )
                     value.connectTimeout = .seconds(Int64(timeout))
                     // NIOSSH also uses this as its receive window, which has to hold a full transfer window.
@@ -877,11 +907,13 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                 }
                 do {
                     try Task.checkCancellation()
-                    let destination = settings(host: profile.host, port: profile.port, username: profile.username, key: privateKey)
+                    let destination = settings(host: profile.host, port: profile.port, username: profile.username, key: privateKey,
+                                               verified: destinationKey)
                     let client: SSHClient
                     var bastion: SSHClient?
                     if let hop = profile.jumpHost, let jumpKey {
-                        let jump = try await SSHClient.connect(to: settings(host: hop.host, port: hop.port, username: hop.username, key: jumpKey))
+                        let jump = try await SSHClient.connect(to: settings(host: hop.host, port: hop.port, username: hop.username, key: jumpKey,
+                                                                            verified: jumpHostKey))
                         bastion = jump
                         try Task.checkCancellation()
                         client = try await jump.jump(to: destination)
@@ -889,7 +921,8 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                         client = try await SSHClient.connect(to: destination)
                     }
                     try Task.checkCancellation()
-                    return LiveSession(profile: profile, client: client, control: control, bastion: bastion)
+                    return LiveSession(profile: profile, client: client, control: control, bastion: bastion,
+                                       destinationKey: destinationKey, jumpHostKey: jumpHostKey)
                 } catch {
                     control.close()
                     throw error
@@ -1555,17 +1588,30 @@ final class DeferredCloses: @unchecked Sendable {
 }
 
 /// Maps a listing's batches to entries as they arrive, and keeps them.
-private final class CollectedEntries: @unchecked Sendable {
+///
+/// The server chooses every byte kept here: each name, and the folder's path that goes in front of
+/// each one. So one name may not exceed `nameLimit`, and the names and paths together may not
+/// exceed `retainedLimit`; past either, the listing fails rather than growing.
+final class CollectedEntries: @unchecked Sendable {
     private let lock = NSLock()
+    private let nameLimit: Int, retainedLimit: Int
     private var collected: [RemoteEntry] = []
     private var prefix: String?
+    private var retained = 0
+    init(nameLimit: Int, retainedLimit: Int) { self.nameLimit = nameLimit; self.retainedLimit = retainedLimit }
     var entries: [RemoteEntry] { lock.lock(); defer { lock.unlock() }; return collected }
     /// Returns everything so far. Batches arrive one at a time, in the order the server gave them.
-    func add(_ components: [SFTPPathComponent], in canonical: String) -> [RemoteEntry] {
+    func add(_ components: [SFTPPathComponent], in canonical: String) throws -> [RemoteEntry] {
         lock.lock(); defer { lock.unlock() }
         let prefix = self.prefix ?? RemotePath.childPrefix(of: canonical)
         self.prefix = prefix
+        let prefixBytes = prefix.utf8.count
         for component in components where component.filename != "." && component.filename != ".." {
+            let nameBytes = component.filename.utf8.count
+            guard nameBytes <= nameLimit else { throw RemoteFileError.listingTooLarge }
+            // Counted before the path is built, so that an oversized one is never allocated.
+            retained += 2 * nameBytes + prefixBytes
+            guard retained <= retainedLimit else { throw RemoteFileError.listingTooLarge }
             collected.append(SFTPRemoteFileService.entry(name: component.filename, path: prefix + component.filename, attributes: component.attributes))
         }
         return collected
@@ -1686,8 +1732,20 @@ private final class LiveSession: @unchecked Sendable {
         let now = ContinuousClock.now
         return [sharedChannels, helperChannels, transferChannels].contains { $0.lastClosed.map { $0.duration(to: now) < allowance } ?? false }
     }
-    init(profile: ConnectionProfile, client: SSHClient, control: SocketControl, bastion: SSHClient? = nil) {
+    /// What the trust store accepted while this connection was set up.
+    let destinationKey: VerifiedHostKey
+    let jumpHostKey: VerifiedHostKey?
+    /// The keys this connection's bytes come through, or nil if either was not recorded.
+    var hostKeys: ServerHostKeys? {
+        guard let destination = destinationKey.value else { return nil }
+        guard let jumpHostKey else { return ServerHostKeys(destination: destination) }
+        guard let jump = jumpHostKey.value else { return nil }
+        return ServerHostKeys(destination: destination, jumpHost: jump)
+    }
+    init(profile: ConnectionProfile, client: SSHClient, control: SocketControl, bastion: SSHClient? = nil,
+         destinationKey: VerifiedHostKey, jumpHostKey: VerifiedHostKey?) {
         self.profile = profile; self.client = client; self.control = control; self.bastion = bastion
+        self.destinationKey = destinationKey; self.jumpHostKey = jumpHostKey
     }
 }
 
@@ -1780,11 +1838,29 @@ private extension RemoteFileVersion {
 struct TrustValidator: NIOSSHClientServerAuthenticationDelegate {
     let store: HostTrustStore
     let endpoint: HostEndpoint
+    /// Told the key the store accepted, so the connection knows which key its bytes came through.
+    var verified: VerifiedHostKey? = nil
     func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
         // The event loop receives a promise immediately. Key lookup never blocks it,
         // and unknown/changed keys fail before NIOSSH can offer user authentication.
         validationCompletePromise.completeWithTask {
-            try await store.validate(endpoint: endpoint, publicKey: hostKey)
+            let accepted = try await store.validate(endpoint: endpoint, publicKey: hostKey)
+            verified?.record(accepted)
+        }
+    }
+}
+
+/// The host key one end of a connection was authenticated with. What is trusted can change while
+/// the connection stays open; this cannot. A key exchange later presenting a different key, even
+/// one trusted by then, leaves the connection with no key it can name.
+final class VerifiedHostKey: @unchecked Sendable {
+    private let lock = NSLock()
+    private var key: HostKeyDetails?
+    private var conflicting = false
+    var value: HostKeyDetails? { lock.withLock { conflicting ? nil : key } }
+    func record(_ accepted: HostKeyDetails) {
+        lock.withLock {
+            if let key { conflicting = conflicting || key != accepted } else { key = accepted }
         }
     }
 }
