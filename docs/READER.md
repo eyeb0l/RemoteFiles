@@ -17,7 +17,7 @@ With VoiceOver, opening a file moves focus to the reader's title heading, on bot
 | HTML / HTM | UTF-8 text up to 2 MiB, as a static rendered preview or source; scripts and linked resources do not load. See [HTML previews](HTML_PREVIEWS.md). |
 | SVG | A restricted static rendering or source. See [SVG previews](#svg-previews). |
 | Images | JPEG, PNG, HEIC/HEIF, GIF, TIFF, WebP and BMP. Tap to open a full-screen viewer with pinch and double-tap zoom, or to share; animated images show their first frame. |
-| PDF | Native scrolling and zooming, with a current-page indicator. |
+| PDF | Native scrolling and zooming, with a current-page indicator. A tapped link opens only an HTTP or HTTPS address; links to other apps or schemes do nothing. |
 | Audio and video | Playback and seeking after download. Compatibility depends on the device and codec; see [audio and video](AUDIO_VIDEO.md) for the full format list. |
 | Certificates | A summary of `.pem`, `.crt`, `.cer`, `.der`, `.p7b`, `.p7c` and `.csr` files up to 2 MiB, with no source view. `.p12` and `.pfx` files are not opened. See [certificate previews](CERTIFICATE_PREVIEWS.md). |
 | A private key in any text file | Hidden by its content. A file that is only a key shows no text, and a key in a longer document becomes `•` with a notice. See [private keys in text files](PRIVATE_KEYS_IN_TEXT.md). |

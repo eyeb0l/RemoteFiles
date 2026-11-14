@@ -11,6 +11,7 @@ import RemoteFilesCore
     var restoration: SavedReadingPosition.Anchor?
     var page = 0
     var width: CGFloat?
+    var opened: [URL] = []
     let position: DocumentReadingPosition
     init(document: PDFDocument, restoration: SavedReadingPosition.Anchor?, position: DocumentReadingPosition) {
         self.document = document; self.restoration = restoration; self.position = position
@@ -23,6 +24,7 @@ private struct PDFFixture: View {
         PDFDocumentView(document: state.document, restoration: state.restoration,
                         readingPosition: state.position, onPageChange: { state.page = $0 })
             .frame(width: state.width)
+            .environment(\.openURL, OpenURLAction { state.opened.append($0); return .handled })
     }
 }
 
@@ -149,6 +151,33 @@ private struct PDFFixture: View {
         state.document = try XCTUnwrap(PDFDocument(url: pdfURL))
         try await waitUntil({ self.pdfView(window).map { $0.isRestored && $0.document === state.document } == true })
         XCTAssertEqual(pdfView(window)?.readingAnchor()?.ordinal, 0)
+    }
+
+    /// PDFKit hands a tapped link to its delegate and opens the URL itself only when there is none.
+    /// A touch cannot be synthesised here, so this drives the delegate PDFKit would call.
+    func testLinkTapsOpenOnlyWebAddresses() async throws {
+        let directory = try temporaryDirectory()
+        let pdfURL = directory.appendingPathComponent("links.pdf")
+        try writePDF(pages: 1, to: pdfURL)
+        let state = PDFFixtureState(document: try XCTUnwrap(PDFDocument(url: pdfURL)), restoration: nil,
+                                    position: DocumentReadingPosition())
+        let window = try host(state)
+        try await waitUntil({ self.pdfView(window)?.isRestored == true })
+        let view = try XCTUnwrap(pdfView(window))
+        let delegate = try XCTUnwrap(view.delegate, "Without a delegate PDFKit opens a link of any scheme")
+        XCTAssertTrue(delegate.responds(to: #selector(PDFViewDelegate.pdfViewWillClick(onLink:with:))))
+
+        for link in ["shortcuts://run-shortcut?name=Example", "tel:+15555550100", "mailto:someone@example.com",
+                     "itms-services://?action=download-manifest&url=https://example.com/app.plist",
+                     "file:///private/var/mobile", "javascript:alert(1)", "https://user:secret@example.com/",
+                     "https:///no-host", "notes.txt"] {
+            delegate.pdfViewWillClick?(onLink: view, with: try XCTUnwrap(URL(string: link), link))
+        }
+        XCTAssertEqual(state.opened, [], "Only web addresses may leave the reader")
+
+        let allowed = try ["https://example.com/page?q=1#part", "HTTP://example.com/"].map { try XCTUnwrap(URL(string: $0)) }
+        for url in allowed { delegate.pdfViewWillClick?(onLink: view, with: url) }
+        XCTAssertEqual(state.opened, allowed)
     }
 
     func testSearchPageWinsOnceAndMissingPagesFallBack() {
