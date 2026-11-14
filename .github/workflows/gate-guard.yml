@@ -1,0 +1,33 @@
+name: Gate guard
+
+# A pull request can edit the workflow and scripts that decide whether it may merge, and then pass
+# them. This runs from the base branch instead, so the pull request cannot change it, and fails when
+# those files are touched. It never checks out or runs the pull request's code and uses no secret.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate-guard:
+    name: Gate unchanged
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      # No `ref`: on this event the default is the base branch, which is the point.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+      - name: Look for changes to the gate's own files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python3 -B scripts/gate_guard.py
