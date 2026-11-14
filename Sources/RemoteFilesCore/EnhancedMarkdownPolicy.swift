@@ -44,9 +44,12 @@ public enum EnhancedMarkdownPolicy {
         while index < bytes.endIndex {
             switch bytes[index] {
             case 0x24, 0x3C, 0x5C, 0x26: return true // $ < \ &
-            case 0x4D, 0x6D where bytes.endIndex - index >= diagramWord.count: // M or m
+            case 0x4D, 0x6D: // M or m
+                // The length is checked here and not in a `where`, which would guard only the second
+                // pattern and let a capital M near the end read past it.
                 // ASCII letters differ from their capitals only in this bit.
-                if diagramWord.indices.allSatisfy({ bytes[index + $0] | 0x20 == diagramWord[$0] }) { return true }
+                if bytes.endIndex - index >= diagramWord.count,
+                   diagramWord.indices.allSatisfy({ bytes[index + $0] | 0x20 == diagramWord[$0] }) { return true }
             default: break
             }
             index += 1
