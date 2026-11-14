@@ -81,7 +81,7 @@ struct RemoteMediaView: View {
                             VStack(spacing: 16) {
                                 Image(systemName: "waveform").font(.system(size: 64)).foregroundStyle(.secondary)
                                     .accessibilityHidden(true)
-                                Text(entry.name).font(.headline).multilineTextAlignment(.center)
+                                Text(RemotePath.displayName(entry.name)).font(.headline).multilineTextAlignment(.center)
                             }.padding().frame(maxHeight: .infinity)
                         }
                         if kind == .audio {
@@ -106,7 +106,7 @@ struct RemoteMediaView: View {
                     }.padding(24)
                 } else {
                     ContentUnavailableView {
-                        Label(entry.name, systemImage: symbol)
+                        Label(RemotePath.displayName(entry.name), systemImage: symbol)
                     } description: {
                         Text(previewFailure ?? "The preview is unavailable.")
                     } actions: {

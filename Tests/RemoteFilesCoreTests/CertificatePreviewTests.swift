@@ -490,6 +490,14 @@ final class CertificatePreviewTests: XCTestCase {
         XCTAssertLessThanOrEqual(summary.alternativeNames.first?.value.utf8.count ?? .max, CertificatePreview.maximumFieldBytes + 8)
         XCTAssertLessThan(summary.serialNumber?.count ?? .max, CertificatePreview.maximumSerialBytes * 3 + 2)
 
+        // An attribute of an unknown type is named by its identifier, which is as long as its encoding.
+        let identifier = [UInt8](repeating: 0x01, count: 60_000)
+        let unknown = try only(Build.certificate(subject: Build.name(Build.text("value"), type: [0x2A] + identifier)))
+        let name = try XCTUnwrap(unknown.subject.attributes.first?.name)
+        XCTAssertTrue(name.hasPrefix("1.2.1.1.1"), name.prefix(20).description)
+        XCTAssertLessThanOrEqual(name.utf8.count, CertificatePreview.maximumFieldBytes + 8)
+        XCTAssertTrue(name.hasSuffix("…"))
+
         let names = Array(repeating: Build.tlv(0x82, Build.text("a.example.test")), count: CertificatePreview.maximumAlternativeNames + 44)
         let many = try only(Build.certificate(extensions: [Build.alternativeNames(names)]))
         XCTAssertEqual(many.alternativeNames.count, CertificatePreview.maximumAlternativeNames)

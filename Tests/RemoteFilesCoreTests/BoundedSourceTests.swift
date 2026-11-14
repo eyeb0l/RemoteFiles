@@ -197,6 +197,7 @@ import RemoteFilesCore
         } while ContinuousClock.now < deadline
         let view = try XCTUnwrap(renderer, "The production SVG preview must retain its renderer")
         XCTAssertTrue(view.window === window)
+        XCTAssertFalse(view.allowsLinkPreview)
         XCTAssertNotNil(view.url)
         XCTAssertFalse(view.isLoading, "The production renderer must finish within its existing fifteen-second deadline")
         let count = try await view.evaluateJavaScript("document.querySelectorAll('svg rect').length") as? Int
@@ -395,6 +396,50 @@ import RemoteFilesCore
         try await wait("script-only entry", failure: { nil }) { finished }
         XCTAssertTrue(needsScripts, "An app entry file must not be presented as a successfully rendered blank page")
     }
+    /// A page chooses its links' text. A link whose text shows a different address from where it
+    /// leads, or that is plain http, is handed over for confirmation; the rest open as before.
+    func testLinksWhoseTextNamesAnotherSiteAreConfirmedAndOthersOpen() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        let rules = try await SVGResourceBlocker.rules()
+        var finished = false, opened: [URL] = [], confirmed: [URL] = []
+        let source = """
+        <!doctype html><html><body>
+        <p><a id="honest" href="https://example.com/docs">Docs</a> <a id="same" href="https://example.com/">example.com</a></p>
+        <p><a id="spoof" href="https://evil.example/">https://bank.example</a> <a id="plain" href="http://example.com/old">Old site</a></p>
+        <p>\(String(repeating: "<a href=\"https://many.example/\">more</a> ", count: 40))<a id="buried" href="https://many.example/">https://bank.example</a></p>
+        <p><a id="spaced" href="https://evil.example/spaced">\(String(repeating: " ", count: 400))https://bank.example</a>
+        <a id="hidden" href="https://evil.example/hidden"><span hidden>evil.example/</span>https://bank.example</a></p>
+        <svg width="200" height="30"><a href="https://evil.example/drawn"><text y="20">https://bank.example</text></a></svg>
+        </body></html>
+        """
+        window.rootViewController = UIHostingController(rootView: StaticHTMLWebView(text: source, filename: "links.html", rules: rules,
+            readingPosition: DocumentReadingPosition(), onFinish: { _ in finished = true }, onFailure: { XCTFail($0) },
+            openExternalLink: { opened.append($0) }, confirmExternalLink: { confirmed.append($0) }))
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        try await wait("link confirmation", failure: { nil }) { finished }
+        func views(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(views) }
+        let view = try XCTUnwrap(views(window).compactMap { $0 as? WKWebView }.first)
+        for id in ["honest", "same", "spoof", "plain", "buried", "spaced", "hidden"] {
+            _ = try await view.evaluateJavaScript("document.getElementById('\(id)').click(); true", in: nil, contentWorld: .defaultClient)
+        }
+        try await wait("link callbacks", failure: { nil }) { opened.count + confirmed.count == 7 }
+        XCTAssertEqual(Set(opened.map(\.absoluteString)), ["https://example.com/docs", "https://example.com/"])
+        XCTAssertEqual(Set(confirmed.map(\.absoluteString)),
+                       ["https://evil.example/", "http://example.com/old", "https://many.example/",
+                        "https://evil.example/spaced", "https://evil.example/hidden"],
+                       "Too many links to one address is no answer, and a link is judged by its text as laid out")
+        XCTAssertEqual(view.url?.absoluteString, "about:blank", "No link is followed inside the preview")
+        // A link drawn inside an inline SVG has its text read too.
+        let drawn = try XCTUnwrap(URL(string: "https://evil.example/drawn"))
+        let drawnText = await ExternalLinkText.visibleTexts(for: drawn, in: view)
+        XCTAssertEqual(drawnText, ["https://bank.example"])
+        XCTAssertTrue(ExternalLinkPolicy.needsConfirmation(drawn, visibleText: drawnText?.first))
+        XCTAssertTrue(ExternalLinkConfirmation.message(for: try XCTUnwrap(confirmed.first { $0.host == "evil.example" })).contains("evil.example"))
+    }
+
     /// iOS lays a page out at its `device-width` viewport. Text size must not widen that layout
     /// (as `WKWebView.pageZoom` did, by its own factor), so headings and text wrap within the view.
     func testLargeTextSizeReflowsWithinTheViewWidth() async throws {
@@ -425,6 +470,7 @@ import RemoteFilesCore
         func views(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(views) }
         let view = try XCTUnwrap(views(host.view).compactMap { $0 as? WKWebView }.first)
         XCTAssertEqual(view.pageZoom, 1, accuracy: 0.001)
+        XCTAssertFalse(view.allowsLinkPreview, "A long press must not offer a preview that loads a link's destination")
         func number(_ script: String) async throws -> Double {
             let value = try await view.evaluateJavaScript(script, in: nil, contentWorld: .defaultClient)
             return try XCTUnwrap(value as? NSNumber).doubleValue

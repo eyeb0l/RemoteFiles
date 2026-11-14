@@ -39,7 +39,7 @@ struct RemoteInlineImage: View {
             } else {
                 HStack {
                     Image(systemName: "photo")
-                    Text(filename).font(.callout).lineLimit(2)
+                    Text(RemotePath.displayName(filename)).font(.callout).lineLimit(2)
                     Spacer()
                     if loading { ProgressView().accessibilityLabel("Loading \(filename)") }
                 }
@@ -194,7 +194,7 @@ struct ImageViewerChrome<Unavailable: View>: View {
                         .ignoresSafeArea()
                 } else { unavailable() }
             }
-            .navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+            .navigationTitle(RemotePath.displayName(title)).navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
                 ToolbarItem(placement: .primaryAction) {

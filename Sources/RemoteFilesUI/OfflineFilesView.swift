@@ -401,11 +401,11 @@ struct OfflineReaderView: View {
         .safeAreaBar(edge: .top, spacing: 0) {
             if navigation.isFinding { ReaderFindBar(navigation: navigation, inSource: showsSource, isCovered: headingsPresented) }
         }
-        .navigationTitle(savedCopy.filename).navigationBarTitleDisplayMode(.inline)
+        .navigationTitle(RemotePath.displayName(savedCopy.filename)).navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 0) {
-                    Text(savedCopy.filename).font(.subheadline.weight(.semibold)).lineLimit(1).truncationMode(.middle)
+                    Text(RemotePath.displayName(savedCopy.filename)).font(.subheadline.weight(.semibold)).lineLimit(1).truncationMode(.middle)
                     Text("Saved \(QuietDate.saved(savedCopy.savedAt))")
                         .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                         .accessibilityLabel("Offline copy, saved \(savedCopy.savedAt.formatted(date: .abbreviated, time: .shortened))")
