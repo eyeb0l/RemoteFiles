@@ -650,6 +650,8 @@ python3 -B scripts/benchmark_performance.py device --output phone.jsonl --label 
   --udid DEVICE --address MAC_ADDRESS --rtt 0,40
 ```
 
+While that runs, a relay puts the fixture's SSH daemon on `MAC_ADDRESS`, and the phone is handed a key made for the run. The key is marked `restrict`: it can run commands and use SFTP as your account, which the scenarios need, but cannot forward ports or open a terminal. Run it on a network you trust.
+
 Against a server you already run, such as the Linux guest above, alternating builds:
 
 ```sh
