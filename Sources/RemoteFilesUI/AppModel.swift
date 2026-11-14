@@ -170,7 +170,7 @@ final class AppModel {
     private var realMetadata = AppMetadata()
     // Read while a view is being made, and written from the background. Observing them would remake
     // every mounted folder each time one more listing is remembered.
-    @ObservationIgnored private var directories: [String: (listing: FolderListing, storedAt: ContinuousClock.Instant?)] = [:]
+    @ObservationIgnored private var directories: [String: (listing: FolderListing, storedAt: ContinuousClock.Instant?, nameBytes: Int)] = [:]
     @ObservationIgnored private var folderPrefetchQueue: [(profile: ConnectionProfile, path: String)] = []
     @ObservationIgnored private var folderPrefetch: Task<Void, Never>?
     @ObservationIgnored private var folderPrefetchToken: UUID?
@@ -843,12 +843,18 @@ final class AppModel {
     /// A listing younger than this was very likely prefetched moments ago.
     static let listingFreshness: Duration = .seconds(20)
     static let listingLimit = 48
+    /// Bytes of names and paths remembered across folders. Rows alone don't bound memory: a server
+    /// chooses how long each name is.
+    static let listingByteLimit = 16 * 1_024 * 1_024
     func cache(_ value: FolderListing, id: UUID, requestedPath: String) {
         let k = key(id, requestedPath)
-        directories[k] = (value, .now); directoryOrder.removeAll { $0 == k }; directoryOrder.append(k)
+        directories[k] = (value, .now, value.rows.reduce(0) { $0 + $1.entry.nameBytes })
+        directoryOrder.removeAll { $0 == k }; directoryOrder.append(k)
         // Bound the names kept in memory as well as the folders: a few huge listings can't pile up.
+        // The newest always stays, since it is on screen or about to be.
         while directoryOrder.count > Self.listingLimit
-                || (directoryOrder.count > 1 && directories.values.reduce(0, { $0 + $1.listing.rows.count }) > 40_000) {
+                || (directoryOrder.count > 1 && (directories.values.reduce(0, { $0 + $1.listing.rows.count }) > 40_000
+                                                  || directories.values.reduce(0, { $0 + $1.nameBytes }) > Self.listingByteLimit)) {
             directories.removeValue(forKey: directoryOrder.removeFirst())
         }
     }

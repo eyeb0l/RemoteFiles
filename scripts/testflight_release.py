@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Tag a commit on main whose CI passed, which starts the Xcode Cloud TestFlight workflow.
 
-Prints the plan unless --push is given. See docs/TESTFLIGHT.md.
+Prints the plan unless --push is given. The tag is pushed with a deploy key, the only
+credential a repository ruleset lets create `testflight/*` tags. See docs/TESTFLIGHT.md.
 """
 import argparse
 import json
+import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -13,6 +16,9 @@ REPOSITORY = "eyeb0l/RemoteFiles"
 GITHUB_ACTIONS_APP_ID = 15368
 REQUIRED_CHECKS = ("Repository checks", "CI gate")
 TAG_PREFIX = "testflight/"
+PUSH_URL = "git@github.com:" + REPOSITORY + ".git"
+KEY_VARIABLE = "REMOTEFILES_TESTFLIGHT_KEY"
+DEFAULT_KEY = "~/.ssh/remotefiles_testflight_deploy"
 PROJECT = "RemoteFiles.xcodeproj/project.pbxproj"
 
 
@@ -20,9 +26,9 @@ class ReleaseError(Exception):
     pass
 
 
-def capture(*command):
+def capture(*command, env=None):
     try:
-        return subprocess.run(command, check=True, capture_output=True, text=True).stdout
+        return subprocess.run(command, check=True, capture_output=True, text=True, env=env).stdout
     except subprocess.CalledProcessError as error:
         raise ReleaseError(" ".join(command) + " failed: " + error.stderr.strip()) from error
 
@@ -65,12 +71,41 @@ def remote_tags(ls_remote):
     return [line.split("refs/tags/", 1)[1] for line in ls_remote.splitlines() if "refs/tags/" in line]
 
 
+def checked_key(path):
+    """The deploy key, which must need a passphrase: other tools on this Mac can read the file."""
+    key = os.path.expanduser(path)
+    if not os.path.isfile(key):
+        raise ReleaseError("No deploy key at " + key + "; docs/TESTFLIGHT.md explains how to create one")
+    # Exporting the public half with an empty passphrase works only for an unprotected key.
+    unprotected = subprocess.run(["ssh-keygen", "-y", "-P", "", "-f", key], stdin=subprocess.DEVNULL,
+                                 capture_output=True).returncode == 0
+    if unprotected:
+        raise ReleaseError("The deploy key at " + key + " has no passphrase; add one with ssh-keygen -p -f " + shlex.quote(key))
+    return key
+
+
+def push_command(key, commit, tag, environ=None):
+    """The push and its environment.
+
+    No ssh configuration, agent or other identity: ssh asks for this key's passphrase on the
+    terminal every time, and cannot save it to the Keychain or leave the key loaded in an agent.
+    The command goes in GIT_SSH_COMMAND, which outranks an inherited one, GIT_SSH and
+    core.sshCommand; GIT_SSH_VARIANT stops ssh.variant changing the arguments git passes it.
+    """
+    ssh = "ssh -F none -i " + shlex.quote(key) + " -o IdentitiesOnly=yes -o IdentityAgent=none"
+    env = {**(os.environ if environ is None else environ), "GIT_SSH_COMMAND": ssh, "GIT_SSH_VARIANT": "ssh"}
+    return ["git", "push", "--quiet", PUSH_URL, commit + ":refs/tags/" + tag], env
+
+
 def main(arguments=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--commit", default="refs/remotes/origin/main", help="Commit on main; defaults to its tip")
     parser.add_argument("--push", action="store_true", help="Push the tag, which starts the TestFlight build")
+    parser.add_argument("--key", default=os.environ.get(KEY_VARIABLE, DEFAULT_KEY),
+                        help="Deploy key that may create TestFlight tags; defaults to $" + KEY_VARIABLE + " or " + DEFAULT_KEY)
     args = parser.parse_args(arguments)
     try:
+        key = checked_key(args.key) if args.push else None
         capture("git", "fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main")
         commit = capture("git", "rev-parse", "--verify", args.commit + "^{commit}").strip()
         if subprocess.run(["git", "merge-base", "--is-ancestor", commit, "refs/remotes/origin/main"]).returncode != 0:
@@ -89,7 +124,8 @@ def main(arguments=None):
         if not args.push:
             print("Dry run. Repeat with --push to start the TestFlight build.")
             return 0
-        capture("git", "push", "--quiet", "origin", commit + ":refs/tags/" + tag)
+        command, env = push_command(key, commit, tag)
+        capture(*command, env=env)
         print("Pushed. Xcode Cloud assigns the build number; follow it in App Store Connect.")
         return 0
     except ReleaseError as error:
