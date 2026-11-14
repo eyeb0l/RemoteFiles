@@ -10,12 +10,14 @@ actor TreeService: RemoteFileService {
     private var failOnce: [String: RemoteFileError]
     private let delay: Duration
     private let delays: [String: Duration]
+    private let gates: [String: ListingGate]
     private(set) var listed: [String] = []
     private(set) var mostAtOnce = 0
     private var running = 0
     init(_ folders: [String: [RemoteEntry]], failures: [String: RemoteFileError] = [:], failOnce: [String: RemoteFileError] = [:],
-         delay: Duration = .zero, delays: [String: Duration] = [:]) {
+         delay: Duration = .zero, delays: [String: Duration] = [:], gates: [String: ListingGate] = [:]) {
         self.folders = folders; self.failures = failures; self.failOnce = failOnce; self.delay = delay; self.delays = delays
+        self.gates = gates
     }
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
         listed.append(path)
@@ -23,6 +25,7 @@ actor TreeService: RemoteFileService {
         defer { running -= 1 }
         let pause = delays[path] ?? delay
         if pause > .zero { try await Task.sleep(for: pause) }
+        if let gate = gates[path] { await gate.wait() }
         if let failure = failOnce.removeValue(forKey: path) ?? failures[path] { throw failure }
         guard let entries = folders[path] else { throw RemoteFileError.notFound }
         return DirectorySnapshot(path: path, entries: entries)
@@ -30,6 +33,21 @@ actor TreeService: RemoteFileService {
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
     func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.unsupportedFile }
     func disconnect() async {}
+}
+
+/// Holds a folder's listing until the test lets it through.
+actor ListingGate {
+    private var isOpen = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+    func open() {
+        isOpen = true
+        waiting.forEach { $0.resume() }
+        waiting.removeAll()
+    }
 }
 
 final class FolderSearchTests: XCTestCase {
@@ -213,6 +231,62 @@ final class FolderSearchTests: XCTestCase {
         XCTAssertLessThan(later, 31)
         let mostAtOnce = await service.mostAtOnce
         XCTAssertEqual(mostAtOnce, 3, "Subfolders are listed three at a time")
+    }
+
+    func testAFolderWithTooManyNamesIsCountedAndTheSearchGoesOn() async throws {
+        let tree = ["/r": [folder("/r/huge"), folder("/r/ok"), file("/r/needle.txt")], "/r/ok": [file("/r/ok/needle-2.txt")]]
+        let result = try await search(TreeService(tree, failures: ["/r/huge": .listingTooLarge]), "needle")
+        XCTAssertEqual(result.paths, ["/r/needle.txt", "/r/ok/needle-2.txt"])
+        XCTAssertEqual(result.final.unreadableFolders, 1)
+        do {
+            _ = try await search(TreeService(tree, failures: ["/r": .listingTooLarge]), "needle")
+            XCTFail("The starting folder's failure ends the search")
+        } catch RemoteFileError.listingTooLarge { }
+    }
+
+    /// Listings finish in any order and are taken in queue order, so one slow folder could leave
+    /// every other listing waiting in memory. The first folder here never answers until released.
+    func testListingsWaitingToBeReportedHoldBackFurtherListings() async throws {
+        let name = String(repeating: "n", count: 2_000)
+        var tree = ["/r": [folder("/r/a")] + (1...20).map { folder("/r/b\($0)") }, "/r/a": [file("/r/a/needle")]]
+        for index in 1...20 { tree["/r/b\(index)"] = [file("/r/b\(index)/" + name)] }
+        let gate = ListingGate()
+        let service = TreeService(tree, gates: ["/r/a": gate])
+        let limits = RemoteFolderSearch.Limits(concurrentListings: 4, concurrentListingLimit: 4, heldListingBytes: 1_000)
+        let searching = Task { try await self.search(service, "needle", limits: limits) }
+        // The starting folder, then the first four of its subfolders together.
+        while await service.listed.count < 5 { try await Task.sleep(for: .milliseconds(10)) }
+        try await Task.sleep(for: .milliseconds(300))
+        let whileHeld = await service.listed
+        XCTAssertEqual(whileHeld.count, 5, "Nothing more is listed while finished listings wait: \(whileHeld)")
+        await gate.open()
+        let result = try await searching.value
+        XCTAssertEqual(result.paths, ["/r/a/needle"])
+        XCTAssertEqual(result.final.foldersSearched, 22, "Every folder is still listed once the first is reported")
+        XCTAssertNil(result.final.stop)
+    }
+
+    /// Only `maxFolders` are ever listed, so the paths of further folders are not kept either.
+    func testFolderLimitStillStopsTheSearchWhenLaterFoldersAreNotQueued() async throws {
+        var tree = ["/r": (0..<50).map { folder("/r/d\($0)") }]
+        for index in 0..<50 { tree["/r/d\(index)"] = [file("/r/d\(index)/needle")] }
+        let service = TreeService(tree)
+        let result = try await search(service, "needle", limits: .init(maxFolders: 10))
+        XCTAssertEqual(result.final.stop, .folderLimit)
+        XCTAssertEqual(result.final.foldersSearched, 10)
+        XCTAssertEqual(result.paths.count, 9)
+        let listed = await service.listed
+        XCTAssertEqual(listed.count, 10)
+    }
+
+    func testListingPacingBacksOffForALargeListingHoweverQuick() {
+        var pacing = RemoteFolderSearch.ListingPacing(limits: .init(concurrentListings: 8, concurrentListingLimit: 64))
+        for _ in 0..<100 { pacing.finished(after: .milliseconds(120), nameBytes: RemoteFolderSearch.ListingPacing.large) }
+        XCTAssertEqual(pacing.window, 64, "Up to the size counted as large, only time decides")
+        pacing.finished(after: .milliseconds(120), nameBytes: RemoteFolderSearch.ListingPacing.large + 1)
+        XCTAssertEqual(pacing.window, 32)
+        for _ in 0..<10 { pacing.finished(after: .milliseconds(120), nameBytes: 64 * 1_024 * 1_024) }
+        XCTAssertEqual(pacing.window, 8, "Never below where it began")
     }
 
     func testListingPacingGrowsWhileAnswersAreQuickAndBacksOffWhenTheySlow() {

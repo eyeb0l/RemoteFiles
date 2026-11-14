@@ -391,6 +391,21 @@ private struct SourceFixture: View {
         model.cache(huge, id: profile.id, requestedPath: "/huge2")
         XCTAssertNil(model.cachedListing(profile.id, path: "/huge"), "Large listings give way before the total grows without limit")
         XCTAssertNotNil(model.cachedListing(profile.id, path: "/huge2"))
+
+        // A server chooses how long a name is, so a few rows can be as large as many thousands.
+        func long(_ path: String) -> FolderListing {
+            FolderListing(DirectorySnapshot(path: path, entries: (0..<5).map {
+                let name = String(repeating: "n", count: 1_024 * 1_024) + String($0)
+                return .init(name: name, path: path + "/" + name, kind: .file)
+            }))
+        }
+        model.cache(listing(["a"]), id: profile.id, requestedPath: "/small")
+        model.cache(long("/long"), id: profile.id, requestedPath: "/long")
+        XCTAssertNotNil(model.cachedListing(profile.id, path: "/small"), "About 10 MiB of names fits")
+        model.cache(long("/long2"), id: profile.id, requestedPath: "/long2")
+        XCTAssertNil(model.cachedListing(profile.id, path: "/small"))
+        XCTAssertNil(model.cachedListing(profile.id, path: "/long"), "Twice that is over the byte limit, so the older listings go")
+        XCTAssertNotNil(model.cachedListing(profile.id, path: "/long2"), "The newest always stays")
     }
 }
 #endif

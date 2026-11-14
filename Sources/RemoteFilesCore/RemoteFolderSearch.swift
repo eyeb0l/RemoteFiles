@@ -24,11 +24,16 @@ public enum RemoteFolderSearch {
         /// connection a folder takes about three round trips whatever the server does, so this is what
         /// decides how long a search takes.
         public var concurrentListingLimit: Int
+        /// Bytes of names in listings that have arrived but aren't reported yet. Past this, no further
+        /// folder is listed until some are: listings finish in any order and are taken in queue order,
+        /// so one slow folder could otherwise leave every other listing waiting in memory.
+        public var heldListingBytes: Int
         public init(maxDepth: Int = 16, maxFolders: Int = 1_000, maxMatches: Int = 500, timeLimit: Duration = .seconds(30),
-                    concurrentListings: Int = 8, concurrentListingLimit: Int = 64) {
+                    concurrentListings: Int = 8, concurrentListingLimit: Int = 64, heldListingBytes: Int = 32 * 1_024 * 1_024) {
             self.maxDepth = maxDepth; self.maxFolders = maxFolders; self.maxMatches = maxMatches
             self.timeLimit = timeLimit; self.concurrentListings = max(1, concurrentListings)
             self.concurrentListingLimit = max(self.concurrentListings, concurrentListingLimit)
+            self.heldListingBytes = max(0, heldListingBytes)
         }
     }
 
@@ -98,14 +103,18 @@ public enum RemoteFolderSearch {
 
     /// Lists more folders at once while the server answers quickly, and backs off when answers slow:
     /// every listing has to finish within its own deadline, including the time it queues at the server.
+    /// A large listing backs off as a slow one does, however quickly it came: the window is also how many
+    /// listings are held in memory while they arrive.
     struct ListingPacing {
         static let quick: Duration = .seconds(2), slow: Duration = .seconds(5)
+        /// About 15,000 ordinary names.
+        static let large = 2 * 1_024 * 1_024
         private(set) var window: Int
         private let floor: Int, limit: Int
         init(limits: Limits) { window = limits.concurrentListings; floor = limits.concurrentListings; limit = limits.concurrentListingLimit }
-        mutating func finished(after elapsed: Duration) {
-            if elapsed < Self.quick { window = min(limit, window + 1) }
-            else if elapsed > Self.slow { window = max(floor, window / 2) }
+        mutating func finished(after elapsed: Duration, nameBytes: Int = 0) {
+            if elapsed > Self.slow || nameBytes > Self.large { window = max(floor, window / 2) }
+            else if elapsed < Self.quick { window = min(limit, window + 1) }
         }
     }
 
@@ -149,6 +158,8 @@ public enum RemoteFolderSearch {
         var started = 0, accepted = 0, reported = 0, running = 0
         var finished: [Int: Result<DirectorySnapshot, Error>] = [:], retried: Set<Int> = []
         var ready: [Int: Accepted] = [:]
+        // The names each of those holds, from when its listing arrives until its folder is reported.
+        var held: [Int: Int] = [:], heldBytes = 0
         // Why listing stopped, which the report takes up between folders; whether a recovery came too late to
         // start, which ends the walk; and a failure that will end it, which nothing after is accepted past.
         var listingStop: Stop?, abandoned = false, blocked = false
@@ -189,7 +200,8 @@ public enum RemoteFolderSearch {
                 for listing in mailbox.take() {
                     let index = listing.index
                     running -= 1
-                    pacing.finished(after: listing.elapsed)
+                    let nameBytes = (try? listing.result.get())?.nameBytes ?? 0
+                    pacing.finished(after: listing.elapsed, nameBytes: nameBytes)
                     if case .failure(let error) = listing.result, index > 0, endsConnection(error), retried.insert(index).inserted {
                         // A peer's deadline retires the shared SFTP channel and fails the listings on it;
                         // list this folder once more on a fresh channel before giving up.
@@ -205,6 +217,7 @@ public enum RemoteFolderSearch {
                         continue
                     }
                     finished[index] = listing.result
+                    held[index] = nameBytes; heldBytes += nameBytes
                 }
                 while !blocked, accepted - reported < lookahead, let result = finished.removeValue(forKey: accepted) {
                     let folder = queue[accepted]
@@ -217,7 +230,11 @@ public enum RemoteFolderSearch {
                         let visible = snapshot.entries.filter { includeHidden || !RemotePath.isHidden($0.name) }
                             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
                         if folder.depth < limits.maxDepth {
-                            for entry in visible where entry.kind == .directory { queue.append(Folder(path: entry.path, depth: folder.depth + 1)) }
+                            // At most `maxFolders` are listed, so one more is enough to know that some were left.
+                            // Every path queued here stays until the walk ends.
+                            for entry in visible where entry.kind == .directory && queue.count <= limits.maxFolders {
+                                queue.append(Folder(path: entry.path, depth: folder.depth + 1))
+                            }
                         }
                         // Offered in the order the walk will read them, so that nothing is read ahead of a file the
                         // walk still has to read itself.
@@ -236,7 +253,9 @@ public enum RemoteFolderSearch {
             // Starts more listings. A walk does this after reporting what it could, so that a limit reached in a
             // folder starts nothing after it, except that a live search also does it before each file it reads.
             func refill() {
-                while !blocked, !abandoned, listingStop == nil, running < pacing.window, started < queue.count, started - reported < lookahead {
+                // Held listings are reported, or the one next in order is still being listed, so this resumes.
+                while !blocked, !abandoned, listingStop == nil, running < pacing.window, started < queue.count, started - reported < lookahead,
+                      heldBytes <= limits.heldListingBytes {
                     guard started < limits.maxFolders else { listingStop = .folderLimit; break }
                     guard ContinuousClock.now < deadline else { listingStop = .timeLimit; break }
                     let index = started, path = queue[index].path
@@ -266,7 +285,9 @@ public enum RemoteFolderSearch {
                     continue
                 }
                 while reported < accepted, !abandoned, let item = ready.removeValue(forKey: reported) {
-                    let folder = queue[reported]; reported += 1
+                    let folder = queue[reported]
+                    heldBytes -= held.removeValue(forKey: reported) ?? 0
+                    reported += 1
                     var update = Update()
                     switch item {
                     case .outside:
@@ -365,7 +386,7 @@ public enum RemoteFolderSearch {
     /// One folder's failure that leaves the rest of the search meaningful.
     private static func isSkippable(_ error: Error) -> Bool {
         switch error {
-        case RemoteFileError.permissionDenied, RemoteFileError.notFound, RemoteFileError.timedOut: return true
+        case RemoteFileError.permissionDenied, RemoteFileError.notFound, RemoteFileError.timedOut, RemoteFileError.listingTooLarge: return true
         default: return false
         }
     }

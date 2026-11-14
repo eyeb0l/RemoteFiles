@@ -58,6 +58,8 @@ public struct ConnectionIdentityUnlockRequired: LocalizedError, Sendable {
 public struct RemoteEntry: Identifiable, Hashable, Sendable {
     public enum Kind: String, Sendable { case directory, file, symlink, other }
     public var id: String { path }
+    /// The bytes of the name and of the path, which holds the name again.
+    public var nameBytes: Int { name.utf8.count + path.utf8.count }
     public let name: String
     public let path: String
     public let size: UInt64?
@@ -175,6 +177,8 @@ public struct DirectorySnapshot: Sendable {
     public let path: String
     public let entries: [RemoteEntry]
     public init(path: String, entries: [RemoteEntry]) { self.path = path; self.entries = entries }
+    /// The bytes its names and paths take, which is what a held or remembered listing costs.
+    public var nameBytes: Int { entries.reduce(0) { $0 + $1.nameBytes } }
 }
 
 public struct SavedLocation: Identifiable, Codable, Hashable, Sendable {
@@ -257,6 +261,8 @@ public extension RemoteFileService {
 
 public enum RemoteFileError: LocalizedError, Sendable {
     case tooLarge(Int), unavailable(String), notFound, permissionDenied, connectionEnded, timedOut, invalidPath, unsupportedFile, authenticationFailed
+    /// A folder whose names are longer, or together larger, than a listing may keep in memory.
+    case listingTooLarge
     public var errorDescription: String? {
         switch self {
         case .tooLarge(let limit): return "Too Large to Preview. The limit is \(ByteCountFormatter.string(fromByteCount: Int64(limit), countStyle: .file))."
@@ -268,6 +274,7 @@ public enum RemoteFileError: LocalizedError, Sendable {
         case .timedOut: return "The connection timed out. Check the address, server availability, network permissions, and Tailscale connection if used."
         case .invalidPath: return "This remote path cannot be resolved."
         case .unsupportedFile: return "Preview is not available for this file type."
+        case .listingTooLarge: return "This folder’s names are too long or too many to list."
         }
     }
 }
