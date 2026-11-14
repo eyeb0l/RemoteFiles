@@ -34,6 +34,9 @@ public struct DocumentTextIndex: Sendable {
     /// Whether the rendered document needs the rich renderer (`EnhancedMarkdownPolicy`), decided from
     /// the same parse as the parts. Never for a refused document, which isn't rendered at all.
     public let requiresEnhancedRendering: Bool
+    /// The parts' links that `ExternalLinkPolicy` confirms before opening. Found here, away from the
+    /// UI actor, because a document can hold a hundred thousand of them.
+    public let linksNeedingConfirmation: Set<URL>
     private let rendered: [(Int, String)]
 
     /// Parses Markdown once. Throws only `CancellationError`, between its phases; the parse itself
@@ -42,6 +45,7 @@ public struct DocumentTextIndex: Sendable {
         source = text
         guard markdown else {
             self.parts = []; self.headings = []; self.rendered = []; self.isSourceOnly = false; self.requiresEnhancedRendering = false
+            self.linksNeedingConfirmation = []
             return
         }
         // Index the original structure before splitting images into their own views.
@@ -55,6 +59,7 @@ public struct DocumentTextIndex: Sendable {
         } catch {
             // Source is then the only way to read the document, so Find must still work there.
             self.parts = []; self.headings = []; self.rendered = []; self.isSourceOnly = true; self.requiresEnhancedRendering = false
+            self.linksNeedingConfirmation = []
             return
         }
         var preparedParts: [MarkdownPart] = []
@@ -132,6 +137,8 @@ public struct DocumentTextIndex: Sendable {
             }
         }
         finishHeading()
+        try Task.checkCancellation()
+        linksNeedingConfirmation = ExternalLinkPolicy.linksNeedingConfirmation(in: preparedParts)
         parts = preparedParts; self.rendered = rendered; self.headings = headings; isSourceOnly = false
     }
 
