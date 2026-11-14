@@ -5,7 +5,9 @@ name: Gate guard
 # those files are touched. It never checks out or runs the pull request's code and uses no secret.
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened]
+    # `edited` covers a change of base: retargeting a stacked pull request to `main` can bring gate
+    # changes from its old base into its diff without a new commit.
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
@@ -18,6 +20,8 @@ concurrency:
 jobs:
   gate-guard:
     name: Gate unchanged
+    # A title or description edit changes no file.
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

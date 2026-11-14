@@ -159,7 +159,8 @@ never the pull request's code, holds a read-only token and uses no secret. It li
 request's changed files through the API and fails if any is part of the gate: everything
 `ci_scope.py` lists as `INFRASTRUCTURE`, `scripts/gate_guard.py` itself, and `ci_scripts/`. A
 file renamed out of the gate counts, and a pull request with too many files to list in full
-fails as well.
+fails as well. It runs again when a pull request's base changes, because retargeting a stacked
+pull request can bring gate changes from its old base into its diff without a new commit.
 
 The check is deliberately not required. A failure does not mean the change is wrong; it means
 the other checks passing proves less than usual, so a person reads the diff and merges. GitHub
