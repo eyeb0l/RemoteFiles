@@ -139,7 +139,21 @@ final class DocumentPolicyTests: XCTestCase {
         XCTAssertLessThan(started.duration(to: .now), .seconds(5), "Refused before parsing, which takes far longer")
         // Bars are counted a line at a time.
         let rows = Array(repeating: "|a|b|c|", count: 1_000)
-        XCTAssertNoThrow(try DocumentPolicy.prepareMarkdown((["|a|b|c|", "|-|-|-|"] + rows).joined(separator: "\n")))
+        for ending in ["\n", "\r", "\r\n"] {
+            XCTAssertNoThrow(try DocumentPolicy.prepareMarkdown((["|a|b|c|", "|-|-|-|"] + rows).joined(separator: ending)),
+                             "Line ending \(ending.unicodeScalars.map { $0.value })")
+        }
+    }
+
+    func testCRLFCountsAsOneLineBreak() throws {
+        let lines = MarkdownLimits.maximumMarkers / 2 + 1
+        XCTAssertNoThrow(try MarkdownLimits.checkSource(String(repeating: "a\r\n", count: lines)))
+        XCTAssertThrowsError(try MarkdownLimits.checkSource(String(repeating: "a\r\n", count: MarkdownLimits.maximumMarkers + 1))) {
+            XCTAssertEqual($0 as? MarkdownLimitError, .tooManyMarkers)
+        }
+        XCTAssertThrowsError(try MarkdownLimits.checkSource(String(repeating: "a\r\r", count: lines))) {
+            XCTAssertEqual($0 as? MarkdownLimitError, .tooManyMarkers, "Each bare carriage return is a line of its own")
+        }
     }
 
     func testDocumentsThatChangeFormattingEveryFewBytesAreNotParsed() throws {

@@ -199,10 +199,13 @@ public enum MarkdownLimits {
     public static let maximumBarsPerLine = 256
 
     static func checkSource(_ source: String) throws {
-        var markers = 0, bars = 0
+        var markers = 0, bars = 0, previous: UInt8 = 0
         for byte in source.utf8 {
+            defer { previous = byte }
             switch byte {
-            case 0x0A: // Line feed
+            case 0x0A where previous == 0x0D: // The line feed of CRLF ends the same line.
+                continue
+            case 0x0A, 0x0D: // Line feed or carriage return, both line endings in Markdown
                 markers += 1; bars = 0
             case 0x7C: // |
                 markers += 1; bars += 1
