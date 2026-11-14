@@ -17,5 +17,4 @@ Sources: https://registry.npmjs.org/{library}/-/{library}-{version}.tgz.
 Upstream projects: https://github.com/mermaid-js/mermaid, https://github.com/KaTeX/KaTeX, https://github.com/markedjs/marked, https://github.com/cure53/DOMPurify.
 
 To update: select reviewed releases, extract the distribution and license from each npm tarball, update these hashes, and rerun EnhancedMarkdownTests and hosted EnhancedMarkdownDisplayTests.
-Repository checks compare each file with its hash above (`scripts/test_bundled_renderer.py`), so a bundle cannot change without this table changing with it.
 The integration and resource limits are in markdown-renderer.js.
