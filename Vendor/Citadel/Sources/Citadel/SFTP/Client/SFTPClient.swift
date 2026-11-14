@@ -257,6 +257,10 @@ public final class SFTPClient: Sendable {
                 guard failure == nil else { continue }
                 switch response {
                 case .name(let name) where closing == nil:
+                    // RemoteFiles: a server with nothing left to list answers EOF (SFTP v3, section 6.7). A
+                    // batch with no names moves neither limit and refills the window, so a server answering
+                    // every READDIR with one kept the listing running for as long as it liked.
+                    guard !name.components.isEmpty else { throw SFTPError.invalidResponse }
                     try await append(name)
                     // Any request sent now keeps the listing waiting a round trip for its reply, even if the
                     // next answer is the EOF. Half a window still keeps the server busy, so top up from there.

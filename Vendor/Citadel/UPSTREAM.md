@@ -111,6 +111,9 @@ hands over the `CLOSE` as a future and returns as soon as the listing is complet
 close must still make the caller retire the channel. A window is now topped up only once half of it has been
 answered: every read still outstanding at EOF must be drained, so one sent just before EOF would cost a round
 trip for nothing, and half a window keeps the server busy. RemoteFiles passes 16 for browsing and 8 for walks.
+A `NAME` answer that carries no names fails the listing with `invalidResponse`: the protocol answers EOF when
+nothing is left, and an empty batch moved neither limit while still refilling the window, so a server could keep
+a listing running indefinitely.
 
 `SFTPClient.sendRealPath`, `sendAttributes` and `sendOpenFile`, and `SFTPFile.sendReadAttributes` and `sendClose`,
 queue a request and return a future without waiting. They expose the existing `sendRequestFuture` ordering, so
@@ -131,6 +134,9 @@ and the crypto library's private-key consistency checks. ECDSA imports validate 
 curve, private scalar and derived public point. The app compares the derived public
 key with the outer container for every algorithm. `OpenSSHKey.swift` rejects trailing
 public data and validates every padding byte, accepting a complete padding block.
+It also refuses a cipher named without a key derivation, which had AES read its key and IV
+from empty arrays, and an empty passphrase, whose bytes were force-unwrapped as a pointer that empty data need not have. The
+app's own container check already rejects both before the parser sees them.
 
 `SSHAuthenticationMethod.rsaSHA2` offers SHA-512 then SHA-256, never SHA-1.
 Citadel's pre-existing legacy RSA implementation is not used for identity signing.

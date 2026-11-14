@@ -159,8 +159,10 @@ struct SSHPacketParser {
 
                 // Check if this line looks like an SSH version (any SSH version, not just 2.0)
                 if lineSlice.count >= 4 && lineSlice.starts(with: "SSH-".utf8) {
-                    // Found SSH version line, return everything up to and including this line
-                    var version = String(decoding: slice[slice.startIndex..<index], as: UTF8.self)
+                    // RemoteFiles: return the identification string alone. A server may send other lines
+                    // first (RFC 4253, section 4.2), and this string goes into the key-exchange hash, so
+                    // returning those lines with it made the host's signature fail to verify.
+                    var version = String(decoding: lineSlice, as: UTF8.self)
                     // read including \n
                     self.buffer.moveReaderIndex(forwardBy: slice.startIndex.distance(to: index).advanced(by: 1))
                     // Remove the trailing \r if present (but keep \n removal logic for consistency)
