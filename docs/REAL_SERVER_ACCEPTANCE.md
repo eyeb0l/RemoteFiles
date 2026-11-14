@@ -113,10 +113,10 @@ or a Wi-Fi/cellular handoff.
 On 30 October 2026 the physical iPhone 17 Pro (iOS 27.2) passed this check, with
 Wi-Fi off in Settings, 5G connected and the cable attached. The signed Release
 build of the commit adding this record ran `testSavedConnectionReopensRealProject`,
-which passed in 33.2 seconds. It opened **My MacBook** at `100.125.79.6`, browsed
+which passed in 33.2 seconds. It opened **My MacBook** at its tailnet address, browsed
 the real project's `docs` folder and rendered `READER_PERFORMANCE.md`. All 42
 samples showed the iPhone on USB and a Tailscale DERP relay route (`lhr`), never
-a local one. An SSH session from the phone's tailnet address `100.114.108.88` was
+a local one. An SSH session from the phone's tailnet address was
 established in 26 samples, and 43,648 WireGuard bytes were exchanged. Because the
 route was relayed, this does not show a direct path to a carrier address. Evidence:
 `/private/tmp/remotefiles-cellular-run3/` (`summary.md`, `samples.jsonl`,
