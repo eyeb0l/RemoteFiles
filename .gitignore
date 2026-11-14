@@ -5,3 +5,11 @@ DerivedData*/
 xcuserdata/
 .DS_Store
 .test-server/
+# Signing material, API keys and local configuration never belong in the repository.
+*.p8
+*.p12
+*.mobileprovision
+.env
+.env.*
+# Test result bundles are large and can hold screenshots and logs of a real device.
+*.xcresult
