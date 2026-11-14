@@ -59,7 +59,8 @@ extension View {
     for (const anchor of document.querySelectorAll('a[href]')) {
         if (anchor.href !== target && anchor.getAttribute('href') !== target) continue;
         if (texts.length >= 32) return null;
-        const text = (anchor.innerText || '').trim();
+        // A link inside an inline SVG has no `innerText`; its text is its content.
+        const text = (typeof anchor.innerText === 'string' ? anchor.innerText : (anchor.textContent || '')).trim();
         if (text.length > 2000) return null;
         texts.push(text);
     }

@@ -411,6 +411,7 @@ import RemoteFilesCore
         <p>\(String(repeating: "<a href=\"https://many.example/\">more</a> ", count: 40))<a id="buried" href="https://many.example/">https://bank.example</a></p>
         <p><a id="spaced" href="https://evil.example/spaced">\(String(repeating: " ", count: 400))https://bank.example</a>
         <a id="hidden" href="https://evil.example/hidden"><span hidden>evil.example/</span>https://bank.example</a></p>
+        <svg width="200" height="30"><a href="https://evil.example/drawn"><text y="20">https://bank.example</text></a></svg>
         </body></html>
         """
         window.rootViewController = UIHostingController(rootView: StaticHTMLWebView(text: source, filename: "links.html", rules: rules,
@@ -431,6 +432,11 @@ import RemoteFilesCore
                         "https://evil.example/spaced", "https://evil.example/hidden"],
                        "Too many links to one address is no answer, and a link is judged by its text as laid out")
         XCTAssertEqual(view.url?.absoluteString, "about:blank", "No link is followed inside the preview")
+        // A link drawn inside an inline SVG has its text read too.
+        let drawn = try XCTUnwrap(URL(string: "https://evil.example/drawn"))
+        let drawnText = await ExternalLinkText.visibleTexts(for: drawn, in: view)
+        XCTAssertEqual(drawnText, ["https://bank.example"])
+        XCTAssertTrue(ExternalLinkPolicy.needsConfirmation(drawn, visibleText: drawnText?.first))
         XCTAssertTrue(ExternalLinkConfirmation.message(for: try XCTUnwrap(confirmed.first { $0.host == "evil.example" })).contains("evil.example"))
     }
 
