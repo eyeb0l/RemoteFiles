@@ -15,7 +15,19 @@ final class ReadingPositionStoreTests: XCTestCase {
         XCTAssertEqual(try url.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
         try await store.save(original, connectionID: id, path: "/Reports/other.md")
         XCTAssertEqual(try url.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true, "Set again after each write")
+        // A file an earlier version wrote is taken out of backups when the store opens it, not at its next write.
+        var included = URLResourceValues(); included.isExcludedFromBackup = false
+        var existing = url
+        try existing.setResourceValues(included)
+        existing.removeAllCachedResourceValues()
+        // macOS reports everything in a temporary folder as excluded, so only iOS starts from "included" here.
+        #if os(iOS)
+        XCTAssertEqual(try existing.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, false)
+        #endif
         let recreated = ReadingPositionStore(fileURL: url)
+        var reopened = url
+        reopened.removeAllCachedResourceValues()
+        XCTAssertEqual(try reopened.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
         let restored = await recreated.restore(connectionID: id, path: "/Reports/report.md", revision: original.revision)
         XCTAssertEqual(restored, original)
         let changed = await recreated.restore(connectionID: id, path: "/Reports/report.md", revision: SavedReadingPosition.revision(for: "Report\n東京"))

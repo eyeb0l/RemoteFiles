@@ -251,9 +251,10 @@ final class FolderBrowsingTests: XCTestCase {
         XCTAssertNil(preferences.array(forKey: "folderSortOrders-v1"), "And leaves the preferences file")
         let file = directory.appendingPathComponent("folder-sort-orders-v1.json")
         XCTAssertEqual(try file.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
-        #if !targetEnvironment(simulator)
-        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: file.path)[.protectionKey] as? FileProtectionType, .complete)
-        #endif
+        // A simulator does not report file protection.
+        if ProcessInfo.processInfo.environment["SIMULATOR_UDID"] == nil {
+            XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: file.path)[.protectionKey] as? FileProtectionType, .complete)
+        }
 
         model.setFolderSortOrder(.kind, id: id, path: "/srv/other")
         let second = try AppModel(directory: directory, fileService: DemoRemoteFileService(delayNanoseconds: 0), preferences: preferences)
