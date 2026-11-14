@@ -13,7 +13,7 @@ let package = Package(
         .package(path: "Vendor/Textual"),
         .package(path: "Vendor/swift-nio-ssh"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0"),
-        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.12.3"),
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "5.1.1"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-asn1.git", from: "1.7.0")
     ],
