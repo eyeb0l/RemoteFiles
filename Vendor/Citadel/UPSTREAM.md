@@ -122,6 +122,9 @@ and the crypto library's private-key consistency checks. ECDSA imports validate 
 curve, private scalar and derived public point. The app compares the derived public
 key with the outer container for every algorithm. `OpenSSHKey.swift` rejects trailing
 public data and validates every padding byte, accepting a complete padding block.
+It also refuses a cipher named without a key derivation, which had AES read its key and IV
+from empty arrays, and an empty passphrase, whose bytes were force-unwrapped as a pointer that empty data need not have. The
+app's own container check already rejects both before the parser sees them.
 
 `SSHAuthenticationMethod.rsaSHA2` offers SHA-512 then SHA-256, never SHA-1.
 Citadel's pre-existing legacy RSA implementation is not used for identity signing.

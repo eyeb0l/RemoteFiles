@@ -253,9 +253,13 @@ enum OpenSSH {
         ) throws -> T {
             switch self {
             case .none:
+                // RemoteFiles: a cipher needs a key, and no derivation gives none. Handing AES the
+                // empty arrays made BoringSSL read its key and IV from past their ends.
+                guard cipher.keyLength == 0 else { throw KeyError.missingDecryptionKey }
                 return try perform([], [])
             case .bcrypt(var salt, let iterations):
-                guard let decryptionKey = decryptionKey else {
+                // RemoteFiles: empty data has no base address, which is force-unwrapped below.
+                guard let decryptionKey = decryptionKey, !decryptionKey.isEmpty else {
                     throw KeyError.missingDecryptionKey
                 }
                 
