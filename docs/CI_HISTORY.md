@@ -10,6 +10,96 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 14 November 2026: a download test read its fake before the transfer saw cancellation
+
+PR #141 run [43577671711](https://github.com/eyeb0l/RemoteFiles/actions/runs/43577671711) failed
+**Quick / simulator-core** in `AppModelLifecycleTests.testEnteringDemoInOneWindowKeepsAnotherWindowsDownloadRunning`
+with `[]` where it expected `["/file.bin"]`; the other 796 tests passed, and the same commit's
+parent had passed the whole lane an hour earlier. The test waited for the queue to mark the
+item interrupted and then read the fake transport's list of cancelled transfers at once. The
+fake records a cancellation from its own task, when its ten-millisecond sleep throws, which can
+be after the queue has already marked the item. The test now waits for that record instead of
+reading it once. The cause is from reading the test, not from reproducing the failure.
+
+## 14 November 2026: an integration suite hang was a fixture teardown, not the transport change
+
+While PR #127 was being prepared, `scripts/test-openssh.sh swift test --filter SFTPIntegrationTests
+--filter SFTPDirectoryReadTests --filter PublicKeyInstall --filter Jump --filter Transport` stopped
+for ten minutes after `testOfflineFolderFailsClosedWhenMembersAreReplacedByLinksDuringTheSave`
+started, under a first version of that PR that closed the connection on any handshake error. The
+change did not cause it. Looping the same command on the MacBook Air (macOS 27.2.1) hung 3 of 15
+runs of `main` at 953b024, 1 of 10 of the PR's final version and 1 of 5 of the first version.
+Each hung process was sampled before it was killed, and each had its main thread in the teardown
+block that `limitedServer(sessions:options:)` adds, inside `server.waitUntilExit()`.
+
+The limited sshd had already exited in every hang: it was not in the process table. One hung
+process was kept alive and attached with LLDB. Its `Process` for that server reported
+`isRunning == false`, yet `-[NSConcreteTask waitUntilExit]` was still running the run loop in
+62.5 ms slices sixteen minutes later. Its disassembly shows it returns when the task's state
+records termination, or when the task is missing from a per-thread registry it reads once on
+entry. The state word matched that of two servers whose waits had returned. Why this wait missed
+the termination is inside Foundation and was not established. All eight event loops were idle and
+no thread was blocked on a lock.
+
+The log did not show the hung test. `xctest`'s output is buffered, so in the hangs on `main` the
+visible log stopped, as in the original, at the offline-folder test's start, about 1.7 KB of output
+before the hang in one of the next limited-server tests (`testOneChannelServer…`). The `limited-*`
+sshd logs identify the test: the teardown copies its server's log only after the wait. The
+`[Citadel] SSH Server Error: NIOSSHError.tcpShutdown` line above the start is Citadel's SFTP channel
+handler logging an ordinary disconnect; it appears in passing runs too.
+
+The teardown now polls `isRunning` for at most 60 seconds, then kills the server and fails the test.
+On 5d295f8 the unchanged command then hung 4 of 20 runs and, with only that change, 0 of 20; all 50
+unchanged runs together hung 9 times. The other `waitUntilExit()` calls in the tests wait for
+short-lived children whose output they have read to the end, off the teardown path; none was seen to
+hang, and they are unchanged. The macos-openssh lane has not exceeded its deadline in the 400 CI
+runs since 19 October; why CI has not hit this was not established.
+
+## 14 November 2026: a result line split by a system log line counted as missing
+
+PR #124 run [43538623080, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/43538623080/attempts/1)
+failed **Quick / simulator-core** with `Missing results:
+PlaybackTests/testCorruptRefreshPreservesPreviousPlayerAndReportsCodecError` and
+`xcresult/log count mismatch`: the xcresult held 760 passes and four allowed skips, the
+log 759. No test failed. In `simulator-core.log` the test's result line was split by an
+audio log line from the test host, written between the test's name and its outcome:
+
+```
+Test Case '-[RemoteFilesTests.PlaybackTests testCorruptRefresh…]'2026-11-14 01:24:21.111681+0000 RemoteFilesTestHost[35848:128845] [AQ]        LoudnessManager.mm:1222  IsHardwareSupported: no plist loaded, returning false
+ passed (0.014 seconds).
+```
+
+`log_tests` in `scripts/test-acceptance.py` already removes such records from inside a
+test's identifier and from inside the `Test Case '-[` prefix. This one fell between the
+closing quote and the outcome, which it does not handle, so the test had a start and no
+result. The PR changed image decoding only. The job was rerun once, with this cause named
+on the PR.
+
+Later the same day, #138 replaced the position-specific cases with one rule: `log_tests`
+removes every complete structured record that starts mid-line, wherever it falls in a result
+line. Of the 90 simulator-core logs still retained (7–14 November), 29 had such a record in a
+result line, and this run's was the only one at this position; the old and new parsers agree
+on every other log. Interruptions that are not complete records still leave no result.
+
+## 14 November 2026: a preview-reader test assumed its two reads arrive in order
+
+`BoundedPreviewReaderTests.testGrowthBeyondInitialStatIsRejectedWhileReceiving` failed
+**Quick / simulator-core** on two unrelated pull requests within a few hours: #135 run
+[43547113181](https://github.com/eyeb0l/RemoteFiles/actions/runs/43547113181) (761 other tests
+passed) and #134 run [43560296011](https://github.com/eyeb0l/RemoteFiles/actions/runs/43560296011)
+(776 passed). Both reported the requests `[5, 4, 1]` where the test expected `[4, 5]`. Neither
+pull request touched the reader; #135 passed when rerun.
+
+`BoundedPreviewReader.stream` starts its reads as task-group tasks, which begin in either order.
+The test's fake handed out its chunks in the order requests arrived, whatever their offsets. When
+the probe's task ran first it received the first chunk, came back short and was topped up with a
+one-byte read, which is exactly `[5, 4, 1]`. The neighbouring test already notes that requests
+start in any order.
+
+The test now reads from a fake that answers each request by its offset, and compares the
+requests sorted by offset. The reader is unchanged. The cause is from reading the code and the
+two failures' identical output; the failure was not reproduced locally.
+
 ## 13 November 2026: Find focus regression needs phase-specific CI evidence
 
 PR #121 run [43432298598, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/43432298598/attempts/1)

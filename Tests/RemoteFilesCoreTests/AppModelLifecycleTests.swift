@@ -352,8 +352,8 @@ private actor KeyedDownloadService: RemoteFileService, RemoteFileSessionClosing 
         await first.setDemo(true)
         await second.setDemo(true)
         try await waitUntil("The last window entering Demo stopped its download") { manager.items.first?.state == .interrupted }
-        cancelled = await secondService.cancelled
-        XCTAssertEqual(cancelled, ["/file.bin"])
+        // The queue marks the item before the transfer's own task has seen its cancellation.
+        try await waitUntil("The transfer was cancelled") { await secondService.cancelled == ["/file.bin"] }
     }
 
     /// Editing, removing or forgetting the host key of a connection in one window stops that connection's
@@ -679,6 +679,78 @@ private actor KeyedDownloadService: RemoteFileService, RemoteFileSessionClosing 
         let disconnects = await base.disconnects, cancelledKeys = await keys.cancellations
         XCTAssertEqual(disconnects, 1); XCTAssertEqual(cancelledKeys, 1)
     }
+    /// A trusted key can only be reset from a connection that uses it, so the last such
+    /// connection takes it with it. One still in use by another connection stays.
+    func testDeletingAConnectionForgetsAHostKeyNothingElseUses() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try AppModel(directory: directory, fileService: BackgroundExportService())
+        let key = NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey
+        let shared = HostEndpoint(host: "shared.example", port: 22), lone = HostEndpoint(host: "lone.example", port: 2222)
+        let hop = HostEndpoint(host: "hop.example", port: 22)
+        let first = ConnectionProfile(name: "First", host: "Shared.Example", username: "reader", identityID: UUID())
+        let second = ConnectionProfile(name: "Second", host: "shared.example", username: "other", identityID: UUID(),
+                                       jumpHost: JumpHost(host: "hop.example", username: "jump", identityID: UUID()))
+        let third = ConnectionProfile(name: "Third", host: "lone.example", port: 2222, username: "reader", identityID: UUID())
+        model.metadata.connections = [first, second, third]
+        await model.persist()
+        for endpoint in [shared, lone, hop] { try await model.trust.trustUnknown(endpoint: endpoint, key: HostKeyDetails(publicKey: key)) }
+        func isTrusted(_ endpoint: HostEndpoint) async -> Bool { (try? await model.trust.validate(endpoint: endpoint, publicKey: key)) != nil }
+
+        await model.removeConnection(third)
+        var trusted = [await isTrusted(lone), await isTrusted(shared), await isTrusted(hop)]
+        XCTAssertEqual(trusted, [false, true, true], "Only the key nothing else uses goes")
+        await model.removeConnection(first)
+        trusted = [await isTrusted(shared), await isTrusted(hop)]
+        XCTAssertEqual(trusted, [true, true], "Another connection still reaches that server")
+        await model.removeConnection(second)
+        trusted = [await isTrusted(shared), await isTrusted(hop)]
+        XCTAssertEqual(trusted, [false, false], "The last connection takes its server's and its jump host's keys")
+        XCTAssertNil(model.errorMessage)
+    }
+
+    /// The "Host Key Changed" sheet and a connection's settings reset trust the same way: what was
+    /// previewed through the old key goes too, and the connection is dropped.
+    func testEveryTrustResetForgetsPreviewedFilesAndDisconnects() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = BackgroundExportService(), model = try AppModel(directory: directory, fileService: service)
+        let key = NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey
+        let endpoint = HostEndpoint(host: "studio.example", port: 22)
+        try await model.trust.trustUnknown(endpoint: endpoint, key: HostKeyDetails(publicKey: key))
+        let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("RemoteImages-v1")
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        let previewed = cache.appendingPathComponent(UUID().uuidString + ".resource")
+        try Data("from the server trusted before".utf8).write(to: previewed)
+
+        let forgotten = await model.resetTrust(endpoint: endpoint)
+        XCTAssertTrue(forgotten)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: previewed.path), "A file previewed through the old key is not kept for the next one")
+        do { try await model.trust.validate(endpoint: endpoint, publicKey: key); XCTFail("The key must be verified again") } catch HostTrustError.unknown { }
+        let disconnects = await service.disconnects; XCTAssertEqual(disconnects, 1)
+    }
+
+    func testDeletingAConnectionRemovesItsDownloadsOnlyWhenAsked() async throws {
+        for removing in [false, true] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let (model, service, _, _) = try await twoWindows(directory)
+            let kept = ConnectionProfile(name: "Kept", host: "kept.invalid", username: "reader", identityID: UUID())
+            let deleted = ConnectionProfile(name: "Deleted", host: "deleted.invalid", username: "reader", identityID: UUID())
+            model.metadata.connections = [kept, deleted]
+            await model.persist()
+            await service.hold("/held.bin")
+            model.enqueueDownload(profile: kept, entry: file("held.bin"))
+            model.enqueueDownload(profile: deleted, entry: file("one.bin"))
+            model.enqueueDownload(profile: deleted, entry: file("two.bin"))
+            XCTAssertEqual(model.downloads(from: deleted).count, 2)
+            await model.removeConnection(deleted, removingDownloads: removing)
+            XCTAssertEqual(model.downloads(from: deleted).count, removing ? 0 : 2, removing ? "Removed on request" : "Kept unless asked")
+            XCTAssertEqual(model.downloads(from: kept).count, 1, "Another connection's downloads are never touched")
+            await service.release("/held.bin")
+        }
+    }
+
     func testResetTrustForgetsOnlyTheSavedConnectionEndpoint() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

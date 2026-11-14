@@ -383,6 +383,8 @@ private struct DownloadsBarButton: View {
 
 struct HomeView: View {
     @Bindable var model: AppModel
+    /// A connection being deleted that still has downloads, which are kept or removed by choice.
+    @State private var connectionToDelete: ConnectionProfile?
     /// Connection names only help tell servers apart when there's more than one.
     private var showsConnectionNames: Bool { model.metadata.connections.count > 1 }
     private func state(_ profile: ConnectionProfile) -> (label: String, color: Color?) {
@@ -441,7 +443,10 @@ struct HomeView: View {
                         .contextMenu {
                             if !model.demo {
                                 Button("Edit Connection", systemImage: "pencil") { model.sheet = .connection(profile.id) }
-                                Button("Delete Connection", systemImage: "trash", role: .destructive) { Task { await model.removeConnection(profile) } }
+                                Button("Delete Connection", systemImage: "trash", role: .destructive) {
+                                    if model.downloads(from: profile).isEmpty { Task { await model.removeConnection(profile) } }
+                                    else { connectionToDelete = profile }
+                                }
                             }
                             Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnectAndGoHome() } }
                         }
@@ -477,6 +482,18 @@ struct HomeView: View {
             if !Task.isCancelled { ReaderWarmUp.start() }
         }
         .navigationTitle("RemoteFiles")
+        .confirmationDialog("Delete “\(connectionToDelete?.name ?? "")”?", isPresented: Binding(
+            get: { connectionToDelete != nil }, set: { if !$0 { connectionToDelete = nil } }),
+            titleVisibility: .visible, presenting: connectionToDelete) { profile in
+            Button("Delete Connection and Its Downloads", role: .destructive) {
+                Task { await model.removeConnection(profile, removingDownloads: true) }
+            }
+            Button("Delete Connection Only", role: .destructive) { Task { await model.removeConnection(profile) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { profile in
+            let count = model.downloads(from: profile).count
+            Text("\(count) \(count == 1 ? "file" : "files") downloaded from it \(count == 1 ? "is" : "are") on this device.")
+        }
         .navigationSubtitle(model.demo ? "Demo workspace · sample files" : "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

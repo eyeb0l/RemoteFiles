@@ -13,6 +13,7 @@ struct HTMLContentView: View {
     @State private var error: String?
     @State private var loaded = false
     @State private var needsScripts = false
+    @State private var linkToConfirm: URL?
     var body: some View {
         ZStack {
             if let error {
@@ -20,7 +21,7 @@ struct HTMLContentView: View {
             } else if let rules {
                 StaticHTMLWebView(text: text, filename: filename, rules: rules, readingPosition: readingPosition, fontScale: fontSize / 17,
                     onFinish: { needsScripts = $0; loaded = true },
-                    onFailure: { error = $0 }, openExternalLink: { openURL($0) })
+                    onFailure: { error = $0 }, openExternalLink: { openURL($0) }, confirmExternalLink: { linkToConfirm = $0 })
                     // Run the page to the bottom edge; the web view insets its end for the home indicator.
                     .ignoresSafeArea(.container, edges: .bottom)
                     .opacity(needsScripts ? 0 : 1)
@@ -31,6 +32,7 @@ struct HTMLContentView: View {
                 } else if !loaded { LoadingPlaceholder(label: "Rendering HTML…", shape: .document) }
             } else { LoadingPlaceholder(label: "Rendering HTML…", shape: .document) }
         }
+        .confirmingExternalLink($linkToConfirm)
         .task(id: ExactText(text: text)) {
             rules = nil; error = nil; loaded = false; needsScripts = false
             do {
@@ -61,6 +63,8 @@ struct StaticHTMLWebView: UIViewRepresentable {
     let onFinish: (Bool) -> Void
     let onFailure: (String) -> Void
     let openExternalLink: (URL) -> Void
+    /// Given a link whose text calls for a look at where it leads first. Without this, every link opens.
+    var confirmExternalLink: ((URL) -> Void)? = nil
 
     static func configuration(rules: WKContentRuleList) -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
@@ -100,6 +104,9 @@ struct StaticHTMLWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let view = AnchoredHTMLWebView(frame: .zero, configuration: Self.configuration(rules: rules))
         context.coordinator.attach(view)
+        context.coordinator.confirmExternalLink = confirmExternalLink
+        // A long press would otherwise offer a preview of a link, which may load its destination.
+        view.allowsLinkPreview = false
         view.navigationDelegate = context.coordinator
         view.scrollView.delegate = context.coordinator
         // Reading positions use native offsets, so UIKit must not shift the origin.
@@ -109,6 +116,7 @@ struct StaticHTMLWebView: UIViewRepresentable {
         return view
     }
     func updateUIView(_ view: WKWebView, context: Context) {
+        context.coordinator.confirmExternalLink = confirmExternalLink
         let coordinator = context.coordinator
         coordinator.resumeTrackingIfNeeded()
         if coordinator.text.map({ sameBytes($0, text) }) != true {
@@ -150,6 +158,7 @@ struct StaticHTMLWebView: UIViewRepresentable {
         let onFinish: (Bool) -> Void
         let onFailure: (String) -> Void
         let openExternalLink: (URL) -> Void
+        var confirmExternalLink: ((URL) -> Void)?
         private let captureAnchor: (WKWebView) async throws -> SavedReadingPosition.Anchor?
         init(readingPosition: DocumentReadingPosition, onFinish: @escaping (Bool) -> Void,
              onFailure: @escaping (String) -> Void, openExternalLink: @escaping (URL) -> Void,
@@ -310,7 +319,9 @@ struct StaticHTMLWebView: UIViewRepresentable {
                     cancelRestoration()
                     decisionHandler(.allow); return
                 }
-                if DocumentPolicy.allowsExternalLink(url) { openExternalLink(url) }
+                if DocumentPolicy.allowsExternalLink(url) {
+                    ExternalLinkText.open(url, from: view, open: openExternalLink, confirm: confirmExternalLink)
+                }
             }
             decisionHandler(.cancel)
         }

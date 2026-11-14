@@ -227,6 +227,33 @@ private actor CachedPlaybackService: RemoteFileService {
         playback.stop()
         XCTAssertNil(playback.videoAspectRatio, "Stopping releases the file, and what it said about itself")
     }
+    /// A playback file goes with its player. One found from another process was left by a crash.
+    func testPlaybackFilesLeftByAPreviousProcessAreRemovedAndALivePlayersIsKept() async throws {
+        let fm = FileManager.default
+        let directory = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? fm.removeItem(at: directory) }
+        let leftovers = ["RemotePlayback-" + UUID().uuidString, "RemotePlayback-" + UUID().uuidString + "-" + UUID().uuidString]
+        for name in leftovers + ["unrelated"] {
+            try fm.createDirectory(at: directory.appendingPathComponent(name), withIntermediateDirectories: true)
+            try Data("media".utf8).write(to: directory.appendingPathComponent(name).appendingPathComponent("media.m4a"))
+        }
+        RemotePlaybackController.removeLeftovers(in: directory)
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: directory.path), ["unrelated"])
+
+        // This process's own file, in the real temporary directory, survives the same sweep.
+        let source = try await downloaded("Sample audio.m4a")
+        defer { try? fm.removeItem(at: source) }
+        let controller = RemotePlaybackController()
+        defer { controller.stop() }
+        try await controller.prepare(source, filename: "recording.m4a")
+        func live() throws -> [String] {
+            try fm.contentsOfDirectory(atPath: fm.temporaryDirectory.path).filter { $0.hasPrefix("RemotePlayback-") && !RemotePlaybackController.isLeftover($0) }
+        }
+        XCTAssertEqual(try live().count, 1)
+        RemotePlaybackController.removeLeftovers()
+        XCTAssertEqual(try live().count, 1, "A player's file is not taken from under it")
+        XCTAssertNotNil(controller.player)
+    }
     func testCorruptRefreshPreservesPreviousPlayerAndReportsCodecError() async throws {
         let source = try await downloaded("Sample audio.m4a")
         let corrupt = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

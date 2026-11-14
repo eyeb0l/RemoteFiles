@@ -348,10 +348,11 @@ struct ChangedHostView: View {
         .confirmationDialog("Remove saved trust for \(endpoint.host)?", isPresented: $showReset, titleVisibility: .visible) {
             Button("Reset Saved Trust", role: .destructive) {
                 Task {
-                    do {
-                        try await model.trust.reset(endpoint: endpoint)
+                    // The same reset as from a connection's settings: a changed key is the case in
+                    // which what was kept from the server before must not carry over.
+                    if await model.resetTrust(endpoint: endpoint) {
                         model.sheet = nil; model.sessionRevision += 1
-                    } catch { message = error.localizedDescription }
+                    } else { message = model.errorMessage; model.errorMessage = nil }
                 }
             }
         } message: {

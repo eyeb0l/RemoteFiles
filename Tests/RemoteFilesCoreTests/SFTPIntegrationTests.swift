@@ -180,7 +180,15 @@ final class SFTPIntegrationTests: XCTestCase {
         server.standardOutput = log; server.standardError = log
         try server.run()
         addTeardownBlock {
-            if server.isRunning { server.terminate(); server.waitUntilExit() }
+            // Not `waitUntilExit()`: called here, on the main thread, it sometimes polls forever after sshd
+            // has exited and `isRunning` is already false (docs/CI_HISTORY.md, 14 November 2026).
+            if server.isRunning { server.terminate() }
+            let deadline = ContinuousClock.now + .seconds(60)
+            while server.isRunning, ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(20)) }
+            if server.isRunning {
+                kill(server.processIdentifier, SIGKILL)
+                XCTFail("The limited fixture \(name) did not exit within 60 seconds of SIGTERM")
+            }
             try? log.close()
             if let evidence = ProcessInfo.processInfo.environment["REMOTEFILES_SSHD_LOG"] {
                 let retained = URL(fileURLWithPath: evidence).deletingPathExtension().appendingPathExtension("\(name).log")
@@ -2634,15 +2642,16 @@ private final class ReplyStallingProxy: @unchecked Sendable {
 
 final class BoundedPreviewReaderTests: XCTestCase {
     func testGrowthBeyondInitialStatIsRejectedWhileReceiving() async throws {
-        let chunks = ControlledPreviewChunks(["1234", "56789"])
+        // The two reads start together, in either order, so the file answers each by its offset.
+        let file = PipelinedPreviewFile(Array("123456789".utf8))
         do {
-            _ = try await BoundedPreviewReader.read(initialSize: 4, limit: 8) { _, amount in
-                await chunks.next(maximum: amount)
+            _ = try await BoundedPreviewReader.read(initialSize: 4, limit: 8) { offset, amount in
+                await file.read(offset: offset, length: amount)
             }
             XCTFail("A file that grows beyond its stat size must be rejected")
         } catch RemoteFileError.tooLarge(let limit) { XCTAssertEqual(limit, 8) }
-        let requested = await chunks.requests
-        XCTAssertEqual(requested, [4, 5], "The expected size, then a probe up to one byte past the limit")
+        let requested = await file.requests.sorted { $0.0 < $1.0 }.map { [Int($0.0), Int($0.1)] }
+        XCTAssertEqual(requested, [[0, 4], [4, 5]], "The expected size, and a probe up to one byte past the limit")
     }
 
     func testKnownSizeFinishesWithoutASecondRoundOfReads() async throws {

@@ -3,6 +3,11 @@ import XCTest
 import Textual
 @testable import RemoteFilesUI
 
+private actor HighlightCallCounter {
+    private(set) var count = 0
+    func record() { count += 1 }
+}
+
 /// Completes real tokenization, then holds its first result before the highlighter
 /// can validate or cache it. No scheduler timing or unusually large input is needed.
 private actor HighlightTokenizationGate {
@@ -97,6 +102,25 @@ final class SourceHighlightingTests: XCTestCase {
         XCTAssertNil(unknown)
         XCTAssertNil(unsupported)
         XCTAssertNil(empty)
+    }
+
+    /// The grammars' time grows with the square of a line's length, and the call can't be stopped.
+    func testASourceWithAVeryLongLineIsNotTokenized() async throws {
+        let calls = HighlightCallCounter()
+        let counting = SourceHighlighting(tokenize: { _, _ in await calls.record(); return [] })
+        let long = "# Report\n\n![chart](data:image/png;base64," + String(repeating: "a", count: SourceHighlighting.lineByteLimit) + ")\n\nAfter\n"
+        let skipped = try await counting.highlight(long, language: "markdown", dark: false)
+        XCTAssertNil(skipped)
+        let tokenized = await calls.count
+        XCTAssertEqual(tokenized, 0, "The tokenizer is never given the long line")
+        XCTAssertTrue(SourceHighlighting.hasLongLine(String(repeating: "a", count: SourceHighlighting.lineByteLimit + 1)))
+        XCTAssertFalse(SourceHighlighting.hasLongLine(String(repeating: String(repeating: "a", count: SourceHighlighting.lineByteLimit) + "\r\n", count: 3)))
+
+        // A line at the limit is still coloured.
+        let comment = "let value = 42 // "
+        let atLimit = comment + String(repeating: "a", count: SourceHighlighting.lineByteLimit - comment.utf8.count) + "\n"
+        let highlighted = try await SourceHighlighting().highlight(atLimit, language: "swift", dark: false)
+        XCTAssertNotNil(highlighted)
     }
 
     func testCancelledWorkDoesNotReturnHighlightedSource() async throws {

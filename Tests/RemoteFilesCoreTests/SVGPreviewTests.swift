@@ -60,4 +60,19 @@ final class SVGPreviewTests: XCTestCase {
         ] { XCTAssertThrowsError(try SVGPreviewPolicy.prepare(source)) }
         XCTAssertNoThrow(try SVGPreviewPolicy.prepare("<svg><title>&lt;script&gt; inert</title><![CDATA[<script>also inert</script>]]></svg>"))
     }
+
+    /// The parser would re-read the bytes in a declared encoding, where a declaration the text
+    /// check looks for can be spelled differently.
+    func testOnlyUTF8MayBeDeclared() {
+        for declaration in ["<?xml version=\"1.0\" encoding=\"UTF-7\"?>", "<?xml version='1.0' encoding='utf-16'?>",
+                            "\u{FEFF}<?xml version=\"1.0\" encoding = \"ISO-8859-1\" ?>", "<?xml version=\"1.0\" encoding=UTF-8?>"] {
+            XCTAssertThrowsError(try SVGPreviewPolicy.prepare(declaration + "<svg xmlns=\"http://www.w3.org/2000/svg\"/>"), declaration) {
+                XCTAssertEqual($0 as? SVGPreviewPolicy.Failure, .unsupported)
+            }
+        }
+        XCTAssertThrowsError(try SVGPreviewPolicy.prepare("<?xml version=\"1.0\" encoding=\"UTF-7\"?><svg>+ADwAIQ-DOCTYPE svg+AD4-</svg>"))
+        for declaration in ["<?xml version=\"1.0\"?>", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>", "<?xml version='1.0' encoding='utf-8' standalone='yes'?>\n", ""] {
+            XCTAssertNoThrow(try SVGPreviewPolicy.prepare(declaration + "<svg xmlns=\"http://www.w3.org/2000/svg\"><title>encoding=\"UTF-7\"</title></svg>"), declaration)
+        }
+    }
 }

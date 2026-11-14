@@ -27,6 +27,28 @@ final class DocumentTextIndexTests: XCTestCase {
         XCTAssertEqual(try index.matches("🌍", inSource: false).targets.first?.range.length, 2)
     }
 
+    /// Source is the only way to read a document the renderer refuses, so Find must still work there.
+    func testARefusedDocumentKeepsSourceSearchAndOffersNothingRendered() throws {
+        let text = "# Title\n\n" + String(repeating: ">", count: MarkdownLimits.maximumDepth) + " quoted needle\n\nAnother needle"
+        XCTAssertThrowsError(try DocumentPolicy.remoteMarkdownParts(text))
+        let index = try DocumentTextIndex(text: text, markdown: true)
+        XCTAssertTrue(index.isSourceOnly)
+        XCTAssertTrue(index.parts.isEmpty)
+        XCTAssertNil(index.renderableParts, "A reader must not show the missing parts as an empty document")
+        XCTAssertTrue(index.headings.isEmpty)
+        XCTAssertNil(index.heading(fragment: ""))
+        let inSource = try index.matches("NEEDLE", inSource: true)
+        XCTAssertEqual(inSource.targets.map { (text as NSString).substring(with: $0.range) }, ["needle", "needle"])
+        XCTAssertTrue(inSource.targets.allSatisfy { $0.partID == nil })
+        XCTAssertTrue(try index.matches("needle", inSource: false).targets.isEmpty, "Nothing is rendered to search")
+
+        let rendered = try DocumentTextIndex(text: "# Title\n\n> quoted needle", markdown: true)
+        XCTAssertFalse(rendered.isSourceOnly)
+        XCTAssertEqual(rendered.renderableParts?.count, rendered.parts.count)
+        XCTAssertEqual(try DocumentTextIndex(text: "", markdown: true).renderableParts?.count, 0, "An empty document is rendered as empty")
+        XCTAssertFalse(try DocumentTextIndex(text: text, markdown: false).isSourceOnly, "Plain text was never Markdown")
+    }
+
     func testInlineImagesKeepOneHeadingAndRevealTheFirstAvailableTextPart() throws {
         let text = """
         # Before ![badge](badge.png) **After**

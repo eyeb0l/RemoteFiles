@@ -68,12 +68,13 @@ public enum RemoteResourcePath {
 }
 
 public enum RemoteResourceError: LocalizedError, Sendable {
-    case outsideDocument, notImage, insecureCache
+    case outsideDocument, notImage, imageTooLarge, insecureCache
     case missingFile(String)
     public var errorDescription: String? {
         switch self {
         case .outsideDocument: return "This image link points outside the document’s folder. Open its folder directly to access it."
         case .notImage: return "This file is not a supported image, or its image data is damaged."
+        case .imageTooLarge: return "This image has too many pixels to preview. Save the original to open it in another app."
         case .insecureCache: return "The protected image cache is unavailable."
         case .missingFile(let path): return "File not found at:\n\(path)\n\nIt may have been moved or deleted."
         }
@@ -105,6 +106,24 @@ public struct RemoteResourcePreview: Sendable {
     public let connectionFailure: RemoteFileError?
 }
 
+/// Counts the clearings of each cache folder in this process. Holding the lock while a file is
+/// moved into the cache, or while the folder is emptied, puts every transfer wholly before a
+/// clearing, which then removes its file, or wholly after, where it sees the new count.
+private final class CacheClearings: @unchecked Sendable {
+    private let lock = NSLock()
+    private var counts: [String: Int] = [:]
+    func count(for directory: URL) -> Int { holding(directory) { $0 } }
+    func holding<T>(_ directory: URL, _ body: (Int) throws -> T) rethrows -> T {
+        lock.lock(); defer { lock.unlock() }
+        return try body(counts[directory.standardizedFileURL.path, default: 0])
+    }
+    func clear(_ directory: URL, _ body: () -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        counts[directory.standardizedFileURL.path, default: 0] += 1
+        body()
+    }
+}
+
 /// Disk bytes only: 256 MiB LRU, 24-hour retention, 5-minute freshness, 128 MiB per file.
 /// After the freshness window, a copy whose remote size and modification time still match is
 /// revalidated with one metadata request instead of being transferred again.
@@ -114,7 +133,10 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
     /// All resolver instances in this process share the cache. Prefixing active
     /// partials prevents one window's first-use sweep from deleting another
     /// window's in-flight transfer while still identifying prior-process debris.
-    private static let partialProcessPrefix = UUID().uuidString + "-"
+    static let partialProcessPrefix = UUID().uuidString + "-"
+    /// Shared by every resolver for the same reason: a clearing in one window has to be seen by
+    /// a transfer in another.
+    private static let clearings = CacheClearings()
     private struct Flight {
         let id: UUID
         let task: Task<Void, Never>
@@ -281,11 +303,24 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         }
         return files
     }
+    /// Removes everything kept, and this resolver's own transfers. Each window has its own
+    /// resolver over the same folder, so a transfer another window is part-way through is left
+    /// to finish: its file is told from a previous process's debris by this process's prefix.
+    /// That transfer's readers get its file, but under a name no later reader looks up.
     public func clearCache() {
         cancelAll()
-        try? FileManager.default.removeItem(at: directory)
+        let fm = FileManager.default, directory = directory
+        Self.clearings.clear(directory) {
+            for child in (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+            where !(child.pathExtension == "partial" && child.lastPathComponent.hasPrefix(Self.partialProcessPrefix)) {
+                try? fm.removeItem(at: child)
+            }
+        }
         cleanedAbandonedPartials = false
     }
+    /// Applies the age and size limits now. They are otherwise applied only when something new
+    /// is fetched, so files from a server no longer visited would stay as long as nothing was.
+    public func trimCache() { trim(reserving: 0) }
     private func cancel(key: String, waiter: UUID) {
         guard let continuation = flights[key]?.waiters.removeValue(forKey: waiter) else { return }
         flights[key]?.observers.removeValue(forKey: waiter)
@@ -321,6 +356,7 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
     }
     private func fetch(key: String, flightKey: String, generation: UUID?, id: UUID, path: String, document: RemoteDocumentLocation) async throws -> URL {
         let fm = FileManager.default
+        let clearing = Self.clearings.count(for: directory)
         try prepareCacheDirectory()
         let target = directory.appendingPathComponent(key).appendingPathExtension("resource")
         var targetAttributes = try validateCachedFile(at: target)
@@ -385,14 +421,25 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         guard Self.mayKeep(temp, path: path) else { throw RemoteResourceError.notImage }
         // An invalidated transfer still belongs to its original consumers. Keep its
         // result at a separate URL so it cannot replace the current cached resource.
-        let destination = generations[key] == generation ? target :
-            directory.appendingPathComponent(key + "-" + id.uuidString).appendingPathExtension("resource")
-        try? fm.removeItem(at: destination)
+        let aside = directory.appendingPathComponent(key + "-" + id.uuidString).appendingPathExtension("resource")
+        // The same goes for a transfer begun before the cache was cleared, in any window: the
+        // key has no host key in it, so these bytes may be from a server no longer trusted.
+        // It is decided before anything is removed, or this would take the copy kept since.
+        let isCurrent = generations[key] == generation
+        var destination = Self.clearings.holding(directory) { count in
+            let destination = isCurrent && count == clearing ? target : aside
+            try? fm.removeItem(at: destination)
+            return destination
+        }
         trim(reserving: size)
         if let version = RemoteFileVersion(size: downloaded.size, modifiedAt: downloaded.modifiedAt) {
             Self.storeVersion(version, at: temp)
         }
-        try fm.moveItem(at: temp, to: destination)
+        // And again at the move, for a clearing since the lines above.
+        try Self.clearings.holding(directory) { count in
+            if count != clearing { destination = aside }
+            try fm.moveItem(at: temp, to: destination)
+        }
         do {
             try protectCacheFile(destination)
         } catch {
@@ -463,13 +510,14 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
     /// Returns secure attributes for a reusable regular file. Non-regular cache
     /// entries are discarded without following them and treated as a miss.
     /// A Markdown image can point at any file, such as an `id_rsa` beside the document, and this
-    /// cache is on disk. Anything not named as media must really be an image, like an `.ico`.
+    /// cache is on disk. Anything not named as media must really be an image in a format the
+    /// app displays, like an `.ico`.
     private static func mayKeep(_ file: URL, path: String) -> Bool {
         switch DocumentPolicy.kind(filename: RemotePath.name(of: path)) {
         case .image, .pdf, .video, .audio: return true
         default:
             guard let source = CGImageSourceCreateWithURL(file as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return false }
-            return CGImageSourceGetType(source) != nil
+            return RemoteImageFormat.isAllowed(source)
         }
     }
     private func validateCachedFile(at url: URL) throws -> [FileAttributeKey: Any]? {
