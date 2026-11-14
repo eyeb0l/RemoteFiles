@@ -630,7 +630,7 @@ private actor KeyedDownloadService: RemoteFileService, RemoteFileSessionClosing 
         await model.deleteIdentity(identity)
         XCTAssertEqual(model.metadata.identities, [identity]); XCTAssertNotNil(model.errorMessage)
         let key = NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey
-        let hop = HostEndpoint(host: "jump.invalid", port: 2222), target = HostEndpoint(host: "target.invalid", port: 22)
+        let hop = HostEndpoint(host: "jump.invalid", port: 2222), target = HostEndpoint.destination(of: profile)
         try await model.trust.trustUnknown(endpoint: hop, key: HostKeyDetails(publicKey: key))
         try await model.trust.trustUnknown(endpoint: target, key: HostKeyDetails(publicKey: key))
         await model.resetJumpHostTrust(for: profile)
@@ -679,6 +679,35 @@ private actor KeyedDownloadService: RemoteFileService, RemoteFileSessionClosing 
         let disconnects = await base.disconnects, cancelledKeys = await keys.cancellations
         XCTAssertEqual(disconnects, 1); XCTAssertEqual(cancelledKeys, 1)
     }
+    /// A build from before servers behind jump hosts had their own trusted keys saved such a
+    /// server's key under its bare address. At launch the connection that reaches it through a jump
+    /// host takes that record over, so opening it does not ask to verify the key again.
+    func testLoadingGivesAnEarlierTrustRecordToTheConnectionBehindAJumpHost() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let key = NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey
+        let details = try HostKeyDetails(publicKey: key)
+        struct EarlierEndpoint: Encodable { let host: String; let port: Int }
+        struct EarlierRecord: Encodable { let endpoint: EarlierEndpoint; let key: HostKeyDetails }
+        struct EarlierDocument: Encodable { let version = 1; let records: [EarlierRecord] }
+        let earlier = EarlierDocument(records: [.init(endpoint: .init(host: "10.0.0.5", port: 22), key: details),
+                                                .init(endpoint: .init(host: "hop.example", port: 22), key: details)])
+        try JSONEncoder().encode(earlier).write(to: directory.appendingPathComponent("known-hosts-v1.json"))
+
+        let model = try AppModel(directory: directory, fileService: BackgroundExportService())
+        let profile = ConnectionProfile(name: "Behind the hop", host: "10.0.0.5", username: "reader", identityID: UUID(),
+                                        jumpHost: JumpHost(host: "hop.example", username: "jump", identityID: UUID()))
+        model.metadata.connections = [profile]
+        await model.persist()
+        await model.load()
+
+        try await model.trust.validate(endpoint: .destination(of: profile), publicKey: key)
+        try await model.trust.validate(endpoint: HostEndpoint(host: "hop.example", port: 22), publicKey: key)
+        do { try await model.trust.validate(endpoint: HostEndpoint(host: "10.0.0.5", port: 22), publicKey: key); XCTFail("Nothing reaches that address directly") }
+        catch HostTrustError.unknown { }
+    }
+
     /// A trusted key can only be reset from a connection that uses it, so the last such
     /// connection takes it with it. One still in use by another connection stays.
     func testDeletingAConnectionForgetsAHostKeyNothingElseUses() async throws {
@@ -689,22 +718,28 @@ private actor KeyedDownloadService: RemoteFileService, RemoteFileSessionClosing 
         let shared = HostEndpoint(host: "shared.example", port: 22), lone = HostEndpoint(host: "lone.example", port: 2222)
         let hop = HostEndpoint(host: "hop.example", port: 22)
         let first = ConnectionProfile(name: "First", host: "Shared.Example", username: "reader", identityID: UUID())
+        let alsoDirect = ConnectionProfile(name: "Also direct", host: "shared.example", username: "other", identityID: UUID())
         let second = ConnectionProfile(name: "Second", host: "shared.example", username: "other", identityID: UUID(),
                                        jumpHost: JumpHost(host: "hop.example", username: "jump", identityID: UUID()))
         let third = ConnectionProfile(name: "Third", host: "lone.example", port: 2222, username: "reader", identityID: UUID())
-        model.metadata.connections = [first, second, third]
+        // The same address behind the jump host is a server of its own, with its own key.
+        let behindHop = HostEndpoint.destination(of: second)
+        model.metadata.connections = [first, alsoDirect, second, third]
         await model.persist()
-        for endpoint in [shared, lone, hop] { try await model.trust.trustUnknown(endpoint: endpoint, key: HostKeyDetails(publicKey: key)) }
+        for endpoint in [shared, behindHop, lone, hop] { try await model.trust.trustUnknown(endpoint: endpoint, key: HostKeyDetails(publicKey: key)) }
         func isTrusted(_ endpoint: HostEndpoint) async -> Bool { (try? await model.trust.validate(endpoint: endpoint, publicKey: key)) != nil }
 
         await model.removeConnection(third)
-        var trusted = [await isTrusted(lone), await isTrusted(shared), await isTrusted(hop)]
-        XCTAssertEqual(trusted, [false, true, true], "Only the key nothing else uses goes")
+        var trusted = [await isTrusted(lone), await isTrusted(shared), await isTrusted(behindHop), await isTrusted(hop)]
+        XCTAssertEqual(trusted, [false, true, true, true], "Only the key nothing else uses goes")
         await model.removeConnection(first)
-        trusted = [await isTrusted(shared), await isTrusted(hop)]
-        XCTAssertEqual(trusted, [true, true], "Another connection still reaches that server")
+        trusted = [await isTrusted(shared), await isTrusted(behindHop), await isTrusted(hop)]
+        XCTAssertEqual(trusted, [true, true, true], "Another connection still reaches that server directly")
+        await model.removeConnection(alsoDirect)
+        trusted = [await isTrusted(shared), await isTrusted(behindHop), await isTrusted(hop)]
+        XCTAssertEqual(trusted, [false, true, true], "A connection through a jump host does not keep the directly reached server's key")
         await model.removeConnection(second)
-        trusted = [await isTrusted(shared), await isTrusted(hop)]
+        trusted = [await isTrusted(behindHop), await isTrusted(hop)]
         XCTAssertEqual(trusted, [false, false], "The last connection takes its server's and its jump host's keys")
         XCTAssertNil(model.errorMessage)
     }

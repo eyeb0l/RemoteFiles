@@ -61,8 +61,8 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                        limits: RemoteFolderSearch.Limits, content: RemoteFolderSearch.ContentLimits?,
                        partial: @escaping @Sendable (RemoteFolderSearch.Update) -> Void) async throws -> RemoteFolderSearch.Update? {
         do {
-            _ = try ServerFolderSearch.command(query: query, root: root, includeHidden: includeHidden,
-                                                     limits: limits, content: content)
+            _ = try ServerFolderSearch.helper(query: query, root: root, includeHidden: includeHidden,
+                                              limits: limits, content: content)
         } catch ServerFolderSearch.Failure.unsupported { return nil }
         let session = try await session(for: profile)
         guard !session.serverSearchUnavailable else { return nil }
@@ -79,11 +79,11 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                     let identity = try await Self.searchIdentity(root: root, sftp: sftp)
                     // The root stays held until the helper has finished with it.
                     defer { _ = identity.directory.sendClose() }
-                    let command = try ServerFolderSearch.command(query: query, root: root, includeHidden: includeHidden,
+                    let helper = try ServerFolderSearch.helper(query: query, root: root, includeHidden: includeHidden,
                         limits: limits, content: content, identity: identity.value)
                     let decoder = ServerFolderSearch.OutputDecoder(query: query, root: root, includeHidden: includeHidden, limits: limits, content: content)
                     return try await self.retryingRefusal(session, expected: expectsRoom) {
-                        try await Self.streamSearchCommand(client: session.client, command: command, timeout: timeout, decoder: decoder,
+                        try await Self.streamSearchCommand(client: session.client, helper: helper, timeout: timeout, decoder: decoder,
                                                            partial: partial, onChannel: { helperChannels.add($0.closeFuture) })
                     }
                 }
@@ -249,7 +249,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     /// Hands the helper's results on as they arrive. Decoding and matching happen here, off the actor and
     /// the event loop, so neither browsing nor the channel waits for them. At the match limit it stops listening,
     /// which ends the helper the next time it writes.
-    nonisolated private static func streamSearchCommand(client: SSHClient, command: String, timeout: UInt64,
+    nonisolated private static func streamSearchCommand(client: SSHClient, helper: ServerFolderSearch.Helper, timeout: UInt64,
                                                         decoder: ServerFolderSearch.OutputDecoder,
                                                         partial: @escaping @Sendable (RemoteFolderSearch.Update) -> Void,
                                                         onChannel: @escaping @Sendable (Channel) -> Void = { _ in }) async throws -> (RemoteFolderSearch.Update, Int) {
@@ -257,7 +257,8 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         let (chunks, sink) = AsyncStream.makeStream(of: ByteBuffer.self)
         let execution = Task {
             defer { sink.finish() }
-            _ = try await executeSearchCommand(client: client, command: command, timeout: timeout, onOutput: { sink.yield($0) }, onChannel: onChannel)
+            _ = try await executeSearchCommand(client: client, command: helper.command, input: helper.input, timeout: timeout,
+                                               onOutput: { sink.yield($0) }, onChannel: onChannel)
         }
         return try await withTaskCancellationHandler {
             var decoder = decoder, bytes = 0
@@ -283,7 +284,8 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     /// A peer can defer acknowledging channel close until its process exits. Return cancellation
     /// and deadlines immediately while the owned child drains; late-created channels close too.
     /// With `onOutput`, standard output goes there as it arrives instead of into the result.
-    nonisolated static func executeSearchCommand(client: SSHClient, command: String, timeout: UInt64,
+    /// `input` is what the command reads from its standard input.
+    nonisolated static func executeSearchCommand(client: SSHClient, command: String, input: Data? = nil, timeout: UInt64,
                                                  maxResponseSize: Int = ServerFolderSearch.outputLimit,
                                                  onOutput: (@Sendable (ByteBuffer) -> Void)? = nil,
                                                  onChannelCreated: @escaping @Sendable () -> Void = {},
@@ -293,7 +295,8 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
             defer { control.close() }
             return try await detachedDeadline(seconds: timeout, onTimeout: { control.close() }) {
                 try Task.checkCancellation()
-                return try await client.executeBoundedCommand(command, maxResponseSize: maxResponseSize, onOutput: onOutput, onChannelCreated: {
+                return try await client.executeBoundedCommand(command, standardInput: input.map { ByteBuffer(bytes: $0) },
+                                                              maxResponseSize: maxResponseSize, onOutput: onOutput, onChannelCreated: {
                     onChannel($0); control.install($0); onChannelCreated()
                 })
             }
@@ -893,11 +896,12 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
             if let hop = profile.jumpHost { jumpKey = try await key(hop.identityID) } else { jumpKey = nil }
             let privateKey = try await key(profile.identityID)
             return try await Self.deadline(seconds: timeout, close: { control.close() }) {
-                func settings(host: String, port: Int, username: String, key: IdentityPrivateKey, verified: VerifiedHostKey?) -> SSHClientSettings {
+                func settings(host: String, port: Int, username: String, key: IdentityPrivateKey, trusted: HostEndpoint,
+                              verified: VerifiedHostKey?) -> SSHClientSettings {
                     var value = SSHClientSettings(
                         host: host, port: port,
                         authenticationMethod: { key.authentication(username: username) },
-                        hostKeyValidator: .custom(TrustValidator(store: trustStore, endpoint: HostEndpoint(host: host, port: port), verified: verified))
+                        hostKeyValidator: .custom(TrustValidator(store: trustStore, endpoint: trusted, verified: verified))
                     )
                     value.connectTimeout = .seconds(Int64(timeout))
                     // NIOSSH also uses this as its receive window, which has to hold a full transfer window.
@@ -907,13 +911,14 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                 }
                 do {
                     try Task.checkCancellation()
+                    // Trusted as the server behind this jump host, not as that address reached directly.
                     let destination = settings(host: profile.host, port: profile.port, username: profile.username, key: privateKey,
-                                               verified: destinationKey)
+                                               trusted: .destination(of: profile), verified: destinationKey)
                     let client: SSHClient
                     var bastion: SSHClient?
                     if let hop = profile.jumpHost, let jumpKey {
                         let jump = try await SSHClient.connect(to: settings(host: hop.host, port: hop.port, username: hop.username, key: jumpKey,
-                                                                            verified: jumpHostKey))
+                                                                            trusted: HostEndpoint(host: hop.host, port: hop.port), verified: jumpHostKey))
                         bastion = jump
                         try Task.checkCancellation()
                         client = try await jump.jump(to: destination)

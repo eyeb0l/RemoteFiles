@@ -463,10 +463,10 @@ final class SFTPIntegrationTests: XCTestCase {
         // Exercise the remote helper with a genuinely held directory as well. The production
         // adapter obtains its descriptor from SFTP procfs; this portable fixture inherits one.
         let root = fixture.files + "/docs"
-        let helper = try ServerFolderSearch.command(query: "Linked source", root: root, includeHidden: false,
-                                                    limits: .init(), content: .init(), rootHandle: "/dev/fd/9")
+        let helper = try ServerFolderSearch.helper(query: "Linked source", root: root, includeHidden: false,
+                                                   limits: .init(), content: .init(), rootHandle: "/dev/fd/9")
         let output = try await SFTPRemoteFileService.executeSearchCommand(client: client,
-            command: "exec 9<" + ServerFolderSearch.quote(root) + "; " + helper, timeout: allowance)
+            command: "exec 9<" + ServerFolderSearch.quote(root) + "; " + helper.command, input: helper.input, timeout: allowance)
         let found = try ServerFolderSearch.decode(Data(output.readableBytesView), query: "Linked source", root: root,
                                                   includeHidden: false, limits: .init(), content: .init())
         XCTAssertEqual(found.contentMatches.map(\.entry.name), ["source.md"])
@@ -535,10 +535,14 @@ final class SFTPIntegrationTests: XCTestCase {
         let jumpPublic = try String(contentsOfFile: fixture.directory + "/jump-host.pub", encoding: .utf8)
         try await stores.trust.trustUnknown(endpoint: jumpEndpoint, key: HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: jumpPublic)))
         do { _ = try await service.listDirectory(profile: profile, path: fixture.files); XCTFail("Require destination trust") }
-        catch HostTrustError.unknown(let endpoint, _) { XCTAssertEqual(endpoint, fixture.endpoint) }
+        catch HostTrustError.unknown(let endpoint, _) { XCTAssertEqual(endpoint, .destination(of: profile)) }
+        // The same address reached directly is another server as far as trust goes.
+        try await stores.trustFixtureHost()
+        do { _ = try await service.listDirectory(profile: profile, path: fixture.files); XCTFail("Trust for the address reached directly is not trust for this route") }
+        catch HostTrustError.unknown(let endpoint, _) { XCTAssertEqual(endpoint.via, jumpEndpoint) }
         let destinationLog = try String(contentsOfFile: fixture.directory + "/sshd.log", encoding: .utf8)
         XCTAssertFalse(String(destinationLog.dropFirst(targetBefore.count)).contains("Accepted publickey"), "Destination trust precedes its authentication")
-        try await stores.trustFixtureHost()
+        try await stores.trustFixtureHost(through: jumpEndpoint)
         let bytes = try await service.readFile(profile: profile, path: fixture.files + "/report.md", limit: 4096)
         XCTAssertTrue(String(decoding: bytes, as: UTF8.self).contains("Fixture report"))
         _ = try await service.listDirectory(profile: profile, path: fixture.files + "/empty")
@@ -557,11 +561,11 @@ final class SFTPIntegrationTests: XCTestCase {
         let jumpPublic = try String(contentsOfFile: fixture.directory + "/jump-host.pub", encoding: .utf8)
         try await stores.trust.trustUnknown(endpoint: HostEndpoint(host: hop.host, port: hop.port), key: HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: jumpPublic)))
         let wrongKey = try HostKeyDetails(publicKey: NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey)
-        try await stores.trust.trustUnknown(endpoint: fixture.endpoint, key: wrongKey)
+        try await stores.trust.trustUnknown(endpoint: .destination(of: profile), key: wrongKey)
         let service = stores.service(); addTeardownBlock { await service.disconnect() }
         let before = try String(contentsOfFile: fixture.directory + "/sshd.log", encoding: .utf8)
         do { _ = try await service.listDirectory(profile: profile, path: fixture.files); XCTFail("Changed destination must block") }
-        catch HostTrustError.changed(let endpoint, _, _) { XCTAssertEqual(endpoint, fixture.endpoint) }
+        catch HostTrustError.changed(let endpoint, _, _) { XCTAssertEqual(endpoint, .destination(of: profile)) }
         let after = try String(contentsOfFile: fixture.directory + "/sshd.log", encoding: .utf8)
         let added = String(after.dropFirst(before.count))
         XCTAssertFalse(added.contains("Accepted publickey")); XCTAssertFalse(added.contains("Failed publickey"))
@@ -572,7 +576,7 @@ final class SFTPIntegrationTests: XCTestCase {
         let hop = try XCTUnwrap(base.jumpHost)
         let jumpPublic = try String(contentsOfFile: fixture.directory + "/jump-host.pub", encoding: .utf8)
         try await stores.trust.trustUnknown(endpoint: HostEndpoint(host: hop.host, port: hop.port), key: HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: jumpPublic)))
-        try await stores.trustFixtureHost()
+        try await stores.trustFixtureHost(through: HostEndpoint(host: hop.host, port: hop.port))
         let service = stores.service(); addTeardownBlock { await service.disconnect() }
         var denied = base; denied.host = "127.0.0.2" // The bastion permits only 127.0.0.1.
         do { _ = try await service.listDirectory(profile: denied, path: fixture.files); XCTFail("Forwarding must be refused") }
@@ -2480,11 +2484,12 @@ private struct Stores {
         try await metadata.save(value)
         return profile
     }
-    /// Trusts the fixture's host key, at its own port or at a relay in front of it.
-    func trustFixtureHost(port: Int? = nil) async throws {
+    /// Trusts the fixture's host key, at its own port or at a relay in front of it, reached
+    /// directly or through the given jump host.
+    func trustFixtureHost(port: Int? = nil, through jumpHost: HostEndpoint? = nil) async throws {
         let publicKey = try String(contentsOfFile: fixture.directory + "/host.pub", encoding: .utf8)
         let details = try HostKeyDetails(publicKey: NIOSSHPublicKey(openSSHPublicKey: publicKey))
-        try await trust.trustUnknown(endpoint: HostEndpoint(host: "127.0.0.1", port: port ?? fixture.port), key: details)
+        try await trust.trustUnknown(endpoint: HostEndpoint(host: "127.0.0.1", port: port ?? fixture.port, via: jumpHost), key: details)
     }
     /// Functional checks use the benchmark's 60-second budget rather than the 15-second interactive
     /// deadline. The fixture is macOS sshd, which resolves the owner and group of every listed entry

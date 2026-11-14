@@ -165,9 +165,9 @@ final class LinuxServerSearchAcceptanceTests: XCTestCase {
         ]
         for (path, inode, mountID, namespace) in cases {
             let mismatched = try ServerFolderSearch.RootIdentity(fdinfo: "ino: \(inode)\nmnt_id: \(mountID)", namespace: namespace)
-            let command = try ServerFolderSearch.command(query: "needle", root: path, includeHidden: true,
+            let helper = try ServerFolderSearch.helper(query: "needle", root: path, includeHidden: true,
                 limits: .init(), content: .init(), identity: mismatched)
-            let response = try await SFTPRemoteFileService.executeSearchCommand(client: client, command: command, timeout: 5)
+            let response = try await SFTPRemoteFileService.executeSearchCommand(client: client, command: helper.command, input: helper.input, timeout: 5)
             let value = try JSONDecoder().decode(ServerFolderSearch.Response.self, from: Data(response.readableBytesView))
             XCTAssertEqual(value.error, "unsupported")
             XCTAssertEqual(value.folders, 0)

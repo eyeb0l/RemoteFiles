@@ -49,14 +49,18 @@ final class ExternalLinkPolicyTests: XCTestCase {
     }
 
     func testMarkdownLinksAreJudgedByTheTextTheyAreShownWith() throws {
-        let parts = try DocumentPolicy.remoteMarkdownParts("""
+        let text = """
         [https://bank.example](https://evil.example/) and [**bank**.example/login](https://evil.example/two)
 
         [Docs](https://example.com/docs) [example.com](https://example.com/) [Old site](http://example.com/old)
 
         [Guide](Guide.md) ![image](picture.png) [bank.example](other.md)
-        """)
-        XCTAssertEqual(ExternalLinkPolicy.linksNeedingConfirmation(in: parts).map(\.absoluteString).sorted(),
-                       ["http://example.com/old", "https://evil.example/", "https://evil.example/two"])
+        """
+        let parts = try DocumentPolicy.remoteMarkdownParts(text)
+        let expected = ["http://example.com/old", "https://evil.example/", "https://evil.example/two"]
+        XCTAssertEqual(ExternalLinkPolicy.linksNeedingConfirmation(in: parts).map(\.absoluteString).sorted(), expected)
+        // The reader takes them from its index, prepared away from the UI actor.
+        XCTAssertEqual(try DocumentTextIndex(text: text, markdown: true).linksNeedingConfirmation.map(\.absoluteString).sorted(), expected)
+        XCTAssertTrue(try DocumentTextIndex(text: text, markdown: false).linksNeedingConfirmation.isEmpty)
     }
 }

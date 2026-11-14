@@ -48,8 +48,16 @@ enum ServerFolderSearch {
         let excludedExtensions: [String]
     }
 
-    static func command(query: String, root: String, includeHidden: Bool, limits: RemoteFolderSearch.Limits,
-                        content: RemoteFolderSearch.ContentLimits?, rootHandle: String? = nil, identity: RootIdentity? = nil) throws -> String {
+    /// What runs on the server, and what it is given to read. The request, which holds the query and
+    /// the folder, goes on standard input and not as an argument: on a server shared with other
+    /// accounts, a process's arguments can be read by all of them for as long as it runs.
+    struct Helper {
+        let command: String
+        let input: Data
+    }
+
+    static func helper(query: String, root: String, includeHidden: Bool, limits: RemoteFolderSearch.Limits,
+                       content: RemoteFolderSearch.ContentLimits?, rootHandle: String? = nil, identity: RootIdentity? = nil) throws -> Helper {
         guard RemotePath.isAbsolute(root), !root.utf8.contains(0), root.utf8.elementsEqual("/".utf8) || !RemotePath.endsWithSeparator(root),
               !RemotePath.components(of: root).contains(where: RemotePath.isDotName) else { throw Failure.unsupported }
         // Cap custom limits too: a server cannot cause unbounded allocations or a long-running job.
@@ -67,8 +75,9 @@ enum ServerFolderSearch {
         let payload = try JSONEncoder().encode(request).base64EncodedString()
         guard let url = Bundle.module.url(forResource: "ServerSearch", withExtension: "txt") else { throw Failure.unsupported }
         let script = try String(contentsOf: url, encoding: .utf8)
-        // Both arguments are shell-quoted. The query and path are encoded data, never shell syntax.
-        return "python3 -I -S -B -c " + quote(script) + " " + quote(payload)
+        // The script is shell-quoted and holds nothing of the user's. The request is one line of
+        // base64, which the script reads without waiting for the end of its input.
+        return Helper(command: "python3 -I -S -B -c " + quote(script), input: Data((payload + "\n").utf8))
     }
 
     static func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'" }

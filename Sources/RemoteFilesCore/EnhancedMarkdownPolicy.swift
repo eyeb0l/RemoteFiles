@@ -15,13 +15,50 @@ public enum EnhancedMarkdownPolicy {
 
     /// Uses the same CommonMark parser as the native reader to distinguish real notation
     /// from examples in fenced, indented and inline code, including nested list/quote blocks.
-    /// Call off the main actor along with Markdown preparation.
+    /// Call off the main actor along with Markdown preparation. The reader has this from
+    /// `DocumentTextIndex.requiresEnhancedRendering`, which shares one parse with the rest of preparation.
     public static func requiresEnhancedRendering(_ source: String) -> Bool {
-        guard source.utf8.count <= maximumSourceBytes,
-              source.contains("$") || source.contains("<") || source.contains("\\") || source.localizedCaseInsensitiveContains("mermaid"),
+        guard mayRequireEnhancedRendering(source),
               (try? MarkdownLimits.checkSource(source)) != nil,
               let document = try? AttributedString(markdown: source,
                   options: .init(appliesSourcePositionAttributes: true)) else { return false }
+        return requiresEnhancedRendering(parsed: document, source: source)
+    }
+
+    /// Whether the text holds anything the rich renderer is for. Most documents don't, and need no parse
+    /// with source positions.
+    static func mayRequireEnhancedRendering(_ source: String) -> Bool {
+        guard source.utf8.count <= maximumSourceBytes else { return false }
+        // Math needs `$` or `\`, HTML needs `<`, and a diagram's fence spells `mermaid` in ASCII letters
+        // unless a character reference, which needs `&`, spells it. Without any of these the check is
+        // false whatever follows, and a pass over the bytes costs far less than the localized search below.
+        let mayMatch = source.utf8.withContiguousStorageIfAvailable(mayHoldRichSyntax) ?? mayHoldRichSyntax(Array(source.utf8))
+        guard mayMatch else { return false }
+        return source.contains("$") || source.contains("<") || source.contains("\\") || source.localizedCaseInsensitiveContains("mermaid")
+    }
+
+    private static let diagramWord = Array("mermaid".utf8)
+
+    private static func mayHoldRichSyntax<Bytes: RandomAccessCollection<UInt8>>(_ bytes: Bytes) -> Bool where Bytes.Index == Int {
+        var index = bytes.startIndex
+        while index < bytes.endIndex {
+            switch bytes[index] {
+            case 0x24, 0x3C, 0x5C, 0x26: return true // $ < \ &
+            case 0x4D, 0x6D: // M or m
+                // The length is checked here and not in a `where`, which would guard only the second
+                // pattern and let a capital M near the end read past it.
+                // ASCII letters differ from their capitals only in this bit.
+                if bytes.endIndex - index >= diagramWord.count,
+                   diagramWord.indices.allSatisfy({ bytes[index + $0] | 0x20 == diagramWord[$0] }) { return true }
+            default: break
+            }
+            index += 1
+        }
+        return false
+    }
+
+    /// `document` must be `source` parsed with source positions.
+    static func requiresEnhancedRendering(parsed document: AttributedString, source: String) -> Bool {
         var prose = Array(source.utf16)
         for run in document.runs {
             var isCode = run.inlinePresentationIntent?.contains(.code) == true

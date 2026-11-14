@@ -121,10 +121,31 @@ public enum DocumentPolicy {
     /// Invoke away from the main actor for substantial reports.
     ///
     /// Throws `MarkdownLimitError` for a document whose structure costs far more than its size
-    /// suggests; the reader then offers its source instead.
+    /// suggests; the reader then offers its source instead. Throws `CancellationError` when the
+    /// task is cancelled: preparation stops between its phases, though not inside Foundation's parse.
     public static func prepareMarkdown(_ source: String, preserveImages: Bool = false, preserveDocumentLinks: Bool = false) throws -> AttributedString {
+        try prepareMarkdown(source, preserveImages: preserveImages, preserveDocumentLinks: preserveDocumentLinks,
+                            checkingEnhancedRendering: false).document
+    }
+
+    /// The prepared document and, from the same parse, whether it needs the rich renderer, so the
+    /// reader parses a document once however much it derives from it.
+    static func prepareMarkdown(_ source: String, preserveImages: Bool, preserveDocumentLinks: Bool,
+                                checkingEnhancedRendering: Bool) throws -> (document: AttributedString, requiresEnhancedRendering: Bool) {
+        try Task.checkCancellation()
         try MarkdownLimits.checkSource(source)
-        var document = try AttributedString(markdown: source)
+        // Source positions are only for the renderer check, and only a document it might select needs them.
+        let positions = checkingEnhancedRendering && EnhancedMarkdownPolicy.mayRequireEnhancedRendering(source)
+        var document = try AttributedString(markdown: source, options: .init(appliesSourcePositionAttributes: positions))
+        // The parse can take seconds. A reader that has gone since needs nothing more.
+        try Task.checkCancellation()
+        var requiresEnhancedRendering = false
+        if positions {
+            requiresEnhancedRendering = EnhancedMarkdownPolicy.requiresEnhancedRendering(parsed: document, source: source)
+            // Without them the document is the one an ordinary parse gives: the runs they split join again.
+            document.markdownSourcePosition = nil
+        }
+        try Task.checkCancellation()
         let runs = Array(document.runs)
         try MarkdownLimits.checkStructure(runs)
         // Each kept image becomes a view of its own and divides the text around it.
@@ -132,6 +153,7 @@ public enum DocumentPolicy {
         // Replace image runs before handing content to Textual, so its default image loader never
         // receives a URL. Keep readable alt text, including for relative/data/file image URLs.
         for run in runs.reversed() {
+            try Task.checkCancellation()
             let isExtraImage = run.imageURL != nil && extraImages > 0
             if isExtraImage { extraImages -= 1 }
             if run.imageURL != nil && (!preserveImages || isExtraImage) {
@@ -156,6 +178,7 @@ public enum DocumentPolicy {
         var seenItems = Set<Int>()
         var markers: [(Range<AttributedString.Index>, String, AttributeContainer)] = []
         for run in document.runs {
+            try Task.checkCancellation()
             guard let intent = run.presentationIntent,
                   let item = intent.components.first(where: { if case .listItem = $0.kind { return true }; return false }),
                   seenItems.insert(item.identity).inserted,
@@ -167,11 +190,12 @@ public enum DocumentPolicy {
             markers.append((run.range.lowerBound..<end, prefix == "[ ] " ? "☐" : "☑", run.attributes))
         }
         for (range, marker, attributes) in markers.reversed() {
+            try Task.checkCancellation()
             var replacement = AttributedString(marker)
             replacement.setAttributes(attributes)
             document.replaceSubrange(range, with: replacement)
         }
-        return document
+        return (document, requiresEnhancedRendering)
     }
 }
 

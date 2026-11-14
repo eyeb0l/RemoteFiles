@@ -41,6 +41,29 @@ final class EnhancedMarkdownPolicyTests: XCTestCase {
         }
     }
 
+    /// The quick pass over the bytes only answers no where the search it guards would have led to no.
+    func testTheQuickPreCheckAgreesWithTheSearchItGuards() throws {
+        func searched(_ source: String) -> Bool {
+            source.contains("$") || source.contains("<") || source.contains("\\") || source.localizedCaseInsensitiveContains("mermaid")
+        }
+        let sources = ["", "# Plain\n\nNothing rich here at all.", "```MERMAID\ngraph TD\n A-->B\n```", "~~~MerMaid\nx\n~~~",
+                       "```&#109;ermaid\ngraph TD\n A-->B\n```", "Fish &amp; chips", "Cost: $5", "2 < 3", #"a \ b"#,
+                       "Mermaid diagrams are described in prose.", "é ü 東京 🌍 without any of them", "ends in merMAI", "MERMAID", "mermai",
+                       // A capital at the very end, with fewer bytes after it than the word has.
+                       "M", "Sent at 10 PM", "ends in MERMAI", "ends in Mer",
+                       String(repeating: "> quoted text\n", count: 1_000)]
+        for source in sources {
+            XCTAssertEqual(EnhancedMarkdownPolicy.mayRequireEnhancedRendering(source), searched(source), source)
+            // Where the bytes alone answer no, the full check would have said no too.
+            let quickNo = !source.utf8.contains { [0x24, 0x3C, 0x5C, 0x26].contains($0) } && source.range(of: "mermaid", options: [.caseInsensitive, .literal]) == nil
+            if quickNo {
+                let parsed = try AttributedString(markdown: source, options: .init(appliesSourcePositionAttributes: true))
+                XCTAssertFalse(EnhancedMarkdownPolicy.requiresEnhancedRendering(parsed: parsed, source: source), source)
+            }
+        }
+        XCTAssertTrue(EnhancedMarkdownPolicy.requiresEnhancedRendering("```MERMAID\ngraph TD\n A-->B\n```"))
+    }
+
     func testAllOfflineLibrariesAreBundled() throws {
         let scripts = try EnhancedMarkdownPolicy.rendererScripts()
         XCTAssertEqual(scripts.count, 5)
