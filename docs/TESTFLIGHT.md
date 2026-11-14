@@ -15,8 +15,10 @@ python3 -B scripts/testflight_release.py --push  # Pushes the tag, which starts 
 
 The command defaults to the tip of `main`; use `--commit SHA` for an earlier commit on `main`.
 It stops unless the commit is on `main` and both **Repository checks** and **CI gate** passed
-on it. A docs-only commit passes those with its Mac lanes skipped, so check that the last code
-commit's run passed too. It needs your `gh` login to read those results and the
+on it. A commit that changes only documentation passes those with every lane that builds the app
+skipped, so the command also looks back along `main` for the newest commit on which both
+**Quick** lanes passed, and stops if anything CI would have built has changed since. That
+covers a code commit whose run failed or was cancelled by the push after it. It needs your `gh` login to read those results and the
 [deploy key](#deploy-key) to push the tag; `ssh` asks for the key's passphrase each time.
 
 Xcode Cloud then runs `ci_scripts/ci_post_clone.sh`, which fails the build if the commit is

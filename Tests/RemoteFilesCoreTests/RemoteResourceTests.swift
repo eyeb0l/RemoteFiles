@@ -73,6 +73,66 @@ final class RemoteResourceTests: XCTestCase {
         .init(profile: .init(name: "Test", host: "mac", username: "reader", identityID: UUID()),
               path: "/Users/iris/wardrobe/data/ui-audit-2026-09-21/audit.md")
     }
+    /// The age limit was applied only when something new was fetched, so files from a server no
+    /// longer visited stayed for as long as nothing was. It is also applied at launch.
+    func testTrimmingRemovesPreviewedFilesPastTheirAgeWithoutAFetch() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let old = dir.appendingPathComponent("old.resource"), fresh = dir.appendingPathComponent("fresh.resource")
+        try Data("previewed two days ago".utf8).write(to: old)
+        try Data("previewed just now".utf8).write(to: fresh)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-2 * 86_400)], ofItemAtPath: old.path)
+        let resolver = RemoteResourceResolver(service: FixedBytesTransportMock(bytes: Data()), directory: dir)
+        await resolver.trimCache()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: old.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fresh.path))
+        await RemoteResourceResolver(service: FixedBytesTransportMock(bytes: Data()), directory: dir.appendingPathComponent("missing")).trimCache()
+    }
+
+    /// Each window has its own resolver over one folder. Clearing what is kept must not take the
+    /// file another window is still receiving.
+    func testClearingKeepsATransferAnotherWindowIsPartWayThrough() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let live = RemoteResourceResolver.partialProcessPrefix + UUID().uuidString + ".partial"
+        for name in ["kept.resource", "debris-of-an-earlier-process.partial", live] {
+            try Data("bytes".utf8).write(to: dir.appendingPathComponent(name))
+        }
+        await RemoteResourceResolver(service: FixedBytesTransportMock(bytes: Data()), directory: dir).clearCache()
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), [live])
+    }
+
+    /// The transfer left to finish must not put back what the clearing removed: the cache's key has
+    /// no host key in it, so the bytes of a server whose trust was reset would be served, for the
+    /// freshness window, as the copy of whatever is trusted at that address next.
+    func testATransferBegunBeforeAClearingIsNotKeptForLaterReaders() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let document = location // One identity, so one cache key, for both readers.
+        let slow = SuspendedDestinationTransportMock()
+        let otherWindow = RemoteResourceResolver(service: slow, directory: dir)
+        let reading = Task { try await otherWindow.localFile(for: "first.png", in: document) }
+        await slow.waitUntilStarted()
+
+        await RemoteResourceResolver(service: FixedBytesTransportMock(bytes: Data()), directory: dir).clearCache()
+        let current = Data("from the server trusted now".utf8)
+        let later = RemoteResourceResolver(service: FixedBytesTransportMock(bytes: current), directory: dir)
+        let fetched = try await later.localFile(for: "first.png", in: document)
+        XCTAssertEqual(try Data(contentsOf: fetched), current)
+
+        await slow.release()
+        let finished = try await reading.value
+        XCTAssertEqual(try Data(contentsOf: finished), Data("first image".utf8), "Its own reader still gets the file")
+        XCTAssertNotEqual(fetched, finished)
+        XCTAssertEqual(try Data(contentsOf: fetched), current, "Finishing must not remove or replace the copy kept since the clearing")
+        let again = try await RemoteResourceResolver(service: FixedBytesTransportMock(bytes: Data("not fetched".utf8)), directory: dir)
+            .localFile(for: "first.png", in: document)
+        XCTAssertEqual(again, fetched)
+        XCTAssertEqual(try Data(contentsOf: again), current)
+    }
+
     func testDecoderDownsamplesLargeDimensionsAndRejectsCorruptData() async throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
         defer { try? FileManager.default.removeItem(at: file) }

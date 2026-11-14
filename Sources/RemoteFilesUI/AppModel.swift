@@ -210,6 +210,19 @@ final class AppModel {
         observeLibrary()
         await loadOfflineLibrary()
         loadDownloads()
+        await removeLeftovers()
+    }
+    /// Once a process, before anything is played or exported: what a previous process left behind,
+    /// and previewed files past their age or size limit.
+    private static var removedLeftovers = false
+    private func removeLeftovers() async {
+        guard !Self.removedLeftovers else { return }
+        Self.removedLeftovers = true
+        #if os(iOS)
+        RemotePlaybackController.removeLeftovers()
+        #endif
+        RemoteOriginalExporter.removeAbandonedExports(in: FileManager.default.temporaryDirectory.appendingPathComponent("RemoteOriginalExports-v1", isDirectory: true))
+        await resources.trimCache()
     }
     /// Follows the saved library, so a connection, key, favourite or recent changed in another window
     /// shows in this one.
@@ -508,9 +521,20 @@ final class AppModel {
         // something else uses it.
         await lockUnreferencedKeys()
     }
-    func removeConnection(_ profile: ConnectionProfile) async {
+    /// The files downloaded through a connection that are still in the Downloads list.
+    func downloads(from profile: ConnectionProfile) -> [ManagedDownload] {
+        downloads?.items.filter { $0.profile.id == profile.id } ?? []
+    }
+    func removeConnection(_ profile: ConnectionProfile, removingDownloads: Bool = false) async {
         await downloads?.interrupt(reason: Self.changedConnectionDownloadMessage) { $0.profile.id == profile.id }
+        if removingDownloads {
+            for item in downloads(from: profile) {
+                do { try downloads?.remove(item.id) } catch { errorMessage = error.localizedDescription }
+            }
+        }
         await disconnect(preservingDownloads: true, keepingKeys: true)
+        // Images, PDFs and media previewed from it are on disk until they age out.
+        await forgetPreviewedFiles()
         routes.removeAll { $0.connectionID == profile.id }
         sessionRevision += 1
         do { try await searchIndexStore().remove(connectionID: profile.id) }
@@ -527,6 +551,23 @@ final class AppModel {
             library.recents.removeAll { $0.connectionID == id }
         }
         await lockUnreferencedKeys()
+        await forgetUnusedHostKeys(of: profile)
+    }
+    /// A trusted key can only be reset from a connection that uses it. Once the last one is gone
+    /// nothing in the app could remove it, so it goes with that connection.
+    private func forgetUnusedHostKeys(of removed: ConnectionProfile) async {
+        guard !demo else { return }
+        let remaining = metadata.connections + (await metadataStore.snapshot().connections)
+        for endpoint in Self.endpoints(of: removed) where !remaining.contains(where: { $0.id != removed.id && Self.endpoints(of: $0).contains(endpoint) }) {
+            do { try await trust.reset(endpoint: endpoint) } catch { errorMessage = error.localizedDescription }
+        }
+    }
+    private static func endpoints(of profile: ConnectionProfile) -> [HostEndpoint] {
+        [HostEndpoint(host: profile.host, port: profile.port)] + (profile.jumpHost.map { [HostEndpoint(host: $0.host, port: $0.port)] } ?? [])
+    }
+    private func forgetPreviewedFiles() async {
+        await resources.clearCache()
+        await RemoteImageDecoder.shared.clear()
     }
     private static let folderSortKey = "folderSortOrders-v1"
     /// Most folders whose sort choice is remembered; the least recently changed is dropped first.
@@ -588,22 +629,31 @@ final class AppModel {
     }
     /// Forgets the trusted key of the saved endpoint, never unsaved edits in the connection form.
     func resetTrust(for profile: ConnectionProfile) async {
-        await interruptDownloads(through: HostEndpoint(host: profile.host, port: profile.port))
-        await disconnect(preservingDownloads: true, keepingKeys: true)
-        do { try await searchIndexStore().remove(connectionID: profile.id) }
-        catch { errorMessage = error.localizedDescription }
-        // Forgetting trust must remain possible even when the local search cache is damaged.
-        do { try await trust.reset(endpoint: HostEndpoint(host: profile.host, port: profile.port)) }
-        catch { errorMessage = error.localizedDescription }
+        await resetTrust(endpoint: HostEndpoint(host: profile.host, port: profile.port), of: profile)
     }
     func resetJumpHostTrust(for profile: ConnectionProfile) async {
         guard let jump = profile.jumpHost else { return }
-        await interruptDownloads(through: HostEndpoint(host: jump.host, port: jump.port))
+        await resetTrust(endpoint: HostEndpoint(host: jump.host, port: jump.port), of: profile)
+    }
+    /// Forgets a server's trusted key, and with it what was read through that key and kept on the
+    /// device: whatever is trusted next must not be shown, or searched, as the server before it.
+    /// Every way of resetting trust comes through here. Returns whether the key was forgotten.
+    /// `profile` is the connection it was asked from, whose indexes go whether or not it is saved.
+    @discardableResult func resetTrust(endpoint: HostEndpoint, of profile: ConnectionProfile? = nil) async -> Bool {
+        await interruptDownloads(through: endpoint)
         await disconnect(preservingDownloads: true, keepingKeys: true)
-        do { try await searchIndexStore().remove(connectionID: profile.id) }
-        catch { errorMessage = error.localizedDescription }
-        do { try await trust.reset(endpoint: HostEndpoint(host: jump.host, port: jump.port)) }
-        catch { errorMessage = error.localizedDescription }
+        let saved = demo ? [] : await metadataStore.snapshot().connections
+        var connections = (metadata.connections + saved).filter { Self.endpoints(of: $0).contains(endpoint) }.map(\.id)
+        if let profile { connections.insert(profile.id, at: 0) }
+        var seen = Set<UUID>()
+        for id in connections where seen.insert(id).inserted {
+            do { try await searchIndexStore().remove(connectionID: id) }
+            catch { errorMessage = error.localizedDescription }
+        }
+        await forgetPreviewedFiles()
+        // Forgetting trust must remain possible even when the local search cache is damaged.
+        do { try await trust.reset(endpoint: endpoint); return true }
+        catch { errorMessage = error.localizedDescription; return false }
     }
     /// Stops every download that reaches a server whose trusted key is being forgotten, directly or through it
     /// as a jump host, whichever connection it was started from. Downloads from other servers go on.

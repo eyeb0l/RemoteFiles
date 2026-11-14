@@ -156,15 +156,33 @@ enum PlaybackError: LocalizedError {
     }
 }
 
+extension RemotePlaybackController {
+    /// Removes the playback files of a previous process. One is removed when its player goes, so
+    /// any left were left by a crash, and may be a second copy of up to 128 MiB. This process's
+    /// own are told apart by their prefix and left alone.
+    static func removeLeftovers(in directory: URL = FileManager.default.temporaryDirectory) {
+        let fm = FileManager.default
+        for child in (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        where isLeftover(child.lastPathComponent) {
+            try? fm.removeItem(at: child)
+        }
+    }
+    static func isLeftover(_ name: String) -> Bool {
+        name.hasPrefix(PlaybackFile.prefix) && !name.hasPrefix(PlaybackFile.processPrefix)
+    }
+}
+
 /// A hard link retains the downloaded inode without another large allocation. A copy is the
 /// fallback across volumes. The resolver always replaces cache files rather than editing them.
 private final class PlaybackFile: @unchecked Sendable {
+    static let prefix = "RemotePlayback-"
+    static let processPrefix = prefix + UUID().uuidString + "-"
     let directory: URL
     let url: URL
     init(source: URL, filename: String) throws {
         guard source.isFileURL else { throw PlaybackError.unplayable }
         let fm = FileManager.default
-        directory = fm.temporaryDirectory.appendingPathComponent("RemotePlayback-" + UUID().uuidString, isDirectory: true)
+        directory = fm.temporaryDirectory.appendingPathComponent(Self.processPrefix + UUID().uuidString, isDirectory: true)
         let suffix = (filename as NSString).pathExtension.lowercased()
         url = directory.appendingPathComponent("media").appendingPathExtension(suffix)
         do {

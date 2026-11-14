@@ -253,6 +253,16 @@ public actor RemoteOriginalExporter {
     /// return from the background. The prefix tells their folders from a previous process's debris,
     /// so one window's first export doesn't delete the file another is writing or handing to Files.
     static let processPrefix = "export-" + UUID().uuidString + "-"
+    /// Removes what a previous process left in `directory`: a file prepared for Save Original and
+    /// never handed over, such as after a crash. An exporter does this before its first export;
+    /// this does it at launch, for someone who never exports again.
+    public static func removeAbandonedExports(in directory: URL) {
+        let fm = FileManager.default
+        for child in (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        where isAbandoned(child.lastPathComponent) {
+            try? fm.removeItem(at: child)
+        }
+    }
     static func isAbandoned(_ name: String) -> Bool {
         guard name.hasPrefix("export-"), !name.hasPrefix(processPrefix) else { return false }
         let parts = name.dropFirst(7)
