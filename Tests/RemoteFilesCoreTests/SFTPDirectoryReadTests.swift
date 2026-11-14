@@ -93,6 +93,18 @@ final class SFTPDirectoryReadTests: XCTestCase {
         XCTAssertEqual(recorder.requests.last, "close")
     }
 
+    /// A server with nothing left to list answers EOF. One that answers each READDIR with no names
+    /// instead moved no limit and had its window refilled, so the listing never ended.
+    func testReadRepliesWithoutNamesFailTheListingInsteadOfKeepingItRunning() async throws {
+        let recorder = try await list(FakeDirectory(entries: ["a", "b", "c"], batch: 1, emptyReaddirFrom: 2), concurrentReads: 8) { _ in
+            XCTFail("A NAME answer with no names must fail the listing")
+        } failure: { error in
+            guard case SFTPError.invalidResponse = error else { return XCTFail("Unexpected \(error)") }
+        }
+        XCTAssertEqual(recorder.requests.last, "close")
+        XCTAssertLessThan(recorder.readdirs, 20, "No new READDIR is issued after the empty answer")
+    }
+
     func testCloseFailureFailsListing() async throws {
         try await list(FakeDirectory(entries: ["a"], closeStatus: 4), concurrentReads: 8) { _ in
             XCTFail("A failed CLOSE must fail the listing so the caller retires the channel")
@@ -323,6 +335,8 @@ private struct FakeDirectory: Sendable {
     var failingReaddir: Int?
     var failureCode: UInt32 = 4
     var invalidReaddir: Int?
+    /// From this READDIR on, each is answered with a NAME that carries no names.
+    var emptyReaddirFrom: Int?
     var closeStatus: UInt32 = 0
     var invalidInitialPacketLength: UInt32?
     var fileSize: UInt64 = 0
@@ -497,6 +511,9 @@ private final class FakeSFTPHandler: ChannelDuplexHandler {
             }
             if index == directory.invalidReaddir {
                 return send(context) { $0.writeInteger(UInt8(102)); $0.writeInteger(id); $0.writeFakeString("dir") }
+            }
+            if let empty = directory.emptyReaddirFrom, index >= empty {
+                return send(context) { $0.writeInteger(UInt8(104)); $0.writeInteger(id); $0.writeInteger(UInt32(0)) }
             }
             if cursor >= directory.entries.count {
                 if exhausted, directory.rewindAfterEOF {

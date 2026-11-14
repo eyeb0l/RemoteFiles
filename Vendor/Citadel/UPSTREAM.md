@@ -99,6 +99,9 @@ hands over the `CLOSE` as a future and returns as soon as the listing is complet
 close must still make the caller retire the channel. A window is now topped up only once half of it has been
 answered: every read still outstanding at EOF must be drained, so one sent just before EOF would cost a round
 trip for nothing, and half a window keeps the server busy. RemoteFiles passes 16 for browsing and 8 for walks.
+A `NAME` answer that carries no names fails the listing with `invalidResponse`: the protocol answers EOF when
+nothing is left, and an empty batch moved neither limit while still refilling the window, so a server could keep
+a listing running indefinitely.
 
 `SFTPClient.sendRealPath`, `sendAttributes` and `sendOpenFile`, and `SFTPFile.sendReadAttributes` and `sendClose`,
 queue a request and return a future without waiting. They expose the existing `sendRequestFuture` ordering, so
