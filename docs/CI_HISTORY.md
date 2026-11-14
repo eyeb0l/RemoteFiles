@@ -10,6 +10,17 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 14 November 2026: a download test read its fake before the transfer saw cancellation
+
+PR #141 run [43577671711](https://github.com/eyeb0l/RemoteFiles/actions/runs/43577671711) failed
+**Quick / simulator-core** in `AppModelLifecycleTests.testEnteringDemoInOneWindowKeepsAnotherWindowsDownloadRunning`
+with `[]` where it expected `["/file.bin"]`; the other 796 tests passed, and the same commit's
+parent had passed the whole lane an hour earlier. The test waited for the queue to mark the
+item interrupted and then read the fake transport's list of cancelled transfers at once. The
+fake records a cancellation from its own task, when its ten-millisecond sleep throws, which can
+be after the queue has already marked the item. The test now waits for that record instead of
+reading it once. The cause is from reading the test, not from reproducing the failure.
+
 ## 14 November 2026: an integration suite hang was a fixture teardown, not the transport change
 
 While PR #127 was being prepared, `scripts/test-openssh.sh swift test --filter SFTPIntegrationTests
