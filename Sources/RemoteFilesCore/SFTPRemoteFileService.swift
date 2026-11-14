@@ -309,8 +309,15 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     /// Entries a listing may hold before it fails. A folder's rows take roughly 200 bytes an entry,
     /// so even a full listing stays far below what the system allows the app.
     static let directoryEntryLimit = 250_000
-    /// Decoded names, longnames and attributes that the same listing may hold in total.
+    /// Decoded names, longnames and attributes that the same listing may hold in total, and the
+    /// bytes of names and paths its entries may keep afterwards.
     static let directoryMetadataLimit = 128 * 1024 * 1024
+    /// The same two bounds for a listing nobody is waiting to see: a search or index walk, a folder
+    /// listed ahead, or a quiet check. Many of those run at once, and about 100,000 ordinary names fit.
+    static let walkMetadataLimit = 16 * 1024 * 1024
+    /// Bytes one name may take. File systems allow a few hundred, and SFTP's frame about a mebibyte,
+    /// which is far more than a row can show or a folder of rows can sort.
+    static let directoryNameLimit = 4_096
     /// Symbolic links resolved per listing; later links stay unresolved and resolve when tapped.
     static let linkResolutionLimit = 256
     /// Links resolved at once, each sending REALPATH and STAT together. Enough for the whole of
@@ -350,6 +357,7 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         let progress = DeadlineExtension()
         let result = try await perform(session: session, role: role, progress: progress) { sftp, closes in
             try await Self.snapshot(path, sftp: sftp, readWindow: role == .walk ? Self.walkReadWindow : Self.directoryReadWindow,
+                                    metadataLimit: role == .walk ? Self.walkMetadataLimit : Self.directoryMetadataLimit,
                                     progress: progress, closes: closes, partial: partial, resolvesLinks: resolvesLinks)
         }
         measurements.directoryOperations += 1
@@ -365,31 +373,35 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         try Task.checkCancellation()
         guard let session = active, session.profile == profile, !session.control.isCancelled, session.client.isConnected else { return nil }
         return try await perform(session: session, role: .walk) { sftp, closes in
-            try await Self.snapshot(path, sftp: sftp, readWindow: Self.walkReadWindow, progress: nil, closes: closes, partial: nil, resolvesLinks: true)
+            try await Self.snapshot(path, sftp: sftp, readWindow: Self.walkReadWindow, metadataLimit: Self.walkMetadataLimit,
+                                    progress: nil, closes: closes, partial: nil, resolvesLinks: true)
         }
     }
 
     /// Names are ready after two round trips: REALPATH and OPENDIR together, then the READDIRs. With
     /// `closes`, the listing returns without waiting a third for CLOSE, whose reply is checked afterwards.
     /// `partial` receives what has arrived so far before links are resolved, each time with more entries.
-    private nonisolated static func snapshot(_ path: String, sftp: SFTPClient, readWindow: Int, progress: DeadlineExtension?, closes: DeferredCloses?,
+    private nonisolated static func snapshot(_ path: String, sftp: SFTPClient, readWindow: Int, metadataLimit: Int,
+                                             progress: DeadlineExtension?, closes: DeferredCloses?,
                                              partial: (@Sendable (DirectorySnapshot) -> Void)?, resolvesLinks: Bool) async throws -> DirectorySnapshot {
         let requested = try validated(path)
         // The server resolves both requests from the same path. If REALPATH fails, the listing still
         // drains and closes its handle.
         let resolved = sftp.sendRealPath(atPath: requested)
-        let collected = CollectedEntries()
+        let collected = CollectedEntries(nameLimit: directoryNameLimit, retainedLimit: metadataLimit)
         let listed: Result<Void, Error>
         do {
             _ = try await sftp.listDirectory(atPath: requested, resolvingPath: false, concurrentReads: readWindow,
-                                             maximumEntries: directoryEntryLimit, maximumMetadataBytes: directoryMetadataLimit,
+                                             maximumEntries: directoryEntryLimit, maximumMetadataBytes: metadataLimit,
                                              onBatch: { components in
                 progress?.record()
                 let canonical = try await resolved.get()
-                let entries = collected.add(components, in: canonical)
+                let entries = try collected.add(components, in: canonical)
                 if let partial { partial(DirectorySnapshot(path: canonical, entries: entries)) }
             }, deferringClose: closes.map { closes in { closes.add($0) } })
             listed = .success(())
+        } catch SFTPError.directoryListingMetadataLimitExceeded, SFTPError.directoryListingEntryLimitExceeded {
+            listed = .failure(RemoteFileError.listingTooLarge)
         } catch {
             listed = .failure(error)
         }
@@ -1555,17 +1567,30 @@ final class DeferredCloses: @unchecked Sendable {
 }
 
 /// Maps a listing's batches to entries as they arrive, and keeps them.
-private final class CollectedEntries: @unchecked Sendable {
+///
+/// The server chooses every byte kept here: each name, and the folder's path that goes in front of
+/// each one. So one name may not exceed `nameLimit`, and the names and paths together may not
+/// exceed `retainedLimit`; past either, the listing fails rather than growing.
+final class CollectedEntries: @unchecked Sendable {
     private let lock = NSLock()
+    private let nameLimit: Int, retainedLimit: Int
     private var collected: [RemoteEntry] = []
     private var prefix: String?
+    private var retained = 0
+    init(nameLimit: Int, retainedLimit: Int) { self.nameLimit = nameLimit; self.retainedLimit = retainedLimit }
     var entries: [RemoteEntry] { lock.lock(); defer { lock.unlock() }; return collected }
     /// Returns everything so far. Batches arrive one at a time, in the order the server gave them.
-    func add(_ components: [SFTPPathComponent], in canonical: String) -> [RemoteEntry] {
+    func add(_ components: [SFTPPathComponent], in canonical: String) throws -> [RemoteEntry] {
         lock.lock(); defer { lock.unlock() }
         let prefix = self.prefix ?? RemotePath.childPrefix(of: canonical)
         self.prefix = prefix
+        let prefixBytes = prefix.utf8.count
         for component in components where component.filename != "." && component.filename != ".." {
+            let nameBytes = component.filename.utf8.count
+            guard nameBytes <= nameLimit else { throw RemoteFileError.listingTooLarge }
+            // Counted before the path is built, so that an oversized one is never allocated.
+            retained += 2 * nameBytes + prefixBytes
+            guard retained <= retainedLimit else { throw RemoteFileError.listingTooLarge }
             collected.append(SFTPRemoteFileService.entry(name: component.filename, path: prefix + component.filename, attributes: component.attributes))
         }
         return collected
