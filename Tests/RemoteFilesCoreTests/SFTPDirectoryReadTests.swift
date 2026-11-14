@@ -105,6 +105,16 @@ final class SFTPDirectoryReadTests: XCTestCase {
         XCTAssertLessThan(recorder.readdirs, 20, "No new READDIR is issued after the empty answer")
     }
 
+    /// A server may send lines before its identification string (RFC 4253, section 4.2). Only that
+    /// string goes into the key-exchange hash; with the lines included, the host's signature never verifies.
+    func testLinesBeforeTheServersVersionStringDoNotBreakKeyExchange() async throws {
+        let notice = "This host is monitored.\r\nSecond line, without a carriage return\n"
+        let recorder = try await list(FakeDirectory(entries: ["a", "b"], linesBeforeVersion: notice), concurrentReads: 8) { names in
+            XCTAssertEqual(names, ["a", "b"])
+        }
+        XCTAssertEqual(recorder.requests.last, "close")
+    }
+
     func testCloseFailureFailsListing() async throws {
         try await list(FakeDirectory(entries: ["a"], closeStatus: 4), concurrentReads: 8) { _ in
             XCTFail("A failed CLOSE must fail the listing so the caller retires the channel")
@@ -337,6 +347,8 @@ private struct FakeDirectory: Sendable {
     var invalidReaddir: Int?
     /// From this READDIR on, each is answered with a NAME that carries no names.
     var emptyReaddirFrom: Int?
+    /// Sent before the server's identification string, as a TCP wrapper or an appliance may.
+    var linesBeforeVersion = ""
     var closeStatus: UInt32 = 0
     var invalidInitialPacketLength: UInt32?
     var fileSize: UInt64 = 0
@@ -370,6 +382,9 @@ private final class FakeSFTPServer: @unchecked Sendable {
         let listener = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .childChannelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
+                    if !directory.linesBeforeVersion.isEmpty {
+                        try channel.pipeline.syncOperations.addHandler(LinesBeforeVersion(directory.linesBeforeVersion))
+                    }
                     try channel.pipeline.syncOperations.addHandler(NIOSSHHandler(
                         role: .server(.init(hostKeys: [hostKey], userAuthDelegate: AcceptAnyPassword())),
                         allocator: channel.allocator,
@@ -399,6 +414,24 @@ private final class FakeSFTPServer: @unchecked Sendable {
     }
 
     func stop() async throws { try await listener.close() }
+}
+
+/// Puts its lines in front of the first bytes the SSH handler writes, which are its identification string.
+private final class LinesBeforeVersion: ChannelOutboundHandler {
+    typealias OutboundIn = ByteBuffer
+    typealias OutboundOut = ByteBuffer
+    private var lines: String?
+
+    init(_ lines: String) { self.lines = lines }
+
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        guard let lines else { return context.write(data, promise: promise) }
+        self.lines = nil
+        var bytes = context.channel.allocator.buffer(string: lines)
+        var rest = unwrapOutboundIn(data)
+        bytes.writeBuffer(&rest)
+        context.write(wrapOutboundOut(bytes), promise: promise)
+    }
 }
 
 private final class AcceptAnyPassword: NIOSSHServerUserAuthenticationDelegate {

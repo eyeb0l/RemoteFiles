@@ -16,3 +16,10 @@ rejects a peer channel maximum packet size of zero while preserving small nonzer
 validates ECDSA signature mpints as canonical positive, nonzero, curve-width-bounded integers
 before copying them into fixed-width storage. The package retains a focused local test target for
 these untrusted wire-format boundaries.
+
+The version parser returns the server's identification string alone. A server may send other
+lines before it (RFC 4253, section 4.2), and the string goes into the key-exchange hash; the fork
+returned those lines with it, so the host's signature never verified and such a server could not
+be reached (`NIOSSHError.invalidExchangeHashSignature`). Apple fixed this in July 2023 (#153), after
+the fork diverged. `SFTPDirectoryReadTests.testLinesBeforeTheServersVersionStringDoNotBreakKeyExchange`
+covers it.
