@@ -100,6 +100,23 @@ final class DocumentTextIndexTests: XCTestCase {
         XCTAssertEqual(Data(index.source.utf8), Data(text.utf8))
     }
 
+    /// Leaving the reader cancels its preparation, which must stop rather than record the document
+    /// as one the limits refused.
+    func testCancelledPreparationThrowsInsteadOfRefusingTheDocument() async throws {
+        let text = String(repeating: "# Heading\n\nText with *emphasis* and ![image](i.png).\n\n- [ ] task\n\n", count: 2_000)
+        let results = await Task.detached {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return (Result { try DocumentTextIndex(text: text, markdown: true) },
+                    Result { try DocumentPolicy.prepareMarkdown(text, preserveImages: true, preserveDocumentLinks: true) },
+                    Result { try DocumentPolicy.remoteMarkdownParts(text) })
+        }.value
+        XCTAssertThrowsError(try results.0.get()) { XCTAssertTrue($0 is CancellationError, "\($0)") }
+        XCTAssertThrowsError(try results.1.get()) { XCTAssertTrue($0 is CancellationError, "\($0)") }
+        XCTAssertThrowsError(try results.2.get()) { XCTAssertTrue($0 is CancellationError, "\($0)") }
+        // Outside a cancelled task the same text prepares as usual.
+        XCTAssertFalse(try DocumentTextIndex(text: text, markdown: true).isSourceOnly)
+    }
+
     // MARK: - One parse gives what separate parses gave
 
     /// Documents of every shape the reader meets: this repository's own documentation, the demo's
