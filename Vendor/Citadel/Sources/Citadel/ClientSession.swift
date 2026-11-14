@@ -66,6 +66,7 @@ final class ClientHandshakeHandler: ChannelInboundHandler, Sendable {
     typealias InboundIn = Any
 
     private let promise: EventLoopPromise<Void>
+    private let hasAuthenticated = NIOLockedValueBox(false)
     let logger = Logger(label: "nl.orlandos.citadel.handshake")
 
     /// A future that will be fulfilled when the handshake is complete.
@@ -84,12 +85,20 @@ final class ClientHandshakeHandler: ChannelInboundHandler, Sendable {
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         if event is UserAuthSuccessEvent {
+            self.hasAuthenticated.withLockedValue { $0 = true }
             self.promise.succeed(())
         }
     }
 
     func errorCaught(context: ChannelHandlerContext, error: any Error) {
         self.promise.fail(error)
+        // RemoteFiles: NIOSSHHandler reports a transport failure, such as a packet that does not
+        // decrypt, and leaves the connection open. Before login the failed promise ends the
+        // connection attempt, and the caller closes the socket. After login the promise is already
+        // fulfilled, so the error went nowhere: requests never finished and the peer could keep
+        // the connection buffering. No SSH connection continues past such an error, so close it.
+        guard self.hasAuthenticated.withLockedValue({ $0 }) else { return }
+        context.close(promise: nil)
     }
 
     func handlerAdded(context: ChannelHandlerContext) {

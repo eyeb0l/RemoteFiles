@@ -42,6 +42,23 @@ final class SecurityBoundaryTests: XCTestCase {
         )
     }
 
+    /// Parsing leaves at most one incomplete packet behind. Bytes beyond that are not being
+    /// consumed, as when a packet fails to decrypt and is tried again on every read.
+    func testParserRefusesToKeepBufferingBytesThatAreNotConsumed() throws {
+        let allocator = ByteBufferAllocator()
+        let maximumPacketSize = 1 << 15, chunk = 4 * 1024
+        var parser = SSHPacketParser(allocator: allocator, maximumPacketSize: maximumPacketSize)
+        var kept = 0
+        var refusal: Error?
+        for _ in 0..<64 {
+            var bytes = allocator.buffer(repeating: 0, count: chunk)
+            do { try parser.append(bytes: &bytes); kept += chunk } catch { refusal = error; break }
+        }
+        XCTAssertEqual((refusal as? NIOSSHError)?.type, .protocolViolation)
+        XCTAssertGreaterThan(kept, maximumPacketSize, "A whole packet and the read that completes it still fit")
+        XCTAssertLessThanOrEqual(kept, maximumPacketSize + SSHPacketParser.unparsedSlack + chunk)
+    }
+
     func testPeerMaximumPacketSizeRejectsOnlyZero() throws {
         XCTAssertThrowsError(try SSHChildChannel.validatePeerMaximumPacketSize(0)) { error in
             XCTAssertEqual((error as? NIOSSHError)?.type, .protocolViolation)
