@@ -121,7 +121,9 @@ extension SSHClient {
 
     /// Bounded stdout and stderr, with child-channel ownership for cancellation and deadlines.
     /// The callback runs before the exec request, including for channels opened after cancellation.
-    public func executeBoundedCommand(_ command: String, maxResponseSize: Int,
+    /// RemoteFiles: `standardInput` is written to the command once the server has taken the request.
+    /// The channel's output side stays open; a command that reads to the end of its input would wait.
+    public func executeBoundedCommand(_ command: String, standardInput: ByteBuffer? = nil, maxResponseSize: Int,
                                       onOutput: (@Sendable (ByteBuffer) -> Void)? = nil,
                                       onChannelCreated: @escaping @Sendable (Channel) -> Void) async throws -> ByteBuffer {
         let promise = eventLoop.makePromise(of: ByteBuffer.self)
@@ -160,9 +162,18 @@ extension SSHClient {
         )
         
         return try await eventLoop.flatSubmit {
-            channel.triggerUserOutboundEvent(execRequest).whenFailure { [channel] error in
-                channel.close(promise: nil)
-                promise.fail(error)
+            channel.triggerUserOutboundEvent(execRequest).whenComplete { [channel] result in
+                switch result {
+                case .failure(let error):
+                    channel.close(promise: nil)
+                    promise.fail(error)
+                case .success:
+                    guard let standardInput else { return }
+                    channel.writeAndFlush(standardInput).whenFailure { error in
+                        channel.close(promise: nil)
+                        promise.fail(error)
+                    }
+                }
             }
             
             return promise.futureResult

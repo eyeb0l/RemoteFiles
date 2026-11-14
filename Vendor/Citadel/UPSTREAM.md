@@ -169,6 +169,11 @@ is retained. Isolated OpenSSH tests exercise both output streams, cancellation, 
 and continued SFTP use over the same SSH connection. No PTY, agent forwarding, or remote
 file upload is added.
 
+`executeBoundedCommand` also takes `standardInput`, written to the command once the server has
+taken the exec request. RemoteFiles sends the search helper's request that way, so the query and
+folder are not in the server's process list. The channel's output side is left open, so a command
+must not read to the end of its input.
+
 ### Read-only descriptor identity lookup
 
 `SFTPClient.readSymbolicLink` exposes the existing SFTP READLINK request and requires one

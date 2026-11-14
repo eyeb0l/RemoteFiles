@@ -110,6 +110,14 @@ qemu-system-aarch64 -M virt -accel hvf -cpu host -smp 4 -m 2048 \
 Then start the fixture daemon on 22401 inside the guest as above; no tunnel is needed. A second
 drive with `throttling.iops-total=150` models a slow disk for cold-cache timings.
 
+## Recorded validation: 2026-11-14
+
+After the helper's request moved from its command line to its standard input: the seven tests of
+`LinuxServerSearchAcceptanceTests` passed with no failures or skips against a loopback daemon at the
+default `MaxSessions`, on Ubuntu 26.04, Linux `7.0.0-42-generic`, OpenSSH `10.2p1`, Python `3.14.4`,
+reached through one SSH forward. The channel-limit class was not run; the change does not touch
+how channels are opened.
+
 ## Recorded validation: 2026-11-09
 
 Ubuntu 26.04.1, Linux `7.0.0-42-generic`, OpenSSH `10.2p1`, Python `3.14`, with loopback daemons at

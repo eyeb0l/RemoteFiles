@@ -463,10 +463,10 @@ final class SFTPIntegrationTests: XCTestCase {
         // Exercise the remote helper with a genuinely held directory as well. The production
         // adapter obtains its descriptor from SFTP procfs; this portable fixture inherits one.
         let root = fixture.files + "/docs"
-        let helper = try ServerFolderSearch.command(query: "Linked source", root: root, includeHidden: false,
-                                                    limits: .init(), content: .init(), rootHandle: "/dev/fd/9")
+        let helper = try ServerFolderSearch.helper(query: "Linked source", root: root, includeHidden: false,
+                                                   limits: .init(), content: .init(), rootHandle: "/dev/fd/9")
         let output = try await SFTPRemoteFileService.executeSearchCommand(client: client,
-            command: "exec 9<" + ServerFolderSearch.quote(root) + "; " + helper, timeout: allowance)
+            command: "exec 9<" + ServerFolderSearch.quote(root) + "; " + helper.command, input: helper.input, timeout: allowance)
         let found = try ServerFolderSearch.decode(Data(output.readableBytesView), query: "Linked source", root: root,
                                                   includeHidden: false, limits: .init(), content: .init())
         XCTAssertEqual(found.contentMatches.map(\.entry.name), ["source.md"])
