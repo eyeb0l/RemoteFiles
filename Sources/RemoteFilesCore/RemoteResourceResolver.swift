@@ -144,6 +144,8 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         var observers: [UUID: DownloadProgressHandler]
     }
     private let service: any RemoteFileService
+    /// The same transport, when it can say which host keys its bytes came through. See `storedFile`.
+    private let attesting: (any HostKeyAttesting)?
     private let directory: URL
     private let diskLimit: Int
     private let fileLimit: Int
@@ -159,7 +161,12 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
                 fileLimit: Int = 128 * 1024 * 1024, freshness: TimeInterval = 300) {
         self.service = service; self.directory = directory; self.diskLimit = diskLimit
         self.fileLimit = fileLimit; self.freshness = freshness
+        // The app's connections reach the transport through a coalescing wrapper.
+        attesting = (service as? any HostKeyAttesting) ?? ((service as? CoalescingFileService)?.base as? any HostKeyAttesting)
     }
+    /// Whether kept copies are bound to the host keys they came through. Only a transport with no
+    /// trusted keys, as in Demo and tests, leaves them unbound.
+    var bindsCopiesToHostKeys: Bool { attesting != nil }
     public func localFile(for reference: String, in document: RemoteDocumentLocation) async throws -> URL {
         try await localFile(for: reference, in: document, progress: { _ in })
     }
@@ -171,8 +178,12 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         // bytes without it, and `mayKeep` covers the files that can only be told by their content.
         guard !DocumentPolicy.kind(filename: RemotePath.name(of: path)).isCertificateFile else { throw RemoteResourceError.notImage }
         let key = try cacheKey(path: path, document: document)
+        // Asked for each reader: a reader for whom another key is trusted neither finds this
+        // reader's copy nor shares its transfer, which may return one.
+        let binding = await lookupBinding(for: document.profile)
+        try Task.checkCancellation()
         let generation = generations[key]
-        let flightKey = key + ":" + (generation?.uuidString ?? "initial")
+        let flightKey = key + ":" + (binding ?? "untrusted") + ":" + (generation?.uuidString ?? "initial")
         let waiter = UUID()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -185,7 +196,7 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
                 let id = UUID()
                 let task = Task {
                     let result: Result<URL, Error>
-                    do { result = .success(try await self.fetch(key: key, flightKey: flightKey, generation: generation, id: id, path: path, document: document)) }
+                    do { result = .success(try await self.fetch(key: key, binding: binding, flightKey: flightKey, generation: generation, id: id, path: path, document: document)) }
                     catch { result = .failure(error) }
                     self.finish(key: flightKey, id: id, result: result)
                 }
@@ -225,7 +236,7 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
             switch error {
             case RemoteFileError.connectionEnded, RemoteFileError.timedOut, RemoteFileError.unavailable:
                 if allowCachedFallback, document.canonicalRoot == nil,
-                   let file = try freshCachedFile(for: reference, in: document) {
+                   let file = try await freshCachedFile(for: reference, in: document) {
                     let size = (try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.uint64Value ?? 0
                     await progress(.init(receivedBytes: size, totalBytes: size, isComplete: true))
                     try Task.checkCancellation()
@@ -246,11 +257,13 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         return RemoteResourcePreview(file: file, connectionFailure: nil)
     }
 
-    private func freshCachedFile(for reference: String, in document: RemoteDocumentLocation) throws -> URL? {
-        try prepareCacheDirectory()
+    /// With no connection, so only the trust store says which copy may be used.
+    private func freshCachedFile(for reference: String, in document: RemoteDocumentLocation) async throws -> URL? {
         let path = try RemoteResourcePath.resolve(reference, relativeTo: document)
         let key = try cacheKey(path: path, document: document)
-        let file = directory.appendingPathComponent(key).appendingPathExtension("resource")
+        guard let binding = await lookupBinding(for: document.profile) else { return nil }
+        try prepareCacheDirectory()
+        let file = storedFile(key: key, binding: binding)
         guard let attributes = try validateCachedFile(at: file),
               let modified = attributes[.modificationDate] as? Date,
               Date().timeIntervalSince(modified) < freshness,
@@ -264,6 +277,7 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
     /// Keys on what determines the bytes: the account that read them and the remote location.
     /// Renaming a connection or editing its starting folder keeps its cached resources, while a
     /// different endpoint, account, identity or jump route never shares them. JSON keeps fields unambiguous.
+    /// The file a copy is kept in is named for this key and for the host keys it came through: see `storedFile`.
     private func cacheKey(path: String, document: RemoteDocumentLocation) throws -> String {
         let profile = document.profile
         let endpoint = HostEndpoint(host: profile.host, port: profile.port)
@@ -276,7 +290,31 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
             let jump = HostEndpoint(host: hop.host, port: hop.port)
             fields += ["jump-host", jump.host, String(jump.port), hop.username, hop.identityID.uuidString]
         }
-        return SHA256.hash(data: try JSONEncoder().encode(fields)).map { String(format: "%02x", $0) }.joined()
+        return Self.hex(SHA256.hash(data: try JSONEncoder().encode(fields)))
+    }
+    private static func hex(_ digest: SHA256.Digest) -> String { digest.map { String(format: "%02x", $0) }.joined() }
+    /// Stands for the host keys of a transport that cannot name them. Only such a transport, which
+    /// has no trust store, writes or reads it, so its copies never meet one that can.
+    private static let unattested = "unattested"
+    /// Names the host keys bytes came through. The same server keeps the same name whatever the
+    /// connection is called, and a different key, at either end of a route, never shares it.
+    private static func binding(for keys: ServerHostKeys) -> String {
+        let fields = [keys.destination.publicKey, keys.jumpHost?.publicKey ?? ""]
+        return hex(SHA256.hash(data: (try? JSONEncoder().encode(fields)) ?? Data()))
+    }
+    /// The copy a reader may be given is the one that came through the keys trusted for it now, or
+    /// none while a key is not trusted. Asked of the trust store each time, never kept: trust can be
+    /// reset and another key accepted while a transfer is under way, in this window or another.
+    private func lookupBinding(for profile: ConnectionProfile) async -> String? {
+        guard let attesting else { return Self.unattested }
+        return await attesting.trustedHostKeys(for: profile).map(Self.binding(for:))
+    }
+    /// A copy is kept under the keys its own connection verified, not those trusted when it
+    /// arrives: a window still connected after another reset trust gets the old server's bytes, and
+    /// they must not become the copy of the key accepted since. Names from before host keys were
+    /// part of them (`<key>.resource`) are never looked up, and go with age or a refresh.
+    private func storedFile(key: String, binding: String) -> URL {
+        directory.appendingPathComponent(key + "." + binding).appendingPathExtension("resource")
     }
     public func invalidate(_ reference: String, in document: RemoteDocumentLocation) {
         _ = invalidateResources([reference], in: document)
@@ -289,7 +327,6 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
     @discardableResult
     public func invalidateResources(_ references: [String], in document: RemoteDocumentLocation) -> [URL] {
         var invalidated = Set<String>()
-        var files: [URL] = []
         for reference in references {
             guard let path = try? RemoteResourcePath.resolve(reference, relativeTo: document),
                   let key = try? cacheKey(path: path, document: document),
@@ -297,9 +334,17 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
             // Generation metadata is needed only while an older flight can publish.
             // Idle resources use their stable on-disk key across resolver launches.
             generations[key] = flights.keys.contains { $0.hasPrefix(key + ":") } ? UUID() : nil
-            let file = directory.appendingPathComponent(key).appendingPathExtension("resource")
-            try? FileManager.default.removeItem(at: file)
-            files.append(file)
+        }
+        guard !invalidated.isEmpty else { return [] }
+        // The copies kept under every host key, since one from a key not trusted now could be
+        // trusted again. A transfer's file kept aside, `<key>-<id>.resource`, stays with its readers.
+        var files: [URL] = []
+        for child in (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        where child.pathExtension == "resource" {
+            let name = child.lastPathComponent
+            guard let dot = name.firstIndex(of: "."), invalidated.contains(String(name[..<dot])) else { continue }
+            try? FileManager.default.removeItem(at: child)
+            files.append(child)
         }
         return files
     }
@@ -354,20 +399,23 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
             await observer(progress)
         }
     }
-    private func fetch(key: String, flightKey: String, generation: UUID?, id: UUID, path: String, document: RemoteDocumentLocation) async throws -> URL {
+    private func fetch(key: String, binding: String?, flightKey: String, generation: UUID?, id: UUID, path: String,
+                       document: RemoteDocumentLocation) async throws -> URL {
         let fm = FileManager.default
         let clearing = Self.clearings.count(for: directory)
         try prepareCacheDirectory()
-        let target = directory.appendingPathComponent(key).appendingPathExtension("resource")
-        var targetAttributes = try validateCachedFile(at: target)
+        // With no key trusted there is nothing this reader may be given. The transfer below then
+        // fails to connect, or has a key accepted while connecting, which it names.
+        let target = binding.map { storedFile(key: key, binding: $0) }
+        var targetAttributes = try target.flatMap { try validateCachedFile(at: $0) }
         // An older version could have kept a file that this check now refuses.
-        if targetAttributes != nil, !Self.mayKeep(target, path: path) {
+        if let target, targetAttributes != nil, !Self.mayKeep(target, path: path) {
             try? fm.removeItem(at: target)
             targetAttributes = nil
         }
         // Saved results recheck their canonical boundary on every opening, even when an
         // ordinary preview or a previous search opening has already cached these bytes.
-        if document.canonicalRoot == nil, let attrs = targetAttributes,
+        if document.canonicalRoot == nil, let target, let attrs = targetAttributes,
            let modified = attrs[.modificationDate] as? Date,
            Date().timeIntervalSince(modified) < freshness {
             try? fm.setAttributes([.creationDate: Date()], ofItemAtPath: target.path)
@@ -375,7 +423,7 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
             await report(.init(receivedBytes: size, totalBytes: size, isComplete: true), key: flightKey, id: id)
             try Task.checkCancellation()
             if generations[key] == generation, fm.fileExists(atPath: target.path) { return target }
-        } else if document.canonicalRoot == nil, targetAttributes != nil, let cached = Self.storedVersion(at: target),
+        } else if document.canonicalRoot == nil, let target, targetAttributes != nil, let cached = Self.storedVersion(at: target),
                   let current = try? await service.resolveEntry(profile: document.profile, path: path),
                   current.kind == .file, RemoteResourcePath.contains(current.path, in: document.resourceRoot),
                   RemoteFileVersion(size: current.size, modifiedAt: current.modifiedAt) == cached {
@@ -399,17 +447,30 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         }
         try protectCacheFile(temp)
         let downloaded: RemoteEntry
+        // Named by the keys this transfer's own connection verified, or nil if it could not say.
+        let arrivedThrough: String?
+        let progress: DownloadProgressHandler = { update in await self.report(update, key: flightKey, id: id) }
         do {
-            if let root = document.canonicalRoot {
-                downloaded = try await service.downloadSnapshotFile(profile: document.profile, path: path, canonicalRoot: root,
-                    destination: temp, limit: fileLimit, progress: { update in
-                        await self.report(update, key: flightKey, id: id)
-                    })
+            if let attesting {
+                let attested: AttestedDownload
+                if let root = document.canonicalRoot {
+                    attested = try await attesting.attestedDownloadSnapshotFile(profile: document.profile, path: path, canonicalRoot: root,
+                                                                                destination: temp, limit: fileLimit, progress: progress)
+                } else {
+                    attested = try await attesting.attestedDownloadFile(profile: document.profile, path: path, allowedRoot: document.resourceRoot,
+                                                                        destination: temp, limit: fileLimit, progress: progress)
+                }
+                downloaded = attested.entry
+                arrivedThrough = attested.hostKeys.map(Self.binding(for:))
             } else {
-                downloaded = try await service.downloadFile(profile: document.profile, path: path, allowedRoot: document.resourceRoot,
-                                                        destination: temp, limit: fileLimit, progress: { update in
-                                                            await self.report(update, key: flightKey, id: id)
-                                                        })
+                if let root = document.canonicalRoot {
+                    downloaded = try await service.downloadSnapshotFile(profile: document.profile, path: path, canonicalRoot: root,
+                                                                        destination: temp, limit: fileLimit, progress: progress)
+                } else {
+                    downloaded = try await service.downloadFile(profile: document.profile, path: path, allowedRoot: document.resourceRoot,
+                                                                destination: temp, limit: fileLimit, progress: progress)
+                }
+                arrivedThrough = Self.unattested
             }
         } catch RemoteFileError.notFound {
             throw RemoteResourceError.missingFile(path)
@@ -422,12 +483,13 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         // An invalidated transfer still belongs to its original consumers. Keep its
         // result at a separate URL so it cannot replace the current cached resource.
         let aside = directory.appendingPathComponent(key + "-" + id.uuidString).appendingPathExtension("resource")
-        // The same goes for a transfer begun before the cache was cleared, in any window: the
-        // key has no host key in it, so these bytes may be from a server no longer trusted.
+        // The same goes for a transfer begun before the cache was cleared, in any window, which
+        // a clearing is to remove, and for one whose connection could not name its keys.
         // It is decided before anything is removed, or this would take the copy kept since.
         let isCurrent = generations[key] == generation
+        let published = arrivedThrough.map { storedFile(key: key, binding: $0) }
         var destination = Self.clearings.holding(directory) { count in
-            let destination = isCurrent && count == clearing ? target : aside
+            let destination = isCurrent && count == clearing ? published ?? aside : aside
             try? fm.removeItem(at: destination)
             return destination
         }

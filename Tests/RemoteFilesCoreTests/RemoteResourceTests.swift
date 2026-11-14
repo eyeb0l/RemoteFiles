@@ -3,6 +3,8 @@ import XCTest
 import ImageIO
 import CoreGraphics
 import zlib
+import Crypto
+import NIOSSH
 @testable import RemoteFilesCore
 
 final class RemoteResourceTests: XCTestCase {
@@ -104,9 +106,8 @@ final class RemoteResourceTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), [live])
     }
 
-    /// The transfer left to finish must not put back what the clearing removed: the cache's key has
-    /// no host key in it, so the bytes of a server whose trust was reset would be served, for the
-    /// freshness window, as the copy of whatever is trusted at that address next.
+    /// The transfer left to finish must not put back what the clearing removed, which a trust reset
+    /// or a deleted connection asked to be gone from the device.
     func testATransferBegunBeforeAClearingIsNotKeptForLaterReaders() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -131,6 +132,254 @@ final class RemoteResourceTests: XCTestCase {
             .localFile(for: "first.png", in: document)
         XCTAssertEqual(again, fetched)
         XCTAssertEqual(try Data(contentsOf: again), current)
+    }
+
+    private func hostKey() throws -> HostKeyDetails {
+        try HostKeyDetails(publicKey: NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey)
+    }
+    private func trustStore(in dir: URL) throws -> HostTrustStore {
+        try HostTrustStore(fileURL: dir.appendingPathComponent("trust-\(UUID().uuidString).json"))
+    }
+
+    /// On iPad, resetting trust disconnects only the window that asked. Another window still
+    /// connected to the server goes on reading over the connection that verified the old key. What
+    /// it previews then must not become the copy of the key accepted at that address next.
+    func testAWindowStillConnectedAfterATrustResetCannotGiveTheNextTrustedServerItsBytes() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let document = location // One identity, so one location, for both windows.
+        let endpoint = HostEndpoint(host: document.profile.host, port: document.profile.port)
+        let trust = try trustStore(in: dir)
+        let old = try hostKey(), new = try hostKey()
+        try await trust.trustUnknown(endpoint: endpoint, key: old)
+        let resetting = AttestingTransportMock(trust: trust, keys: .init(destination: old), bytes: Data("old server, first window".utf8))
+        let stillConnected = AttestingTransportMock(trust: trust, keys: .init(destination: old), bytes: Data("from the server no longer trusted".utf8))
+        let firstWindow = RemoteResourceResolver(service: resetting, directory: dir.appendingPathComponent("cache"))
+        let otherWindow = RemoteResourceResolver(service: stillConnected, directory: dir.appendingPathComponent("cache"))
+
+        // As `AppModel.resetTrust`: the asking window clears what is kept, then the key is forgotten.
+        await firstWindow.clearCache()
+        try await trust.reset(endpoint: endpoint)
+        let previewed = try await otherWindow.localFile(for: "a.png", in: document)
+        XCTAssertEqual(try Data(contentsOf: previewed), Data("from the server no longer trusted".utf8), "The connected window still reads its own server")
+        // Nor does that window's next look find it, while no key is trusted.
+        _ = try await otherWindow.localFile(for: "a.png", in: document)
+        var previews = await stillConnected.downloads
+        XCTAssertEqual(previews, 2)
+
+        // Its next transfer is still under way when the new key is accepted, so the key trusted
+        // when it finishes is the new one, though its bytes came through the old.
+        await stillConnected.holdNextDownload()
+        let finishing = Task { try await otherWindow.localFile(for: "b.png", in: document) }
+        await stillConnected.waitUntilHeld()
+        try await trust.trustUnknown(endpoint: endpoint, key: new)
+        await stillConnected.release()
+        _ = try await finishing.value
+
+        await resetting.reconnect(keys: .init(destination: new), bytes: Data("from the server trusted now".utf8))
+        for name in ["a.png", "b.png"] {
+            let opened = try await firstWindow.localFile(for: name, in: document)
+            XCTAssertEqual(try Data(contentsOf: opened), Data("from the server trusted now".utf8), name)
+        }
+        let fetched = await resetting.downloads
+        XCTAssertEqual(fetched, 2, "No copy from the old key may be served under the new one")
+        previews = await stillConnected.downloads
+        XCTAssertEqual(previews, 3)
+    }
+
+    /// A copy is served only while the key it came through is the one trusted for its server.
+    func testACopyIsServedOnlyWhileTheKeyItCameThroughIsTrusted() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let document = location
+        let endpoint = HostEndpoint(host: document.profile.host, port: document.profile.port)
+        let trust = try trustStore(in: dir)
+        let first = try hostKey(), second = try hostKey()
+        try await trust.trustUnknown(endpoint: endpoint, key: first)
+        let service = AttestingTransportMock(trust: trust, keys: .init(destination: first), bytes: Data("first server".utf8))
+        let resolver = RemoteResourceResolver(service: service, directory: dir.appendingPathComponent("cache"))
+        let kept = try await resolver.localFile(for: "a.png", in: document)
+        let again = try await resolver.localFile(for: "a.png", in: document)
+        XCTAssertEqual(again, kept)
+        var downloads = await service.downloads
+        XCTAssertEqual(downloads, 1, "Served from the cache while its key stays trusted")
+
+        // Not cleared here: only the key decides.
+        try await trust.reset(endpoint: endpoint)
+        _ = try await resolver.localFile(for: "a.png", in: document)
+        downloads = await service.downloads
+        XCTAssertEqual(downloads, 2, "With no key trusted, nothing kept may be served")
+
+        try await trust.trustUnknown(endpoint: endpoint, key: second)
+        await service.reconnect(keys: .init(destination: second), bytes: Data("second server".utf8))
+        let other = try await resolver.localFile(for: "a.png", in: document)
+        XCTAssertNotEqual(other, kept)
+        XCTAssertEqual(try Data(contentsOf: other), Data("second server".utf8))
+        downloads = await service.downloads
+        XCTAssertEqual(downloads, 3)
+
+        try await trust.reset(endpoint: endpoint)
+        try await trust.trustUnknown(endpoint: endpoint, key: first)
+        let back = try await resolver.localFile(for: "a.png", in: document)
+        XCTAssertEqual(back, kept)
+        XCTAssertEqual(try Data(contentsOf: back), Data("first server".utf8))
+        downloads = await service.downloads
+        XCTAssertEqual(downloads, 3, "The first key's copy is its own again once that key is trusted again")
+    }
+
+    /// The trusted key is asked for when bytes are looked up, not once when a transfer starts:
+    /// first-use trust is accepted while the connection is made, after the transfer has begun.
+    func testACopyIsKeptUnderTheKeyItsConnectionVerifiedEvenIfAcceptedDuringTheTransfer() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let document = location
+        let endpoint = HostEndpoint(host: document.profile.host, port: document.profile.port)
+        let trust = try trustStore(in: dir)
+        let key = try hostKey()
+        let service = AttestingTransportMock(trust: trust, keys: .init(destination: key), bytes: Data("first use".utf8),
+                                             acceptOnConnect: endpoint)
+        let resolver = RemoteResourceResolver(service: service, directory: dir.appendingPathComponent("cache"))
+        let first = try await resolver.localFile(for: "a.png", in: document)
+        let second = try await resolver.localFile(for: "a.png", in: document)
+        XCTAssertEqual(second, first)
+        let downloads = await service.downloads
+        XCTAssertEqual(downloads, 1)
+    }
+
+    /// Played with no connection, so the trust store alone decides which copy may play.
+    func testOfflinePlaybackUsesOnlyACopyFromTheKeyTrustedNow() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let document = location
+        let endpoint = HostEndpoint(host: document.profile.host, port: document.profile.port)
+        let trust = try trustStore(in: dir)
+        let first = try hostKey(), second = try hostKey()
+        try await trust.trustUnknown(endpoint: endpoint, key: first)
+        let service = AttestingTransportMock(trust: trust, keys: .init(destination: first), bytes: Data("first server".utf8))
+        let resolver = RemoteResourceResolver(service: service, directory: dir.appendingPathComponent("cache"))
+        let kept = try await resolver.localFileForPreview(for: "a.mp4", in: document)
+        await service.setLookupError(RemoteFileError.connectionEnded)
+        let offline = try await resolver.localFileForPreview(for: "a.mp4", in: document)
+        XCTAssertEqual(offline.file, kept.file, "Its key is still trusted")
+        XCTAssertNotNil(offline.connectionFailure)
+
+        try await trust.reset(endpoint: endpoint)
+        do {
+            _ = try await resolver.localFileForPreview(for: "a.mp4", in: document)
+            XCTFail("With no key trusted, nothing kept may play")
+        } catch RemoteFileError.connectionEnded { }
+        try await trust.trustUnknown(endpoint: endpoint, key: second)
+        do {
+            _ = try await resolver.localFileForPreview(for: "a.mp4", in: document)
+            XCTFail("The first key's copy must not play as the second server's")
+        } catch RemoteFileError.connectionEnded { }
+        let downloads = await service.downloads
+        XCTAssertEqual(downloads, 1)
+    }
+
+    /// A jump host's key is part of what the bytes came through.
+    func testAJumpHostsKeyIsPartOfWhatACopyIsKeptUnder() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var profile = location.profile
+        profile.jumpHost = JumpHost(host: "bastion.example", username: "jump", identityID: UUID())
+        let document = RemoteDocumentLocation(profile: profile, path: location.path)
+        let destination = HostEndpoint(host: profile.host, port: profile.port)
+        let hop = try XCTUnwrap(profile.jumpHost), bastion = HostEndpoint(host: hop.host, port: hop.port)
+        let trust = try trustStore(in: dir)
+        let server = try hostKey(), firstJump = try hostKey(), secondJump = try hostKey()
+        try await trust.trustUnknown(endpoint: destination, key: server)
+        try await trust.trustUnknown(endpoint: bastion, key: firstJump)
+        let service = AttestingTransportMock(trust: trust, keys: .init(destination: server, jumpHost: firstJump), bytes: Data("through the first".utf8))
+        let resolver = RemoteResourceResolver(service: service, directory: dir.appendingPathComponent("cache"))
+        let kept = try await resolver.localFile(for: "a.png", in: document)
+        let again = try await resolver.localFile(for: "a.png", in: document)
+        XCTAssertEqual(again, kept)
+        var downloads = await service.downloads
+        XCTAssertEqual(downloads, 1)
+
+        try await trust.reset(endpoint: bastion)
+        _ = try await resolver.localFile(for: "a.png", in: document)
+        downloads = await service.downloads
+        XCTAssertEqual(downloads, 2, "With the jump host's key not trusted, nothing kept may be served")
+        try await trust.trustUnknown(endpoint: bastion, key: secondJump)
+        await service.reconnect(keys: .init(destination: server, jumpHost: secondJump), bytes: Data("through the second".utf8))
+        let other = try await resolver.localFile(for: "a.png", in: document)
+        XCTAssertNotEqual(other, kept)
+        XCTAssertEqual(try Data(contentsOf: other), Data("through the second".utf8))
+        downloads = await service.downloads
+        XCTAssertEqual(downloads, 3)
+    }
+
+    /// A connection that cannot name its keys keeps nothing for later readers.
+    func testATransferWhoseConnectionCannotNameItsKeysIsNotKept() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let document = location
+        let trust = try trustStore(in: dir)
+        try await trust.trustUnknown(endpoint: HostEndpoint(host: document.profile.host, port: document.profile.port), key: try hostKey())
+        let service = AttestingTransportMock(trust: trust, keys: nil, bytes: Data("unnamed".utf8))
+        let resolver = RemoteResourceResolver(service: service, directory: dir.appendingPathComponent("cache"))
+        let first = try await resolver.localFile(for: "a.png", in: document)
+        XCTAssertEqual(try Data(contentsOf: first), Data("unnamed".utf8), "Its own reader still gets the bytes")
+        let second = try await resolver.localFile(for: "a.png", in: document)
+        XCTAssertNotEqual(second, first)
+        let downloads = await service.downloads
+        XCTAssertEqual(downloads, 2)
+    }
+
+    /// Copies kept before their names included host keys came through a key nobody recorded.
+    func testACopyKeptUnderTheNameBeforeHostKeysIsNeverServed() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let document = location
+        let trust = try trustStore(in: dir)
+        try await trust.trustUnknown(endpoint: HostEndpoint(host: document.profile.host, port: document.profile.port), key: try hostKey())
+        let service = AttestingTransportMock(trust: trust, keys: nil, bytes: Data("current".utf8))
+        let cache = dir.appendingPathComponent("cache")
+        let resolver = RemoteResourceResolver(service: service, directory: cache)
+        // Learn this reference's location from where its transfer's own copy was put aside.
+        let aside = try await resolver.localFile(for: "a.png", in: document).lastPathComponent
+        let key = try XCTUnwrap(aside.split(separator: "-").first)
+        let legacy = cache.appendingPathComponent(key + ".resource")
+        try Data("kept by the previous scheme".utf8).write(to: legacy)
+        let served = try await resolver.localFile(for: "a.png", in: document)
+        XCTAssertNotEqual(served.lastPathComponent, legacy.lastPathComponent)
+        XCTAssertEqual(try Data(contentsOf: served), Data("current".utf8))
+        // A refresh removes it, as it does every copy of that reference.
+        let removed = await resolver.invalidateResources(["a.png"], in: document)
+        XCTAssertEqual(removed.map(\.lastPathComponent), [legacy.lastPathComponent])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path))
+    }
+
+    /// The app reaches its transport through a coalescing wrapper, which must not hide its keys.
+    func testTheAppsTransportBindsCopiesToHostKeysAndDemoDoesNot() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let sftp = SFTPRemoteFileService(identityStore: IdentityStore(), trustStore: try trustStore(in: dir),
+                                         metadataStore: try MetadataStore(fileURL: dir.appendingPathComponent("metadata.json")))
+        let app = RemoteResourceResolver(service: CoalescingFileService(base: sftp), directory: dir)
+        let direct = RemoteResourceResolver(service: sftp, directory: dir)
+        let demo = RemoteResourceResolver(service: CoalescingFileService(base: DemoRemoteFileService()), directory: dir)
+        let appBinds = await app.bindsCopiesToHostKeys, directBinds = await direct.bindsCopiesToHostKeys
+        let demoBinds = await demo.bindsCopiesToHostKeys
+        XCTAssertTrue(appBinds)
+        XCTAssertTrue(directBinds)
+        XCTAssertFalse(demoBinds)
+    }
+
+    /// A connection's key is the one its first exchange verified; a different one later is not
+    /// a key its bytes can be said to come through.
+    func testAConnectionRecordsOneVerifiedKey() throws {
+        let first = try hostKey(), second = try hostKey()
+        let verified = VerifiedHostKey()
+        XCTAssertNil(verified.value)
+        verified.record(first); verified.record(first)
+        XCTAssertEqual(verified.value, first)
+        verified.record(second)
+        XCTAssertNil(verified.value)
+        verified.record(first)
+        XCTAssertNil(verified.value)
     }
 
     func testDecoderDownsamplesLargeDimensionsAndRejectsCorruptData() async throws {
@@ -1170,6 +1419,63 @@ private actor VersionedResourceTransportMock: RemoteFileService {
         downloads += 1
         try bytes.write(to: destination)
         return .init(name: RemotePath.name(of: path), path: path, kind: .file, size: UInt64(bytes.count), modifiedAt: modifiedAt)
+    }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
+    func disconnect() async {}
+}
+
+/// One window's connection: it verified `keys` when it connected, whatever is trusted since.
+private actor AttestingTransportMock: RemoteFileService, HostKeyAttesting {
+    private let trust: HostTrustStore
+    private var keys: ServerHostKeys?
+    private var bytes: Data
+    private var lookupError: Error?
+    /// Accepts the session's key on first use while connecting, as the app's trust prompt does.
+    private let acceptOnConnect: HostEndpoint?
+    private(set) var downloads = 0
+    private var holdsNext = false
+    private var held: CheckedContinuation<Void, Never>?
+    private var heldWaiters: [CheckedContinuation<Void, Never>] = []
+    init(trust: HostTrustStore, keys: ServerHostKeys?, bytes: Data, acceptOnConnect: HostEndpoint? = nil) {
+        self.trust = trust; self.keys = keys; self.bytes = bytes; self.acceptOnConnect = acceptOnConnect
+    }
+    /// The next transfer stops, with its bytes written, until `release`.
+    func holdNextDownload() { holdsNext = true }
+    func waitUntilHeld() async {
+        guard held == nil else { return }
+        await withCheckedContinuation { heldWaiters.append($0) }
+    }
+    func release() { held?.resume(); held = nil }
+    func reconnect(keys: ServerHostKeys?, bytes: Data) { self.keys = keys; self.bytes = bytes }
+    func setLookupError(_ error: Error?) { lookupError = error }
+    func trustedHostKeys(for profile: ConnectionProfile) async -> ServerHostKeys? { await trust.trustedKeys(for: profile) }
+    func attestedDownloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL,
+                              limit: Int, progress: @escaping DownloadProgressHandler) async throws -> AttestedDownload {
+        if let acceptOnConnect, let key = keys?.destination { try await trust.trustUnknown(endpoint: acceptOnConnect, key: key) }
+        let verified = keys
+        let entry = try await downloadFile(profile: profile, path: path, allowedRoot: allowedRoot, destination: destination, limit: limit)
+        if holdsNext {
+            holdsNext = false
+            await withCheckedContinuation { continuation in
+                held = continuation
+                heldWaiters.forEach { $0.resume() }; heldWaiters.removeAll()
+            }
+        }
+        return AttestedDownload(entry: entry, hostKeys: verified)
+    }
+    func attestedDownloadSnapshotFile(profile: ConnectionProfile, path: String, canonicalRoot: String, destination: URL,
+                                      limit: Int, progress: @escaping DownloadProgressHandler) async throws -> AttestedDownload {
+        throw RemoteFileError.unsupportedFile
+    }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
+        if let lookupError { throw lookupError }
+        return .init(name: RemotePath.name(of: path), path: path, kind: .file)
+    }
+    func downloadFile(profile: ConnectionProfile, path: String, allowedRoot: String, destination: URL, limit: Int) async throws -> RemoteEntry {
+        downloads += 1
+        try bytes.write(to: destination)
+        return .init(name: RemotePath.name(of: path), path: path, kind: .file, size: UInt64(bytes.count))
     }
     func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
     func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { throw RemoteFileError.unsupportedFile }
