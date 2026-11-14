@@ -24,12 +24,13 @@ Test Case '-[RemoteFilesTests.PlaybackTests testCorruptRefresh…]'2026-11-14 01
  passed (0.014 seconds).
 ```
 
-The runner matches a whole result line, so it found the start of this test and no
+`log_tests` in `scripts/test-acceptance.py` already removes such records from inside a
+test's identifier and from inside the `Test Case '-[` prefix. This one fell between the
+closing quote and the outcome, which it does not handle, so the test had a start and no
 result. The PR changed image decoding only. The job was rerun once, with this cause named
-on the PR. The runner is unchanged: one occurrence does not show how often the test host's
-own output lands inside a result line, and the playback tests are where it writes most.
-If it recurs, the fix belongs in the runner's log matching, since the xcresult already
-had the right count.
+on the PR. The runner is unchanged: one occurrence does not show how often a record lands
+in that position. If it recurs, extend `log_tests` to that position as well; the xcresult
+already had the right count.
 
 ## 13 November 2026: Find focus regression needs phase-specific CI evidence
 
