@@ -409,6 +409,8 @@ import RemoteFilesCore
         <p><a id="honest" href="https://example.com/docs">Docs</a> <a id="same" href="https://example.com/">example.com</a></p>
         <p><a id="spoof" href="https://evil.example/">https://bank.example</a> <a id="plain" href="http://example.com/old">Old site</a></p>
         <p>\(String(repeating: "<a href=\"https://many.example/\">more</a> ", count: 40))<a id="buried" href="https://many.example/">https://bank.example</a></p>
+        <p><a id="spaced" href="https://evil.example/spaced">\(String(repeating: " ", count: 400))https://bank.example</a>
+        <a id="hidden" href="https://evil.example/hidden"><span hidden>evil.example/</span>https://bank.example</a></p>
         </body></html>
         """
         window.rootViewController = UIHostingController(rootView: StaticHTMLWebView(text: source, filename: "links.html", rules: rules,
@@ -419,13 +421,15 @@ import RemoteFilesCore
         try await wait("link confirmation", failure: { nil }) { finished }
         func views(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(views) }
         let view = try XCTUnwrap(views(window).compactMap { $0 as? WKWebView }.first)
-        for id in ["honest", "same", "spoof", "plain", "buried"] {
+        for id in ["honest", "same", "spoof", "plain", "buried", "spaced", "hidden"] {
             _ = try await view.evaluateJavaScript("document.getElementById('\(id)').click(); true", in: nil, contentWorld: .defaultClient)
         }
-        try await wait("link callbacks", failure: { nil }) { opened.count + confirmed.count == 5 }
+        try await wait("link callbacks", failure: { nil }) { opened.count + confirmed.count == 7 }
         XCTAssertEqual(Set(opened.map(\.absoluteString)), ["https://example.com/docs", "https://example.com/"])
-        XCTAssertEqual(Set(confirmed.map(\.absoluteString)), ["https://evil.example/", "http://example.com/old", "https://many.example/"],
-                       "More links to one address than are read is no answer, so that one is confirmed")
+        XCTAssertEqual(Set(confirmed.map(\.absoluteString)),
+                       ["https://evil.example/", "http://example.com/old", "https://many.example/",
+                        "https://evil.example/spaced", "https://evil.example/hidden"],
+                       "Too many links to one address is no answer, and a link is judged by its text as laid out")
         XCTAssertEqual(view.url?.absoluteString, "about:blank", "No link is followed inside the preview")
         XCTAssertTrue(ExternalLinkConfirmation.message(for: try XCTUnwrap(confirmed.first { $0.host == "evil.example" })).contains("evil.example"))
     }

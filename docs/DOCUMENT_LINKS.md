@@ -21,7 +21,7 @@ first, with the host it really goes to and its whole address, when:
 This applies to rendered Markdown, rich Markdown and HTML previews. In the two web previews the
 app reads the link's text from its own isolated script world; the page's scripts still never
 run. The app knows the tapped link's address, not which link it was, so it reads every link to
-that address and asks if any of them calls for it, or if there are more than 32. A link with no text to compare, such as one around an image, opens as before unless it is
+that address and asks if any of them calls for it, or if there are more than 32. The text is read as laid out, so spacing and hidden elements don't count. This is a check on text, not a guarantee: styling can still draw text the app does not read as an address, and a label that names a site in words has nothing to compare. A link with no text to compare, such as one around an image, opens as before unless it is
 `http`. Links in PDFs open without this check.
 
 ## Offline documents

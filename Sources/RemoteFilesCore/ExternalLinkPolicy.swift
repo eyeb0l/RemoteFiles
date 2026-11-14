@@ -42,6 +42,12 @@ public enum ExternalLinkPolicy {
     static func hostsShown(in text: String) -> [String] {
         String(text.prefix(2_000)).lowercased().split(whereSeparator: \.isWhitespace).compactMap { word in
             let word = String(word)
+            // An address written out with its scheme is read as one, so that a numeric, bracketed
+            // or encoded host counts too. Punctuation after it belongs to the sentence.
+            if let scheme = word.range(of: "https://") ?? word.range(of: "http://") {
+                let address = word[scheme.lowerBound...].trimmingCharacters(in: CharacterSet(charactersIn: ".,;:!?)]}>\"'”’"))
+                if let host = URLComponents(string: address)?.host, !host.isEmpty { return host }
+            }
             guard let match = pattern.firstMatch(in: word, range: NSRange(word.startIndex..., in: word)),
                   let hostRange = Range(match.range(at: 2), in: word) else { return nil }
             let host = String(word[hostRange])

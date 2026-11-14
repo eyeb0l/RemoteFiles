@@ -17,6 +17,10 @@ final class ExternalLinkPolicyTests: XCTestCase {
         XCTAssertTrue(try needs("https://evil.example/", "https://bank.example/redirect?next=https://evil.example/"))
         XCTAssertTrue(try needs("https://evil.example/", "bank.example/go?to=evil.example"))
         XCTAssertTrue(try needs("https://evil.example/", "evil.example and bank.example"), "Every address shown has to be the destination's")
+        // An address written with its scheme is read as one, whatever its host looks like.
+        for text in ["https://192.168.1.1/admin", "https://bank.xn--p1ai/", "https://[2001:db8::1]/login", "(see https://bank.example)."] {
+            XCTAssertTrue(try needs("https://evil.example/", text), text)
+        }
         XCTAssertTrue(try needs("https://xn--bnk-7cd.example/", "bank.example"), "A lookalike name is not the name shown")
     }
 
@@ -28,6 +32,8 @@ final class ExternalLinkPolicyTests: XCTestCase {
         XCTAssertFalse(try needs("https://www.example.com/", "example.com"), "With or without www is the same site to a reader")
         XCTAssertFalse(try needs("https://example.com/guide", "https://example.com/?ref=other.example"), "A host inside the shown address's query is not shown as its host")
         XCTAssertFalse(try needs("https://example.com/guide", "example.com or www.example.com"))
+        XCTAssertFalse(try needs("https://192.168.1.1/admin", "https://192.168.1.1/admin"))
+        XCTAssertFalse(try needs("https://example.com/guide", "(see https://example.com/guide)."), "Punctuation around an address is the sentence's")
         XCTAssertFalse(try needs("https://example.com/", nil), "No text to compare, as for a link around an image")
     }
 

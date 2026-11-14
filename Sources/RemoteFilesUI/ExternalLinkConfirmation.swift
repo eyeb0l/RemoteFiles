@@ -51,13 +51,17 @@ extension View {
     }
 
     /// The tapped link is not known here, only its address, so every link to that address is
-    /// read. More of them than are read is no answer at all, not a clean one.
+    /// read. More of them than are read, or more text than is read, is no answer at all, not a
+    /// clean one. `innerText` is the text as laid out: spaces collapsed, and nothing from an
+    /// element that is hidden or not displayed.
     private static let script = #"""
     const texts = [];
     for (const anchor of document.querySelectorAll('a[href]')) {
         if (anchor.href !== target && anchor.getAttribute('href') !== target) continue;
         if (texts.length >= 32) return null;
-        texts.push((anchor.textContent || '').slice(0, 300));
+        const text = (anchor.innerText || '').trim();
+        if (text.length > 2000) return null;
+        texts.push(text);
     }
     return texts;
     """#
