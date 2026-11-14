@@ -5,6 +5,140 @@ Measured 22 September 2026 with Xcode 27.0 (27A266a), Swift 6.4 and macOS
 thread and reduces the observed simulator reader stall. It does **not** establish
 that all reader hitches or the preview's performance acceptance criteria are resolved.
 
+## Markdown preparation: one parse (14 November 2026)
+
+Measured on a MacBook Air (M3, 8 cores, 16 GB) with macOS 27.2.1 and Xcode 27.2, in a release
+build. No simulator or iPhone figures were taken: expect the same proportions on a phone, not the
+same seconds.
+
+**What opening a document parsed.** `ReaderNavigationState.prepare` builds the reader's
+`DocumentTextIndex`, which parsed the text with `AttributedString(markdown:)`. `DocumentContentView`
+reused the index's parts, but then parsed the text again, with source positions, for
+`EnhancedMarkdownPolicy.requiresEnhancedRendering` whenever it held `$`, `<`, `\` or `mermaid`.
+Most READMEs do: one `<` in a code span is enough. It also prepared a document again when the limits
+had refused it after parsing, only to learn that it failed. Now the index takes source positions when
+that pre-check passes, decides the renderer, removes the positions (the runs they split join again,
+and the document equals an ordinary parse's) and applies the policy. The content view takes the
+index's parts, renderer choice and refusal. A content view without a matching index, as in tests and
+fixtures, builds an index of its own.
+
+| Path | Parses before | After |
+| --- | ---: | ---: |
+| Live or offline reader, text holding `$`, `<`, `\` or `mermaid` | 2 | 1 |
+| Live or offline reader, text holding none of them | 1 | 1 |
+| Document refused after parsing (too many runs, too deep) | 2 | 1 |
+| Document refused before parsing (markers, table width) | 0 | 0 |
+| Content view with no matching index, text holding one of them | 2 | 1 |
+
+Counted with a copy of the core in which a counter wraps both `AttributedString(markdown:)` calls,
+driven through the calls the reader makes, for every case below.
+
+**Method.** A throwaway SwiftPM executable, not committed, depends on this package by path and is
+built with `swift build -c release`. Each case and operation runs in a process of its own, three
+times. The table gives the median wall time of the operation and the process's lifetime peak
+physical footprint (`proc_pid_rusage`, `ri_lifetime_max_phys_footprint`), which includes 3 to 10 MiB
+present before the document exists. **Open** is what the reader does: build the index, then what the
+content view does with it (before: the renderer check, the scan for links to confirm and, for a
+refused document, preparing it again). **Stops** cancels preparation 200 ms after it starts and
+times the return, including those 200 ms.
+
+| Case | Content | KiB | Runs |
+| --- | --- | ---: | ---: |
+| `readme-300k`, `readme-1900k` | Headings, prose with inline formatting and `Array<String>` in code, links, lists, tasks, code blocks, tables, some images | 300, 1,900 | 11,866, 74,688 |
+| `prose-escapes` | Paragraphs with a `\\` and `` `a<b>` ``, so the renderer check reads every run | 1,899 | 135,738 |
+| `runs` | `*a* ` × 99,990: just under the run limit | 390 | 199,979 |
+| `links` | `[a](https://a.io)b ` × 99,990 | 1,855 | 199,980 |
+| `markers` | `**a** ` × 62,490: just under the marker limit | 366 | 124,979 |
+| `table` | 254 columns (255 bars) × 781 rows: under the bar and run limits | 389 | 198,374 |
+| `nesting` | Paragraphs inside 31 quotes, to the 2 MiB cap | 2,046 | 16,124 |
+| `images` | `![a](i.png) ` × 99,990: all but 128 become alternative text | 1,171 | 199,979 |
+| `tasks` | `- [ ] a` × 124,990 | 976 | 124,990 |
+| `brackets` | `[a ` × 249,990: unclosed, just under the marker limit | 732 | 1 |
+| `table-refused` | 254 columns × 961 rows: refused for its runs after parsing | 479 | 244,094 |
+| `links-refused` | `[a](u)b ` × 249,990: one counted marker gives two runs; refused after parsing | 1,953 | 499,980 |
+
+| Case | Parse alone | Open before | Open after | Stops before | Stops after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `readme-300k` | 0.12 s, 18 MiB | 0.32 s, 34 MiB | 0.20 s, 26 MiB | 0.21 s | 0.21 s |
+| `readme-1900k` | 0.79 s, 100 MiB | 2.12 s, 172 MiB | 1.31 s, 130 MiB | 0.95 s | 0.96 s |
+| `prose-escapes` | 1.28 s, 144 MiB | 3.23 s, 243 MiB | 1.97 s, 204 MiB | 1.43 s | 1.57 s |
+| `runs` | 1.71 s, 193 MiB | 2.10 s, 193 MiB | 2.07 s, 193 MiB | 1.88 s | 1.67 s |
+| `links` | 1.80 s, 195 MiB | 2.75 s, 195 MiB | 2.52 s, 195 MiB | 2.13 s | 1.91 s |
+| `markers` | 1.04 s, 122 MiB | 1.30 s, 122 MiB | 1.26 s, 122 MiB | 1.15 s | 1.23 s |
+| `table` | 2.39 s, 274 MiB | 2.85 s, 274 MiB | 2.81 s, 274 MiB | 2.63 s | 2.43 s |
+| `nesting` | 0.14 s, 40 MiB | 0.32 s, 42 MiB | 0.20 s, 41 MiB | 0.21 s | 0.27 s |
+| `images` | 1.82 s, 187 MiB | 4.30 s, 218 MiB | 4.07 s, 218 MiB | 3.66 s | 1.84 s |
+| `tasks` | 1.33 s, 283 MiB | 3.97 s, 283 MiB | 3.38 s, 283 MiB | 3.17 s | 1.32 s |
+| `brackets` | 0.07 s, 105 MiB | 0.11 s, 105 MiB | 0.07 s, 105 MiB | 0.20 s | 0.20 s |
+| `table-refused` | 2.96 s, 337 MiB | 6.04 s, 337 MiB | 2.99 s, 337 MiB | 3.03 s | 3.04 s |
+| `links-refused` | 4.73 s, 461 MiB | 9.26 s, 461 MiB | 4.62 s, 461 MiB | 4.76 s | 4.68 s |
+
+A document that finishes within 200 ms stops at its end either way. **Stops after** was measured
+before the pre-check change below, which `nesting` still paid then. The parse-alone figure for
+`links-refused` is a single run.
+
+**Where the time goes.** Foundation's parse is most of every case, and it alone sets the peak: in
+every large case but `images` the parse's own footprint is within 2 MiB of the whole preparation's.
+Parsing with source positions costs 10 to 35% more time and 10 to 40% more memory (`table`: 2.73 s
+and 375 MiB), so the index asks for them only when the pre-check passes. After the parse, 200,000 runs cost about 0.3 s
+of passes over them, each bare enumeration about 55 ms; merging passes would save at most about
+0.1 s and wasn't done. Two policy steps cost as much as the parse: every image after the 128th
+becomes its alternative text and every task marker a checkbox, each an `AttributedString` edit of
+14 to 19 µs whatever the document's size (1.86 s for 99,862 images, 1.78 s for 124,990 tasks).
+
+**Also changed.**
+
+- **Cancellation.** Preparation checks before the parse, after it and through each pass. Cancelled
+  200 ms in, `images` stops at 1.84 s instead of 3.66 s and `tasks` at 1.32 s instead of 3.17 s: the
+  end of the parse, which cannot be interrupted. A cancelled index throws instead of recording the
+  document as refused.
+- **Links to confirm.** `ExternalLinkPolicy.linksNeedingConfirmation` ran on the main actor after
+  preparation: 0.32 s for `links` and 0.05 s for `readme-1900k`. The index finds them on its own task.
+- **Renderer pre-check.** The locale-aware search for `mermaid` took 0.12 s on 2 MiB holding no `$`,
+  `<` or `\`. One pass over the bytes rules the rich renderer out first, in 3 ms, when none of those
+  characters, `&` or the word in any ASCII case appear; without them the full check can only say no.
+
+**Tried and rejected.**
+
+- Rebuilding the string once from pieces instead of one `replaceSubrange` per image or task:
+  1.83 s for `images` (0.49 s to build the replacements, 1.34 s to append) against 1.86 s, and
+  1.85 s for `tasks` against 1.92 s, each including finding what to edit. Appending costs about what
+  replacing does.
+- Editing through the character view, which keeps the run's attributes: 1.70 s for `tasks`, 2.29 s
+  for `images`.
+- Parsing in pieces to lower the peak: block structure, link reference definitions and the
+  identities that group headings and list items span the whole document, so the output would change.
+  Not attempted.
+
+**The limits: a proposal, not changed here.** The worst cases measured are 2.8 s and 274 MiB
+(`table`) or 4.1 s (`images`) for a document the limits accept, and 4.6 s and 461 MiB for one
+refused after parsing (`links-refused`). Real documents are far from either. Of 260 Markdown files
+over 16 KB on the measuring Mac (changelogs, READMEs and documentation up to 1.0 MB), the most
+demanding has 47,750 markers (a 1.0 MB changelog) and the most runs 28,862 (a 0.9 MB changelog).
+Scaled to the 2 MiB cap, the densest would have about 100,000 markers and 65,000 runs. With
+`maximumMarkers` at 125,000 and `maximumRuns` at 100,000, none of them would be refused, and the
+same constructions would cost at most:
+
+| Case at the proposed limits | Time | Peak |
+| --- | ---: | ---: |
+| Links, refused after parsing (`[a](u)b ` × 124,990: 249,980 runs) | 2.32 s | 232 MiB |
+| Images (`![a](i.png) ` × 49,990) | 1.96 s | 119 MiB |
+| Tasks (× 62,500) | 1.59 s | 143 MiB |
+| Table (254 columns × 391 rows) | 1.39 s | 139 MiB |
+| Runs (`*a* ` × 50,000) | 1.01 s | 98 MiB |
+
+A 2 MiB document of unusually dense formatting, such as generated API references or a table of
+several hundred thousand cells, would start showing **Rendered Preview Unavailable**. That is a
+product decision, so the values stay as they are.
+
+**Reproducing.** Make a SwiftPM executable outside the checkout that depends on this package by path
+and imports `RemoteFilesCore`. Generate each case in the process, record `getrusage` and
+`proc_pid_rusage` around one call (`AttributedString(markdown:)`, `DocumentPolicy.prepareMarkdown`,
+`DocumentTextIndex(text:markdown:)`), build with `swift build -c release` and run each case in a
+fresh process. To count parses, copy `Sources/RemoteFilesCore` and wrap both
+`AttributedString(markdown:)` calls in a counter. Equivalence with the previous preparation is
+checked by `DocumentTextIndexTests`, which keeps a verbatim copy of it.
+
 ## Interface overhaul: update cost and journey hangs (4 November 2026)
 
 Measured on the iPhone 18 Pro simulator (iOS 27.2), Release with `ENABLE_TESTABILITY=YES`, against `72bec2d`. No physical-device profile was recorded.
