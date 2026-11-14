@@ -173,6 +173,7 @@ final class DocumentTextIndexTests: XCTestCase {
             // The public route the renderer had used gives the same parts too.
             Self.assertSameParts(try DocumentPolicy.remoteMarkdownParts(text), expected, name)
             XCTAssertEqual(index.headings, reference.headings, name)
+            XCTAssertEqual(index.linksNeedingConfirmation, ExternalLinkPolicy.linksNeedingConfirmation(in: expected), name)
             XCTAssertEqual(index.heading(fragment: ""), reference.top, name)
             for query in ["e", "the", "Image", "☐", "é", "🌍", "[", " ", "preview unavailable"] {
                 XCTAssertEqual(try index.matches(query, inSource: false).targets, reference.matches(query), "\(name): \(query)")

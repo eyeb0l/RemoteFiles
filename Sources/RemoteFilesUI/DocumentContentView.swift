@@ -201,7 +201,7 @@ public struct DocumentContentView: View {
             guard let result = index.renderableParts else { throw MarkdownPreparation.Refused() }
             guard !Task.isCancelled else { return }
             enhancedRendering = index.requiresEnhancedRendering
-            linksToConfirm = ExternalLinkPolicy.linksNeedingConfirmation(in: result)
+            linksToConfirm = index.linksNeedingConfirmation
             prepared = result
             preparedSource = input
             preparationFailed = false
