@@ -50,12 +50,14 @@ extension View {
         }
     }
 
+    /// The tapped link is not known here, only its address, so every link to that address is
+    /// read. More of them than are read is no answer at all, not a clean one.
     private static let script = #"""
     const texts = [];
     for (const anchor of document.querySelectorAll('a[href]')) {
         if (anchor.href !== target && anchor.getAttribute('href') !== target) continue;
+        if (texts.length >= 32) return null;
         texts.push((anchor.textContent || '').slice(0, 300));
-        if (texts.length >= 32) break;
     }
     return texts;
     """#

@@ -28,18 +28,23 @@ public enum ExternalLinkPolicy {
         let shown = hostsShown(in: visibleText)
         guard !shown.isEmpty else { return false }
         func plain(_ name: String) -> String { name.hasPrefix("www.") ? String(name.dropFirst(4)) : name }
-        return !shown.contains { plain($0) == plain(host) }
+        // Every address shown has to be the destination's: naming it somewhere is not enough.
+        return shown.contains { plain($0) != plain(host) }
     }
 
     /// What reads as a web address in a link's text: `https://bank.example/login`,
     /// `www.bank.example` or a bare `bank.example`. A bare name ending like a file, such as
     /// `README.md`, is a file name, which links are often labelled with.
+    ///
+    /// Each run of text without a space is one address at most, and its host is the first name in
+    /// it: in `https://bank.example/redirect?next=https://evil.example/` the reader is shown
+    /// `bank.example`, and what follows is that address's path and query.
     static func hostsShown(in text: String) -> [String] {
-        let lowered = String(text.prefix(2_000)).lowercased()
-        let range = NSRange(lowered.startIndex..., in: lowered)
-        return pattern.matches(in: lowered, range: range).compactMap { match in
-            guard let hostRange = Range(match.range(at: 2), in: lowered) else { return nil }
-            let host = String(lowered[hostRange])
+        String(text.prefix(2_000)).lowercased().split(whereSeparator: \.isWhitespace).compactMap { word in
+            let word = String(word)
+            guard let match = pattern.firstMatch(in: word, range: NSRange(word.startIndex..., in: word)),
+                  let hostRange = Range(match.range(at: 2), in: word) else { return nil }
+            let host = String(word[hostRange])
             let hasScheme = match.range(at: 1).location != NSNotFound
             if hasScheme || host.hasPrefix("www.") { return host }
             guard let ending = host.split(separator: ".").last, !fileEndings.contains(String(ending)) else { return nil }

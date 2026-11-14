@@ -11,7 +11,8 @@ A document chooses its links' text, so the text can name one site while the link
 another. Most web links are honest and open in the browser on one tap. A link is confirmed
 first, with the host it really goes to and its whole address, when:
 
-- its text shows a web address on a different host, such as `[https://bank.example](https://evil.example/)`
+- its text shows a web address on a different host (every address shown has to be the
+  destination's, and an address's host is its first name, not one in its path or query), such as `[https://bank.example](https://evil.example/)`
   or the same thing in an HTML file. `www.` is ignored, a bare name ending like a file
   (`README.md`) is taken as a file name, and a name written in another script to look like the
   real one counts as different;
@@ -19,7 +20,8 @@ first, with the host it really goes to and its whole address, when:
 
 This applies to rendered Markdown, rich Markdown and HTML previews. In the two web previews the
 app reads the link's text from its own isolated script world; the page's scripts still never
-run. A link with no text to compare, such as one around an image, opens as before unless it is
+run. The app knows the tapped link's address, not which link it was, so it reads every link to
+that address and asks if any of them calls for it, or if there are more than 32. A link with no text to compare, such as one around an image, opens as before unless it is
 `http`. Links in PDFs open without this check.
 
 ## Offline documents
