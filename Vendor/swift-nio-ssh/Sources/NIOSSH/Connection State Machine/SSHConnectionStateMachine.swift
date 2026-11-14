@@ -89,42 +89,42 @@ struct SSHConnectionStateMachine {
         }
     }
 
-    mutating func bufferInboundData(_ data: inout ByteBuffer) {
+    mutating func bufferInboundData(_ data: inout ByteBuffer) throws {
         switch self.state {
         case .idle:
             preconditionFailure("Cannot receive inbound data in idle state")
         case .sentVersion(var state):
-            state.parser.append(bytes: &data)
+            try state.parser.append(bytes: &data)
             self.state = .sentVersion(state)
         case .keyExchange(var state):
-            state.parser.append(bytes: &data)
+            try state.parser.append(bytes: &data)
             self.state = .keyExchange(state)
         case .receivedNewKeys(var state):
-            state.parser.append(bytes: &data)
+            try state.parser.append(bytes: &data)
             self.state = .receivedNewKeys(state)
         case .sentNewKeys(var state):
-            state.parser.append(bytes: &data)
+            try state.parser.append(bytes: &data)
             self.state = .sentNewKeys(state)
         case .userAuthentication(var state):
-            state.parser.append(bytes: &data)
+            try state.parser.append(bytes: &data)
             self.state = .userAuthentication(state)
         case .active(var state):
-            state.parser.append(bytes: &data)
+            try state.parser.append(bytes: &data)
             self.state = .active(state)
         case .receivedKexInitWhenActive(var state):
-            state.parser.append(bytes: &data)
+            try state.parser.append(bytes: &data)
             self.state = .receivedKexInitWhenActive(state)
         case .sentKexInitWhenActive(var state):
-            state.parser.append(bytes: &data)
+            try state.parser.append(bytes: &data)
             self.state = .sentKexInitWhenActive(state)
         case .rekeying(var state):
-            state.parser.append(bytes: &data)
+            try state.parser.append(bytes: &data)
             self.state = .rekeying(state)
         case .rekeyingReceivedNewKeysState(var state):
-            state.parser.append(bytes: &data)
+            try state.parser.append(bytes: &data)
             self.state = .rekeyingReceivedNewKeysState(state)
         case .rekeyingSentNewKeysState(var state):
-            state.parser.append(bytes: &data)
+            try state.parser.append(bytes: &data)
             self.state = .rekeyingSentNewKeysState(state)
         case .receivedDisconnect, .sentDisconnect:
             // No more I/O, we're done.

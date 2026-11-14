@@ -28,6 +28,18 @@ handshake handler while awaiting authentication. Upstream regression tests expos
 ten-second delay even after closing the forwarded child. The close-future observer captures only the
 promise and preserves an already completed authentication result.
 
+`ClientHandshakeHandler.errorCaught` also closes the channel after failing its promise, once
+login has completed. NIOSSH reports a transport failure, such as a packet that does not decrypt,
+with `fireErrorCaught` and leaves the connection open. After login the promise is already
+fulfilled, so upstream dropped the error: the connection stayed open, its requests never finished
+and the peer could keep it buffering. Before login nothing changes: the failed promise ends the
+connection attempt and the caller closes the socket, which lets a server finish reporting, for
+example, that no algorithm matched. Closing there as well made the two "no common algorithms"
+integration tests miss the server's message. A jump connection's handler sits on a forwarded
+child channel, where it also catches `tcpShutdown` as the outer connection ends; closing that
+child then is harmless. `SFTPDirectoryReadTests.testAPacketThatFailsToDecryptAfterLoginClosesTheConnection`
+sends such a packet from an in-process server and requires the client to disconnect.
+
 Reason: the upstream `SSHClient.connect(on:settings:)` alternative invokes NIO synchronous pipeline
 operations off the event loop. The unmodified source crashed the independent OpenSSH integration test
 with `NIOCore/ChannelPipeline.swift:1208: Precondition failed`. The normal `connect(to:)` flow initializes

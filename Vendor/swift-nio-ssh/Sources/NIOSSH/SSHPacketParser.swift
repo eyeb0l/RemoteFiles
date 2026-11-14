@@ -44,7 +44,15 @@ struct SSHPacketParser {
         self.maximumPacketSize = maximumPacketSize
     }
 
-    mutating func append(bytes: inout ByteBuffer) {
+    /// RemoteFiles: what parsing leaves behind is at most one incomplete packet, which
+    /// `maximumPacketSize` bounds. More than that is data nothing is consuming, such as a packet
+    /// that failed to decrypt and is retried on every read, so it is refused rather than kept.
+    internal static let unparsedSlack = 1024
+
+    mutating func append(bytes: inout ByteBuffer) throws {
+        guard self.buffer.readableBytes <= self.maximumPacketSize + Self.unparsedSlack else {
+            throw NIOSSHError.protocolViolation(protocolName: "transport", violation: "Received data is not being consumed")
+        }
         self.buffer.writeBuffer(&bytes)
     }
 
