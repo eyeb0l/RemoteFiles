@@ -255,6 +255,7 @@ import WebKit
             return root.subviews.lazy.compactMap { web($0) }.first
         }
         let view = try XCTUnwrap(web(window))
+        XCTAssertFalse(view.allowsLinkPreview, "A long press must not offer a preview that loads a link's destination")
         let expectedIDs = try DocumentTextIndex(text: source, markdown: true).headings.map(\.id).joined(separator: ",")
         try await assertScript("Array.from(document.querySelectorAll('h1')).map(e=>e.id).join(',')", in: view, equals: expectedIDs)
         _ = try await inspect("Array.from(document.querySelectorAll('a')).find(e=>e.textContent==='Next').click(); Array.from(document.querySelectorAll('a')).find(e=>e.textContent==='Web').click(); document.querySelector('.rf-image').click()", in: view)
