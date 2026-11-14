@@ -16,3 +16,11 @@ rejects a peer channel maximum packet size of zero while preserving small nonzer
 validates ECDSA signature mpints as canonical positive, nonzero, curve-width-bounded integers
 before copying them into fixed-width storage. The package retains a focused local test target for
 these untrusted wire-format boundaries.
+
+Local security hardening also bounds what the packet parser buffers. `SSHPacketParser.append`,
+and `bufferInboundData` above it, now throw a protocol violation once the bytes left over from
+parsing exceed the maximum packet size plus 1,024 bytes. Parsing leaves at most one incomplete
+packet, so more than that is data nothing is consuming: upstream kept a packet that failed to
+decrypt, retried it on every read and appended each read behind it without limit.
+`NIOSSHHandler.channelRead` reports the error as it reports a parsing error. The local test target
+covers the bound.
