@@ -183,9 +183,12 @@ final class AppModel {
     @ObservationIgnored private var documentOrder: [CacheKey] = []
 
     let preferences: UserDefaults
+    /// Remote folder paths, so kept beside the library with its protection, not in the preferences file.
+    private let folderSortFile: URL
     init(directory: URL, fileService: (any RemoteFileService)? = nil, publicKeyInstaller: (any PublicKeyInstalling)? = nil,
          preferences: UserDefaults = .standard, identities: IdentityStore = IdentityStore()) throws {
         searchIndexDirectory = directory.appendingPathComponent("SearchIndexes-v1", isDirectory: true)
+        folderSortFile = directory.appendingPathComponent("folder-sort-orders-v1.json")
         self.preferences = preferences
         self.identities = identities
         downloadDirectory = directory.appendingPathComponent("Downloads-v1", isDirectory: true)
@@ -543,12 +546,45 @@ final class AppModel {
         if order != .name { entries.append([key, order.rawValue]) }
         storeFolderSortOrders(Array(entries.suffix(Self.folderSortLimit)))
     }
-    /// Stored as [key, order] pairs, oldest first.
-    private func folderSortOrders() -> [[String]] {
-        (preferences.array(forKey: Self.folderSortKey) as? [[String]])?.filter { $0.count == 2 } ?? []
+    /// Stored as [key, order] pairs, oldest first. Read from the file each time: every window has
+    /// its own model, and a copy held here would be written back over another window's choice.
+    func folderSortOrders() -> [[String]] {
+        moveFolderSortOrdersOutOfPreferences()
+        guard let bytes = try? Data(contentsOf: folderSortFile),
+              let entries = try? JSONDecoder().decode([[String]].self, from: bytes) else { return [] }
+        return entries.filter { $0.count == 2 }
     }
     private func storeFolderSortOrders(_ entries: [[String]]) {
-        if entries.isEmpty { preferences.removeObject(forKey: Self.folderSortKey) } else { preferences.set(entries, forKey: Self.folderSortKey) }
+        moveFolderSortOrdersOutOfPreferences()
+        writeFolderSortOrders(entries)
+    }
+    @discardableResult private func writeFolderSortOrders(_ entries: [[String]]) -> Bool {
+        guard !entries.isEmpty else {
+            try? FileManager.default.removeItem(at: folderSortFile)
+            return !FileManager.default.fileExists(atPath: folderSortFile.path)
+        }
+        do {
+            try FileManager.default.createDirectory(at: folderSortFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let bytes = try JSONEncoder().encode(entries)
+            #if os(iOS)
+            try bytes.write(to: folderSortFile, options: [.atomic, .completeFileProtection])
+            #else
+            try bytes.write(to: folderSortFile, options: .atomic)
+            #endif
+            // Which folders exist on a server is not something a backup needs to carry.
+            var values = URLResourceValues(); values.isExcludedFromBackup = true
+            var file = folderSortFile
+            try? file.setResourceValues(values)
+            return true
+        } catch { return false }
+    }
+    /// Earlier versions kept these in the preferences file, the one place remote paths were stored
+    /// without complete file protection. The preference goes only once the file holds its entries.
+    private func moveFolderSortOrdersOutOfPreferences() {
+        guard let legacy = preferences.array(forKey: Self.folderSortKey) else { return }
+        let entries = (legacy as? [[String]])?.filter { $0.count == 2 } ?? []
+        guard FileManager.default.fileExists(atPath: folderSortFile.path) || writeFolderSortOrders(entries) else { return }
+        preferences.removeObject(forKey: Self.folderSortKey)
     }
     /// Forgets the trusted key of the saved endpoint, never unsaved edits in the connection form.
     func resetTrust(for profile: ConnectionProfile) async {
