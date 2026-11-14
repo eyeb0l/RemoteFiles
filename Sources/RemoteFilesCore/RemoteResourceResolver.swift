@@ -68,12 +68,13 @@ public enum RemoteResourcePath {
 }
 
 public enum RemoteResourceError: LocalizedError, Sendable {
-    case outsideDocument, notImage, insecureCache
+    case outsideDocument, notImage, imageTooLarge, insecureCache
     case missingFile(String)
     public var errorDescription: String? {
         switch self {
         case .outsideDocument: return "This image link points outside the document’s folder. Open its folder directly to access it."
         case .notImage: return "This file is not a supported image, or its image data is damaged."
+        case .imageTooLarge: return "This image has too many pixels to preview. Save the original to open it in another app."
         case .insecureCache: return "The protected image cache is unavailable."
         case .missingFile(let path): return "File not found at:\n\(path)\n\nIt may have been moved or deleted."
         }
@@ -473,13 +474,14 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
     /// Returns secure attributes for a reusable regular file. Non-regular cache
     /// entries are discarded without following them and treated as a miss.
     /// A Markdown image can point at any file, such as an `id_rsa` beside the document, and this
-    /// cache is on disk. Anything not named as media must really be an image, like an `.ico`.
+    /// cache is on disk. Anything not named as media must really be an image in a format the
+    /// app displays, like an `.ico`.
     private static func mayKeep(_ file: URL, path: String) -> Bool {
         switch DocumentPolicy.kind(filename: RemotePath.name(of: path)) {
         case .image, .pdf, .video, .audio: return true
         default:
             guard let source = CGImageSourceCreateWithURL(file as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return false }
-            return CGImageSourceGetType(source) != nil
+            return RemoteImageFormat.isAllowed(source)
         }
     }
     private func validateCachedFile(at url: URL) throws -> [FileAttributeKey: Any]? {

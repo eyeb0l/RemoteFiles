@@ -180,7 +180,15 @@ final class SFTPIntegrationTests: XCTestCase {
         server.standardOutput = log; server.standardError = log
         try server.run()
         addTeardownBlock {
-            if server.isRunning { server.terminate(); server.waitUntilExit() }
+            // Not `waitUntilExit()`: called here, on the main thread, it sometimes polls forever after sshd
+            // has exited and `isRunning` is already false (docs/CI_HISTORY.md, 14 November 2026).
+            if server.isRunning { server.terminate() }
+            let deadline = ContinuousClock.now + .seconds(60)
+            while server.isRunning, ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(20)) }
+            if server.isRunning {
+                kill(server.processIdentifier, SIGKILL)
+                XCTFail("The limited fixture \(name) did not exit within 60 seconds of SIGTERM")
+            }
             try? log.close()
             if let evidence = ProcessInfo.processInfo.environment["REMOTEFILES_SSHD_LOG"] {
                 let retained = URL(fileURLWithPath: evidence).deletingPathExtension().appendingPathExtension("\(name).log")

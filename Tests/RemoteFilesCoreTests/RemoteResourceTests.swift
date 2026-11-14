@@ -123,6 +123,117 @@ final class RemoteResourceTests: XCTestCase {
         catch RemoteResourceError.notImage { }
     }
 
+    private func writeImage(_ type: String, to file: URL, side: Int = 16) -> Bool {
+        guard let context = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let image = context.makeImage(),
+              let destination = CGImageDestinationCreateWithURL(file as CFURL, type as CFString, 1, nil) else { return false }
+        CGImageDestinationAddImage(destination, image, nil)
+        return CGImageDestinationFinalize(destination)
+    }
+    private func detectedType(_ file: URL) -> String? {
+        CGImageSourceCreateWithURL(file as CFURL, nil).flatMap { CGImageSourceGetType($0) as String? }
+    }
+
+    /// ImageIO chooses a decoder from a file's bytes, so its name must not decide what is decoded.
+    func testDecoderRefusesFormatsTheAppDoesNotNameWhateverTheFileIsCalled() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let decoder = RemoteImageDecoder()
+        var refused: [String] = []
+        for type in ["com.adobe.photoshop-image", "public.jpeg-2000", "com.ilm.openexr-image", "com.truevision.tga-image",
+                     "public.avif", "com.apple.icns", "public.jpeg-xl", "com.microsoft.dds", "public.pbm"] {
+            let file = dir.appendingPathComponent("diagram-\(refused.count).png")
+            guard writeImage(type, to: file), let detected = detectedType(file) else { continue }
+            XCTAssertFalse(RemoteImageFormat.allowedTypes.contains(detected), "\(type) was read back as \(detected)")
+            do {
+                _ = try await decoder.decode(file, maxPixel: 400)
+                XCTFail("\(type) was decoded from a file named .png")
+            } catch RemoteResourceError.notImage { }
+            refused.append(type)
+        }
+        XCTAssertGreaterThanOrEqual(refused.count, 2, "ImageIO wrote too few other formats to prove the rule: \(refused)")
+
+        // The disk cache applies the same rule to a file whose name does not say it is media.
+        let photoshop = dir.appendingPathComponent("logo.psd")
+        XCTAssertTrue(writeImage("com.adobe.photoshop-image", to: photoshop))
+        let cache = dir.appendingPathComponent("cache")
+        let resolver = RemoteResourceResolver(service: FixedBytesTransportMock(bytes: try Data(contentsOf: photoshop)), directory: cache)
+        do {
+            _ = try await resolver.localFile(for: "logo", in: location)
+            XCTFail("A Photoshop file is not an image this app displays")
+        } catch RemoteResourceError.notImage { }
+    }
+
+    func testDecoderAcceptsEveryFormatTheAppNames() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let decoder = RemoteImageDecoder()
+        var accepted = Set<String>()
+        for type in RemoteImageFormat.allowedTypes.sorted() {
+            // The name is deliberately unhelpful: only the contents count.
+            let file = dir.appendingPathComponent("image-\(accepted.count).bin")
+            guard writeImage(type, to: file) else { continue }
+            let decoded = try await decoder.decode(file, maxPixel: 400)
+            XCTAssertEqual(decoded.image.width, 16, type)
+            accepted.insert(type)
+        }
+        XCTAssertTrue(accepted.isSuperset(of: ["public.jpeg", "public.png", "public.tiff", "com.compuserve.gif", "com.microsoft.bmp"]),
+                      "Only \(accepted.sorted()) could be written and decoded")
+        // ImageIO reads WebP but cannot write it: a one-pixel lossless file.
+        let webp = dir.appendingPathComponent("pixel.bin")
+        try XCTUnwrap(Data(base64Encoded: "UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==")).write(to: webp)
+        XCTAssertEqual(detectedType(webp), "org.webmproject.webp")
+        let pixel = try await decoder.decode(webp, maxPixel: 400)
+        XCTAssertEqual(pixel.image.width, 1)
+    }
+
+    /// One-bit greyscale and all black: real pixels that compress to a few kilobytes. ImageIO
+    /// reports no size at all for a file that only declares large dimensions.
+    private func blackPNG(width: Int, height: Int) throws -> Data {
+        func bytes(_ value: UInt32) -> Data { withUnsafeBytes(of: value.bigEndian) { Data($0) } }
+        func chunk(_ type: String, _ payload: Data) -> Data {
+            let checked = Data(type.utf8) + payload
+            let checksum = checked.withUnsafeBytes { crc32(0, $0.bindMemory(to: Bytef.self).baseAddress, uInt(checked.count)) }
+            return bytes(UInt32(payload.count)) + checked + bytes(UInt32(checksum))
+        }
+        let rows = Data(count: (1 + (width + 7) / 8) * height)
+        var length = compressBound(uLong(rows.count))
+        var packed = Data(count: Int(length))
+        let status = packed.withUnsafeMutableBytes { output in
+            rows.withUnsafeBytes { input in
+                compress2(output.bindMemory(to: Bytef.self).baseAddress, &length,
+                          input.bindMemory(to: Bytef.self).baseAddress, uLong(rows.count), 9)
+            }
+        }
+        XCTAssertEqual(status, Z_OK)
+        return Data([137, 80, 78, 71, 13, 10, 26, 10])
+            + chunk("IHDR", bytes(UInt32(width)) + bytes(UInt32(height)) + Data([1, 0, 0, 0, 0]))
+            + chunk("IDAT", packed.prefix(Int(length))) + chunk("IEND", Data())
+    }
+
+    func testDecoderRefusesSourcesWithTooManyPixelsBeforeDecodingThem() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let decoder = RemoteImageDecoder()
+        for (width, height) in [(9_000, 9_000), (32_769, 16), (16, 32_769), (20_000, 20_000)] {
+            try blackPNG(width: width, height: height).write(to: file)
+            do {
+                _ = try await decoder.decode(file, maxPixel: 400)
+                XCTFail("\(width) x \(height) was decoded")
+            } catch RemoteResourceError.imageTooLarge { }
+        }
+        // 48-megapixel phone photos and 61-megapixel camera photos are within the limit.
+        XCTAssertTrue(RemoteImageFormat.isWithinLimits(width: 8_064, height: 6_048))
+        XCTAssertTrue(RemoteImageFormat.isWithinLimits(width: 9_504, height: 6_336))
+        XCTAssertTrue(RemoteImageFormat.isWithinLimits(width: 8_000, height: 8_000))
+        XCTAssertFalse(RemoteImageFormat.isWithinLimits(width: 8_001, height: 8_000))
+        XCTAssertFalse(RemoteImageFormat.isWithinLimits(width: .nan, height: 8))
+        XCTAssertFalse(RemoteImageFormat.isWithinLimits(width: 0, height: 8))
+    }
+
     /// Valid RGB PNG with uncompressed DEFLATE rows. The fixture has actual image
     /// bytes over 70 MB rather than padding, and generation retains only one row.
     private func largePNG(at file: URL) throws {
