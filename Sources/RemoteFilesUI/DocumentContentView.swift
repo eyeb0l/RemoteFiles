@@ -186,7 +186,8 @@ public struct DocumentContentView: View {
         preparationFailed = false
         do {
             let result: [MarkdownPart]
-            if let index = navigation?.index, index.source.utf8.elementsEqual(input.utf8) { result = index.parts }
+            // A refused document has no parts to reuse; preparing it here reports why it isn't rendered.
+            if let index = navigation?.index, index.source.utf8.elementsEqual(input.utf8), let parts = index.renderableParts { result = parts }
             else { result = try await MarkdownPreparation.shared.prepare(input) }
             let requiresEnhanced = await MarkdownPreparation.shared.requiresEnhancedRendering(input)
             guard !Task.isCancelled else { return }

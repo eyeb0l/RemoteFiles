@@ -102,7 +102,9 @@ final class DocumentPolicyTests: XCTestCase {
         }
         // The reader's parts and its text index use the same preparation, so neither renders it.
         XCTAssertThrowsError(try DocumentPolicy.remoteMarkdownParts(source), file: file, line: line)
-        XCTAssertThrowsError(try DocumentTextIndex(text: source, markdown: true), file: file, line: line)
+        let index = try? DocumentTextIndex(text: source, markdown: true)
+        XCTAssertEqual(index?.isSourceOnly, true, file: file, line: line)
+        XCTAssertEqual(index?.parts.count, 0, file: file, line: line)
     }
 
     /// The renderer nests one view per block level, and a few hundred overflow its stack.

@@ -40,7 +40,8 @@ one rich document.
 
 A Markdown file within the 2 MiB preview cap can still cost far more than its size
 suggests, so a document past any of these limits is not rendered, natively or richly.
-The reader shows **Rendered Preview Unavailable**, and **Source** shows the text as usual:
+The reader shows **Rendered Preview Unavailable**, and **Source** shows the text as usual,
+with **Find** working there. Such a document has no headings list:
 
 - **Nesting:** more than 32 block levels around any text, such as a quote inside a quote
   32 times. The renderer builds a view inside a view for each level, and a few hundred
