@@ -54,7 +54,8 @@ or proof of the complete physical acceptance matrix.
 `TEST_RUNNER_REMOTEFILES_REAL_SERVER=1`. The initial journey additionally requires
 `TEST_RUNNER_REMOTEFILES_REAL_HOST`, `..._USER`, `..._DIRECTORY`, and
 `..._FINGERPRINT`; these are forwarded to the runner without the `TEST_RUNNER_`
-prefix. Never pass private keys/passwords through these variables.
+prefix. Never pass private keys/passwords through these variables. `testRelativeLargeAndMissingImages`
+reads `..._REAL_HOST` too when it has to create its "Image checks" connection.
 
 Build the signed Release test target with `ENABLE_TESTABILITY=YES` as documented
 in [READER_PERFORMANCE.md](READER_PERFORMANCE.md). Run only the intended test with
