@@ -337,6 +337,81 @@ final class PrivateKeyRedactionTests: XCTestCase {
         }
     }
 
+    /// A log line can be mostly prefix. The key is at the end of each, and only it is hidden.
+    func testAKeyUnderALongLogPrefixIsHiddenAndThePrefixStays() throws {
+        let key = SyntheticKey.pem(bytes: 500)
+        let prefix = "2026-11-13T10:00:00.000Z gateway-7f9c4d5b6-x2k8q deploy[4821]: info     "
+        XCTAssertGreaterThan(prefix.utf8.count, 64, "Longer than the key text beside it")
+        let logged = key.split(separator: "\n").map { prefix + $0 }.joined(separator: "\n") + "\n" + prefix + "done\n"
+        assertHidden(logged, key: key)
+        let result = PrivateKeyRedaction.redact(logged)
+        XCTAssertEqual(result.hiddenKeys, 1)
+        let hidden = result.text.split(separator: "\n").filter { $0.contains("•••••") }
+        XCTAssertEqual(hidden.count, key.split(separator: "\n").count - 2, "Every line of the key's body")
+        XCTAssertTrue(hidden.allSatisfy { $0.hasPrefix(prefix) }, "The prefix beside the key is still readable")
+        // The last line of a key is short, and is found by where the lines above it began.
+        let last = try XCTUnwrap(key.split(separator: "\n").dropLast().last)
+        XCTAssertLessThan(last.count, 40)
+        XCTAssertFalse(result.text.contains(last))
+        XCTAssertTrue(result.text.hasSuffix(prefix + "done\n"))
+        // A sentence under the same prefix, between the markers, is not a key.
+        let prose = [SyntheticKey.begin("RSA"), "the key was removed from this report on request", SyntheticKey.end("RSA")]
+            .map { prefix + $0 }.joined(separator: "\n")
+        XCTAssertEqual(PrivateKeyRedaction.redact(prose).hiddenKeys, 0)
+    }
+
+    func testPGPSecretKeyBlocksAndLabelsInOtherCasesAreHidden() {
+        let body = SyntheticKey.wrapped(SyntheticKey.base64(bytes: 400, seed: 31))
+        let pgp = (["-----BEGIN PGP SECRET KEY BLOCK-----", "Version: Synthetic 1", ""] + body
+                   + ["=AbCd", "-----END PGP SECRET KEY BLOCK-----"]).joined(separator: "\n") + "\n"
+        assertHidden("Backup of the signing key:\n\n" + pgp, key: pgp)
+        XCTAssertTrue(PrivateKeyRedaction.redact(pgp).isOnlyKeys)
+        XCTAssertEqual(PrivateKeyRedaction.redact("-----BEGIN PGP PUBLIC KEY BLOCK-----\n" + body.joined(separator: "\n")
+                                                   + "\n-----END PGP PUBLIC KEY BLOCK-----\n").hiddenKeys, 0)
+        for label in ["rsa private key", "Rsa Private Key", "pgp secret key block"] {
+            let lower = (["-----BEGIN \(label)-----"] + body + ["-----END \(label)-----"]).joined(separator: "\n") + "\n"
+            assertHidden(lower, key: lower)
+        }
+        XCTAssertEqual(PrivateKeyRedaction.redact("Keep the private key and the secret key in the Keychain.").hiddenKeys, 0)
+    }
+
+    /// Each accepted candidate once read to the end of its line, so a megabyte of them on one
+    /// line took most of a minute. Only the candidate's own run is read now.
+    func testAcceptedCandidatesOnOneLongLineAreEachReadOnce() {
+        let candidate = SyntheticKey.opensshBody()
+        let unit = candidate + " "
+        let text = String(repeating: unit, count: DocumentPolicy.previewByteLimit / unit.utf8.count)
+        let started = ContinuousClock.now
+        let result = PrivateKeyRedaction.redact(text)
+        // Quadratic work took 90 seconds for this much on a Mac; linear work takes a fraction of one.
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(20))
+        XCTAssertEqual(result.hiddenKeys, text.utf8.count / unit.utf8.count, "Every candidate is still hidden")
+        XCTAssertFalse(result.text.contains(candidate.prefix(24)))
+        XCTAssertEqual(result.text.utf16.count, text.utf16.count)
+        // Nor does padding after each candidate make the work more than linear.
+        let padded = candidate + String(repeating: " ", count: 4_000) + "\n"
+        let spaced = String(repeating: padded, count: DocumentPolicy.previewByteLimit / padded.utf8.count)
+        let again = ContinuousClock.now
+        XCTAssertEqual(PrivateKeyRedaction.redact(spaced).hiddenKeys, spaced.utf8.count / padded.utf8.count)
+        XCTAssertLessThan(ContinuousClock.now - again, .seconds(20))
+    }
+
+    /// Only a run that ends its line wraps onto the next, however the line ends.
+    func testAWrappedKeyStillContinuesOntoItsNextLines() {
+        let lines = SyntheticKey.wrapped(SyntheticKey.opensshBody(), width: 70)
+        XCTAssertGreaterThan(lines.count, 3)
+        for text in [lines.joined(separator: "\n") + "\n", lines.joined(separator: "\r\n") + "\r\n",
+                     "key = \"" + lines.joined(separator: "\\n") + "\"\n",
+                     lines.map { "  \"" + $0 + "\"," }.joined(separator: "\n") + "\n",
+                     // Trailing whitespace of any length is still the end of the line.
+                     lines.map { $0 + "     " }.joined(separator: "\n") + "\n",
+                     lines.map { $0 + String(repeating: " \t", count: 40) }.joined(separator: "\r\n") + "\r\n"] {
+            let result = PrivateKeyRedaction.redact(text)
+            XCTAssertEqual(result.hiddenKeys, 1)
+            for line in lines { XCTAssertFalse(result.text.contains(line.suffix(12)), "A later line of the key survived") }
+        }
+    }
+
     func testHostileInputStaysLinearAtThePreviewLimit() {
         let limit = DocumentPolicy.previewByteLimit
         let begin = SyntheticKey.begin("RSA") + "\n", end = SyntheticKey.end("RSA") + "\n"

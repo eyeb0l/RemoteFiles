@@ -34,6 +34,11 @@ public enum PrivateKeyRedaction {
     // MARK: - Recognizing a key
 
     private static let privateKey = Array("PRIVATE KEY".utf8)
+    /// PGP's older name for the same thing: `-----BEGIN PGP SECRET KEY BLOCK-----`.
+    private static let secretKey = Array("SECRET KEY".utf8)
+    /// The scanner reads a label in any case, so the first look must not miss these.
+    private static let otherCases = ["private key", "Private Key", "secret key", "Secret Key"].map { Array($0.utf8) }
+    private static func isKeyLabel(_ label: String) -> Bool { label.contains("PRIVATE KEY") || label.contains("PGP SECRET KEY") }
     private static let puttyMarker = Array("PuTTY-User-Key-File-".utf8)
     private static let ssh2Begin = Array("---- BEGIN SSH2 ".utf8)
     private static let ssh2End = Array("---- END SSH2 ".utf8)
@@ -44,10 +49,12 @@ public enum PrivateKeyRedaction {
     /// an OpenSSH key without its markers. Every such text starts with these characters.
     private static let wrappedPEM = base64Prefix(of: "-----BEGIN ", characters: 14)
     private static let wrappedOpenSSH = base64Prefix(of: "openssh-key-v1\0", characters: 19)
-    private static let needles = [privateKey, puttyMarker, wrappedPEM, wrappedOpenSSH]
+    private static let needles = [privateKey, secretKey, puttyMarker, wrappedPEM, wrappedOpenSSH] + otherCases
 
     /// The longest run of base64 that starts a key line. Real keys wrap at 64 to 76 characters.
     private static let minimumKeyRun = 32
+    /// A run that ends a line under a long prefix. Keys wrap at 64 or more; this allows a narrower one.
+    private static let minimumTailRun = 40
     /// Shorter than any real key's body. The smallest, an Ed25519 PKCS #8 key, has 64 characters.
     private static let minimumKeyCharacters = 40
     private static let minimumWrappedCharacters = 64
@@ -114,6 +121,27 @@ public enum PrivateKeyRedaction {
             self.runs = runs; visibleBytes = visible; isBlank = !hasAlphanumeric
         }
 
+        private func endsLine(_ run: Range<Int>, in bytes: [UInt8]) -> Bool {
+            !bytes[run.upperBound..<range.upperBound].contains { !PrivateKeyRedaction.isSpace($0) && $0 != 0x22 && $0 != 0x27 && $0 != 0x2C }
+        }
+
+        /// The run that ends the line, when it is long enough to be a key's and nothing follows it
+        /// but whitespace or a closing quote. A log line can be mostly prefix (a timestamp, a host,
+        /// a process) and still end in a line of the key.
+        func keyTail(in bytes: [UInt8]) -> Range<Int>? {
+            guard let last = runs.last, last.count >= PrivateKeyRedaction.minimumTailRun,
+                  bytes[last].contains(where: { (0x30...0x39).contains($0) || $0 == 0x2B || $0 == 0x2F }),
+                  endsLine(last, in: bytes) else { return nil }
+            return last
+        }
+
+        /// The run that ends the line and starts in the given column: a key's short last line
+        /// under the same prefix as the lines before it.
+        func tail(startingAt column: Int, in bytes: [UInt8]) -> Range<Int>? {
+            guard let last = runs.last, last.lowerBound - range.lowerBound == column, endsLine(last, in: bytes) else { return nil }
+            return last
+        }
+
         /// Mostly long base64, with at least one run that an identifier wouldn't be. A prefix, such
         /// as a log's timestamp or a code comment's slashes, doesn't stop a line being one.
         func isKeyLine(in bytes: [UInt8]) -> Bool {
@@ -152,30 +180,37 @@ public enum PrivateKeyRedaction {
         }
     }
 
+    /// Where the next line starts, if a line ending begins at `index`: a real one, or an escaped
+    /// `\n` or `\r\n` behind any number of backslashes.
+    private static func lineBreak(in bytes: [UInt8], at index: Int, end: Int) -> Int? {
+        guard index < end else { return nil }
+        let byte = bytes[index]
+        // CRLF is one line ending, raw or escaped. Counted as two it makes an empty line, which
+        // the scanners read as the end of a key, leaving the rest of the key's lines showing.
+        if byte == 0x0A { return index + 1 }
+        if byte == 0x0D { return index + 1 < end && bytes[index + 1] == 0x0A ? index + 2 : index + 1 }
+        guard byte == 0x5C else { return nil }
+        var after = index
+        while after < end, bytes[after] == 0x5C { after += 1 }
+        guard after < end, bytes[after] == 0x6E || bytes[after] == 0x72 else { return nil }
+        var next = after + 1
+        if bytes[after] == 0x72 {
+            var pair = after + 1
+            while pair < end, bytes[pair] == 0x5C { pair += 1 }
+            if pair > after + 1, pair < end, bytes[pair] == 0x6E { next = pair + 1 }
+        }
+        return next
+    }
+
     /// Calls `body` for each line in `range` until it returns false.
     private static func forEachLine(in bytes: [UInt8], range: Range<Int>, _ body: (Line) -> Bool) {
         var start = range.lowerBound, index = start
         while index < range.upperBound {
-            let byte = bytes[index]
-            var next: Int?
-            // CRLF is one line ending, raw or escaped. Counted as two it makes an empty line, which
-            // the scanners read as the end of a key, leaving the rest of the key's lines showing.
-            if byte == 0x0A {
-                next = index + 1
-            } else if byte == 0x0D {
-                next = index + 1
-                if next! < range.upperBound, bytes[next!] == 0x0A { next! += 1 }
-            } else if byte == 0x5C {
-                var after = index
-                while after < range.upperBound, bytes[after] == 0x5C { after += 1 }
-                if after < range.upperBound, bytes[after] == 0x6E || bytes[after] == 0x72 {
-                    next = after + 1
-                    if bytes[after] == 0x72 {
-                        var pair = after + 1
-                        while pair < range.upperBound, bytes[pair] == 0x5C { pair += 1 }
-                        if pair > after + 1, pair < range.upperBound, bytes[pair] == 0x6E { next = pair + 1 }
-                    }
-                } else { index = after; continue }
+            let next = lineBreak(in: bytes, at: index, end: range.upperBound)
+            if next == nil, bytes[index] == 0x5C {
+                // Backslashes that escape something else belong to the line.
+                while index < range.upperBound, bytes[index] == 0x5C { index += 1 }
+                continue
             }
             if let next {
                 if !body(Line(start..<index, in: bytes)) { return }
@@ -200,7 +235,7 @@ public enum PrivateKeyRedaction {
 
         mutating func findPEMBlocks() {
             var found: [PEMScanner.Block] = []
-            PEMScanner.scan(bytes) { block in if block.label.contains("PRIVATE KEY") { found.append(block) } }
+            PEMScanner.scan(bytes) { block in if PrivateKeyRedaction.isKeyLabel(block.label) { found.append(block) } }
             for block in found {
                 guard let body = walk(block.body, isTerminated: block.isTerminated) else { continue }
                 let beginLength = "-----BEGIN ".utf8.count + block.label.utf8.count + PrivateKeyRedaction.pemDashes.count
@@ -285,7 +320,7 @@ public enum PrivateKeyRedaction {
                         ? [start..<runEnd] : wrappedLines(from: start, upTo: PrivateKeyRedaction.wrappedHeadCharacters)
                     guard head.reduce(0, { $0 + $1.count }) >= PrivateKeyRedaction.minimumWrappedCharacters,
                           isWrappedKey(head, needle: needle) else { continue }
-                    let body = wrappedLines(from: start)
+                    let body = wrappedBody(from: start)
                     add(body, span: start..<body.last!.upperBound)
                     position = body.last!.upperBound
                 }
@@ -304,14 +339,43 @@ public enum PrivateKeyRedaction {
             return PrivateKeyRedaction.first(PrivateKeyRedaction.privateKey, in: Array(head), range: 0..<head.count) != nil
         }
 
-        /// The run, and any lines it wraps onto. Every line of wrapped base64 has the same length
-        /// but the last, so a shorter or longer one ends it, as does any other kind of line.
-        private func wrappedLines(from start: Int, upTo limit: Int? = nil) -> [Range<Int>] {
+        /// The whole of an accepted key: its run, and the lines it wraps onto. Only a run that ends
+        /// its line wraps. Reading the rest of the line to find out would have every candidate on
+        /// one long line read all of it, which made a megabyte of them take most of a minute.
+        private func wrappedBody(from start: Int) -> [Range<Int>] {
+            var index = start
+            while index < bytes.count {
+                if PrivateKeyRedaction.isBase64(bytes[index]) { index += 1 }
+                else if bytes[index] == 0x5C, index + 1 < bytes.count, bytes[index + 1] == 0x2F { index += 2 }
+                else { break }
+            }
+            let first = start..<index, width = first.count
+            guard width <= PrivateKeyRedaction.maximumWrappedLine else { return [first] }
+            // A closing quote, a comma or trailing spaces may stand between the run and its line's end.
+            // Each candidate reads only the padding that follows it, so this stays linear however long that is.
+            var after = index
+            while after < bytes.count,
+                  bytes[after] == 0x20 || bytes[after] == 0x09 || bytes[after] == 0x22 || bytes[after] == 0x27 || bytes[after] == 0x2C {
+                after += 1
+            }
+            guard let next = PrivateKeyRedaction.lineBreak(in: bytes, at: after, end: bytes.count) else { return [first] }
+            var runs = [first]
+            PrivateKeyRedaction.forEachLine(in: bytes, range: next..<bytes.count) { line in
+                guard let run = line.runs.first, line.runs.count == 1, run.count <= width, line.isSoleRun(in: bytes) else { return false }
+                runs.append(run)
+                return run.count == width
+            }
+            return runs
+        }
+
+        /// The start of a candidate, far enough to tell what it is: its run and any lines it wraps
+        /// onto. Every line of wrapped base64 has the same length but the last, so a shorter or
+        /// longer one ends it, as does any other kind of line.
+        private func wrappedLines(from start: Int, upTo limit: Int) -> [Range<Int>] {
             var runs: [Range<Int>] = [], width = 0, total = 0
-            let limit = limit ?? .max
             // A look ahead stays in a fixed window: one long line of candidates would otherwise have
             // each of them read the whole line.
-            let end = limit == .max ? bytes.count : min(bytes.count, start + PrivateKeyRedaction.wrappedHeadWindow)
+            let end = min(bytes.count, start + PrivateKeyRedaction.wrappedHeadWindow)
             PrivateKeyRedaction.forEachLine(in: bytes, range: start..<end) { line in
                 guard let run = line.runs.first else { return false }
                 if runs.isEmpty {
@@ -331,18 +395,32 @@ public enum PrivateKeyRedaction {
         /// what follows it, and most of it must be key text.
         private func walk(_ range: Range<Int>, isTerminated: Bool) -> [Range<Int>]? {
             var hidden: [Range<Int>] = [], total = 0, seenKey = false, keyBytes = 0, otherBytes = 0
+            // Where the key starts on a line that is mostly prefix, so that its short last line is found.
+            var tailColumn: Int?
             let bytes = self.bytes
             PrivateKeyRedaction.forEachLine(in: bytes, range: range) { line in
                 guard !line.isBlank else { return true }
                 let isKeyLine = line.isKeyLine(in: bytes)
                 if !seenKey, !isKeyLine, line.isHeader(in: bytes) { return true }
+                if !isKeyLine {
+                    // Only the key is hidden on such a line, and the prefix stays readable.
+                    let tail = line.keyTail(in: bytes) ?? tailColumn.flatMap { line.tail(startingAt: $0, in: bytes) }
+                    if let tail {
+                        seenKey = true; tailColumn = tail.lowerBound - line.range.lowerBound
+                        hidden.append(tail); total += tail.count; keyBytes += line.visibleBytes
+                        return true
+                    }
+                }
+                // The line after a key under a prefix is the end marker's own prefix, or other log text.
+                let followsTail = tailColumn != nil
+                tailColumn = nil
                 let isLone = seenKey && line.isLoneRun(in: bytes)
                 if !isKeyLine, !isLone {
                     guard isTerminated else { return false }
                     if !seenKey { otherBytes += line.visibleBytes; return true }
                 }
                 seenKey = true
-                for run in line.runs where run.count >= 4 || isLone {
+                for run in line.runs where (run.count >= 4 || isLone) && (isKeyLine || isLone || !followsTail) {
                     hidden.append(run); total += run.count
                 }
                 if isKeyLine || isLone { keyBytes += line.visibleBytes } else { otherBytes += line.visibleBytes }
