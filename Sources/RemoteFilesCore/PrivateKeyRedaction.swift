@@ -352,8 +352,9 @@ public enum PrivateKeyRedaction {
             let first = start..<index, width = first.count
             guard width <= PrivateKeyRedaction.maximumWrappedLine else { return [first] }
             // A closing quote, a comma or trailing spaces may stand between the run and its line's end.
+            // Each candidate reads only the padding that follows it, so this stays linear however long that is.
             var after = index
-            while after < bytes.count, after - index < 4,
+            while after < bytes.count,
                   bytes[after] == 0x20 || bytes[after] == 0x09 || bytes[after] == 0x22 || bytes[after] == 0x27 || bytes[after] == 0x2C {
                 after += 1
             }

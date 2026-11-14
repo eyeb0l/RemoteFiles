@@ -388,6 +388,12 @@ final class PrivateKeyRedactionTests: XCTestCase {
         XCTAssertEqual(result.hiddenKeys, text.utf8.count / unit.utf8.count, "Every candidate is still hidden")
         XCTAssertFalse(result.text.contains(candidate.prefix(24)))
         XCTAssertEqual(result.text.utf16.count, text.utf16.count)
+        // Nor does padding after each candidate make the work more than linear.
+        let padded = candidate + String(repeating: " ", count: 4_000) + "\n"
+        let spaced = String(repeating: padded, count: DocumentPolicy.previewByteLimit / padded.utf8.count)
+        let again = ContinuousClock.now
+        XCTAssertEqual(PrivateKeyRedaction.redact(spaced).hiddenKeys, spaced.utf8.count / padded.utf8.count)
+        XCTAssertLessThan(ContinuousClock.now - again, .seconds(20))
     }
 
     /// Only a run that ends its line wraps onto the next, however the line ends.
@@ -396,7 +402,10 @@ final class PrivateKeyRedactionTests: XCTestCase {
         XCTAssertGreaterThan(lines.count, 3)
         for text in [lines.joined(separator: "\n") + "\n", lines.joined(separator: "\r\n") + "\r\n",
                      "key = \"" + lines.joined(separator: "\\n") + "\"\n",
-                     lines.map { "  \"" + $0 + "\"," }.joined(separator: "\n") + "\n"] {
+                     lines.map { "  \"" + $0 + "\"," }.joined(separator: "\n") + "\n",
+                     // Trailing whitespace of any length is still the end of the line.
+                     lines.map { $0 + "     " }.joined(separator: "\n") + "\n",
+                     lines.map { $0 + String(repeating: " \t", count: 40) }.joined(separator: "\r\n") + "\r\n"] {
             let result = PrivateKeyRedaction.redact(text)
             XCTAssertEqual(result.hiddenKeys, 1)
             for line in lines { XCTAssertFalse(result.text.contains(line.suffix(12)), "A later line of the key survived") }
