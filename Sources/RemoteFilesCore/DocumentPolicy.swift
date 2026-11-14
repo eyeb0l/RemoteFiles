@@ -119,12 +119,22 @@ public enum DocumentPolicy {
     /// Foundation is the same CommonMark/GFM parser used by Textual. This performs only
     /// attributed-output policy/formatting, never Markdown syntax parsing or resource loading.
     /// Invoke away from the main actor for substantial reports.
+    ///
+    /// Throws `MarkdownLimitError` for a document whose structure costs far more than its size
+    /// suggests; the reader then offers its source instead.
     public static func prepareMarkdown(_ source: String, preserveImages: Bool = false, preserveDocumentLinks: Bool = false) throws -> AttributedString {
+        try MarkdownLimits.checkSource(source)
         var document = try AttributedString(markdown: source)
+        let runs = Array(document.runs)
+        try MarkdownLimits.checkStructure(runs)
+        // Each kept image becomes a view of its own and divides the text around it.
+        var extraImages = preserveImages ? max(0, runs.count { $0.imageURL != nil } - MarkdownLimits.maximumImages) : 0
         // Replace image runs before handing content to Textual, so its default image loader never
         // receives a URL. Keep readable alt text, including for relative/data/file image URLs.
-        for run in Array(document.runs).reversed() {
-            if run.imageURL != nil && !preserveImages {
+        for run in runs.reversed() {
+            let isExtraImage = run.imageURL != nil && extraImages > 0
+            if isExtraImage { extraImages -= 1 }
+            if run.imageURL != nil && (!preserveImages || isExtraImage) {
                 // Foundation uses an object-replacement character for an image with no alt text.
                 let alt = String(document[run.range].characters)
                     .replacingOccurrences(of: "\u{FFFC}", with: "")
@@ -165,6 +175,56 @@ public enum DocumentPolicy {
     }
 }
 
+
+public enum MarkdownLimitError: Error, Equatable, Sendable {
+    case tooManyMarkers, tableTooWide, tooDeeplyNested, tooManyRuns
+}
+
+/// Bounds on what one Markdown document may ask of the parser and the renderer. A file within the
+/// preview's byte limit can still nest hundreds of blocks, give a table thousands of columns or
+/// change formatting every few bytes, and each of those costs far more than ordinary writing.
+public enum MarkdownLimits {
+    /// Images shown from one document; later ones become their alternative text.
+    public static let maximumImages = 128
+    /// Block levels around any text. The renderer builds a view inside a view for each, and a few
+    /// hundred overflow its stack. Ten nested lists use about twenty.
+    public static let maximumDepth = 32
+    /// Stretches of text that differ in formatting or block. Each costs the parser about ten
+    /// microseconds and 700 bytes; a megabyte and a half of ordinary formatted prose has about 100,000.
+    public static let maximumRuns = 200_000
+    /// Line breaks and formatting characters, counted before parsing: no run begins without one,
+    /// so this bounds the parse itself, which cannot be interrupted once started.
+    public static let maximumMarkers = 250_000
+    /// Vertical bars on one line. Parsing a table row costs the square of its columns.
+    public static let maximumBarsPerLine = 256
+
+    static func checkSource(_ source: String) throws {
+        var markers = 0, bars = 0, previous: UInt8 = 0
+        for byte in source.utf8 {
+            defer { previous = byte }
+            switch byte {
+            case 0x0A where previous == 0x0D: // The line feed of CRLF ends the same line.
+                continue
+            case 0x0A, 0x0D: // Line feed or carriage return, both line endings in Markdown
+                markers += 1; bars = 0
+            case 0x7C: // |
+                markers += 1; bars += 1
+                if bars > maximumBarsPerLine { throw MarkdownLimitError.tableTooWide }
+            case 0x2A, 0x5F, 0x60, 0x5B, 0x7E, 0x3C: // * _ ` [ ~ <
+                markers += 1
+            default: continue
+            }
+            if markers > maximumMarkers { throw MarkdownLimitError.tooManyMarkers }
+        }
+    }
+
+    static func checkStructure(_ runs: [AttributedString.Runs.Run], maximumRuns: Int = maximumRuns) throws {
+        guard runs.count <= maximumRuns else { throw MarkdownLimitError.tooManyRuns }
+        for run in runs where (run.presentationIntent?.components.count ?? 0) > maximumDepth {
+            throw MarkdownLimitError.tooDeeplyNested
+        }
+    }
+}
 
 public struct MarkdownPart: Identifiable, Sendable {
     public enum Content: Sendable { case text(AttributedString), image(reference: String, alt: String) }
