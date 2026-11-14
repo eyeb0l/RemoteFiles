@@ -26,9 +26,9 @@ class ReleaseError(Exception):
     pass
 
 
-def capture(*command):
+def capture(*command, env=None):
     try:
-        return subprocess.run(command, check=True, capture_output=True, text=True).stdout
+        return subprocess.run(command, check=True, capture_output=True, text=True, env=env).stdout
     except subprocess.CalledProcessError as error:
         raise ReleaseError(" ".join(command) + " failed: " + error.stderr.strip()) from error
 
@@ -84,11 +84,17 @@ def checked_key(path):
     return key
 
 
-def push_command(key, commit, tag):
-    # No ssh configuration, agent or other identity: ssh asks for this key's passphrase on the
-    # terminal every time, and cannot save it to the Keychain or leave the key loaded in an agent.
+def push_command(key, commit, tag, environ=None):
+    """The push and its environment.
+
+    No ssh configuration, agent or other identity: ssh asks for this key's passphrase on the
+    terminal every time, and cannot save it to the Keychain or leave the key loaded in an agent.
+    The command goes in GIT_SSH_COMMAND, which outranks an inherited one, GIT_SSH and
+    core.sshCommand; GIT_SSH_VARIANT stops ssh.variant changing the arguments git passes it.
+    """
     ssh = "ssh -F none -i " + shlex.quote(key) + " -o IdentitiesOnly=yes -o IdentityAgent=none"
-    return ["git", "-c", "core.sshCommand=" + ssh, "push", "--quiet", PUSH_URL, commit + ":refs/tags/" + tag]
+    env = {**(os.environ if environ is None else environ), "GIT_SSH_COMMAND": ssh, "GIT_SSH_VARIANT": "ssh"}
+    return ["git", "push", "--quiet", PUSH_URL, commit + ":refs/tags/" + tag], env
 
 
 def main(arguments=None):
@@ -118,7 +124,8 @@ def main(arguments=None):
         if not args.push:
             print("Dry run. Repeat with --push to start the TestFlight build.")
             return 0
-        capture(*push_command(key, commit, tag))
+        command, env = push_command(key, commit, tag)
+        capture(*command, env=env)
         print("Pushed. Xcode Cloud assigns the build number; follow it in App Store Connect.")
         return 0
     except ReleaseError as error:

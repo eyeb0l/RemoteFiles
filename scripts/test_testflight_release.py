@@ -190,13 +190,31 @@ class ReleaseFlowTests(unittest.TestCase):
         self.assertEqual(self.git(self.origin, "rev-parse", "testflight/0.1.0-4"), self.tip)
 
     def test_push_goes_to_github_over_ssh_with_only_the_deploy_key(self):
-        command = release.push_command("/keys/deploy key", "abc123", "testflight/0.1.0-3")
-        self.assertEqual(command[-2:], ["git@github.com:eyeb0l/RemoteFiles.git", "abc123:refs/tags/testflight/0.1.0-3"])
-        ssh = command[command.index("-c") + 1]
-        self.assertTrue(ssh.startswith("core.sshCommand=ssh "))
+        command, env = release.push_command("/keys/deploy key", "abc123", "testflight/0.1.0-3", {"PATH": "/bin"})
+        self.assertEqual(command, ["git", "push", "--quiet", "git@github.com:eyeb0l/RemoteFiles.git",
+                                   "abc123:refs/tags/testflight/0.1.0-3"])
+        self.assertEqual(env["PATH"], "/bin")
+        ssh = env["GIT_SSH_COMMAND"]
+        self.assertTrue(ssh.startswith("ssh "))
         # A saved passphrase or a loaded agent would let any process on the Mac release.
         for option in ("-F none", "-i '/keys/deploy key'", "-o IdentitiesOnly=yes", "-o IdentityAgent=none"):
             self.assertIn(option, ssh)
+
+    def test_push_replaces_an_inherited_ssh_command(self):
+        """Git prefers GIT_SSH_COMMAND to core.sshCommand, so a developer's wrapper would win."""
+        fake = self.root / "fake-ssh"
+        used = self.root / "used"
+        fake.write_text('#!/bin/sh\necho "$0" >> "' + str(used) + '"\nexit 1\n')
+        fake.chmod(0o755)
+        tools = self.root / "tools"
+        tools.mkdir(exist_ok=True)
+        (tools / "ssh").symlink_to(fake)
+        inherited = {**self.env, "PATH": str(tools) + os.pathsep + self.env["PATH"], "GIT_SSH_COMMAND": "inherited-ssh",
+                     "GIT_SSH": "inherited-ssh", "GIT_SSH_VARIANT": "plink"}
+        command, env = release.push_command(str(self.deploy_key()), self.tip, "testflight/0.1.0-3", inherited)
+        self.assertEqual(env["GIT_SSH_VARIANT"], "ssh")
+        self.assertNotEqual(subprocess.run(command, cwd=self.work, env=env, capture_output=True).returncode, 0)
+        self.assertEqual(used.read_text().split(), [str(tools / "ssh")])
 
     def test_failed_checks_and_unmerged_commits_push_nothing(self):
         self.deploy_key()

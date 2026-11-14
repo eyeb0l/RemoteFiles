@@ -44,8 +44,9 @@ gh repo deploy-key add ~/.ssh/remotefiles_testflight_deploy.pub --repo eyeb0l/Re
 
 - **Another location:** pass `--key PATH` or set `REMOTEFILES_TESTFLIGHT_KEY`.
 - **Passphrase:** the command refuses a key without one, because other tools on the Mac can
-  read the file. It runs `ssh` without your SSH configuration or agent, so the passphrase is
-  asked for on the terminal each time and is not saved to the Keychain.
+  read the file. It runs `ssh` without your SSH configuration, agent or an exported
+  `GIT_SSH_COMMAND`, so the passphrase is asked for on the terminal each time and is not saved
+  to the Keychain.
 - **First use:** `ssh` asks you to accept GitHub's host key unless it is already in
   `~/.ssh/known_hosts`. Compare it with
   [GitHub's published fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints).
