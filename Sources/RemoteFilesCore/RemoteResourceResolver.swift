@@ -114,7 +114,7 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
     /// All resolver instances in this process share the cache. Prefixing active
     /// partials prevents one window's first-use sweep from deleting another
     /// window's in-flight transfer while still identifying prior-process debris.
-    private static let partialProcessPrefix = UUID().uuidString + "-"
+    static let partialProcessPrefix = UUID().uuidString + "-"
     private struct Flight {
         let id: UUID
         let task: Task<Void, Never>
@@ -281,9 +281,16 @@ public actor RemoteResourceResolver: RemoteResourceResolving {
         }
         return files
     }
+    /// Removes everything kept, and this resolver's own transfers. Each window has its own
+    /// resolver over the same folder, so a transfer another window is part-way through is left
+    /// to finish: its file is told from a previous process's debris by this process's prefix.
     public func clearCache() {
         cancelAll()
-        try? FileManager.default.removeItem(at: directory)
+        let fm = FileManager.default
+        for child in (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        where !(child.pathExtension == "partial" && child.lastPathComponent.hasPrefix(Self.partialProcessPrefix)) {
+            try? fm.removeItem(at: child)
+        }
         cleanedAbandonedPartials = false
     }
     /// Applies the age and size limits now. They are otherwise applied only when something new

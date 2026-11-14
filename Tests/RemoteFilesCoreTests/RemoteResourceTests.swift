@@ -90,6 +90,20 @@ final class RemoteResourceTests: XCTestCase {
         await RemoteResourceResolver(service: FixedBytesTransportMock(bytes: Data()), directory: dir.appendingPathComponent("missing")).trimCache()
     }
 
+    /// Each window has its own resolver over one folder. Clearing what is kept must not take the
+    /// file another window is still receiving.
+    func testClearingKeepsATransferAnotherWindowIsPartWayThrough() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let live = RemoteResourceResolver.partialProcessPrefix + UUID().uuidString + ".partial"
+        for name in ["kept.resource", "debris-of-an-earlier-process.partial", live] {
+            try Data("bytes".utf8).write(to: dir.appendingPathComponent(name))
+        }
+        await RemoteResourceResolver(service: FixedBytesTransportMock(bytes: Data()), directory: dir).clearCache()
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), [live])
+    }
+
     func testDecoderDownsamplesLargeDimensionsAndRejectsCorruptData() async throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
         defer { try? FileManager.default.removeItem(at: file) }
