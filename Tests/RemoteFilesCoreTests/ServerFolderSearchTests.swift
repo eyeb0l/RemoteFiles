@@ -88,8 +88,27 @@ final class ServerFolderSearchTests: XCTestCase {
             query: "x", root: "/r", includeHidden: false, limits: .init(), content: nil)) { error in
             guard case ServerFolderSearch.Failure.resourceLimit = error else { return XCTFail("Limits must not mark a server unsupported") }
         }
-        XCTAssertThrowsError(try ServerFolderSearch.command(query: "x", root: "/r", includeHidden: false,
+        XCTAssertThrowsError(try ServerFolderSearch.helper(query: "x", root: "/r", includeHidden: false,
             limits: .init(), content: .init(maxFiles: 501)), "Custom limits must not be silently tightened")
+    }
+
+    /// On a server shared with other accounts, all of them can read a process's arguments. The
+    /// query and the folder are therefore read by the helper, not passed to it.
+    func testTheRequestIsReadFromStandardInputAndIsNotAnArgument() throws {
+        let helper = try ServerFolderSearch.helper(query: "quarterly-secret", root: "/srv/private-project", includeHidden: false,
+                                                   limits: .init(), content: .init())
+        let line = try XCTUnwrap(String(data: helper.input, encoding: .utf8))
+        XCTAssertTrue(line.hasSuffix("\n"))
+        XCTAssertEqual(line.filter { $0 == "\n" }.count, 1, "One line, so the helper need not wait for the end of its input")
+        let encoded = String(line.dropLast())
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(Data(base64Encoded: encoded))) as? [String: Any])
+        XCTAssertEqual(fields["query"] as? String, "quarterly-secret")
+        XCTAssertEqual(fields["root"] as? String, "/srv/private-project")
+        for hidden in ["quarterly-secret", "private-project", encoded] {
+            XCTAssertFalse(helper.command.contains(hidden), "The command line must not carry \(hidden.prefix(24))")
+        }
+        XCTAssertTrue(helper.command.hasPrefix("python3 -I -S -B -c '"))
+        XCTAssertTrue(helper.command.hasSuffix("'"), "Nothing follows the script")
     }
 
     /// A backslash is an ordinary byte in a name on the server, so a reply naming one is kept.
@@ -286,13 +305,16 @@ final class ServerFolderSearchTests: XCTestCase {
 
     private func helperOutput(root: String, query: String, content: RemoteFolderSearch.ContentLimits? = nil, hidden: Bool = false,
                               limits: RemoteFolderSearch.Limits = .init(), handleRoot: String? = nil, provideHandle: Bool = true) throws -> Data {
-        let helper = try ServerFolderSearch.command(query: query, root: root, includeHidden: hidden, limits: limits, content: content,
-                                                     rootHandle: provideHandle ? "/dev/fd/9" : nil)
-        let command = "exec 9<" + ServerFolderSearch.quote(handleRoot ?? root) + "; " + helper
-        let process = Process(), output = Pipe(), errors = Pipe()
+        let helper = try ServerFolderSearch.helper(query: query, root: root, includeHidden: hidden, limits: limits, content: content,
+                                                   rootHandle: provideHandle ? "/dev/fd/9" : nil)
+        let command = "exec 9<" + ServerFolderSearch.quote(handleRoot ?? root) + "; " + helper.command
+        let process = Process(), input = Pipe(), output = Pipe(), errors = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/sh"); process.arguments = ["-c", command]
-        process.standardOutput = output; process.standardError = errors
+        process.standardInput = input; process.standardOutput = output; process.standardError = errors
         try process.run()
+        // As over SSH: the request is written and the input left open, so the helper must not wait for its end.
+        try input.fileHandleForWriting.write(contentsOf: helper.input)
+        defer { try? input.fileHandleForWriting.close() }
         let data = output.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         XCTAssertEqual(process.terminationStatus, 0, String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))

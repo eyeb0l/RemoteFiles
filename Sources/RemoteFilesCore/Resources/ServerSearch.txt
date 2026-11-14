@@ -3,7 +3,8 @@
 # totals. The last line has final set, and only that one can carry an error.
 import base64, collections, errno, json, os, re, signal, stat, sys, time
 
-r = json.loads(base64.b64decode(sys.argv[1]))
+# The request is the first line of standard input, so the query and folder are in no process list.
+r = json.loads(base64.b64decode(sys.stdin.buffer.readline(1 << 20)))
 root = r['root']
 result = dict(version=2, root=root, candidates=[], folders=0, unreadableFolders=0,
               deepFolders=0, files=0, skippedFiles=0, unreadableFiles=0, bytes=0,
