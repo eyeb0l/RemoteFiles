@@ -206,6 +206,41 @@ class LogResultTests(unittest.TestCase):
                 log.write_text(f"Test Ca{interruption}se '-[ExampleTests testOne]' passed (0.001 seconds).\n")
                 self.assertEqual(acceptance.log_tests(log), {})
 
+    def test_structured_diagnostic_between_identifier_and_outcome_preserves_the_result(self):
+        # Verbatim from simulator-core.log of run 43538623080, attempt 1.
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "test.log"
+            log.write_text(
+                "Test Case '-[RemoteFilesTests.PlaybackTests testCorruptRefreshPreservesPreviousPlayerAndReportsCodecError]' started.\n"
+                "2026-11-14 01:24:21.103006+0000 RemoteFilesTestHost[35848:128801] [] <<<< FFR_Common >>>> signalled err=-12848 at <>:4132\n"
+                "Test Case '-[RemoteFilesTests.PlaybackTests testCorruptRefreshPreservesPreviousPlayerAndReportsCodecError]'"
+                "2026-11-14 01:24:21.111681+0000 RemoteFilesTestHost[35848:128845] [AQ]        LoudnessManager.mm:1222  "
+                "IsHardwareSupported: no plist loaded, returning false\n"
+                " passed (0.014 seconds).\n")
+            self.assertEqual(acceptance.log_tests(log),
+                             {"PlaybackTests/testCorruptRefreshPreservesPreviousPlayerAndReportsCodecError": "passed"})
+
+    def test_structured_diagnostics_at_any_offset_of_a_result_line_preserve_every_outcome(self):
+        diagnostic = "2026-11-14 01:24:21.111681+0000 RemoteFilesTestHost[35848:128845] [AQ] diagnostic\n"
+        for outcome in ("passed", "failed", "skipped"):
+            line = f"Test Case '-[RemoteFilesTests.PlaybackTests testCodec]' {outcome} (0.014 seconds).\n"
+            for offset in range(1, len(line)):
+                with self.subTest(outcome=outcome, offset=offset), tempfile.TemporaryDirectory() as directory:
+                    log = Path(directory) / "test.log"
+                    log.write_text(line[:offset] + diagnostic + diagnostic + line[offset:])
+                    self.assertEqual(acceptance.log_tests(log), {"PlaybackTests/testCodec": outcome})
+
+    def test_unknown_unterminated_or_line_start_interruptions_before_the_outcome_create_no_result(self):
+        # Only a complete record that begins mid-line was spliced in. A line break of XCTest's own
+        # before the outcome leaves the result ambiguous, whatever follows it.
+        for interruption in ("unknown diagnostic\n", "2026-11-14 01:24:21 TestHost diagnostic\n",
+                             "2026-11-14 01:24:21.111681+0000 TestHost[1:2] [AQ] missing newline",
+                             "\n2026-11-14 01:24:21.111681+0000 TestHost[1:2] [AQ] diagnostic\n"):
+            with self.subTest(interruption=interruption), tempfile.TemporaryDirectory() as directory:
+                log = Path(directory) / "test.log"
+                log.write_text(f"Test Case '-[ExampleTests testOne]'{interruption} passed (0.001 seconds).\n")
+                self.assertEqual(acceptance.log_tests(log), {})
+
     def test_interrupted_identifier_duplicates_are_still_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / "test.log"
