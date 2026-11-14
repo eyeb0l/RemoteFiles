@@ -131,13 +131,28 @@ requires a document only for France. This is our reading, not legal advice, and 
 responsibility for it with the developer. Repeat the questionnaire if any of these facts change,
 including a proprietary algorithm being added.
 
+Checked again on 14 November 2026, and nothing needed changing:
+
+- Apple's table still asks an app that "uses an industry standard algorithm, not provided within the
+  Apple operating system" only for the French encryption declaration, and only when the app is
+  distributed in France. A US classification (CCATS) is asked only of proprietary algorithms.
+- [Apple's definition of the key](https://developer.apple.com/documentation/bundleresources/information-property-list/itsappusesnonexemptencryption)
+  is that `NO` means the app, including the libraries it links, "either uses no encryption, or only
+  uses encryption that's exempt from export compliance requirements". With France excluded no
+  document is required, which is what `NO` declares here.
+- The algorithms are the same. Moving swift-crypto from 3 to 5 changed the library's version, not
+  what the app uses it for.
+
 Before releasing on the App Store, check this again:
 
 - **France:** the `NO` depends on the app not being distributed there, so exclude France from the
   app's availability. To include it, upload the French encryption declaration and replace `NO` with
   `YES` plus the `ITSEncryptionExportComplianceCode` that Apple issues.
 - **US annual report:** the sources conflict on whether a finished mass-market app needs a BIS
-  self-classification report, due by 1 February. Ask an export lawyer or BIS.
+  self-classification report, due by 1 February. Ask an export lawyer or BIS. Apple's own
+  [guidance](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations)
+  leaves it open too: an app using exempt encryption "might alternatively be required to submit a
+  year-end self-classification report to the U.S. government".
 
 ## Privacy manifest
 
