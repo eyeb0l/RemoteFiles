@@ -96,6 +96,83 @@ final class DocumentPolicyTests: XCTestCase {
         XCTAssertEqual(prepared.runs.compactMap(\.link), [URL(string: "https://example.com")!])
     }
 
+    private func assertLimit(_ expected: MarkdownLimitError, _ source: String, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertThrowsError(try DocumentPolicy.prepareMarkdown(source), file: file, line: line) {
+            XCTAssertEqual($0 as? MarkdownLimitError, expected, file: file, line: line)
+        }
+        // The reader's parts and its text index use the same preparation, so neither renders it.
+        XCTAssertThrowsError(try DocumentPolicy.remoteMarkdownParts(source), file: file, line: line)
+        XCTAssertThrowsError(try DocumentTextIndex(text: source, markdown: true), file: file, line: line)
+    }
+
+    /// The renderer nests one view per block level, and a few hundred overflow its stack.
+    func testDeeplyNestedBlocksAreNotRendered() throws {
+        let quotes = { (depth: Int) in String(repeating: ">", count: depth) + " quoted" }
+        XCTAssertNoThrow(try DocumentPolicy.prepareMarkdown(quotes(MarkdownLimits.maximumDepth - 1)))
+        assertLimit(.tooDeeplyNested, quotes(MarkdownLimits.maximumDepth))
+        assertLimit(.tooDeeplyNested, quotes(500))
+        assertLimit(.tooDeeplyNested, "Before\n\n" + quotes(100_000) + "\n\nAfter")
+        assertLimit(.tooDeeplyNested, (0..<40).map { String(repeating: "  ", count: $0) + "- item" }.joined(separator: "\n"))
+        // Ten lists inside one another, each item quoted: deep for writing, and well within the limit.
+        let nested = (0..<10).map { String(repeating: "  ", count: $0) + "- item \($0)" }.joined(separator: "\n")
+        XCTAssertNoThrow(try DocumentPolicy.prepareMarkdown(nested + "\n\n> - > quoted list"))
+        // A source view shows the same text whatever its structure.
+        guard case .text(_, markdown: true, _) = DocumentPolicy.decode(Data(quotes(500).utf8), filename: "deep.md") else {
+            return XCTFail("Decoding is unaffected")
+        }
+    }
+
+    func testTablesWiderThanTheLimitAreNotParsed() throws {
+        func table(columns: Int) -> String {
+            let row = "|" + String(repeating: "a|", count: columns)
+            return [row, "|" + String(repeating: "-|", count: columns), row].joined(separator: "\n")
+        }
+        let widest = try DocumentPolicy.prepareMarkdown(table(columns: MarkdownLimits.maximumBarsPerLine - 1))
+        XCTAssertTrue(widest.runs.contains { run in
+            run.presentationIntent?.components.contains { if case .table = $0.kind { return true }; return false } == true
+        })
+        let started = ContinuousClock.now
+        assertLimit(.tableTooWide, table(columns: MarkdownLimits.maximumBarsPerLine))
+        assertLimit(.tableTooWide, "# Title\n\n" + table(columns: 20_000))
+        XCTAssertLessThan(started.duration(to: .now), .seconds(5), "Refused before parsing, which takes far longer")
+        // Bars are counted a line at a time.
+        let rows = Array(repeating: "|a|b|c|", count: 1_000)
+        XCTAssertNoThrow(try DocumentPolicy.prepareMarkdown((["|a|b|c|", "|-|-|-|"] + rows).joined(separator: "\n")))
+    }
+
+    func testDocumentsThatChangeFormattingEveryFewBytesAreNotParsed() throws {
+        let started = ContinuousClock.now
+        assertLimit(.tooManyMarkers, String(repeating: "*a* ", count: 130_000))
+        assertLimit(.tooManyMarkers, String(repeating: "a\n\n", count: 130_000))
+        XCTAssertLessThan(started.duration(to: .now), .seconds(5), "Refused before parsing, which takes far longer")
+        // The count after parsing catches what the characters did not predict.
+        let document = try AttributedString(markdown: "one *two* three **four** `five`")
+        let runs = Array(document.runs)
+        XCTAssertNoThrow(try MarkdownLimits.checkStructure(runs, maximumRuns: runs.count))
+        XCTAssertThrowsError(try MarkdownLimits.checkStructure(runs, maximumRuns: runs.count - 1)) {
+            XCTAssertEqual($0 as? MarkdownLimitError, .tooManyRuns)
+        }
+        // Ordinary long writing is far inside both limits.
+        let prose = String(repeating: "A paragraph of ordinary prose with `code`, *emphasis* and a [link](https://example.com).\n\n", count: 3_000)
+        XCTAssertGreaterThan(prose.utf8.count, 256 * 1_024)
+        XCTAssertNoThrow(try DocumentPolicy.remoteMarkdownParts(prose))
+    }
+
+    func testImagesBeyondTheLimitBecomeTheirAlternativeText() throws {
+        let source = (0..<(MarkdownLimits.maximumImages + 2)).map { "![alt \($0)](images/\($0).png)" }.joined(separator: "\n\n")
+        let parts = try DocumentPolicy.remoteMarkdownParts(source)
+        let references = parts.compactMap { part -> String? in
+            if case .image(let reference, _) = part.content { return reference }; return nil
+        }
+        XCTAssertEqual(references, (0..<MarkdownLimits.maximumImages).map { "images/\($0).png" }, "The first images are kept, in order")
+        guard case .text(let last) = parts.last?.content else { return XCTFail("The later images are text") }
+        let text = String(last.characters)
+        XCTAssertTrue(text.contains("alt \(MarkdownLimits.maximumImages) — preview unavailable"), text)
+        XCTAssertTrue(text.contains("alt \(MarkdownLimits.maximumImages + 1) — preview unavailable"), text)
+        XCTAssertFalse(last.runs.contains { $0.imageURL != nil })
+        XCTAssertEqual(try DocumentTextIndex(text: source, markdown: true).parts.count, parts.count)
+    }
+
     func testMarkdownStructureAndReadOnlyTasks() throws {
         let prepared = try DocumentPolicy.prepareMarkdown("""
         # Heading
