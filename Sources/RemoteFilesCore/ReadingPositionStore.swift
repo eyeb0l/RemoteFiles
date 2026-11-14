@@ -125,5 +125,10 @@ public actor ReadingPositionStore {
         #else
         try bytes.write(to: fileURL, options: .atomic)
         #endif
+        // What was read, and a hash of each document's text, is not something a backup needs to
+        // carry. An atomic write makes a new file each time, so this is set again each time.
+        var values = URLResourceValues(); values.isExcludedFromBackup = true
+        var file = fileURL
+        try? file.setResourceValues(values)
     }
 }

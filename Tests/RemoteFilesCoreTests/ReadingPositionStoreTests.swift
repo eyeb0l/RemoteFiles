@@ -11,6 +11,10 @@ final class ReadingPositionStoreTests: XCTestCase {
         let id = UUID(), original = position("Report\r\n東京")
         let store = ReadingPositionStore(fileURL: url)
         try await store.save(original, connectionID: id, path: "/Reports/report.md")
+        // What was read, and a hash of its text, stays out of device backups.
+        XCTAssertEqual(try url.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+        try await store.save(original, connectionID: id, path: "/Reports/other.md")
+        XCTAssertEqual(try url.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true, "Set again after each write")
         let recreated = ReadingPositionStore(fileURL: url)
         let restored = await recreated.restore(connectionID: id, path: "/Reports/report.md", revision: original.revision)
         XCTAssertEqual(restored, original)

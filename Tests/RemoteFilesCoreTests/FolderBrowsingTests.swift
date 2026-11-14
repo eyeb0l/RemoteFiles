@@ -220,7 +220,7 @@ final class FolderBrowsingTests: XCTestCase {
 
         sort.choose(.size, canonicalPath: nil)
         XCTAssertEqual(sort.orderForListing(at: canonical), .size, "An early choice controls the arriving rows")
-        XCTAssertNil(preferences.array(forKey: "folderSortOrders-v1"), "Do not save against an unresolved alias")
+        XCTAssertTrue(model.folderSortOrders().isEmpty, "Do not save against an unresolved alias")
         // A newer choice can arrive while rows are being prepared off the main actor.
         sort.choose(.kind, canonicalPath: nil)
         sort.receiveListing(at: canonical)
@@ -234,7 +234,32 @@ final class FolderBrowsingTests: XCTestCase {
         XCTAssertEqual(reopened.order, .kind, "The choice survives leaving the view and relaunching")
         sort.choose(.name, canonicalPath: canonical)
         sort.receiveListing(at: canonical)
-        XCTAssertNil(preferences.array(forKey: "folderSortOrders-v1"), "Choosing Name still removes the saved choice")
+        XCTAssertTrue(model.folderSortOrders().isEmpty, "Choosing Name still removes the saved choice")
+        XCTAssertNil(preferences.array(forKey: "folderSortOrders-v1"), "Remote folder paths are not kept in the preferences file")
+    }
+
+    /// Earlier versions kept sort choices, and so remote folder paths, in the preferences file.
+    @MainActor func testSortChoicesMoveFromPreferencesToAProtectedFileOutsideBackups() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "FolderBrowsingTests-" + UUID().uuidString
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { try? FileManager.default.removeItem(at: directory); preferences.removePersistentDomain(forName: suite) }
+        let id = UUID()
+        preferences.set([[id.uuidString + "|/srv/reports", "size"], ["malformed"]], forKey: "folderSortOrders-v1")
+        let model = try AppModel(directory: directory, fileService: DemoRemoteFileService(delayNanoseconds: 0), preferences: preferences)
+        XCTAssertEqual(model.folderSortOrder(id, path: "/srv/reports"), .size, "An earlier choice is kept")
+        XCTAssertNil(preferences.array(forKey: "folderSortOrders-v1"), "And leaves the preferences file")
+        let file = directory.appendingPathComponent("folder-sort-orders-v1.json")
+        XCTAssertEqual(try file.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+        #if !targetEnvironment(simulator)
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: file.path)[.protectionKey] as? FileProtectionType, .complete)
+        #endif
+
+        model.setFolderSortOrder(.kind, id: id, path: "/srv/other")
+        let second = try AppModel(directory: directory, fileService: DemoRemoteFileService(delayNanoseconds: 0), preferences: preferences)
+        XCTAssertEqual(second.folderSortOrder(id, path: "/srv/other"), .kind, "Another window reads what this one saved")
+        XCTAssertEqual(second.folderSortOrder(id, path: "/srv/reports"), .size)
+        XCTAssertEqual(try file.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true, "Set again after each write")
     }
 
     @MainActor func testSortAfterPartialListingPersistsAndCompleteListingKeepsTheLatestChoice() throws {
@@ -256,7 +281,7 @@ final class FolderBrowsingTests: XCTestCase {
         sort.receiveListing(at: path) // The complete listing must retain the later choice.
         XCTAssertEqual(sort.order, .modified)
         XCTAssertEqual(model.folderSortOrder(id, path: path), .modified)
-        XCTAssertEqual((preferences.array(forKey: "folderSortOrders-v1") as? [[String]])?.last?.first,
+        XCTAssertEqual(model.folderSortOrders().last?.first,
                        id.uuidString + "|/Other", "Repeated partial/final listings must not rewrite choices or change their eviction order")
         // A quiet refresh can update the accepted listing's canonical path. The binding
         // always supplies that current path, rather than retaining an older one.
@@ -278,7 +303,7 @@ final class FolderBrowsingTests: XCTestCase {
         sort.receiveListing(at: path)
         XCTAssertEqual(sort.order, .size, "Demo still applies the user's current choice")
         XCTAssertEqual(model.folderSortOrder(id, path: path), .name)
-        XCTAssertNil(preferences.array(forKey: "folderSortOrders-v1"), "Resolving a Demo listing must not write preferences")
+        XCTAssertTrue(model.folderSortOrders().isEmpty, "Resolving a Demo listing must not save a choice")
         XCTAssertEqual(FolderSortSelection(model: model, connectionID: id, canonicalPath: path).order, .name)
     }
 
@@ -302,22 +327,23 @@ final class FolderBrowsingTests: XCTestCase {
         XCTAssertEqual(relaunched.folderSortOrder(profile.id, path: "/Projects"), .size)
 
         model.setFolderSortOrder(.name, id: profile.id, path: "/Projects")
-        XCTAssertEqual((preferences.array(forKey: "folderSortOrders-v1") as? [[String]])?.count, 1, "Name is stored as no entry")
+        XCTAssertEqual(model.folderSortOrders().count, 1, "Name is stored as no entry")
 
         for index in 0..<(AppModel.folderSortLimit + 5) {
             model.setFolderSortOrder(.modified, id: profile.id, path: "/f\(index)")
         }
-        XCTAssertEqual((preferences.array(forKey: "folderSortOrders-v1") as? [[String]])?.count, AppModel.folderSortLimit)
+        XCTAssertEqual(model.folderSortOrders().count, AppModel.folderSortLimit)
         XCTAssertEqual(model.folderSortOrder(other, path: "/Projects"), .name, "The least recently changed choice is dropped first")
         XCTAssertEqual(model.folderSortOrder(profile.id, path: "/f\(AppModel.folderSortLimit + 4)"), .modified)
 
         await model.removeConnection(profile)
-        XCTAssertNil(preferences.array(forKey: "folderSortOrders-v1"), "Deleting a connection forgets its folders")
+        XCTAssertTrue(model.folderSortOrders().isEmpty, "Deleting a connection forgets its folders")
 
         await model.setDemo(true)
         model.setFolderSortOrder(.size, id: profile.id, path: "/Projects")
         XCTAssertEqual(model.folderSortOrder(profile.id, path: "/Projects"), .name)
-        XCTAssertNil(preferences.array(forKey: "folderSortOrders-v1"), "Demo never writes sort choices")
+        XCTAssertTrue(model.folderSortOrders().isEmpty, "Demo never writes sort choices")
+        XCTAssertNil(preferences.array(forKey: "folderSortOrders-v1"))
     }
 
     @MainActor func testEditingAndRemovingConnectionsDeleteTheirIndexesWithoutAffectingAnotherConnection() async throws {
