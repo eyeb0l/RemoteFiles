@@ -58,6 +58,14 @@ The table width and the character count are checked before the parser runs, beca
 be interrupted once started. Images after the first 128 in a document become their
 alternative text, in both renderers.
 
+The reader parses a document once. The rendered parts, the headings list, the text Find searches,
+the links it confirms before opening and the choice between the native and rich renderers all come
+from that parse, and a document refused after parsing is not parsed again to show why. Leaving the
+reader stops preparation between its steps; the parse itself runs to its end. Within the limits the
+costliest documents take about 3 to 4 seconds and up to 300 MiB to prepare on a Mac, and one refused
+only after parsing up to about 5 seconds and 460 MiB; ordinary documents take a fraction of that.
+See [Markdown preparation](READER_PERFORMANCE.md#markdown-preparation-one-parse-14-november-2026).
+
 ## Offline rendering and limits
 
 The app bundles Marked, DOMPurify, KaTeX and Mermaid, with versions, hashes and
@@ -86,7 +94,10 @@ Standalone HTML retains its separate [static preview](HTML_PREVIEWS.md).
 ## Verification
 
 `EnhancedMarkdownPolicyTests` checks semantic renderer selection, literal code
-examples and bundled resources.
+examples, the quick pre-check against the search it guards, and bundled resources.
+`DocumentTextIndexTests` checks that the single parse gives the parts, headings, Find
+results, links to confirm and renderer choice that separate parses gave, on this
+repository's documentation, the demo documents and cases for each preparation rule.
 Hosted `EnhancedMarkdownDisplayTests` checks Mermaid SVG geometry, MathML, block
 and inline HTML, literal multiline code, read-only task states, heading reveal, malicious scripts/resources,
 readable invalid notation, size/expression budgets and live Dynamic Type layout. Simulator results do not
