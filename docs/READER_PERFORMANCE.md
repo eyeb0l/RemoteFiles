@@ -110,26 +110,39 @@ becomes its alternative text and every task marker a checkbox, each an `Attribut
   identities that group headings and list items span the whole document, so the output would change.
   Not attempted.
 
-**The limits: a proposal, not changed here.** The worst cases measured are 2.8 s and 274 MiB
-(`table`) or 4.1 s (`images`) for a document the limits accept, and 4.6 s and 461 MiB for one
-refused after parsing (`links-refused`). Real documents are far from either. Of 260 Markdown files
-over 16 KB on the measuring Mac (changelogs, READMEs and documentation up to 1.0 MB), the most
-demanding has 47,750 markers (a 1.0 MB changelog) and the most runs 28,862 (a 0.9 MB changelog).
-Scaled to the 2 MiB cap, the densest would have about 100,000 markers and 65,000 runs. With
-`maximumMarkers` at 125,000 and `maximumRuns` at 100,000, none of them would be refused, and the
-same constructions would cost at most:
+**The limits, lowered afterwards.** With the limits as they were then (250,000 markers and 200,000
+runs), the worst cases measured were 2.8 s and 274 MiB (`table`) or 4.1 s (`images`) for a document
+the limits accepted, and 4.6 s and 461 MiB for one refused after parsing (`links-refused`). Real
+documents are far from either, so `maximumRuns` is now 100,000 and `maximumMarkers` 175,000.
 
-| Case at the proposed limits | Time | Peak |
-| --- | ---: | ---: |
-| Links, refused after parsing (`[a](u)b ` × 124,990: 249,980 runs) | 2.32 s | 232 MiB |
-| Images (`![a](i.png) ` × 49,990) | 1.96 s | 119 MiB |
-| Tasks (× 62,500) | 1.59 s | 143 MiB |
-| Table (254 columns × 391 rows) | 1.39 s | 139 MiB |
-| Runs (`*a* ` × 50,000) | 1.01 s | 98 MiB |
+Two surveys chose the values. Of 260 Markdown files over 16 KB on the measuring Mac (changelogs,
+READMEs and documentation up to 1.0 MB), the most demanding has 47,750 markers and the most runs
+28,862. A second look at 55 files, scaling each to the 2 MiB cap, found the densest prose at about
+83,000 runs, and two references that are mostly tables at about 135,000 and 170,000 markers. So
+100,000 runs clears everything measured, and markers stay above the tables: at 125,000, a
+reference like those would have stopped rendering above about 1.5 MiB.
 
-A 2 MiB document of unusually dense formatting, such as generated API references or a table of
-several hundred thousand cells, would start showing **Rendered Preview Unavailable**. That is a
-product decision, so the values stay as they are.
+What a document that still renders can cost is now set by the run limit, and what one refused
+after parsing can cost by the marker limit, which is all that bounds the parse. Measured at the
+new limits on the same Mac, release build, each case three times in its own process (they agreed
+to within 0.03 s). These time preparing the index alone, which is the one parse and everything
+after it:
+
+| Case at the new limits | Outcome | Time | Peak |
+| --- | --- | ---: | ---: |
+| Runs (`*a* ` × 49,990) | Rendered | 0.99 s | 98 MiB |
+| Markers (`**a** ` × 43,740) | Rendered | 0.86 s | 86 MiB |
+| Table (254 columns × 391 rows) | Rendered | 1.36 s | 138 MiB |
+| Table (254 columns × 683 rows) | Refused after parsing | 2.09 s | 240 MiB |
+| Links (`[a](u)b ` × 174,990: 349,980 runs) | Refused after parsing | 3.20 s | 324 MiB |
+
+Images and tasks were measured earlier at the same run limit and are not bounded by markers:
+1.96 s and 119 MiB for 49,990 images, 1.59 s and 143 MiB for 62,500 tasks. At 125,000 markers the
+links case took 2.32 s and 232 MiB; the extra second at 175,000 is the price of leaving
+table-heavy references rendered.
+
+A 2 MiB document of unusually dense formatting, such as a table of several hundred thousand cells,
+now shows **Rendered Preview Unavailable**, with its source and **Find** as before.
 
 **Reproducing.** Make a SwiftPM executable outside the checkout that depends on this package by path
 and imports `RemoteFilesCore`. Generate each case in the process, record `getrusage` and

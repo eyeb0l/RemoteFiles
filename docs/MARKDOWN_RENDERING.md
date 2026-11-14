@@ -48,11 +48,12 @@ with **Find** working there. Such a document has no headings list:
   overflow its stack. Ten nested lists use about twenty levels.
 - **Table width:** more than 256 vertical bars on one line. Parsing a table row costs the
   square of its columns: 20,000 columns in 120 KB took 16 seconds on a Mac mini.
-- **Formatting density:** more than 250,000 line breaks and formatting characters
-  (`*`, `_`, `` ` ``, `[`, `|`, `~`, `<`), counted before parsing, or more than 200,000
-  differently formatted stretches of text after it. A megabyte and a half of ordinary
-  formatted prose has about 100,000; 2 MiB of `*a* ` has a million, which took 11 seconds
-  and 750 MiB to parse.
+- **Formatting density:** more than 175,000 line breaks and formatting characters
+  (`*`, `_`, `` ` ``, `[`, `|`, `~`, `<`), counted before parsing, or more than 100,000
+  differently formatted stretches of text after it. Of the real documents measured, the
+  densest would have about 83,000 stretches at the 2 MiB a document may be, and references
+  that are mostly tables up to about 170,000 of the characters; 2 MiB of `*a* ` has a million
+  stretches, which took 11 seconds and 750 MiB to parse.
 
 The table width and the character count are checked before the parser runs, because a parse cannot
 be interrupted once started. Images after the first 128 in a document become their
