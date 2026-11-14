@@ -371,11 +371,29 @@ extension RemoteFolderSearch {
         // A bounded context around the first match also handles huge single-line files safely.
         let start = text.index(range.lowerBound, offsetBy: -50, limitedBy: lineStart) ?? lineStart
         let end = text.index(range.lowerBound, offsetBy: 150, limitedBy: lineEnd) ?? lineEnd
-        let context = String(text[start..<end]).replacingOccurrences(of: "\r\n", with: " ")
+        // Characters don't bound bytes: one can carry any number of combining marks. Keep the
+        // bytes nearest the match on each side.
+        let before = text[start..<range.lowerBound].unicodeScalars, after = text[range.lowerBound..<end].unicodeScalars
+        var leading = before.endIndex, leadingBytes = 0
+        while leading > before.startIndex {
+            let previous = before.index(before: leading), size = UTF8.width(before[previous])
+            guard leadingBytes + size <= snippetLeadingBytes else { break }
+            leading = previous; leadingBytes += size
+        }
+        var trailing = after.startIndex, trailingBytes = 0
+        while trailing < after.endIndex {
+            let size = UTF8.width(after[trailing])
+            guard trailingBytes + size <= snippetTrailingBytes else { break }
+            trailing = after.index(after: trailing); trailingBytes += size
+        }
+        let context = (String(before[leading...]) + String(after[..<trailing])).replacingOccurrences(of: "\r\n", with: " ")
             .replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
             .replacingOccurrences(of: "\t", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-        return ContentMatch(entry: entry, line: line, snippet: (start > lineStart ? "…" : "") + context + (end < lineEnd ? "…" : ""), page: page)
+        let cutBefore = start > lineStart || leading > before.startIndex, cutAfter = end < lineEnd || trailing < after.endIndex
+        return ContentMatch(entry: entry, line: line, snippet: (cutBefore ? "…" : "") + context + (cutAfter ? "…" : ""), page: page)
     }
+    /// The most bytes of a line a result row shows on each side of where its match starts.
+    static let snippetLeadingBytes = 100, snippetTrailingBytes = 300
 }
 
 extension RemoteFolderSearch.Update {

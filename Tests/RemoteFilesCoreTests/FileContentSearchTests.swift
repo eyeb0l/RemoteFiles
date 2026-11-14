@@ -151,6 +151,20 @@ final class FileContentSearchTests: XCTestCase {
         let parallel = await service.mostAtOnce; XCTAssertEqual(parallel, 1)
     }
 
+    /// A character can carry any number of combining marks, so characters don't bound a row's text.
+    func testSnippetIsBoundedInBytesAndKeepsTheMatch() throws {
+        let heavy = "x" + String(repeating: "\u{301}", count: 3_000)
+        let text = String(repeating: heavy, count: 60) + " needle " + String(repeating: heavy, count: 200)
+        let entry = RemoteEntry(name: "marks.txt", path: "/r/marks.txt", kind: .file)
+        let match = try XCTUnwrap(RemoteFolderSearch.firstMatch(in: text, query: "needle", entry: entry))
+        XCTAssertTrue(match.snippet.contains("needle"))
+        XCTAssertLessThanOrEqual(match.snippet.utf8.count,
+                                 RemoteFolderSearch.snippetLeadingBytes + RemoteFolderSearch.snippetTrailingBytes + 2 * "…".utf8.count)
+        XCTAssertTrue(match.snippet.hasPrefix("…")); XCTAssertTrue(match.snippet.hasSuffix("…"))
+        let plain = try XCTUnwrap(RemoteFolderSearch.firstMatch(in: "before the needle and after it", query: "needle", entry: entry))
+        XCTAssertEqual(plain.snippet, "before the needle and after it", "Ordinary lines are unchanged")
+    }
+
     func testSkipsLinksHiddenBinaryOversizedAndUnsupportedFiles() async throws {
         let service = ContentTreeService(["/r": [file("/r/.hidden.txt"), folder("/r/.cache"), file("/r/image.png"),
             file("/r/large.md", size: 300_000), file("/r/binary.txt"), file("/r/invalid.txt"), file("/r/empty.txt"),
