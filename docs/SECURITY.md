@@ -21,4 +21,4 @@ RemoteFiles is a read-only SFTP browser. These are the properties to hold it to:
 - Previews of HTML, Markdown and SVG run no script from the document and load nothing from the network.
 - Every read, download and listing is bounded in size.
 
-The feature pages under [`docs/`](docs/) describe each of these and its limits.
+The other pages in this folder describe each of these and its limits, starting from the [reader](READER.md), [connections](CONNECTIONS.md) and [folder browsing](FOLDER_BROWSING.md).
