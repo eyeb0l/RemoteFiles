@@ -171,6 +171,34 @@ final class SFTPDirectoryReadTests: XCTestCase {
         try await server.stop()
     }
 
+    /// After login nothing waited on Citadel's handshake promise, so a transport error went nowhere:
+    /// the connection stayed open, its requests never finished, and every later read was kept.
+    func testAPacketThatFailsToDecryptAfterLoginClosesTheConnection() async throws {
+        let server = try await FakeSFTPServer.start(FakeDirectory(entries: thousand, batch: 10, holdMilliseconds: 120_000))
+        let client = try await server.connect()
+        let sftp = try await client.openSFTP(logger: FakeSFTPServer.quietLogger)
+        let listing = Task { try await sftp.listDirectory(atPath: "/fake", resolvingPath: false, concurrentReads: 4) }
+        let outcome = Task { () -> Error? in
+            do { _ = try await listing.value; return nil } catch { return error }
+        }
+        // The requests are held by the server, so only the connection closing can end them.
+        while server.recorder.readdirs < 4 { try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertTrue(client.isConnected)
+        server.corruptWire()
+        let deadline = ContinuousClock.now + .seconds(30)
+        while client.isConnected, ContinuousClock.now < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        guard !client.isConnected else {
+            XCTFail("The connection stayed open after a packet that cannot be authenticated")
+            listing.cancel()
+            try? await client.close()
+            try await server.stop()
+            return
+        }
+        let failure = await outcome.value
+        XCTAssertNotNil(failure, "The request waiting on the connection fails rather than hanging")
+        try await server.stop()
+    }
+
     func testEntryLimitDrainsOutstandingReadsAndCloses() async throws {
         let recorder = try await list(
             FakeDirectory(entries: thousand, batch: 3, holdMilliseconds: 10),
@@ -203,34 +231,6 @@ final class SFTPDirectoryReadTests: XCTestCase {
         }
         XCTAssertEqual(recorder.requests.filter { $0 == "close" }.count, 1)
         XCTAssertEqual(recorder.requests.last, "close")
-    }
-
-    /// After login nothing waited on Citadel's handshake promise, so a transport error went nowhere:
-    /// the connection stayed open, its requests never finished, and every later read was kept.
-    func testAPacketThatFailsToDecryptAfterLoginClosesTheConnection() async throws {
-        let server = try await FakeSFTPServer.start(FakeDirectory(entries: thousand, batch: 10, holdMilliseconds: 120_000))
-        let client = try await server.connect()
-        let sftp = try await client.openSFTP(logger: FakeSFTPServer.quietLogger)
-        let listing = Task { try await sftp.listDirectory(atPath: "/fake", resolvingPath: false, concurrentReads: 4) }
-        let outcome = Task { () -> Error? in
-            do { _ = try await listing.value; return nil } catch { return error }
-        }
-        // The requests are held by the server, so only the connection closing can end them.
-        while server.recorder.readdirs < 4 { try await Task.sleep(nanoseconds: 5_000_000) }
-        XCTAssertTrue(client.isConnected)
-        server.corruptWire()
-        let deadline = ContinuousClock.now + .seconds(30)
-        while client.isConnected, ContinuousClock.now < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
-        guard !client.isConnected else {
-            XCTFail("The connection stayed open after a packet that cannot be authenticated")
-            listing.cancel()
-            try? await client.close()
-            try await server.stop()
-            return
-        }
-        let failure = await outcome.value
-        XCTAssertNotNil(failure, "The request waiting on the connection fails rather than hanging")
-        try await server.stop()
     }
 
     func testRejectsZeroAndOversizedSFTPPacketLengths() async throws {
