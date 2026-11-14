@@ -21,6 +21,9 @@ public struct DocumentContentView: View {
     @State private var preparationFailed = false
     @State private var enhancedRendering = false
     @State private var deferInitialOverflow = false
+    /// Links in the prepared Markdown whose text shows a different address from where they lead.
+    @State private var linksToConfirm: Set<URL> = []
+    @State private var linkToConfirm: URL?
 
     public init(text: String, markdown: Bool, source: Bool, filename: String? = nil, location: RemoteDocumentLocation? = nil, resolver: (any RemoteResourceResolving)? = nil, readingPosition: DocumentReadingPosition? = nil, openDocumentLink: ((URL) -> Void)? = nil, wrapLines: Bool = true, navigation: ReaderNavigationState? = nil) {
         self.text = text
@@ -62,6 +65,7 @@ public struct DocumentContentView: View {
             position.overflowGeometry.clearLayoutCache()
         }
         #endif
+        .confirmingExternalLink($linkToConfirm)
         .task(id: ExactText(text: markdown ? text : "")) {
             await prepareMarkdownIfNeeded()
         }
@@ -117,7 +121,11 @@ public struct DocumentContentView: View {
                                         .textual.imageAttachmentLoader(NoImageLoader())
                                         .textual.emojiAttachmentLoader(NoImageLoader())
                                         .environment(\.openURL, OpenURLAction { url in
-                                            if DocumentPolicy.allowsExternalLink(url) { return .systemAction }
+                                            if DocumentPolicy.allowsExternalLink(url) {
+                                                guard linksToConfirm.contains(url) else { return .systemAction }
+                                                linkToConfirm = url
+                                                return .handled
+                                            }
                                             if DocumentPolicy.isRelativeDocumentLink(url), let openDocumentLink {
                                                 openDocumentLink(url)
                                                 return .handled
@@ -192,6 +200,7 @@ public struct DocumentContentView: View {
             let requiresEnhanced = await MarkdownPreparation.shared.requiresEnhancedRendering(input)
             guard !Task.isCancelled else { return }
             enhancedRendering = requiresEnhanced
+            linksToConfirm = ExternalLinkPolicy.linksNeedingConfirmation(in: result)
             prepared = result
             preparedSource = input
             preparationFailed = false

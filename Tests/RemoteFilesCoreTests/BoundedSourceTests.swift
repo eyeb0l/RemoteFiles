@@ -396,6 +396,38 @@ import RemoteFilesCore
         try await wait("script-only entry", failure: { nil }) { finished }
         XCTAssertTrue(needsScripts, "An app entry file must not be presented as a successfully rendered blank page")
     }
+    /// A page chooses its links' text. A link whose text shows a different address from where it
+    /// leads, or that is plain http, is handed over for confirmation; the rest open as before.
+    func testLinksWhoseTextNamesAnotherSiteAreConfirmedAndOthersOpen() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        let rules = try await SVGResourceBlocker.rules()
+        var finished = false, opened: [URL] = [], confirmed: [URL] = []
+        let source = """
+        <!doctype html><html><body>
+        <p><a id="honest" href="https://example.com/docs">Docs</a> <a id="same" href="https://example.com/">example.com</a></p>
+        <p><a id="spoof" href="https://evil.example/">https://bank.example</a> <a id="plain" href="http://example.com/old">Old site</a></p>
+        </body></html>
+        """
+        window.rootViewController = UIHostingController(rootView: StaticHTMLWebView(text: source, filename: "links.html", rules: rules,
+            readingPosition: DocumentReadingPosition(), onFinish: { _ in finished = true }, onFailure: { XCTFail($0) },
+            openExternalLink: { opened.append($0) }, confirmExternalLink: { confirmed.append($0) }))
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        try await wait("link confirmation", failure: { nil }) { finished }
+        func views(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(views) }
+        let view = try XCTUnwrap(views(window).compactMap { $0 as? WKWebView }.first)
+        for id in ["honest", "same", "spoof", "plain"] {
+            _ = try await view.evaluateJavaScript("document.getElementById('\(id)').click(); true", in: nil, contentWorld: .defaultClient)
+        }
+        try await wait("link callbacks", failure: { nil }) { opened.count + confirmed.count == 4 }
+        XCTAssertEqual(Set(opened.map(\.absoluteString)), ["https://example.com/docs", "https://example.com/"])
+        XCTAssertEqual(Set(confirmed.map(\.absoluteString)), ["https://evil.example/", "http://example.com/old"])
+        XCTAssertEqual(view.url?.absoluteString, "about:blank", "No link is followed inside the preview")
+        XCTAssertTrue(ExternalLinkConfirmation.message(for: try XCTUnwrap(confirmed.first { $0.host == "evil.example" })).contains("evil.example"))
+    }
+
     /// iOS lays a page out at its `device-width` viewport. Text size must not widen that layout
     /// (as `WKWebView.pageZoom` did, by its own factor), so headings and text wrap within the view.
     func testLargeTextSizeReflowsWithinTheViewWidth() async throws {

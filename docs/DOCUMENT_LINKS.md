@@ -5,6 +5,23 @@ Only a user tap in rendered Markdown starts a remote document navigation request
 unsafe schemes, absolute remote paths and scheme-relative URLs lose their actions.
 HTTP/HTTPS links keep the existing explicit external-open behavior.
 
+## Links that leave the app
+
+A document chooses its links' text, so the text can name one site while the link goes to
+another. Most web links are honest and open in the browser on one tap. A link is confirmed
+first, with the host it really goes to and its whole address, when:
+
+- its text shows a web address on a different host, such as `[https://bank.example](https://evil.example/)`
+  or the same thing in an HTML file. `www.` is ignored, a bare name ending like a file
+  (`README.md`) is taken as a file name, and a name written in another script to look like the
+  real one counts as different;
+- or it is plain `http`, which others on the network can read and change.
+
+This applies to rendered Markdown, rich Markdown and HTML previews. In the two web previews the
+app reads the link's text from its own isolated script world; the page's scripts still never
+run. A link with no text to compare, such as one around an image, opens as before unless it is
+`http`. Links in PDFs open without this check.
+
 ## Offline documents
 
 Relative links in saved Markdown use the local Offline library, without a transport
