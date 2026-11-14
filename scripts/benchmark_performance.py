@@ -150,8 +150,10 @@ def inside_device_fixture(args):
     generate_fixture(bench, False)
     key = fixture / "device-key"
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+    # The relay puts this daemon on the network and the key travels in the environment, so the key
+    # gets no forwarding, terminal or agent. Commands and SFTP stay: the scenarios use both.
     with open(fixture / "authorized_keys", "a") as handle:
-        handle.write(key.with_suffix(".pub").read_text())
+        handle.write("restrict " + key.with_suffix(".pub").read_text())
     output = pathlib.Path(args.output).resolve()
     for rtt in [int(value) for value in args.rtt.split(",")]:
         port = int(os.environ["REMOTEFILES_SFTP_PORT"]) + 1000
