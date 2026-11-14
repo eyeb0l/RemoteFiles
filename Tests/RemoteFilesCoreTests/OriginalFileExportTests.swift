@@ -176,7 +176,7 @@ final class OriginalFileExportTests: XCTestCase {
         let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
         let service = OriginalExportTransportMock(bytes: Data([1]))
         let exporter = RemoteOriginalExporter(service: service, directory: dir)
-        for name in ["", ".", "..", "../secret", "folder/file", "folder\\file", "A\0B", "A\nB"] {
+        for name in ["", ".", "..", "../secret", "folder/file", "folder\\file", "A\0B", "A\nB", "invoice\u{202E}fdp.html"] {
             do { _ = try await exporter.prepare(profile: profile, entry: entry(name), allowedRoot: "/fixture"); XCTFail(name) }
             catch OriginalFileExportError.invalidFilename { }
         }

@@ -2634,15 +2634,16 @@ private final class ReplyStallingProxy: @unchecked Sendable {
 
 final class BoundedPreviewReaderTests: XCTestCase {
     func testGrowthBeyondInitialStatIsRejectedWhileReceiving() async throws {
-        let chunks = ControlledPreviewChunks(["1234", "56789"])
+        // The two reads start together, in either order, so the file answers each by its offset.
+        let file = PipelinedPreviewFile(Array("123456789".utf8))
         do {
-            _ = try await BoundedPreviewReader.read(initialSize: 4, limit: 8) { _, amount in
-                await chunks.next(maximum: amount)
+            _ = try await BoundedPreviewReader.read(initialSize: 4, limit: 8) { offset, amount in
+                await file.read(offset: offset, length: amount)
             }
             XCTFail("A file that grows beyond its stat size must be rejected")
         } catch RemoteFileError.tooLarge(let limit) { XCTAssertEqual(limit, 8) }
-        let requested = await chunks.requests
-        XCTAssertEqual(requested, [4, 5], "The expected size, then a probe up to one byte past the limit")
+        let requested = await file.requests.sorted { $0.0 < $1.0 }.map { [Int($0.0), Int($0.1)] }
+        XCTAssertEqual(requested, [[0, 4], [4, 5]], "The expected size, and a probe up to one byte past the limit")
     }
 
     func testKnownSizeFinishesWithoutASecondRoundOfReads() async throws {

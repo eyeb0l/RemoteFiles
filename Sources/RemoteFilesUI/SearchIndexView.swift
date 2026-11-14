@@ -117,7 +117,7 @@ struct SearchIndexView: View {
                             model.openInWorkspace(.file(profile.id, entry))
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(match.entry.name)
+                                Text(RemotePath.displayName(match.entry.name))
                                 Text(match.entry.path).font(.caption).foregroundStyle(.secondary)
                                 Text((match.page.map { "Page \($0)" } ?? "Line \(match.line)") + " · " + match.snippet)
                                     .font(.caption).foregroundStyle(.secondary).lineLimit(3)

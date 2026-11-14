@@ -10,6 +10,47 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 14 November 2026: a result line split by a system log line counted as missing
+
+PR #124 run [43538623080, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/43538623080/attempts/1)
+failed **Quick / simulator-core** with `Missing results:
+PlaybackTests/testCorruptRefreshPreservesPreviousPlayerAndReportsCodecError` and
+`xcresult/log count mismatch`: the xcresult held 760 passes and four allowed skips, the
+log 759. No test failed. In `simulator-core.log` the test's result line was split by an
+audio log line from the test host, written between the test's name and its outcome:
+
+```
+Test Case '-[RemoteFilesTests.PlaybackTests testCorruptRefresh…]'2026-11-14 01:24:21.111681+0000 RemoteFilesTestHost[35848:128845] [AQ]        LoudnessManager.mm:1222  IsHardwareSupported: no plist loaded, returning fa
+ passed (0.014 seconds).
+```
+
+`log_tests` in `scripts/test-acceptance.py` already removes such records from inside a
+test's identifier and from inside the `Test Case '-[` prefix. This one fell between the
+closing quote and the outcome, which it does not handle, so the test had a start and no
+result. The PR changed image decoding only. The job was rerun once, with this cause named
+on the PR. The runner is unchanged: one occurrence does not show how often a record lands
+in that position. If it recurs, extend `log_tests` to that position as well; the xcresult
+already had the right count.
+
+## 14 November 2026: a preview-reader test assumed its two reads arrive in order
+
+`BoundedPreviewReaderTests.testGrowthBeyondInitialStatIsRejectedWhileReceiving` failed
+**Quick / simulator-core** on two unrelated pull requests within a few hours: #135 run
+[43547113181](https://github.com/eyeb0l/RemoteFiles/actions/runs/43547113181) (761 other tests
+passed) and #134 run [43560296011](https://github.com/eyeb0l/RemoteFiles/actions/runs/43560296011)
+(776 passed). Both reported the requests `[5, 4, 1]` where the test expected `[4, 5]`. Neither
+pull request touched the reader; #135 passed when rerun.
+
+`BoundedPreviewReader.stream` starts its reads as task-group tasks, which begin in either order.
+The test's fake handed out its chunks in the order requests arrived, whatever their offsets. When
+the probe's task ran first it received the first chunk, came back short and was topped up with a
+one-byte read, which is exactly `[5, 4, 1]`. The neighbouring test already notes that requests
+start in any order.
+
+The test now reads from a fake that answers each request by its offset, and compares the
+requests sorted by offset. The reader is unchanged. The cause is from reading the code and the
+two failures' identical output; the failure was not reproduced locally.
+
 ## 13 November 2026: Find focus regression needs phase-specific CI evidence
 
 PR #121 run [43432298598, attempt 1](https://github.com/eyeb0l/RemoteFiles/actions/runs/43432298598/attempts/1)

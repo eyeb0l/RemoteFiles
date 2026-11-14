@@ -359,4 +359,37 @@ public enum RemotePath {
     }
     /// Hidden as servers and shells mean it: the name's first byte is a full stop.
     public static func isHidden<Name: StringProtocol>(_ name: Name) -> Bool { name.utf8.first == 0x2E }
+
+    /// Characters that change the order text is drawn in and are not themselves drawn: the
+    /// embeddings, overrides and isolates, and the left-to-right, right-to-left and Arabic letter
+    /// marks. `invoice` + U+202E + `fdp.html` is drawn as `invoicelmth.pdf`.
+    public static func isDirectionControl(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x202A...0x202E, 0x2066...0x2069, 0x200E, 0x200F, 0x061C: return true
+        default: return false
+        }
+    }
+    public static func hasDirectionControl<Name: StringProtocol>(_ name: Name) -> Bool {
+        name.unicodeScalars.contains(where: isDirectionControl)
+    }
+    /// A name as it should be shown: each direction control becomes a visible replacement
+    /// character, so the letters appear in the order they are stored and the name's real ending
+    /// is at its end. The stored name is unchanged; only use this for display.
+    public static func displayName<Name: StringProtocol>(_ name: Name) -> String {
+        guard hasDirectionControl(name) else { return String(name) }
+        var shown = String.UnicodeScalarView()
+        for scalar in name.unicodeScalars { shown.append(isDirectionControl(scalar) ? "\u{FFFD}" : scalar) }
+        return String(shown)
+    }
+}
+
+/// A path as a dictionary key that tells apart names differing only in Unicode normalisation.
+/// `String` equality treats them as equal, and a server's file system does not: two files could
+/// otherwise share one cache entry.
+public struct RemotePathKey: Hashable, Sendable {
+    public let path: String
+    public init(_ path: String) { self.path = path }
+    public static func == (lhs: Self, rhs: Self) -> Bool { lhs.path.utf8.elementsEqual(rhs.path.utf8) }
+    // Equal bytes are equal strings, so this agrees with `==`; canonically equal names only collide.
+    public func hash(into hasher: inout Hasher) { hasher.combine(path) }
 }
