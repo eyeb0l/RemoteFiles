@@ -56,7 +56,7 @@ The parser reads untrusted bytes off the main actor. Damaged or hostile input gi
 | A DER file or PKCS #7 bundle | 1 MiB | **Too Large to Preview**, or counted as unreadable in a PEM. Parsing costs about 100 bytes of memory per DER element. |
 | One certificate | 256 KiB | Counted as unreadable; the rest of the file still shows. |
 | Certificates in a file | 200 | The rest are counted as not shown. A key after the limit is still reported. |
-| A displayed field | 1 KiB | Clipped with an ellipsis. Serial numbers show 64 bytes. |
+| A displayed field | 1 KiB | Clipped with an ellipsis, including the identifier shown for an unknown attribute, extension or algorithm. Serial numbers show 64 bytes. |
 | Name attributes | 32 per name | Counted as not shown. |
 | Subject Alternative Names | 256 | Counted as not shown. |
 | Extended key usages and extensions | 32 and 128 | Ignored past the limit. |
