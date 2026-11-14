@@ -267,22 +267,24 @@ def expected_tests(root, platform, directories):
 
 def log_tests(path):
     tests = {}
-    # Simulator diagnostics may split an XCTest identifier or appear between
-    # its outcome and duration. Remove only complete, structured runtime log
-    # records inside the identifier; unknown interruptions still fail inventory.
+    # The test host's runtime log records share the output with XCTest and can
+    # land at any point inside a result line: in the "Test Case '-[" prefix, in
+    # the identifier, before or after the outcome. A record that begins in the
+    # middle of a line was spliced into other output, so remove it and rejoin
+    # the line. Only complete, structured records ending in a newline go; an
+    # unknown or unterminated interruption leaves the result unreadable, and
+    # the inventory fails.
     diagnostic = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+[+-]\d{4} "
                             r"[\w.-]+\[\d+:\d+\] \[[^\]\n]+\] [^\n]*\n")
+    spliced = re.compile(r"(?<=[^\n])(?:" + diagnostic.pattern + ")+")
     pattern = re.compile(r"Test Case '-\[(?:[\w]+\.)?(\w+) (test\w+)\]' (passed|failed|skipped)(?=\s|$|\d{4}-\d{2}-\d{2} )")
-    # The same records may also split the "Test Case '-[" prefix itself.
     prefix = "Test Case '-["
-    spliced = re.compile("|".join(re.escape(prefix[:offset]) + "(?:" + diagnostic.pattern + ")+" + re.escape(prefix[offset:])
-                                  for offset in range(1, len(prefix))))
-    text = spliced.sub(prefix, path.read_text(errors="replace"))
+    text = spliced.sub("", path.read_text(errors="replace"))
     for fragment in text.split(prefix)[1:]:
         name, closing, remainder = fragment.partition("]'")
         if not closing:
             continue
-        match = pattern.match("Test Case '-[" + diagnostic.sub("", name) + closing + remainder)
+        match = pattern.match(prefix + name + closing + remainder)
         if not match:
             continue
         identifier = match[1] + "/" + match[2]

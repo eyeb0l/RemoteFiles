@@ -24,7 +24,7 @@ To see both states, open **TLS certificates** in Explore Demo and choose `Deploy
 
 Detection is `PrivateKeyRedaction` in `RemoteFilesCore`. These are recognized:
 
-- PEM blocks whose label contains `PRIVATE KEY`, including `RSA`, `EC`, `DSA`, `ENCRYPTED`, `OPENSSH` and PGP's `PRIVATE KEY BLOCK`, with or without headers like `Proc-Type`.
+- PEM blocks whose label contains `PRIVATE KEY`, in any case, including `RSA`, `EC`, `DSA`, `ENCRYPTED`, `OPENSSH` and PGP's `PRIVATE KEY BLOCK` and older `SECRET KEY BLOCK`, with or without headers like `Proc-Type`.
 - SSH.COM `---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----` blocks.
 - PuTTY `.ppk` content: the private lines and their MAC. Its public lines stay visible in a longer document.
 - A whole PEM key encoded as base64, such as `client-key-data` in a kubeconfig or `tls.key` in a Kubernetes secret. A certificate beside it stays visible.
@@ -55,6 +55,8 @@ This recognizes key formats. It isn't a secret scanner, and a format it doesn't 
 - JSON Web Keys, WireGuard and age keys, API tokens and passwords aren't recognized.
 - A key in PKCS #8 without its markers isn't recognized, because nothing distinguishes it from other base64.
 - A key wrapped at under 32 characters a line isn't recognized.
+- A key under a prefix longer than the key text beside it, such as a long log prefix, is found only when each line ends with at least 40 characters of the key. Its short last line is found when it starts in the same column as the lines above; under a prefix of varying width it stays visible.
+- A key written with HTML entities in place of its dashes (`&#45;&#45;&#45;&#45;&#45;BEGIN …`) in an `.html` file isn't recognized in the source, and the rendered preview decodes the entities and shows it.
 - An example key in a tutorial is hidden, because it can't be told from a real one. Save the original to read it.
 - UTF-16 or Latin-1 text isn't checked, because it never opens as text. It shows **Can't display this file**.
 - A key in an image or on a PDF page is still visible when you open that file. Text extracted from them for search is checked a page at a time, so the part of a key that continues onto another page can reach a saved index, and OCR can misread a key so that it no longer matches.

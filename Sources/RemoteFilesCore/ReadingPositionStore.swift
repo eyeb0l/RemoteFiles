@@ -86,6 +86,8 @@ public actor ReadingPositionStore {
     public init(fileURL: URL, capacity: Int = 200) {
         self.fileURL = fileURL
         self.capacity = max(1, capacity)
+        // A file written by an earlier version is still in backups until something writes it again.
+        Self.excludeFromBackup(fileURL)
         if let data = try? Data(contentsOf: fileURL), data.count <= 2 * 1024 * 1024,
            let file = try? JSONDecoder().decode(File.self, from: data), file.version == 1 {
             records = Array(file.records.filter { $0.position.isValid && !$0.pathBytes.isEmpty && $0.pathBytes.count <= 16_384 && $0.updatedAt.timeIntervalSince1970.isFinite }
@@ -125,5 +127,14 @@ public actor ReadingPositionStore {
         #else
         try bytes.write(to: fileURL, options: .atomic)
         #endif
+        // An atomic write makes a new file each time, so this is set again each time.
+        Self.excludeFromBackup(fileURL)
+    }
+
+    /// What was read, and a hash of each document's text, is not something a backup needs to carry.
+    private static func excludeFromBackup(_ fileURL: URL) {
+        var values = URLResourceValues(); values.isExcludedFromBackup = true
+        var file = fileURL
+        try? file.setResourceValues(values)
     }
 }

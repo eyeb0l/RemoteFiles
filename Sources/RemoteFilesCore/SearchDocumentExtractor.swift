@@ -129,6 +129,7 @@ public enum SearchDocumentExtractor {
 
     private static func image(_ data: Data) throws -> (CGImage, Bool) {
         guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              RemoteImageFormat.isAllowed(source),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
               let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else { throw SearchExtractionError.invalidDocument }
