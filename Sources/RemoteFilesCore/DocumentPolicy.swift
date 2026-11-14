@@ -214,11 +214,13 @@ public enum MarkdownLimits {
     /// hundred overflow its stack. Ten nested lists use about twenty.
     public static let maximumDepth = 32
     /// Stretches of text that differ in formatting or block. Each costs the parser about ten
-    /// microseconds and 700 bytes; a megabyte and a half of ordinary formatted prose has about 100,000.
-    public static let maximumRuns = 200_000
+    /// microseconds and 700 bytes. The densest real document measured would have about 83,000 at
+    /// the 2 MiB a document may be.
+    public static let maximumRuns = 100_000
     /// Line breaks and formatting characters, counted before parsing: no run begins without one,
-    /// so this bounds the parse itself, which cannot be interrupted once started.
-    public static let maximumMarkers = 250_000
+    /// so this bounds the parse itself, which cannot be interrupted once started. Reference
+    /// documents that are mostly tables would have up to about 170,000 at 2 MiB.
+    public static let maximumMarkers = 175_000
     /// Vertical bars on one line. Parsing a table row costs the square of its columns.
     public static let maximumBarsPerLine = 256
 
