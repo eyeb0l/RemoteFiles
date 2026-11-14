@@ -136,6 +136,8 @@ struct EnhancedMarkdownWebView: UIViewRepresentable {
         let configuration = Self.configuration(rules: rules, scripts: scripts)
         configuration.userContentController.add(context.coordinator, contentWorld: .defaultClient, name: "markdownImage")
         let view = WKWebView(frame: .zero, configuration: configuration)
+        // A long press would otherwise offer a preview of a link, which may load its destination.
+        view.allowsLinkPreview = false
         view.navigationDelegate = context.coordinator; view.scrollView.delegate = context.coordinator
         view.accessibilityIdentifier = "Rendered Markdown document"
         context.coordinator.view = view

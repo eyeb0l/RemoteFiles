@@ -197,6 +197,7 @@ import RemoteFilesCore
         } while ContinuousClock.now < deadline
         let view = try XCTUnwrap(renderer, "The production SVG preview must retain its renderer")
         XCTAssertTrue(view.window === window)
+        XCTAssertFalse(view.allowsLinkPreview)
         XCTAssertNotNil(view.url)
         XCTAssertFalse(view.isLoading, "The production renderer must finish within its existing fifteen-second deadline")
         let count = try await view.evaluateJavaScript("document.querySelectorAll('svg rect').length") as? Int
@@ -425,6 +426,7 @@ import RemoteFilesCore
         func views(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(views) }
         let view = try XCTUnwrap(views(host.view).compactMap { $0 as? WKWebView }.first)
         XCTAssertEqual(view.pageZoom, 1, accuracy: 0.001)
+        XCTAssertFalse(view.allowsLinkPreview, "A long press must not offer a preview that loads a link's destination")
         func number(_ script: String) async throws -> Double {
             let value = try await view.evaluateJavaScript(script, in: nil, contentWorld: .defaultClient)
             return try XCTUnwrap(value as? NSNumber).doubleValue
