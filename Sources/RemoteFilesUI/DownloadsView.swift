@@ -84,7 +84,7 @@ private struct DownloadRow: View {
                     .frame(width: iconColumn).accessibilityHidden(true)
                     .contentTransition(.symbolEffect(.replace))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(item.filename).lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                    Text(RemotePath.displayName(item.filename)).lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
                     Text("\(stateText) · \(item.profile.name)")
                         .font(.footnote.monospacedDigit()).foregroundStyle(.secondary)
                         .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)

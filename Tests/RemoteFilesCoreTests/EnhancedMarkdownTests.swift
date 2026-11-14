@@ -11,6 +11,10 @@ final class EnhancedMarkdownPolicyTests: XCTestCase {
         for source in ["# Heading\n\n**ordinary** [link](Guide.md)", "![alt](image.png)", "Cost: $5", "2 < 3", "`plain code`"] {
             XCTAssertFalse(EnhancedMarkdownPolicy.requiresEnhancedRendering(source), source)
         }
+        // A document the native reader refuses is not parsed for the rich renderer either.
+        let wide = "$x$\n\n|" + String(repeating: "a|", count: 1_000)
+        XCTAssertFalse(EnhancedMarkdownPolicy.requiresEnhancedRendering(wide))
+        XCTAssertTrue(EnhancedMarkdownPolicy.requiresEnhancedRendering("$x$\n\n|a|b|"))
     }
     func testCodeExamplesAndGenericTypesStayInNativeMarkdown() {
         let examples = [
