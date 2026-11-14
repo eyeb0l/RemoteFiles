@@ -146,6 +146,18 @@ final class SearchDocumentExtractorTests: XCTestCase {
         }
     }
 
+    /// ImageIO would pick the Photoshop decoder from these bytes, whatever the file is called.
+    func testOCRRefusesAFormatTheAppDoesNotNameAsAnImage() async throws {
+        let data = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(data, "com.adobe.photoshop-image" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, try raster("SEARCHABLE INVOICE"), nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        do {
+            _ = try await extract(data as Data, filename: "invoice.png", options: .init(includeOCR: true))
+            XCTFail("A Photoshop file named .png was decoded")
+        } catch SearchExtractionError.invalidDocument { }
+    }
+
     func testOCRFindsTextInImageAndScannedPDFOnlyWhenEnabled() async throws {
         let image = try png(raster("SEARCHABLE INVOICE"))
         let recognized = try await extract(image, filename: "invoice.png", options: .init(includeOCR: true))

@@ -69,7 +69,11 @@ model in a later navigation change.
   displayed thumbnail. Memory warnings clear the decoded LRU along with document/folder caches. Background/disconnect clears decoded caches and cancels flights.
 - ImageIO downsamples from the disk URL, disables full-source caching, and decodes away
   from MainActor. Inline thumbnails have a **1600-pixel** longest edge; full-screen uses
-  **3072 pixels**. Sources over 400 million pixels are rejected to limit decoder exposure.
+  **3072 pixels**. ImageIO chooses a decoder from a file's contents, not its name, so only
+  JPEG, PNG, HEIC/HEIF, GIF, TIFF, WebP, BMP and ICO data is decoded; other formats ImageIO
+  knows, such as camera RAW, are refused. Sources over **64 million pixels** or 32,768 pixels
+  on a side are refused too, with a message saying so. OCR for search applies the same format
+  rule, with its own 40-million-pixel limit.
   Animated formats display their first frame. SVG/PDF are not image previews.
 - Retry invalidates the cached resource before re-fetching. Document Refresh clears image
   caches and rebuilds image rows after the document reload, even if Markdown is unchanged.
