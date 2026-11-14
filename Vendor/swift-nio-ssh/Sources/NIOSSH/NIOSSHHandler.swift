@@ -159,9 +159,9 @@ extension NIOSSHHandler: ChannelDuplexHandler {
         self.expectingChannelReadComplete = true
 
         var data = self.unwrapInboundIn(data)
-        self.stateMachine.bufferInboundData(&data)
 
         do {
+            try self.stateMachine.bufferInboundData(&data)
             while let result = try self.stateMachine.processInboundMessage(allocator: context.channel.allocator, loop: context.eventLoop) {
                 try self.processInboundMessageResult(result, context: context)
             }

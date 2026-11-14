@@ -69,6 +69,14 @@ validates ECDSA signature mpints as canonical positive, nonzero, curve-width-bou
 before copying them into fixed-width storage. The package retains a focused local test target for
 these untrusted wire-format boundaries.
 
+Local security hardening also bounds what the packet parser buffers. `SSHPacketParser.append`,
+and `bufferInboundData` above it, now throw a protocol violation once the bytes left over from
+parsing exceed the maximum packet size plus 1,024 bytes. Parsing leaves at most one incomplete
+packet, so more than that is data nothing is consuming: upstream kept a packet that failed to
+decrypt, retried it on every read and appended each read behind it without limit.
+`NIOSSHHandler.channelRead` reports the error as it reports a parsing error. The local test target
+covers the bound.
+
 The version parser returns the server's identification string alone. A server may send other
 lines before it (RFC 4253, section 4.2), and the string goes into the key-exchange hash; the fork
 returned those lines with it, so the host's signature never verified and such a server could not

@@ -1465,6 +1465,45 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertEqual(metrics.fileOperations, 1, "Verification must preserve usable cached bytes")
     }
 
+    /// Over a real connection: a window still connected after trust is reset keeps what it reads
+    /// under the key its connection verified, so another window trusting a different key at that
+    /// address is not given it, and gets it again only once that key is trusted again.
+    func testPreviewsKeepTheKeyTheirConnectionVerifiedAfterATrustReset() async throws {
+        let fixture = try Fixture(), stores = try Stores(fixture: fixture)
+        let identity = try await stores.identity.generate(name: "Preview host keys")
+        try fixture.authorize(identity.publicKey)
+        let profile = try await stores.profile(identity: identity)
+        try await stores.trustFixtureHost()
+        let connected = stores.service(), other = stores.service()
+        addTeardownBlock { await connected.disconnect(); await other.disconnect() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clip = URL(fileURLWithPath: fixture.files + "/host-key-clip.mp4")
+        try Data("fixture server bytes".utf8).write(to: clip)
+        defer { try? FileManager.default.removeItem(at: clip) }
+        let location = RemoteDocumentLocation(profile: profile, path: fixture.files + "/report.md")
+        let connectedWindow = RemoteResourceResolver(service: connected, directory: directory)
+        let otherWindow = RemoteResourceResolver(service: other, directory: directory)
+        _ = try await connected.resolveEntry(profile: profile, path: fixture.files)
+
+        try await stores.trust.reset(endpoint: fixture.endpoint)
+        let read = try await connectedWindow.localFile(for: "host-key-clip.mp4", in: location)
+        XCTAssertEqual(try Data(contentsOf: read), Data("fixture server bytes".utf8), "The open connection still reads")
+        let wrong = try HostKeyDetails(publicKey: NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey)
+        try await stores.trust.trustUnknown(endpoint: fixture.endpoint, key: wrong)
+        do {
+            _ = try await otherWindow.localFile(for: "host-key-clip.mp4", in: location)
+            XCTFail("Bytes from the fixture's key must not be served while another key is trusted")
+        } catch HostTrustError.changed { }
+
+        try await stores.trust.reset(endpoint: fixture.endpoint)
+        try await stores.trustFixtureHost()
+        let served = try await otherWindow.localFile(for: "host-key-clip.mp4", in: location)
+        XCTAssertEqual(served, read, "Its own key is trusted again")
+        let metrics = await other.metrics()
+        XCTAssertEqual(metrics.fileOperations, 0, "Served from the copy the connected window kept")
+    }
+
     func testUnknownAndChangedHostFailBeforeAuthentication() async throws {
         let fixture = try Fixture()
         let stores = try Stores(fixture: fixture)

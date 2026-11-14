@@ -194,6 +194,32 @@ final class SFTPDirectoryReadTests: XCTestCase {
         try await server.stop()
     }
 
+    /// After login nothing waited on Citadel's handshake promise, so a transport error went nowhere:
+    /// the connection stayed open, its requests never finished, and every later read was kept.
+    func testAPacketThatFailsToDecryptAfterLoginClosesTheConnection() async throws {
+        let server = try await FakeSFTPServer.start(FakeDirectory(entries: thousand, batch: 10, holdMilliseconds: 120_000))
+        addTeardownBlock { try? await server.stop() }
+        let client = try await server.connect()
+        addTeardownBlock { try? await client.close() }
+        let sftp = try await client.openSFTP(logger: FakeSFTPServer.quietLogger)
+        let listing = Task { try await sftp.listDirectory(atPath: "/fake", resolvingPath: false, concurrentReads: 4) }
+        addTeardownBlock { listing.cancel() }
+        let outcome = Task { () -> Error? in
+            do { _ = try await listing.value; return nil } catch { return error }
+        }
+        // The requests are held by the server, so only the connection closing can end them.
+        while server.recorder.readdirs < 4 { try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertTrue(client.isConnected)
+        server.corruptWire()
+        let deadline = ContinuousClock.now + .seconds(30)
+        while client.isConnected, ContinuousClock.now < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        guard !client.isConnected else {
+            return XCTFail("The connection stayed open after a packet that cannot be authenticated")
+        }
+        let failure = await outcome.value
+        XCTAssertNotNil(failure, "The request waiting on the connection fails rather than hanging")
+    }
+
     func testEntryLimitDrainsOutstandingReadsAndCloses() async throws {
         let recorder = try await list(
             FakeDirectory(entries: thousand, batch: 3, holdMilliseconds: 10),
@@ -374,14 +400,20 @@ private final class FakeSFTPServer: @unchecked Sendable {
     let recorder: FakeRecorder
     private let listener: Channel
 
-    private init(listener: Channel, recorder: FakeRecorder) { self.listener = listener; self.recorder = recorder }
+    private let wire: FakeWire
+
+    private init(listener: Channel, recorder: FakeRecorder, wire: FakeWire) {
+        self.listener = listener; self.recorder = recorder; self.wire = wire
+    }
 
     static func start(_ directory: FakeDirectory) async throws -> FakeSFTPServer {
         let hostKey = NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey())
-        let recorder = FakeRecorder()
+        let recorder = FakeRecorder(), wire = FakeWire()
         let listener = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .childChannelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
+                    // Nearest the socket, so what it writes bypasses the SSH handler's encryption.
+                    try channel.pipeline.syncOperations.addHandler(wire.corruptor())
                     if !directory.linesBeforeVersion.isEmpty {
                         try channel.pipeline.syncOperations.addHandler(LinesBeforeVersion(directory.linesBeforeVersion))
                     }
@@ -395,8 +427,11 @@ private final class FakeSFTPServer: @unchecked Sendable {
                         }))
                 }
             }.bind(host: "127.0.0.1", port: 0).get()
-        return FakeSFTPServer(listener: listener, recorder: recorder)
+        return FakeSFTPServer(listener: listener, recorder: recorder, wire: wire)
     }
+
+    /// Sends every connected client a packet whose length is plausible and whose tag cannot verify.
+    func corruptWire() { wire.corrupt() }
 
     var port: Int { listener.localAddress?.port ?? 0 }
 
@@ -431,6 +466,38 @@ private final class LinesBeforeVersion: ChannelOutboundHandler {
         var rest = unwrapOutboundIn(data)
         bytes.writeBuffer(&rest)
         context.write(wrapOutboundOut(bytes), promise: promise)
+    }
+}
+
+private final class FakeWire: @unchecked Sendable {
+    private let lock = NSLock()
+    private var corruptors: [WireCorruptor] = []
+    func corruptor() -> WireCorruptor {
+        let corruptor = WireCorruptor()
+        lock.lock(); corruptors.append(corruptor); lock.unlock()
+        return corruptor
+    }
+    func corrupt() {
+        lock.lock(); let all = corruptors; lock.unlock()
+        all.forEach { $0.corrupt() }
+    }
+}
+
+private final class WireCorruptor: ChannelOutboundHandler, @unchecked Sendable {
+    typealias OutboundIn = ByteBuffer
+    private var context: ChannelHandlerContext?
+    func handlerAdded(context: ChannelHandlerContext) { self.context = context }
+    func handlerRemoved(context: ChannelHandlerContext) { self.context = nil }
+    func corrupt() {
+        guard let context else { return }
+        context.eventLoop.execute {
+            guard self.context != nil else { return }
+            // AES-GCM leaves the length readable: 32 bytes of ciphertext, then a 16-byte tag.
+            var bytes = context.channel.allocator.buffer(capacity: 52)
+            bytes.writeInteger(UInt32(32))
+            bytes.writeRepeatingByte(0xA5, count: 48)
+            context.writeAndFlush(NIOAny(bytes), promise: nil)
+        }
     }
 }
 

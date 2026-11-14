@@ -67,6 +67,14 @@ Lines wrap by default. Choose **Document actions → Wrap Lines** to turn wrappi
 
 Source uses a selectable native text viewport for both short and long documents. Highlighting is prepared off the main actor; plain text appears first. A file over 256 KiB, or with any line over 4,096 bytes (a minified script, an embedded image), stays plain: colouring a long line takes time that grows with the square of its length. The local token cache holds at most two documents within an estimated 2 MiB, and clears on disconnect, backgrounding or memory warning. No remote scripts are loaded for highlighting.
 
+### Hidden characters that reorder text
+
+Unicode has characters that show nothing and change the order the text after them is displayed in. Placed in source code, they can make a line read as one thing while a compiler is given another. When a document contains any of them (the embeddings, overrides and isolates, U+202A, U+202B, U+202D, U+202E and U+2066 to U+2068), a notice above it says how many, in **Rendered** and in **Source**. The text itself is shown unchanged, and **Copy Source** copies it unchanged. The left-to-right and right-to-left marks that ordinary Arabic and Hebrew text uses are not counted. File names are handled separately: a direction character in a name is shown as a replacement character, so the name appears in stored order.
+
+<img src="screenshots/reader-direction-notice-iphone.png" width="320" alt="An orange notice reading 3 Hidden Characters Reorder Text above four lines of Swift source">
+
+*The notice above a source file whose second line is stored as `if isAdmin { /* ` + override + ` } ` + isolate + `begin admins only */ grant()`, so the closing brace is inside the comment's displayed text. Rendered in the test host on the iPhone 18 Pro simulator, iOS 27.2, without the reader's bars.*
+
 ## Save the original
 
 Choose **Save Original to Files** in the reader toolbar to save a copy through the native Files picker. Preparation streams the original file, up to 128 MiB, preserving its exact bytes and selected filename and extension. You can cancel preparation. Temporary exports expire after ten minutes and are removed on dismissal, navigation away, disconnect or backgrounding. See [original export](ORIGINAL_EXPORT.md) for confinement and lifecycle details.
