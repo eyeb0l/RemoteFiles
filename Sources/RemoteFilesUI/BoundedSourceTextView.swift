@@ -94,6 +94,7 @@ struct BoundedSourceTextView: UIViewRepresentable {
         let coordinator = context.coordinator
         coordinator.position = readingPosition
         coordinator.wrapLines = wrapLines
+        view.bottomEdgeInset = context.environment.bottomEdgeInset
         view.onPosition = { point, anchor in
             readingPosition?.source = point
             readingPosition?.sourceAnchor = anchor
@@ -214,6 +215,10 @@ final class SourceTextView: UITextView {
     var anchor: SavedReadingPosition.Anchor?
     var restoreAnchor = false
     var onPosition: ((CGPoint, SavedReadingPosition.Anchor?) -> Void)?
+    /// How much of the view the reader's bottom bar and the home indicator cover.
+    var bottomEdgeInset: CGFloat = 0 {
+        didSet { if bottomEdgeInset != oldValue { clearBottomEdge(bottomEdgeInset, safeArea: safeAreaInsets) } }
+    }
     private var lastWidth: CGFloat = 0
     private var anchorCorrectionScheduled = false
     private var anchorAttempts = 0
@@ -264,6 +269,10 @@ final class SourceTextView: UITextView {
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if window != nil { setNeedsLayout() }
+    }
+    override func safeAreaInsetsDidChange() {
+        super.safeAreaInsetsDidChange()
+        clearBottomEdge(bottomEdgeInset, safeArea: safeAreaInsets)
     }
     override func layoutSubviews() {
         if lastWidth > 0, lastWidth != bounds.width, anchor != nil { restoreAnchor = true }

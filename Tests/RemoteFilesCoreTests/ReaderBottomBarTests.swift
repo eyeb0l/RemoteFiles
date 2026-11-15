@@ -2,7 +2,9 @@
 import XCTest
 import SwiftUI
 import UIKit
+import WebKit
 @testable import RemoteFilesUI
+import RemoteFilesCore
 
 @MainActor @Observable private final class BottomBarProbe {
     /// Stands for any reader state that isn't the reading mode, such as `loading` or `loadedAt`.
@@ -94,6 +96,51 @@ private struct BottomBarFixture: View {
         }
     }
 
+    /// The source, HTML and rich Markdown readers run under the bar to the bottom edge. Their own
+    /// UIKit safe area leaves out SwiftUI's bottom bar, so without the full inset the end of a
+    /// document stayed behind the bar however far it was scrolled.
+    func testDocumentEndsScrollClearOfTheBottomBar() async throws {
+        let lines = (1...200).map { "Line \($0)" }
+        let documents: [(name: String, text: String, scrollView: (UIView) -> UIScrollView?)] = [
+            ("source.txt", lines.joined(separator: "\n"), { $0 as? SourceTextView }),
+            ("page.html", "<!doctype html><p>" + lines.joined(separator: "<br>") + "</p>", { ($0 as? WKWebView)?.scrollView }),
+            ("rich.md", "Inline math: $x^2$.\n\n" + lines.joined(separator: "\n\n"), { ($0 as? WKWebView)?.scrollView }),
+        ]
+        for document in documents {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let model = try AppModel(directory: directory, fileService: FixedFileService(text: document.text))
+            let profile = ConnectionProfile(name: "Fixture", host: "fixture.invalid", username: "fixture", identityID: UUID(), startingDirectory: "/")
+            model.metadata.connections = [profile]
+            let entry = RemoteEntry(name: document.name, path: "/" + document.name, kind: .file)
+            let probe = BottomEdgeProbe()
+            let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+            let previousWindow = scene.windows.first { $0.isKeyWindow }
+            let window = UIWindow(windowScene: scene)
+            window.rootViewController = UIHostingController(rootView: NavigationStack {
+                ZStack {
+                    // Fills only what the bar and home indicator leave uncovered.
+                    Color.clear.onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { probe.uncoveredMaxY = $0 }
+                    ReaderView(model: model, profile: profile, entry: entry)
+                }
+            })
+            window.makeKeyAndVisible()
+            defer { window.isHidden = true; window.rootViewController = nil; previousWindow?.makeKey() }
+            func scroll() -> UIScrollView? {
+                descendants(window).lazy.compactMap(document.scrollView).first { $0.window === window }
+            }
+            try await waitUntil("the \(document.name) reader") { scroll() != nil && probe.uncoveredMaxY > 0 }
+            let view = try XCTUnwrap(scroll())
+            // Where the content ends when scrolled as far as it goes.
+            func contentEnd() -> CGFloat { view.convert(view.bounds, to: nil).maxY - view.adjustedContentInset.bottom }
+            try await waitUntil("the end of \(document.name) above the bar") { abs(contentEnd() - probe.uncoveredMaxY) < 1 }
+            // The reader still runs under the bar, which covers more than its UIKit safe area.
+            let reader = view.superview as? WKWebView ?? view
+            XCTAssertEqual(view.convert(view.bounds, to: nil).maxY, window.bounds.maxY, accuracy: 1, document.name)
+            XCTAssertGreaterThan(window.bounds.maxY - probe.uncoveredMaxY, reader.safeAreaInsets.bottom + 20, document.name)
+        }
+    }
+
     func testAModeChangedElsewhereStillMovesTheControl() async throws {
         let probe = BottomBarProbe()
         let state = ModeState()
@@ -115,6 +162,15 @@ private struct BottomBarFixture: View {
         state.source = false
         try await waitUntil("Rendered selected by the model") { modes()?.selectedSegmentIndex == 0 }
     }
+}
+
+@MainActor @Observable private final class BottomEdgeProbe { var uncoveredMaxY: CGFloat = 0 }
+private struct FixedFileService: RemoteFileService {
+    let text: String
+    func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data { Data(text.utf8) }
+    func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot { throw RemoteFileError.unsupportedFile }
+    func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry { throw RemoteFileError.unsupportedFile }
+    func disconnect() async {}
 }
 
 @MainActor @Observable private final class ModeState { var source = false }

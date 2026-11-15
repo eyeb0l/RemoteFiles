@@ -40,9 +40,7 @@ struct EnhancedMarkdownView: View {
                     }, confirmExternalLink: { linkToConfirm = $0 })
                     // Scripts are fixed when a web view is made. New text that needs others gets a new one.
                     .id(diagrams)
-                    // Run the page to the bottom edge; the web view's automatic content
-                    // inset keeps the last line clear of the home indicator.
-                    .ignoresSafeArea(.container, edges: .bottom)
+                    .scrollsToBottomEdge()
                 if !loaded { LoadingPlaceholder(label: "Rendering Markdown…", shape: .document) }
             } else { LoadingPlaceholder(label: "Preparing Markdown…", shape: .document) }
         }
@@ -139,7 +137,7 @@ struct EnhancedMarkdownWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = Self.configuration(rules: rules, scripts: scripts)
         configuration.userContentController.add(context.coordinator, contentWorld: .defaultClient, name: "markdownImage")
-        let view = WKWebView(frame: .zero, configuration: configuration)
+        let view = BottomEdgeWebView(frame: .zero, configuration: configuration)
         // A long press would otherwise offer a preview of a link, which may load its destination.
         view.allowsLinkPreview = false
         view.navigationDelegate = context.coordinator; view.scrollView.delegate = context.coordinator
@@ -151,6 +149,7 @@ struct EnhancedMarkdownWebView: UIViewRepresentable {
         let coordinator = context.coordinator
         let wasActive = coordinator.parent.active
         coordinator.parent = self
+        (view as? BottomEdgeWebView)?.bottomEdgeInset = context.environment.bottomEdgeInset
         coordinator.bodyPointSize = Self.bodyPointSize(for: context.environment.dynamicTypeSize)
         if active, !wasActive, coordinator.finished {
             view.evaluateJavaScript("RemoteFilesMarkdown.resumeImages()", in: nil, in: .defaultClient) { _ in }
