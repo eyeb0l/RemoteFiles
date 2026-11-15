@@ -22,8 +22,7 @@ struct HTMLContentView: View {
                 StaticHTMLWebView(text: text, filename: filename, rules: rules, readingPosition: readingPosition, fontScale: fontSize / 17,
                     onFinish: { needsScripts = $0; loaded = true },
                     onFailure: { error = $0 }, openExternalLink: { openURL($0) }, confirmExternalLink: { linkToConfirm = $0 })
-                    // Run the page to the bottom edge; the web view insets its end for the home indicator.
-                    .ignoresSafeArea(.container, edges: .bottom)
+                    .scrollsToBottomEdge()
                     .opacity(needsScripts ? 0 : 1)
                     .accessibilityHidden(needsScripts)
                 if needsScripts {
@@ -110,13 +109,14 @@ struct StaticHTMLWebView: UIViewRepresentable {
         view.navigationDelegate = context.coordinator
         view.scrollView.delegate = context.coordinator
         // Reading positions use native offsets, so UIKit must not shift the origin.
-        // AnchoredHTMLWebView applies only the bottom safe area, as an explicit inset.
+        // AnchoredHTMLWebView applies only the bottom edge, as an explicit inset.
         view.scrollView.contentInsetAdjustmentBehavior = .never
         view.accessibilityIdentifier = "Rendered HTML document"
         return view
     }
     func updateUIView(_ view: WKWebView, context: Context) {
         context.coordinator.confirmExternalLink = confirmExternalLink
+        (view as? AnchoredHTMLWebView)?.bottomEdgeInset = context.environment.bottomEdgeInset
         let coordinator = context.coordinator
         coordinator.resumeTrackingIfNeeded()
         if coordinator.text.map({ sameBytes($0, text) }) != true {
@@ -419,7 +419,7 @@ struct StaticHTMLWebView: UIViewRepresentable {
 }
 
 /// A viewport callback avoids retaining document layout in route-level state.
-final class AnchoredHTMLWebView: WKWebView {
+final class AnchoredHTMLWebView: BottomEdgeWebView {
     var layoutChanged: (() -> Void)?
     var userScrolled: (() -> Void)?
     private var previousSize = CGSize.zero
@@ -430,13 +430,6 @@ final class AnchoredHTMLWebView: WKWebView {
     override func accessibilityScroll(_ direction: UIAccessibilityScrollDirection) -> Bool {
         userScrolled?()
         return super.accessibilityScroll(direction)
-    }
-    override func safeAreaInsetsDidChange() {
-        super.safeAreaInsetsDidChange()
-        // The preview extends under the home indicator; let the end of the page scroll clear of it.
-        guard scrollView.contentInset.bottom != safeAreaInsets.bottom else { return }
-        scrollView.contentInset.bottom = safeAreaInsets.bottom
-        scrollView.verticalScrollIndicatorInsets.bottom = safeAreaInsets.bottom
     }
     override func layoutSubviews() {
         let changed = previousSize != .zero && previousSize != bounds.size
