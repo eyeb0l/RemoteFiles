@@ -1687,6 +1687,11 @@ final class RemoteFilesUITests: XCTestCase {
     /// List virtualizes off-screen rows, so existence is checked while revealing. XCTest also
     /// reports a row under the bottom search bar as hittable while the bar takes its tap, so
     /// drag in short, momentum-free steps until the whole row lies inside the list and above it.
+    /// The home indicator's strip takes taps the same way on iOS 27.0: the folder's `safeAreaBar`
+    /// wrappers end at the bottom safe area, so a tap below it never reaches the row. The last
+    /// row can only scroll to that edge, so the row's centre, where XCTest taps, must lie at
+    /// least 44 points above the window's bottom, clear of the iPhone's 34-point and the iPad's
+    /// 20-point strip.
     @discardableResult
     private func revealFolderRow(_ row: XCUIElement, in app: XCUIApplication,
                                  searchingDown: Bool = true, keepingNearCentre: Bool = false) -> XCUIElement {
@@ -1697,14 +1702,16 @@ final class RemoteFilesUITests: XCTestCase {
         for _ in 0..<16 {
             let search = app.searchFields.firstMatch
             let bottomSearch = search.exists && search.frame.minY > list.frame.midY
+            let clearOfHomeIndicator = app.windows.firstMatch.frame.maxY - 44
             var top = search.exists && !bottomSearch ? max(list.frame.minY, search.frame.maxY) : list.frame.minY
             var bottom = bottomSearch ? min(list.frame.maxY, search.frame.minY - 16) : list.frame.maxY
             if keepingNearCentre {
                 let inset = (bottom - top) / 4
                 top += inset; bottom -= inset
             }
-            if row.exists, row.isHittable, row.frame.minY >= top, row.frame.maxY <= bottom { return row }
-            let down = row.exists ? row.frame.maxY > bottom : searchingDown
+            if row.exists, row.isHittable, row.frame.minY >= top, row.frame.maxY <= bottom,
+               row.frame.midY <= clearOfHomeIndicator { return row }
+            let down = row.exists ? row.frame.maxY > bottom || row.frame.midY > clearOfHomeIndicator : searchingDown
             let from = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.65 : 0.35))
             let to = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.35 : 0.65))
             from.press(forDuration: 0.05, thenDragTo: to)

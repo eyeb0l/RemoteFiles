@@ -10,6 +10,41 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 16 November 2026: iOS 27.0 does not deliver taps under the home indicator to folder rows
+
+The nightly run [43845184892](https://github.com/eyeb0l/RemoteFiles/actions/runs/43845184892)
+on `main` at 62167d2 failed **Acceptance / simulator-ui** in
+`RemoteFilesUITests.testDemoAudioAndVideoHaveNativePlaybackControls`. The other 35 tests
+passed, and the previous nightly and the push run had passed the same commit. After the
+audio half of the test, `revealFolderRow` returned **Sample video.mp4** at y 821.7–873.7 on
+the iPhone 18 Pro's 874-point screen. The synthesized tap landed at its centre, y 847.7. The
+folder list stayed on screen until the 20-second wait for the player ended.
+
+This failure was reproduced on an iPhone 18 Pro simulator with the CI runtime, iOS 27.0
+(24A434). With the row held across y 840, every tap at y 839.5 or above opened the row. Every
+tap at y 840.5 or below did nothing, at any x from 30 to 372, although XCTest still reported
+the row as hittable. 840 is where the bottom safe area starts. backboardd's and UIKit's logs
+showed both the touch-down and the touch-up reaching the app's window, and no system gesture
+claimed them. LLDB `hitTest:withEvent:` on that window returned the row cell at y 838 and the
+navigation stack's hosting view at y 852. Between them, the cell's ancestors include two
+SwiftUI `_UIInteractionView`s for `_UIScrollPocketCollectorInteraction`, with window frame
+(0, 170, 402, 670). Both end at y 840, so UIKit hit-testing stops above the rows the List
+draws under the home indicator. The two views come from `FolderView`'s
+`.safeAreaBar(edge: .top)` and the one inside `.contentStatus`. Replacing both with
+`safeAreaInset` made every tap in that strip open the row. The same build on iOS 27.2
+(24B8117) opened the row at every point down to y 866, which is why the failure did not
+appear on local simulators with the newer runtime.
+
+The test fails only when the scroll leaves a row's top between about y 814 and 822, because
+only then does the whole row fit in the list frame while its centre is in the strip.
+`revealFolderRow` now also scrolls until the row's centre, where XCTest taps, is at least 44
+points above the window's bottom edge. It does not require the whole row to clear the strip.
+At maximum scroll the last row, **Weekly review.md**, ends at y 840, so a whole-row limit made
+two journeys that open it fail with `Could not reveal folder row`. With the row placed at
+y 821.3 on iOS 27.0, the old helper tapped it in place and failed with the nightly's assertion,
+while the new one scrolled it to y 684 before tapping and the video opened. The app keeps `safeAreaBar`, so on iOS 27.0 the parts of rows under the home
+indicator still do not respond to taps.
+
 ## 14 November 2026: the VoiceOver key journey opened SSH Keys before Settings had appeared
 
 PR #145 run [43595831815](https://github.com/eyeb0l/RemoteFiles/actions/runs/43595831815) failed
