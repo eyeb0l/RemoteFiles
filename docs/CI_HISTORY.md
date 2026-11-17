@@ -31,14 +31,15 @@ fails the same way in the app.
 **Reproduction.** Locally, with 16 busy processes on an 8-core Mac, the unchanged method failed 4 of
 40 runs, and 10 of 40 with tracing, which slows the client further. Every failure was this download;
 in each, the refusal was handled with browsing's close already complete or completing. Delaying the
-server's session exit with a `ForceCommand` wrapper did not reproduce it, because OpenSSH then holds
-its close until the session's process exits.
+server's session exit with a `ForceCommand` wrapper did not reproduce it on its own, because OpenSSH
+then holds its close until the session's process exits.
 
 **Fix.** The transfer now also waits and asks again when one of the connection's channels closed
 within the last second (`slotReleaseAllowance`), as browsing already did. The new
-`testOneChannelDownloadRefusedAfterBrowsingClosedAsksAgain` holds the refused download, through a
-task-local observer, until browsing's close has arrived; without the fix it failed 3 of 3 runs. With
-it, under the same load, the original method passed 40 of 40 runs and the new one 20 of 20.
+`testOneChannelDownloadRefusedAfterBrowsingClosedAsksAgain` uses that wrapper to make the server
+refuse the download every time, and a task-local observer to hold the refusal until browsing's close
+has arrived; without the fix it failed 3 of 3 runs. With it, under the same load, the original method
+passed 40 of 40 runs and the new one 20 of 20.
 
 ## 17 November 2026: the post-boot settle wait is not dead time
 
