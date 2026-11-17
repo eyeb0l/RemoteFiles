@@ -126,12 +126,19 @@ class WorkflowGateContractTests(unittest.TestCase):
         self.assertIn("fail-fast: false", blocks["quick"])
         self.assertNotIn("continue-on-error:", self.workflow)
 
+    def test_ui_journeys_start_alongside_the_quick_lanes(self):
+        blocks = dict(re.findall(r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:|\Z)", self.workflow.split("\njobs:\n")[1], re.M | re.S))
+        self.assertIn("    needs: repository-checks\n", blocks["simulator-ui"])
+        # The implicit success() requires Repository checks; no quick result is consulted.
+        self.assertIn("    if: needs.repository-checks.outputs.ui == 'true'\n", blocks["simulator-ui"])
+        self.assertNotIn("needs.quick", blocks["simulator-ui"])
+
     def test_acceptance_lanes_wait_for_quick_lanes_unless_a_main_push_skipped_them(self):
         """Quick lanes that ran must have passed; a skipped quick matrix is accepted only when it was not selected."""
         blocks = dict(re.findall(r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:|\Z)", self.workflow.split("\njobs:\n")[1], re.M | re.S))
         self.assertIn("    if: needs.repository-checks.outputs.quick == 'true'\n", blocks["quick"])
         for job, output in ci_gate.LANE_OUTPUTS.items():
-            if job == "quick":
+            if job in ("quick", "simulator-ui"):
                 continue
             with self.subTest(job=job):
                 condition = re.search(r"^    if: >-\n((?:      .*\n)+)", blocks[job], re.M).group(1)

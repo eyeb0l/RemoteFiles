@@ -172,10 +172,10 @@ pushes would start no Mac job. Eight pull request runs that changed only such sc
 to `main` that needs no Mac job reports in about a minute instead of 23 to 77.
 
 **Not changed.** Nightly runs keep every lane: they refresh the build caches that pushes now
-save less often and catch runner-image drift on an unchanged tree. The UI journeys still wait
+save less often and catch runner-image drift on an unchanged tree. The UI journeys still waited
 for the quick lanes on a pull request: starting them in parallel would cut that PR's feedback
 from about 77 to about 55 minutes, but 10 of 78 such runs failed a quick lane first, about 4
-extra Mac-hours a week. The post-boot settle wait looked like the largest single item left (roughly a
+extra Mac-hours a week. Iris chose the shorter feedback the same day, in a follow-up PR. The post-boot settle wait looked like the largest single item left (roughly a
 third of simulator-core), but [Runner load and post-boot settling](#runner-load-and-post-boot-settling)
 records why a shorter bound failed. The controlled comparison above, run the same day, keeps it.
 

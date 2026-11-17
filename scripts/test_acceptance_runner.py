@@ -674,9 +674,8 @@ class WorkflowShapeTests(unittest.TestCase):
         for name, lane in (("simulator-ui", "ui"), ("voiceover", "voiceover"), ("release-device-compile", "release")):
             with self.subTest(job=name):
                 job = self.job(name)
-                self.assertIn("needs: [repository-checks, quick]", job)
-                # The full condition is pinned in test_ci_gate.py.
-                self.assertIn("      && needs.repository-checks.outputs." + lane + " == 'true'\n", job)
+                # The full conditions are pinned in test_ci_gate.py.
+                self.assertIn("needs.repository-checks.outputs." + lane + " == 'true'\n", job)
                 self.assertIn("      " + lane + ": ${{ steps.scope.outputs." + lane + " }}", self.job("repository-checks"))
         self.assertIn("lane: voiceover", self.job("voiceover"))
         self.assertIn("lane: release-device-compile", self.job("release-device-compile"))

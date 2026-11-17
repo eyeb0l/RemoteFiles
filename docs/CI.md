@@ -24,7 +24,10 @@ within about twenty-five minutes and rarely fails for environmental reasons. The
 extended tiers run on three-CPU hosted runners, failed about one first attempt in
 three during October, and were re-run on the same commit 39 times, 22 of which then
 passed without a code change. They now run once per merged change, nightly, and
-before merge only when a change can be exercised nowhere else.
+before merge only when a change can be exercised nowhere else. The UI journeys start
+alongside the quick lanes: until 17 November 2026 they waited for them, which added about
+25 minutes to every run that included them. 10 of 78 such PR runs in the two weeks before
+had a quick lane fail first, so starting at once costs about 4 Mac-hours a week.
 
 ## Selection rules
 
@@ -78,7 +81,7 @@ using the workflow's `actions: read` permission.
 
 Any API error, timeout, rate limit or malformed response runs every selected lane, and the
 job log names the cause. The log also names the run behind each skip. When the quick lanes
-are skipped, the acceptance lanes start at once instead of waiting for them. A head that was behind `main`
+are skipped, VoiceOver and the Release compile start at once instead of waiting for them. A head that was behind `main`
 at merge never qualifies, even if its test merge matched the merged tree, because the API
 does not report which merge commit a run tested. The nightly run still executes every
 lane on `main`.
@@ -112,8 +115,9 @@ repository job's explicit `true`/`false` scope outputs and the dependency result
 
 Missing or malformed scope outputs fail the gate. A failed quick matrix child
 fails the matrix job; `fail-fast: false` lets both quick lanes finish, and no job
-uses `continue-on-error`. If quick checks fail and acceptance is skipped as a
-consequence, the gate fails. Documentation-only PRs pass after repository checks
+uses `continue-on-error`. The UI journeys start alongside the quick lanes and finish even
+if a quick lane fails; VoiceOver and the Release compile wait for the quick lanes. If quick
+checks fail and those are skipped as a consequence, the gate fails. Documentation-only PRs pass after repository checks
 with all Mac jobs skipped. Nightly and full-acceptance runs still require every
 selected lane. No test is executed again by the gate.
 

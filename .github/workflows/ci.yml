@@ -93,13 +93,10 @@ jobs:
 
   simulator-ui:
     name: Acceptance / simulator-ui
-    needs: [repository-checks, quick]
-    # After successful quick lanes, or right away when a push to main skipped them on evidence.
-    if: >-
-      ${{ !cancelled() && needs.repository-checks.result == 'success'
-      && needs.repository-checks.outputs.ui == 'true'
-      && (needs.quick.result == 'success'
-      || (needs.quick.result == 'skipped' && needs.repository-checks.outputs.quick == 'false')) }}
+    # Alongside the quick lanes rather than after them: waiting added their 25 minutes to every
+    # run with UI journeys. A quick failure no longer saves the UI job; the gate still fails.
+    needs: repository-checks
+    if: needs.repository-checks.outputs.ui == 'true'
     runs-on: xcode-27
     # Build 30, boot 11, settle 8 and test execution 60 minutes, plus checkout, caches and evidence upload.
     timeout-minutes: 120
