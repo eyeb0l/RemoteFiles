@@ -10,6 +10,61 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 17 November 2026: CI cost audit and repeated work on `main`
+
+**Baseline.** `ci.yml` runs created from 3 to 16 November (13.7 days): 319 runs, 2,379
+jobs. Mac jobs used 305 runner-hours, about 155 a week, and Linux 1.6. Runner minutes
+on these standard hosted runners are not billed for this public repository, so the cost
+is shared Mac capacity and wall-clock time rather than money. By job: simulator-core 37%,
+UI journeys 37% (8% of it the two former shards), VoiceOver 15%, macos-openssh 9%, Release
+compile 2%. By event: pull requests 65%, pushes to `main` 24%, nightly runs 10%. 30 hours
+went to failed jobs and 23 to cancelled ones, 9 of them on `main`.
+
+Successful job medians: macos-openssh 5.3 minutes, simulator-core 23.1, UI journeys 51.1,
+VoiceOver 28.5, Release compile 4.2. In 20 lane artifacts, simulator-core spent 76–259 s
+booting and 227–491 s in `simulator-settle`, against 467–760 s of tests; the settle wait
+reached its 480-second bound in about half of them. Time from push to the last job of a
+first-attempt successful run: PR quick tier median 28 minutes (p90 42), PR with UI journeys
+77 (p90 93), push to `main` with only quick lanes 23. Mac queueing was 0.1 minutes at the
+median and 4.5 at p90.
+
+**Repeated work.** 29 of 80 runs on `main` were cancelled by the next push. Of the 74 push
+runs that ran the quick lanes, 62 merged a tree that a same-repository pull request run had
+already passed them on, with the head containing the previous `main` tip: about 30 Mac-hours.
+The UI journeys already skipped on that evidence (26 times). All 13 nightly runs also re-ran
+quick lanes that had passed on that commit's push.
+
+**Changes.** A push to `main` now skips every lane, not only the UI journeys, that a pull
+request run passed on the same tree, and acceptance lanes no longer wait for skipped quick
+lanes. It classifies from the last commit whose run on `main` passed rather than from the
+previous tip: on 14 November `e3c59a5`, a workflow change, was cancelled by `76f8213`, whose
+own diff selected only the UI journeys, so VoiceOver and Release first ran on it in the
+nightly run. Scripts that no lane executes no longer start the quick lanes. The TestFlight
+command accepts the same evidence for a merge that skipped the quick lanes.
+
+**Replay.** Replaying the window's 80 pushes with each run's real lane durations (lane medians
+where a lane had not run): pushes used 4,364 Mac-minutes, including cancelled runs; with the
+evidence rule alone they would have used 2,632, and with the new base as well 3,035. The base
+selects 19 lane runs the old diff missed (VoiceOver 7, Release 6, quick 3, UI 3). 28 of the 80
+pushes would start no Mac job. Eight pull request runs that changed only such scripts used
+260 Mac-minutes. Together that is about 26 Mac-hours, roughly 9% of the window, and a push
+to `main` that needs no Mac job reports in about a minute instead of 23 to 77.
+
+**Not changed.** Nightly runs keep every lane: they refresh the build caches that pushes now
+save less often and catch runner-image drift on an unchanged tree. The UI journeys still wait
+for the quick lanes on a pull request: starting them in parallel would cut that PR's feedback
+from about 77 to about 55 minutes, but 10 of 78 such runs failed a quick lane first, about 4
+extra Mac-hours a week. The post-boot settle wait is the largest single item left (roughly a
+third of simulator-core), but [Runner load and post-boot settling](#runner-load-and-post-boot-settling)
+records why a shorter bound failed, and changing it needs a controlled comparison on hosted runners.
+
+OpenClaw's [CI cost reduction](https://vincent.build/openclaw-ci-cost-reduction/) was the
+prompt for this audit. Most of its saving came from import-graph test selection inside a
+large TypeScript suite, smaller paid runners and deleting tests. Here, two Swift modules,
+one test bundle per lane, free fixed-size hosted runners and a fail-closed inventory make
+per-file test selection unsafe and runner sizing moot. Its rule of not trusting a stale green
+run does carry over, which is why evidence must match the exact tree.
+
 ## 16 November 2026: iOS 27.0 does not deliver taps under the home indicator to folder rows
 
 The nightly run [43845184892](https://github.com/eyeb0l/RemoteFiles/actions/runs/43845184892)
