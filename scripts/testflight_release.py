@@ -21,6 +21,8 @@ REQUIRED_CHECKS = ("Repository checks", "CI gate")
 # The lanes that build and test the app. A change to documentation alone starts neither, and
 # still passes the two required checks.
 CODE_CHECKS = ("Quick / macos-openssh", "Quick / simulator-core")
+# A job skipped by its own condition is never expanded, so the skipped Quick matrix reports this name.
+SKIPPED_QUICK_CHECK = "Quick / ${{ matrix.lane }}"
 # How far back on main to look for a commit those lanes passed on.
 HISTORY_LIMIT = 50
 TAG_PREFIX = "testflight/"
@@ -117,7 +119,8 @@ def skipped_on_evidence(commit, runs):
     whatever an earlier pull request run found. The evidence is looked up again, as CI did, around
     the time of the merge.
     """
-    code = [run for run in runs if run.get("name") in CODE_CHECKS and run.get("app", {}).get("id") == GITHUB_ACTIONS_APP_ID]
+    code = [run for run in runs if run.get("name") in CODE_CHECKS + (SKIPPED_QUICK_CHECK,)
+            and run.get("app", {}).get("id") == GITHUB_ACTIONS_APP_ID]
     if unmet_checks(runs) or not code or any(run.get("conclusion") != "skipped" for run in code):
         return False
     parent = capture("git", "rev-parse", "--verify", commit + "^1").strip()

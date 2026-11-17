@@ -47,7 +47,8 @@ class QuickEvidenceTests(unittest.TestCase):
     """A push to main skips both Quick lanes when a pull request run passed them on the same tree."""
 
     PASSED = [check(name) for name in release.REQUIRED_CHECKS]
-    SKIPPED = [check(name, conclusion="skipped") for name in release.CODE_CHECKS]
+    # How GitHub reports the Quick matrix when the push to main skipped it.
+    SKIPPED = [check(release.SKIPPED_QUICK_CHECK, conclusion="skipped")]
 
     def skipped(self, runs, evidence=None):
         self.calls = []
@@ -70,6 +71,15 @@ class QuickEvidenceTests(unittest.TestCase):
                                        "2025-11-16T12:30:00Z")])
         self.assertIn("passed in pull request run 7 on the same tree", self.output.getvalue())
 
+    def test_expanded_skipped_quick_checks_count_too(self):
+        self.assertTrue(self.skipped(self.PASSED + [check(name, conclusion="skipped") for name in release.CODE_CHECKS],
+                                     evidence={"id": 7}))
+
+    def test_the_skipped_matrix_name_is_the_one_the_workflow_produces(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn("    name: " + release.SKIPPED_QUICK_CHECK + "\n", workflow)
+        self.assertIn("    if: needs.repository-checks.outputs.quick == 'true'\n", workflow)
+
     def test_skipped_quick_lanes_without_evidence_do_not_count(self):
         self.assertFalse(self.skipped(self.PASSED + self.SKIPPED))
         self.assertEqual(len(self.calls), 1)
@@ -79,6 +89,7 @@ class QuickEvidenceTests(unittest.TestCase):
                      [check(name, conclusion="cancelled") for name in release.CODE_CHECKS],
                      [],
                      [check(release.CODE_CHECKS[0], conclusion="skipped"), check(release.CODE_CHECKS[1], conclusion="failure")],
+                     self.SKIPPED + [check(release.CODE_CHECKS[0], conclusion="failure")],
                      [check(name, conclusion="skipped", app=1) for name in release.CODE_CHECKS]):
             with self.subTest(code=code):
                 self.assertFalse(self.skipped(self.PASSED + code, evidence={"id": 7}))
