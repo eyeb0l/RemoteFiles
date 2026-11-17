@@ -19,13 +19,16 @@ REPOSITORY_ONLY = ("docs/*", "README.md", "AGENTS.md", "ROADMAP.md", "PREVIEW_ST
 # A change to the workflow, the runner or its launchers must prove every lane.
 INFRASTRUCTURE = (".github/*", "scripts/ci_scope.py", "scripts/ci_gate.py", "scripts/test-acceptance.py", "scripts/runner_finalization.py",
                   "scripts/test-openssh.sh", "scripts/generate-project.py")
+# Repository checks run these scripts' regressions, and no Mac lane executes them: a lane runs
+# only INFRASTRUCTURE scripts, which scripts/test_ci_scope.py checks.
+LINUX_SCRIPTS = ("scripts/*",)
 # Only the VoiceOver lane executes these.
 VOICEOVER = ("Tests/VoiceOverFixtures/*",)
 # Only the UI lane builds the app target, runs these journeys or exercises these inputs.
 UI = ("Tests/RemoteFilesUITests/*", "App/*", "Package.swift", "Package.resolved", "*/Package.resolved",
       "Vendor/*", "Fixtures/*", "Sources/RemoteFilesCore/Resources/*")
 # Covered by the hosted core and macOS lanes, or not executed by CI at all.
-QUICK_ONLY = ("Sources/*", "Tests/RemoteFilesCoreTests/*", "RemoteFiles.xcodeproj/*", "scripts/*",
+QUICK_ONLY = ("Sources/*", "Tests/RemoteFilesCoreTests/*", "RemoteFiles.xcodeproj/*",
               "Tests/SmallFeatureFixtures/*", "Tests/ImageOpenFixtures/*", "Tests/ReadingAnchorFixtures/*",
               "Tests/LinuxSearchAcceptance/*", "Tests/ServerCompatibilityAcceptance/*")
 LANES = ("ui", "voiceover", "release")
@@ -55,10 +58,14 @@ def classify(paths, force_acceptance=False, force_quick=False, main_push=False):
     for path in paths:
         if matches(path, REPOSITORY_ONLY):
             continue
-        quick = True
         if matches(path, INFRASTRUCTURE):
+            quick = True
             escalate(path, *LANES)
-        elif matches(path, VOICEOVER):
+            continue
+        if matches(path, LINUX_SCRIPTS):
+            continue
+        quick = True
+        if matches(path, VOICEOVER):
             escalate(path, "voiceover")
         elif matches(path, UI):
             escalate(path, "ui")

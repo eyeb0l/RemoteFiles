@@ -31,13 +31,44 @@ class CIScopeTests(unittest.TestCase):
     def test_ordinary_code_unit_tests_and_generated_project_use_quick_validation_only(self):
         for path in ("Sources/RemoteFilesUI/FolderView.swift", "Sources/RemoteFilesCore/SFTPRemoteFileService.swift",
                      "Sources/RemoteFilesCore/HostTrustStore.swift", "Tests/RemoteFilesCoreTests/SFTPIntegrationTests.swift",
-                     "RemoteFiles.xcodeproj/project.pbxproj", "scripts/test_runner_finalization.py",
-                     "scripts/test-voiceover.sh",  # A local launcher now; no CI lane executes it.
+                     "RemoteFiles.xcodeproj/project.pbxproj",
                      "Tests/SmallFeatureFixtures/SmallFeaturesUITests.swift"):
             with self.subTest(path=path):
                 result = classify([path])
                 self.assertEqual(lanes(result), QUICK_ONLY)
                 self.assertEqual(result["reasons"], {})
+
+    def test_scripts_no_mac_lane_executes_start_no_mac_runner(self):
+        for path in ("scripts/test_runner_finalization.py", "scripts/test_ci_scope.py", "scripts/testflight_release.py",
+                     "scripts/benchmark_performance.py", "scripts/latency_proxy.py", "scripts/new_tool.py",
+                     "scripts/test-voiceover.sh",  # A local launcher now; no CI lane executes it.
+                     "scripts/test-small-features.py", "scripts/gate_guard.py"):
+            with self.subTest(path=path):
+                result = classify([path])
+                self.assertEqual(lanes(result), NOTHING)
+                self.assertEqual(result["reasons"], {})
+        self.assertEqual(lanes(classify(["scripts/latency_proxy.py", "Sources/RemoteFilesCore/Models.swift"])), QUICK_ONLY)
+        self.assertEqual(lanes(classify(["scripts/latency_proxy.py", "scripts/test-openssh.sh"])), EVERYTHING)
+
+    def test_every_script_a_mac_lane_can_execute_is_infrastructure(self):
+        """A lane runs scripts only from the workflow, its action, the runner, the fixture launcher or the
+        project. Any script one of them names must select every lane, or changing it alone would test nothing."""
+        root = Path(__file__).resolve().parents[1]
+        launchers = [root / ".github/workflows/ci.yml", *sorted((root / ".github/actions").glob("*/action.yml")),
+                     root / "scripts/test-acceptance.py", root / "scripts/test-openssh.sh",
+                     root / "RemoteFiles.xcodeproj/project.pbxproj", root / "Package.swift"]
+        swift_tests = [path for folder in ("Tests/RemoteFilesCoreTests", "Tests/RemoteFilesUITests", "Tests/VoiceOverFixtures")
+                       for path in sorted((root / folder).rglob("*.swift"))]
+        scripts = sorted(path.name for path in (root / "scripts").iterdir() if path.is_file())
+        self.assertIn("test-acceptance.py", scripts)
+        for source in launchers + swift_tests:
+            text = source.read_text()
+            if source.suffix == ".swift":  # Comments may name a script that runs the tests; code may not.
+                text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
+            for name in scripts:
+                if name in text:
+                    with self.subTest(source=source.relative_to(root), script=name):
+                        self.assertTrue(ci_scope.matches("scripts/" + name, ci_scope.INFRASTRUCTURE))
 
     def test_opt_in_server_acceptance_suites_never_select_acceptance_lanes(self):
         # Their launchers copy them into isolated snapshots; no CI target compiles them.

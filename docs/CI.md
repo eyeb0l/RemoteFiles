@@ -15,7 +15,7 @@ failures and the original timing baselines are in [CI history](CI_HISTORY.md).
 |---|---|---|
 | Repository checks, Linux, about one minute | Generated-project consistency, the Python selector and runner regressions, change classification, `git diff --check` across the complete change | Every PR, push to `main`, nightly run and manual dispatch |
 | CI gate, Linux, no builds or test reruns | Requires successful repository checks and successful selected lanes; accepts unselected lanes only if successful or skipped | Every run, even after a dependency fails or skips |
-| Quick, two Mac jobs in parallel, about 25 minutes | **Quick / macos-openssh**: every inventoried macOS core test with the loopback OpenSSH and bastion fixtures. **Quick / simulator-core**: every inventoried hosted iOS core test, with the fixture, on a disposable simulator | Every change outside documentation, except a push to `main` whose exact tree already passed them in a PR run |
+| Quick, two Mac jobs in parallel, about 25 minutes | **Quick / macos-openssh**: every inventoried macOS core test with the loopback OpenSSH and bastion fixtures. **Quick / simulator-core**: every inventoried hosted iOS core test, with the fixture, on a disposable simulator | Every change outside documentation and scripts no lane executes, except a push to `main` whose exact tree already passed them in a PR run |
 | UI, one Mac job, about 50 minutes | **Acceptance / simulator-ui**: the whole UI journey inventory on one disposable simulator | Every push to `main` with code, unless its exact tree already passed the UI journeys in a PR run; PRs that change UI journeys, `App/`, packages, vendored code, `Fixtures/` or demo resources; CI infrastructure; unknown paths; the `full-acceptance` label |
 | Extended, two Mac jobs, about 30 minutes | **Acceptance / voiceover**: eleven `XCUIVoiceOverService` journeys against production views in the generated `RemoteFilesAccessibility` fixture app. **Acceptance / release-device-compile**: unsigned optimized device build | Nightly at 02:30 UTC on `main`; the label or a manual dispatch; VoiceOver fixture changes (VoiceOver only); CI infrastructure; unknown paths |
 
@@ -45,9 +45,14 @@ the change receives the broadest tier of any of its paths.
 - `Tests/RemoteFilesUITests/`, `App/`, `Package.swift`, every `Package.resolved`,
   vendored code, `Fixtures/` and `Sources/RemoteFilesCore/Resources/` add the UI tier,
   because only the UI lane builds the app target or exercises them.
-- `Sources/`, `Tests/RemoteFilesCoreTests/`, the generated `RemoteFiles.xcodeproj`,
-  other scripts (including the local `scripts/test-voiceover.sh`, which no lane
-  executes) and the local-only fixture apps run the quick tier only.
+- Other scripts start no Mac runner either: Repository checks run their regressions,
+  and no lane executes them. That includes local launchers such as
+  `scripts/test-voiceover.sh`, the benchmark tools and `scripts/testflight_release.py`.
+  `scripts/test_ci_scope.py` fails if the workflow, its action, the runner, the fixture
+  launcher, the project, `Package.swift` or test code names a script outside the
+  infrastructure list, so a script a lane starts to run moves there.
+- `Sources/`, `Tests/RemoteFilesCoreTests/`, the generated `RemoteFiles.xcodeproj` and the
+  local-only fixture apps run the quick tier only.
 - Any other path runs every lane.
 - A push to `main` adds the UI tier to any code change. It then skips every selected lane
   that a PR run already passed on the same tree, as described below.
