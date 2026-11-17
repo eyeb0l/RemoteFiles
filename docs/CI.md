@@ -15,12 +15,12 @@ failures and the original timing baselines are in [CI history](CI_HISTORY.md).
 |---|---|---|
 | Repository checks, Linux, about one minute | Generated-project consistency, the Python selector and runner regressions, change classification, `git diff --check` across the complete change | Every PR, push to `main`, nightly run and manual dispatch |
 | CI gate, Linux, no builds or test reruns | Requires successful repository checks and successful selected lanes; accepts unselected lanes only if successful or skipped | Every run, even after a dependency fails or skips |
-| Quick, two Mac jobs in parallel, about 15 minutes | **Quick / macos-openssh**: every inventoried macOS core test with the loopback OpenSSH and bastion fixtures. **Quick / simulator-core**: every inventoried hosted iOS core test, with the fixture, on a disposable simulator | Every change outside documentation |
-| UI, one Mac job, about 45 minutes | **Acceptance / simulator-ui**: the whole UI journey inventory on one disposable simulator | Every push to `main` with code, unless its exact tree already passed the UI journeys in a PR run; PRs that change UI journeys, `App/`, packages, vendored code, `Fixtures/` or demo resources; CI infrastructure; unknown paths; the `full-acceptance` label |
+| Quick, two Mac jobs in parallel, about 25 minutes | **Quick / macos-openssh**: every inventoried macOS core test with the loopback OpenSSH and bastion fixtures. **Quick / simulator-core**: every inventoried hosted iOS core test, with the fixture, on a disposable simulator | Every change outside documentation, except a push to `main` whose exact tree already passed them in a PR run |
+| UI, one Mac job, about 50 minutes | **Acceptance / simulator-ui**: the whole UI journey inventory on one disposable simulator | Every push to `main` with code, unless its exact tree already passed the UI journeys in a PR run; PRs that change UI journeys, `App/`, packages, vendored code, `Fixtures/` or demo resources; CI infrastructure; unknown paths; the `full-acceptance` label |
 | Extended, two Mac jobs, about 30 minutes | **Acceptance / voiceover**: eleven `XCUIVoiceOverService` journeys against production views in the generated `RemoteFilesAccessibility` fixture app. **Acceptance / release-device-compile**: unsigned optimized device build | Nightly at 02:30 UTC on `main`; the label or a manual dispatch; VoiceOver fixture changes (VoiceOver only); CI infrastructure; unknown paths |
 
 The quick tier finds logic, transport, Keychain, persistence and reader regressions
-within about fifteen minutes and rarely fails for environmental reasons. The UI and
+within about twenty-five minutes and rarely fails for environmental reasons. The UI and
 extended tiers run on three-CPU hosted runners, failed about one first attempt in
 three during October, and were re-run on the same commit 39 times, 22 of which then
 passed without a code change. They now run once per merged change, nightly, and
@@ -46,35 +46,38 @@ the change receives the broadest tier of any of its paths.
   other scripts (including the local `scripts/test-voiceover.sh`, which no lane
   executes) and the local-only fixture apps run the quick tier only.
 - Any other path runs every lane.
-- A push to `main` adds the UI tier to any code change, unless a PR run already passed
-  the UI journeys on the same tree, as described below.
+- A push to `main` adds the UI tier to any code change. It then skips every selected lane
+  that a PR run already passed on the same tree, as described below.
 - The `full-acceptance` label, the nightly schedule, and a manual dispatch with
   **full_acceptance** on run every lane for any change. A dispatch with it off runs
   the quick tier.
 
-A push to `main` skips the UI job, and only that, when one of the 50 most recent
-successful `pull_request` runs of `ci.yml` meets every condition below. The selector
-reads this from the GitHub API, using the workflow's `actions: read` permission.
+A push to `main` skips a selected lane (both quick jobs count as one lane) when one of the
+50 most recent successful `pull_request` runs of `ci.yml` meets every condition below.
+Different lanes may be proved by different runs. The selector reads this from the GitHub API,
+using the workflow's `actions: read` permission.
 
 - The run's head commit has the same tree as the pushed commit.
 - The head branch belongs to this repository. A fork's run executes the fork's copy of
   the workflow, so it proves nothing.
-- The latest attempt's **Acceptance / simulator-ui** job
-  concluded `success`. A PR that was not selected for the UI tier skipped it, so its
-  merge still runs the journeys.
+- Every job of the lane concluded `success` in the run's latest attempt: both **Quick** jobs,
+  **Acceptance / simulator-ui**, **Acceptance / voiceover** or
+  **Acceptance / release-device-compile**. A PR that was not selected for a lane skipped it,
+  so its merge still runs that lane: most PRs never run the UI journeys, so most merges do.
 - The head contains `main`'s previous tip. A `pull_request` run tests a merge of its head
   into its base, and that merge has the head's tree only when the head contains the base.
   Every `main` base the run can have used is at or before the previous tip.
 
-Any API error, timeout, rate limit or malformed response runs the UI job, and the job log
-names the cause. The log also names the run behind a skip. A head that was behind `main`
+Any API error, timeout, rate limit or malformed response runs every selected lane, and the
+job log names the cause. The log also names the run behind each skip. When the quick lanes
+are skipped, the acceptance lanes start at once instead of waiting for them. A head that was behind `main`
 at merge never qualifies, even if its test merge matched the merged tree, because the API
 does not report which merge commit a run tested. The nightly run still executes every
 lane on `main`.
 
 Preview a decision with
 `python3 -B scripts/ci_scope.py --base "$(git merge-base origin/main HEAD)" --head "$(git rev-parse HEAD)"`;
-add `--main-push` to see what the merge will run. That preview assumes the UI job runs
+add `--main-push` to see what the merge will run. That preview assumes no evidence
 unless `GITHUB_REPOSITORY=eyeb0l/RemoteFiles` is set, which checks the real evidence with
 your `gh` login. `scripts/test_ci_scope.py` covers each rule.
 
@@ -238,9 +241,10 @@ builds leave source and lockfiles unchanged; dirty direct-checkout runs are reje
 Build caches live outside the evidence folder under one key per toolchain,
 architecture, platform, lane, dependency hash and source hash. A restore falls back
 to the same lane's most recent entry, then to any lane of the platform. Only pushes to
-`main` and the nightly run save new entries, so PR branches build on top of the latest
-merged state and the repository's cache budget holds a recent entry for every lane. A push that skips the UI journeys saves no UI
-entry, so the UI lane restores the nightly run's or an earlier merge's.
+`main` and the nightly run save new entries, so PR branches build on top of recently
+merged state and the repository's cache budget holds a recent entry for every lane. A push
+that skips a lane on evidence saves no entry for it, so that lane restores the nightly
+run's or an earlier merge's. The nightly run still runs every lane, which refreshes them all.
 Xcode's native compilation cache and its CAS are stored inside the cache root, and IDE
 indexing is disabled for CI builds.
 

@@ -89,8 +89,8 @@ from the physical-device and human checks that remain.
 [CI](https://github.com/eyeb0l/RemoteFiles/actions/workflows/ci.yml) runs repository
 checks on every pull request and main push. Documentation-only changes stop there.
 Code changes run macOS/OpenSSH tests and all hosted iOS core tests in parallel.
-A push to `main` then runs the demo UI journeys in one job, unless a PR run
-already passed them on the same tree; a PR runs them before merge only when it
+A push to `main` then runs the demo UI journeys in one job. It skips any lane a PR
+run already passed on the same tree; a PR runs the UI journeys before merge only when it
 changes the UI journeys, the app target, packages, vendored code, fixtures, demo
 resources or CI itself. VoiceOver and Release compilation run nightly on `main`,
 for CI changes, and on request. Use the `full-acceptance` PR label or a manual

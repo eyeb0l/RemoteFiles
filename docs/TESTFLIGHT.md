@@ -18,7 +18,9 @@ It stops unless the commit is on `main` and both **Repository checks** and **CI 
 on it. A commit that changes only documentation passes those with every lane that builds the app
 skipped, so the command also looks back along `main` for the newest commit on which both
 **Quick** lanes passed, and stops if anything CI would have built has changed since. That
-covers a code commit whose run failed or was cancelled by the push after it. It needs your `gh` login to read those results and the
+covers a code commit whose run failed or was cancelled by the push after it. A push to `main`
+skips the Quick lanes when a pull request run already passed them on the same tree; for such a
+commit the command finds that pull request run again, as CI did, and counts it. It needs your `gh` login to read those results and the
 [deploy key](#deploy-key) to push the tag; `ssh` asks for the key's passphrase each time.
 
 Xcode Cloud then runs `ci_scripts/ci_post_clone.sh`, which fails the build if the commit is

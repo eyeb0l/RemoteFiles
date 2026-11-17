@@ -675,7 +675,8 @@ class WorkflowShapeTests(unittest.TestCase):
             with self.subTest(job=name):
                 job = self.job(name)
                 self.assertIn("needs: [repository-checks, quick]", job)
-                self.assertIn("if: needs.repository-checks.outputs." + lane + " == 'true'", job)
+                # The full condition is pinned in test_ci_gate.py.
+                self.assertIn("      && needs.repository-checks.outputs." + lane + " == 'true'\n", job)
                 self.assertIn("      " + lane + ": ${{ steps.scope.outputs." + lane + " }}", self.job("repository-checks"))
         self.assertIn("lane: voiceover", self.job("voiceover"))
         self.assertIn("lane: release-device-compile", self.job("release-device-compile"))
