@@ -10,6 +10,58 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 17 November 2026: a killed VoiceOver journey left VoiceOver on for the key journey
+
+The nightly run [44069815284](https://github.com/eyeb0l/RemoteFiles/actions/runs/44069815284)
+on `main` at 6471d9a failed **Acceptance / voiceover** in two methods. 9 passed.
+
+- `VoiceOverChecks.testDemoReaderVoiceOverJourney` exceeded its three-minute allowance. After the
+  double tap on **Document actions** at 123 seconds, the wait for the app to idle ran its full 60
+  seconds (`App animations complete notification not received`), and XCTest killed the runner
+  at 180. Its result is missing from the summary; its recording and spindump were truncated by
+  the kill.
+- `VoiceOverChecks.testPublicKeyConfirmationVoiceOverAccountKeyCancelAndResult` tapped **Settings**
+  twice, 20 seconds apart, and **SSH Keys** never appeared.
+
+**Cause.** The first failure caused the second. A method that exceeds its allowance is killed
+with the runner, so neither its `withVoiceOver` restore nor `setUp`'s teardown block runs, and
+VoiceOver stays on in the simulator. The restarted runner's next `setUp` recorded that as the
+simulator's original state: every later method logs `VO TEARDOWN RESTORED enabled=true,
+original=true`, where the first logs `false`. Most journeys still passed, because they enable
+VoiceOver anyway or turn it off before staging rows. The key journey stages Settings and the key
+form with ordinary taps before it enables VoiceOver. Under VoiceOver a single tap only moves
+focus. The screen recording shows VoiceOver's cursor on the title at launch and on the Settings
+button after each tap, with the home screen unchanged.
+
+**The 14 November diagnosis was wrong.** PR #145's run
+[43595831815](https://github.com/eyeb0l/RemoteFiles/actions/runs/43595831815) (attempt 1) shows
+the same sequence: the demo reader journey was killed at its allowance after the same idle wait
+on **Document actions**, every later method's teardown reports `original=true`, and the key
+journey's Settings tap left the home screen showing. That entry read it as a tap not delivered
+or a slow push and added a second tap, which cannot help while VoiceOver is on.
+
+**Reproduction.** On an iPhone 18 Pro simulator with iOS 27.2 on the MacBook Air, a scratch
+method that enabled VoiceOver and slept past a 60-second allowance ran before the key journey,
+with the lane's own timeout flags. With `main`'s test file, XCTest killed and restarted the
+runner, the key journey tapped **Settings** at 9 and 25 seconds, and it failed at the same
+assertion with the home screen showing. With the fix it passed in 84 seconds. The cascade does
+not depend on the runtime: it needs only VoiceOver on when a touch-staged journey starts.
+
+**Fix.** `setUp` turns VoiceOver off when it finds it on, so every method starts in touch mode
+whatever the previous one left. Teardown still restores the state `setUp` found, so a developer's
+simulator keeps its setting. The per-method `disable()` calls this replaces are gone, and so is
+the 14 November second tap on **Settings**. The demo reader journey asks for the lane's
+240-second maximum: its 16 completed runs retained from 11 to 17 November took 140 to 173
+seconds, and the idle wait adds a fixed 60, which 180 cannot absorb and 240 can (173 + 60 = 233).
+In both stalled runs the journey continued with the menu open after the wait.
+
+**Not found.** Why the idle wait after **Document actions** sometimes never ends. It happened in
+2 of the 18 VoiceOver lane logs retained from 11 to 17 November, both on iOS 27.0 (24A434)
+hosted runners and both at that double tap. No artifact holds a recording or spindump of it,
+and the 27.0 runtime is not installed on the machine used for the reproduction. A second stall
+in one demo run would still exceed 240 seconds, but would no longer leave VoiceOver on for the
+methods after it.
+
 ## 17 November 2026: a download after a failed preview was refused once and not asked again
 
 PR #155 run [44086908805](https://github.com/eyeb0l/RemoteFiles/actions/runs/44086908805) failed
@@ -186,6 +238,8 @@ had passed all 11 with the same test code.
   was still the home screen, so the second found nothing. The log cannot tell a tap that was not
   delivered from a push that was slow. The test now waits up to 15 seconds for the Settings screen
   and taps **Settings** once more only if the home screen is still showing.
+  [17 November](#17-november-2026-a-killed-voiceover-journey-left-voiceover-on-for-the-key-journey)
+  found the real cause: the killed demo journey had left VoiceOver on.
 
 Neither was reproduced.
 
