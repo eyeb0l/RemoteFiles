@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -7,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import testflight_release as release
 
@@ -38,6 +41,64 @@ class CheckGateTests(unittest.TestCase):
         failed_later = [check("Repository checks"), check("CI gate", "success", older), check("CI gate", "failure", newer)]
         self.assertEqual(release.unmet_checks(passed_later), [])
         self.assertEqual(release.unmet_checks(failed_later), ["CI gate: failure"])
+
+
+class QuickEvidenceTests(unittest.TestCase):
+    """A push to main skips both Quick lanes when a pull request run passed them on the same tree."""
+
+    PASSED = [check(name) for name in release.REQUIRED_CHECKS]
+    # How GitHub reports the Quick matrix when the push to main skipped it.
+    SKIPPED = [check(release.SKIPPED_QUICK_CHECK, conclusion="skipped")]
+
+    def skipped(self, runs, evidence=None):
+        self.calls = []
+        outputs = {("git", "rev-parse", "--verify", "abc^1"): "parent\n",
+                   ("git", "show", "-s", "--format=%ct", "abc"): "1763296200\n"}
+
+        def find(*arguments):
+            self.calls.append(arguments)
+            return {"quick": evidence} if evidence else {}
+
+        with mock.patch.object(release, "capture", side_effect=lambda *command, env=None: outputs[command]), \
+                mock.patch.object(release.ci_scope, "find_evidence", side_effect=find), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.output = output
+            return release.skipped_on_evidence("abc", runs)
+
+    def test_skipped_quick_lanes_with_pull_request_evidence_count_as_built(self):
+        self.assertTrue(self.skipped(self.PASSED + self.SKIPPED, evidence={"id": 7}))
+        self.assertEqual(self.calls, [(release.REPOSITORY, "parent", "abc", release.ci_scope.gh_api, ["quick"],
+                                       "2025-11-16T12:30:00Z")])
+        self.assertIn("passed in pull request run 7 on the same tree", self.output.getvalue())
+
+    def test_expanded_skipped_quick_checks_count_too(self):
+        self.assertTrue(self.skipped(self.PASSED + [check(name, conclusion="skipped") for name in release.CODE_CHECKS],
+                                     evidence={"id": 7}))
+
+    def test_the_skipped_matrix_name_is_the_one_the_workflow_produces(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn("    name: " + release.SKIPPED_QUICK_CHECK + "\n", workflow)
+        self.assertIn("    if: needs.repository-checks.outputs.quick == 'true'\n", workflow)
+
+    def test_skipped_quick_lanes_without_evidence_do_not_count(self):
+        self.assertFalse(self.skipped(self.PASSED + self.SKIPPED))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_failed_cancelled_absent_or_partly_skipped_quick_lanes_never_look_for_evidence(self):
+        for code in ([check(name, conclusion="failure") for name in release.CODE_CHECKS],
+                     [check(name, conclusion="cancelled") for name in release.CODE_CHECKS],
+                     [],
+                     [check(release.CODE_CHECKS[0], conclusion="skipped"), check(release.CODE_CHECKS[1], conclusion="failure")],
+                     self.SKIPPED + [check(release.CODE_CHECKS[0], conclusion="failure")],
+                     [check(name, conclusion="skipped", app=1) for name in release.CODE_CHECKS]):
+            with self.subTest(code=code):
+                self.assertFalse(self.skipped(self.PASSED + code, evidence={"id": 7}))
+                self.assertEqual(self.calls, [])
+
+    def test_a_commit_whose_own_required_checks_failed_never_counts(self):
+        runs = [check("Repository checks"), check("CI gate", conclusion="failure")] + self.SKIPPED
+        self.assertFalse(self.skipped(runs, evidence={"id": 7}))
+        self.assertEqual(self.calls, [])
 
 
 class VersionAndTagTests(unittest.TestCase):

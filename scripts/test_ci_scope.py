@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 import ci_scope
-from ci_scope import classify, find_ui_evidence
+from ci_scope import classify, find_evidence
 
 NOTHING = {"quick": False, "ui": False, "voiceover": False, "release": False}
 QUICK_ONLY = {"quick": True, "ui": False, "voiceover": False, "release": False}
@@ -31,13 +31,44 @@ class CIScopeTests(unittest.TestCase):
     def test_ordinary_code_unit_tests_and_generated_project_use_quick_validation_only(self):
         for path in ("Sources/RemoteFilesUI/FolderView.swift", "Sources/RemoteFilesCore/SFTPRemoteFileService.swift",
                      "Sources/RemoteFilesCore/HostTrustStore.swift", "Tests/RemoteFilesCoreTests/SFTPIntegrationTests.swift",
-                     "RemoteFiles.xcodeproj/project.pbxproj", "scripts/test_runner_finalization.py",
-                     "scripts/test-voiceover.sh",  # A local launcher now; no CI lane executes it.
+                     "RemoteFiles.xcodeproj/project.pbxproj",
                      "Tests/SmallFeatureFixtures/SmallFeaturesUITests.swift"):
             with self.subTest(path=path):
                 result = classify([path])
                 self.assertEqual(lanes(result), QUICK_ONLY)
                 self.assertEqual(result["reasons"], {})
+
+    def test_scripts_no_mac_lane_executes_start_no_mac_runner(self):
+        for path in ("scripts/test_runner_finalization.py", "scripts/test_ci_scope.py", "scripts/testflight_release.py",
+                     "scripts/benchmark_performance.py", "scripts/latency_proxy.py", "scripts/new_tool.py",
+                     "scripts/test-voiceover.sh",  # A local launcher now; no CI lane executes it.
+                     "scripts/test-small-features.py", "scripts/gate_guard.py"):
+            with self.subTest(path=path):
+                result = classify([path])
+                self.assertEqual(lanes(result), NOTHING)
+                self.assertEqual(result["reasons"], {})
+        self.assertEqual(lanes(classify(["scripts/latency_proxy.py", "Sources/RemoteFilesCore/Models.swift"])), QUICK_ONLY)
+        self.assertEqual(lanes(classify(["scripts/latency_proxy.py", "scripts/test-openssh.sh"])), EVERYTHING)
+
+    def test_every_script_a_mac_lane_can_execute_is_infrastructure(self):
+        """A lane runs scripts only from the workflow, its action, the runner, the fixture launcher or the
+        project. Any script one of them names must select every lane, or changing it alone would test nothing."""
+        root = Path(__file__).resolve().parents[1]
+        launchers = [root / ".github/workflows/ci.yml", *sorted((root / ".github/actions").glob("*/action.yml")),
+                     root / "scripts/test-acceptance.py", root / "scripts/test-openssh.sh",
+                     root / "RemoteFiles.xcodeproj/project.pbxproj", root / "Package.swift"]
+        swift_tests = [path for folder in ("Tests/RemoteFilesCoreTests", "Tests/RemoteFilesUITests", "Tests/VoiceOverFixtures")
+                       for path in sorted((root / folder).rglob("*.swift"))]
+        scripts = sorted(path.name for path in (root / "scripts").iterdir() if path.is_file())
+        self.assertIn("test-acceptance.py", scripts)
+        for source in launchers + swift_tests:
+            text = source.read_text()
+            if source.suffix == ".swift":  # Comments may name a script that runs the tests; code may not.
+                text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
+            for name in scripts:
+                if name in text:
+                    with self.subTest(source=source.relative_to(root), script=name):
+                        self.assertTrue(ci_scope.matches("scripts/" + name, ci_scope.INFRASTRUCTURE))
 
     def test_opt_in_server_acceptance_suites_never_select_acceptance_lanes(self):
         # Their launchers copy them into isolated snapshots; no CI target compiles them.
@@ -101,7 +132,10 @@ TREE = "a" * 40
 BASE = "b" * 40
 PR_HEAD = "c" * 40
 MERGED = "d" * 40
-UI_JOB, = ci_scope.UI_JOBS
+UI_JOB, = ci_scope.LANE_JOBS["ui"]
+QUICK_JOBS = ci_scope.LANE_JOBS["quick"]
+VOICEOVER_JOB, = ci_scope.LANE_JOBS["voiceover"]
+RELEASE_JOB, = ci_scope.LANE_JOBS["release"]
 
 
 def pull_request_run(**overrides):
@@ -109,21 +143,31 @@ def pull_request_run(**overrides):
             "head_commit": {"tree_id": TREE}, "head_repository": {"full_name": REPOSITORY}, **overrides}
 
 
-def jobs(ui="success"):
-    return [{"name": "Repository checks", "conclusion": "success"}, {"name": UI_JOB, "conclusion": ui}]
+def jobs(ui="success", quick="success", voiceover="skipped", release="skipped"):
+    return [{"name": "Repository checks", "conclusion": "success"}, {"name": UI_JOB, "conclusion": ui},
+            *({"name": name, "conclusion": quick} for name in QUICK_JOBS),
+            {"name": VOICEOVER_JOB, "conclusion": voiceover}, {"name": RELEASE_JOB, "conclusion": release}]
+
+
+def main_run(head_sha=BASE, **overrides):
+    return {"id": 5, "event": "push", "conclusion": "success", "path": ci_scope.CI_WORKFLOW, "head_sha": head_sha,
+            "head_branch": "main", "head_repository": {"full_name": REPOSITORY}, **overrides}
 
 
 class FakeAPI:
-    """Answers the three requests the check makes and records them."""
+    """Answers the requests the checks make and records them."""
 
-    def __init__(self, runs=None, run_jobs=None, compare="ahead"):
+    def __init__(self, runs=None, run_jobs=None, compare="ahead", main_runs=None):
         self.runs = [pull_request_run()] if runs is None else runs
         self.run_jobs = jobs() if run_jobs is None else run_jobs
         self.compare = compare
+        self.main_runs = [main_run()] if main_runs is None else main_runs
         self.paths = []
 
     def __call__(self, path):
         self.paths.append(path)
+        if "/runs?branch=main&" in path:
+            return {"workflow_runs": self.main_runs}
         if "/runs?" in path:
             return {"workflow_runs": self.runs}
         if "/jobs?" in path:
@@ -133,11 +177,15 @@ class FakeAPI:
         raise AssertionError("Unexpected request: " + path)
 
 
-class UIEvidenceTests(unittest.TestCase):
-    def find(self, api, repository=REPOSITORY, base=BASE, tree=TREE):
+class EvidenceTests(unittest.TestCase):
+    def evidence(self, api, wanted=("ui",), repository=REPOSITORY, base=BASE, tree=TREE, **options):
         with mock.patch.object(ci_scope, "tree_of", return_value=tree), contextlib.redirect_stdout(io.StringIO()) as output:
             self.output = output
-            return find_ui_evidence(repository, base, MERGED, api)
+            return find_evidence(repository, base, MERGED, api, wanted, **options)
+
+    def find(self, api, **options):
+        """The UI journeys' evidence alone."""
+        return self.evidence(api, **options).get("ui")
 
     def test_matching_tree_with_both_shards_green_skips(self):
         api = FakeAPI()
@@ -177,7 +225,7 @@ class UIEvidenceTests(unittest.TestCase):
                       json.JSONDecodeError("Expecting value", "", 0)):
             with self.subTest(error=error):
                 self.assertIsNone(self.find(mock.Mock(side_effect=error)))
-                self.assertIn("UI evidence check failed", self.output.getvalue())
+                self.assertIn("Evidence check failed", self.output.getvalue())
 
     def test_failure_after_a_matching_run_does_not_skip(self):
         for failing in ("/jobs?", "/compare/"):
@@ -204,7 +252,7 @@ class UIEvidenceTests(unittest.TestCase):
         api = FakeAPI()
         with mock.patch.object(ci_scope, "tree_of", side_effect=subprocess.CalledProcessError(128, "git")), \
                 contextlib.redirect_stdout(io.StringIO()):
-            self.assertIsNone(find_ui_evidence(REPOSITORY, BASE, MERGED, api))
+            self.assertEqual(find_evidence(REPOSITORY, BASE, MERGED, api, ["ui"]), {})
         self.assertEqual(api.paths, [])
 
     def test_absent_repository_does_not_skip_or_call_the_api(self):
@@ -242,17 +290,109 @@ class UIEvidenceTests(unittest.TestCase):
 
         self.assertEqual(self.find(respond)["id"], 7)
 
+    def test_each_lane_needs_every_one_of_its_jobs(self):
+        self.assertEqual(set(self.evidence(FakeAPI(), wanted=ci_scope.LANE_JOBS)), {"quick", "ui"})
+        self.assertEqual(set(self.evidence(FakeAPI(run_jobs=jobs(voiceover="success", release="success")),
+                                           wanted=ci_scope.LANE_JOBS)), set(ci_scope.LANE_JOBS))
+        one_quick_lane_failed = jobs()
+        one_quick_lane_failed[2]["conclusion"] = "failure"
+        self.assertEqual(set(self.evidence(FakeAPI(run_jobs=one_quick_lane_failed), wanted=["quick", "ui"])), {"ui"})
+        missing_quick_lane = [job for job in jobs() if job["name"] != QUICK_JOBS[1]]
+        self.assertEqual(self.evidence(FakeAPI(run_jobs=missing_quick_lane), wanted=["quick"]), {})
+
+    def test_only_the_wanted_lanes_are_reported(self):
+        self.assertEqual(set(self.evidence(FakeAPI(), wanted=["quick"])), {"quick"})
+        api = FakeAPI()
+        self.assertEqual(self.evidence(api, wanted=[]), {})
+        self.assertEqual(api.paths, [])
+
+    def test_lanes_may_be_proved_by_different_runs_and_the_search_stops_once_all_are(self):
+        runs = [pull_request_run(id=9), pull_request_run(id=8), pull_request_run(id=7)]
+        responses = {"9": jobs(ui="skipped"), "8": jobs(quick="failure"), "7": jobs()}
+        api = FakeAPI(runs=runs)
+
+        def respond(path):
+            if "/jobs?" in path:
+                api.run_jobs = responses[path.split("/runs/")[1].split("/")[0]]
+            return api(path)
+
+        found = self.evidence(respond, wanted=["quick", "ui"])
+        self.assertEqual({lane: run["id"] for lane, run in found.items()}, {"quick": 9, "ui": 8})
+        self.assertFalse(any("/runs/7/" in path for path in api.paths))
+
+    def test_a_failure_after_some_lanes_were_proved_discards_all_evidence(self):
+        api = FakeAPI(runs=[pull_request_run(id=8), pull_request_run(id=7)])
+
+        def respond(path):
+            if "/runs/7/" in path:
+                raise subprocess.CalledProcessError(1, "gh")
+            if "/runs/8/" in path:
+                api.run_jobs = jobs(ui="skipped")
+            return api(path)
+
+        self.assertEqual(self.evidence(respond, wanted=["quick", "ui"]), {})
+
+    def test_a_past_merge_looks_back_from_its_own_time(self):
+        api = FakeAPI()
+        self.evidence(api, wanted=["quick"], created_before="2026-11-16T12:30:00Z")
+        self.assertEqual(api.paths[0], "repos/owner/repo/actions/workflows/ci.yml/runs?event=pull_request&status=success"
+                                       "&per_page=50&created=%3C%3D2026-11-16T12%3A30%3A00Z")
+
+
+class ValidatedBaseTests(unittest.TestCase):
+    ANCESTORS = {BASE: 1, "e" * 40: 3, "f" * 40: 2}
+
+    def base(self, api, repository=REPOSITORY):
+        with mock.patch.object(ci_scope, "is_ancestor", side_effect=lambda commit, head: commit in self.ANCESTORS), \
+                mock.patch.object(ci_scope, "distance", side_effect=lambda commit, head: self.ANCESTORS[commit]), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.output = output
+            return ci_scope.find_validated_base(repository, MERGED, api)
+
+    def test_nearest_successful_push_or_nightly_ancestor_is_the_base(self):
+        api = FakeAPI(main_runs=[main_run("e" * 40, event="schedule"), main_run(BASE), main_run("f" * 40)])
+        self.assertEqual(self.base(api), BASE)
+        self.assertEqual(api.paths, ["repos/owner/repo/actions/workflows/ci.yml/runs?branch=main&status=success&per_page=50"])
+        self.assertEqual(self.base(FakeAPI(main_runs=[main_run("e" * 40, event="schedule")])), "e" * 40)
+
+    def test_the_head_itself_and_commits_off_its_history_are_not_bases(self):
+        self.assertIsNone(self.base(FakeAPI(main_runs=[main_run(MERGED), main_run("9" * 40)])))
+        self.assertIn("every file is classified", self.output.getvalue())
+
+    def test_runs_that_prove_nothing_about_main_are_not_bases(self):
+        for overrides in ({"event": "pull_request"}, {"event": "workflow_dispatch"}, {"conclusion": "failure"},
+                          {"conclusion": "cancelled"}, {"path": ".github/workflows/other.yml"}, {"head_branch": "feature"},
+                          {"head_repository": {"full_name": "someone/repo"}}, {"head_sha": "not a commit"}):
+            with self.subTest(overrides=overrides):
+                self.assertIsNone(self.base(FakeAPI(main_runs=[main_run(**overrides)])))
+
+    def test_any_doubt_returns_no_base(self):
+        self.assertIsNone(self.base(FakeAPI(), repository=""))
+        for api in (mock.Mock(side_effect=subprocess.CalledProcessError(1, "gh")), lambda path: {},
+                    lambda path: {"workflow_runs": [{"event": "push"}]}, lambda path: None):
+            with self.subTest(api=api):
+                self.assertIsNone(self.base(api))
+                self.assertIn("Validated base check failed", self.output.getvalue())
+
 
 class MainPushSelectionTests(unittest.TestCase):
     def select(self, paths, *arguments, api=None, repository=REPOSITORY):
         api = api or FakeAPI()
+        self.bases = []
+
+        def changed(base, head):
+            self.bases.append(base)
+            return paths
+
         with tempfile.TemporaryDirectory() as directory:
             output_path = Path(directory) / "output"
             environment = {"GITHUB_OUTPUT": str(output_path), "GITHUB_REPOSITORY": repository}
             with mock.patch.dict(os.environ, environment, clear=True), \
                     mock.patch("sys.argv", ["ci_scope.py", "--base", BASE, "--head", MERGED, *arguments]), \
-                    mock.patch.object(ci_scope, "changed_paths", return_value=paths), \
+                    mock.patch.object(ci_scope, "changed_paths", side_effect=changed), \
                     mock.patch.object(ci_scope, "tree_of", return_value=TREE), \
+                    mock.patch.object(ci_scope, "is_ancestor", return_value=True), \
+                    mock.patch.object(ci_scope, "distance", return_value=1), \
                     mock.patch.object(ci_scope, "gh_api", api), \
                     contextlib.redirect_stdout(io.StringIO()) as log:
                 ci_scope.main()
@@ -260,37 +400,71 @@ class MainPushSelectionTests(unittest.TestCase):
             self.api = api
             return dict(line.split("=") for line in output_path.read_text().splitlines())
 
-    def test_main_push_with_evidence_skips_only_the_ui_shards(self):
+    def test_main_push_with_evidence_skips_every_lane_already_passed_on_its_tree(self):
         self.assertEqual(self.select(["Sources/RemoteFilesUI/FolderView.swift"], "--main-push"),
-                         {"quick": "true", "ui": "false", "voiceover": "false", "release": "false"})
-        self.assertIn("already passed on this tree in run 7 at " + PR_HEAD, self.log)
+                         {"quick": "false", "ui": "false", "voiceover": "false", "release": "false"})
+        self.assertIn("Quick / macos-openssh, Quick / simulator-core already passed on this tree in run 7 at " + PR_HEAD, self.log)
+        self.assertIn("Acceptance / simulator-ui already passed on this tree in run 7 at " + PR_HEAD, self.log)
+        self.assertNotIn("no evidence", self.log)
 
-    def test_main_push_with_evidence_keeps_the_voiceover_and_release_selection(self):
+    def test_main_push_runs_the_lanes_the_pull_request_did_not_pass(self):
         self.assertEqual(self.select([".github/workflows/ci.yml"], "--main-push"),
-                         {"quick": "true", "ui": "false", "voiceover": "true", "release": "true"})
-        self.assertEqual(self.select(["Tests/VoiceOverFixtures/VoiceOverUITests.swift"], "--main-push"),
-                         {"quick": "true", "ui": "false", "voiceover": "true", "release": "false"})
+                         {"quick": "false", "ui": "false", "voiceover": "true", "release": "true"})
+        self.assertIn("no evidence that a pull request run already passed Acceptance / voiceover, "
+                      "Acceptance / release-device-compile on this tree", self.log)
+        self.assertEqual(self.select(["Tests/VoiceOverFixtures/VoiceOverUITests.swift"], "--main-push",
+                                     api=FakeAPI(run_jobs=jobs(voiceover="success"))),
+                         {"quick": "false", "ui": "false", "voiceover": "false", "release": "false"})
+        self.assertEqual(self.select(["Sources/RemoteFilesUI/FolderView.swift"], "--main-push", api=FakeAPI(run_jobs=jobs(ui="skipped"))),
+                         {"quick": "false", "ui": "true", "voiceover": "false", "release": "false"})
 
-    def test_main_push_without_evidence_runs_the_ui_shards(self):
-        self.assertEqual(self.select(["Sources/RemoteFilesUI/FolderView.swift"], "--main-push", api=FakeAPI(runs=[]))["ui"], "true")
-        self.assertIn("no evidence that a pull request run already passed the UI journeys", self.log)
+    def test_main_push_without_evidence_runs_every_selected_lane(self):
+        self.assertEqual(self.select(["Sources/RemoteFilesUI/FolderView.swift"], "--main-push", api=FakeAPI(runs=[])),
+                         {"quick": "true", "ui": "true", "voiceover": "false", "release": "false"})
+        self.assertIn("no evidence that a pull request run already passed Quick / macos-openssh, Quick / simulator-core, "
+                      "Acceptance / simulator-ui on this tree", self.log)
 
-    def test_main_push_with_an_api_failure_runs_the_ui_shards(self):
+    def test_main_push_with_an_api_failure_runs_every_selected_lane(self):
         api = mock.Mock(side_effect=subprocess.CalledProcessError(1, "gh"))
-        self.assertEqual(self.select(["Sources/RemoteFilesUI/FolderView.swift"], "--main-push", api=api)["ui"], "true")
-        self.assertIn("UI evidence check failed", self.log)
+        self.assertEqual(self.select(["Sources/RemoteFilesUI/FolderView.swift"], "--main-push", api=api),
+                         {"quick": "true", "ui": "true", "voiceover": "false", "release": "false"})
+        self.assertIn("Evidence check failed", self.log)
 
     def test_pull_request_selection_never_reads_the_api(self):
         self.assertEqual(self.select(["App/Info.plist"])["ui"], "true")
         self.assertEqual(self.select(["Sources/RemoteFilesUI/FolderView.swift"])["ui"], "false")
         self.assertEqual(self.api.paths, [])
 
-    def test_documentation_push_to_main_never_reads_the_api(self):
+    def test_documentation_push_to_main_reads_only_earlier_main_runs(self):
         self.assertEqual(self.select(["docs/CI.md"], "--main-push")["ui"], "false")
-        self.assertEqual(self.api.paths, [])
+        self.assertEqual(len(self.api.paths), 1)
+        self.assertIn("/runs?branch=main&", self.api.paths[0])
+
+    def test_main_push_classifies_from_its_event_base_when_that_run_passed(self):
+        self.select(["docs/CI.md"], "--main-push")
+        self.assertEqual(self.bases, [BASE])
+        self.assertNotIn("classifying from", self.log)
+
+    def test_main_push_after_a_cancelled_run_classifies_from_the_last_commit_that_passed(self):
+        earlier = "e" * 40
+        self.select(["docs/CI.md"], "--main-push", api=FakeAPI(main_runs=[main_run(earlier)]))
+        self.assertEqual(self.bases, [earlier])
+        self.assertIn("classifying from " + earlier + ", the last commit whose run on main passed, not " + BASE, self.log)
+
+    def test_main_push_without_a_passing_earlier_run_classifies_every_file(self):
+        for api in (FakeAPI(main_runs=[]), mock.Mock(side_effect=subprocess.CalledProcessError(1, "gh"))):
+            with self.subTest(api=api):
+                self.select(["docs/CI.md"], "--main-push", api=api)
+                self.assertEqual(self.bases, [""])
+
+    def test_local_preview_without_a_repository_uses_the_given_base(self):
+        self.select(["docs/CI.md"], "--main-push", repository="")
+        self.assertEqual(self.bases, [BASE])
+        self.assertIn("without checking earlier runs", self.log)
 
     def test_explicit_full_run_ignores_evidence(self):
-        self.assertEqual(self.select(["Sources/RemoteFilesUI/FolderView.swift"], "--main-push", "--full")["ui"], "true")
+        self.assertEqual(self.select(["Sources/RemoteFilesUI/FolderView.swift"], "--main-push", "--full"),
+                         {"quick": "true", "ui": "true", "voiceover": "true", "release": "true"})
         self.assertEqual(self.api.paths, [])
 
 
@@ -299,9 +473,14 @@ class WorkflowContractTests(unittest.TestCase):
 
     workflow = (Path(__file__).resolve().parents[1] / ci_scope.CI_WORKFLOW).read_text()
 
-    def test_ui_job_name_is_the_one_the_workflow_produces(self):
-        self.assertEqual(ci_scope.UI_JOBS, ("Acceptance / simulator-ui",))
-        self.assertIn("name: Acceptance / simulator-ui\n", self.workflow)
+    def test_lane_job_names_are_the_ones_the_workflow_produces(self):
+        self.assertEqual(ci_scope.LANE_JOBS, {"quick": ("Quick / macos-openssh", "Quick / simulator-core"),
+                                              "ui": ("Acceptance / simulator-ui",), "voiceover": ("Acceptance / voiceover",),
+                                              "release": ("Acceptance / release-device-compile",)})
+        self.assertIn("name: Quick / ${{ matrix.lane }}\n", self.workflow)
+        self.assertIn("lane: [macos-openssh, simulator-core]\n", self.workflow)
+        for name in ("Acceptance / simulator-ui", "Acceptance / voiceover", "Acceptance / release-device-compile"):
+            self.assertIn("name: " + name + "\n", self.workflow)
         self.assertNotIn("shard:", self.workflow)
 
     def test_selector_can_read_run_results_and_nothing_can_write(self):

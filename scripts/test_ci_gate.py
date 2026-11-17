@@ -126,6 +126,22 @@ class WorkflowGateContractTests(unittest.TestCase):
         self.assertIn("fail-fast: false", blocks["quick"])
         self.assertNotIn("continue-on-error:", self.workflow)
 
+    def test_acceptance_lanes_wait_for_quick_lanes_unless_a_main_push_skipped_them(self):
+        """Quick lanes that ran must have passed; a skipped quick matrix is accepted only when it was not selected."""
+        blocks = dict(re.findall(r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:|\Z)", self.workflow.split("\njobs:\n")[1], re.M | re.S))
+        self.assertIn("    if: needs.repository-checks.outputs.quick == 'true'\n", blocks["quick"])
+        for job, output in ci_gate.LANE_OUTPUTS.items():
+            if job == "quick":
+                continue
+            with self.subTest(job=job):
+                condition = re.search(r"^    if: >-\n((?:      .*\n)+)", blocks[job], re.M).group(1)
+                self.assertEqual(" ".join(condition.split()),
+                                 "${{ !cancelled() && needs.repository-checks.result == 'success' "
+                                 "&& needs.repository-checks.outputs." + output + " == 'true' "
+                                 "&& (needs.quick.result == 'success' "
+                                 "|| (needs.quick.result == 'skipped' && needs.repository-checks.outputs.quick == 'false')) }}")
+                self.assertIn("    needs: [repository-checks, quick]\n", blocks[job])
+
 
 if __name__ == "__main__":
     unittest.main()

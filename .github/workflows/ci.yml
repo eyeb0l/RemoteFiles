@@ -17,7 +17,7 @@ on:
 
 permissions:
   contents: read
-  actions: read  # Repository checks reads a PR run's UI shard results before a main push repeats them.
+  actions: read  # Repository checks reads a PR run's lane results before a main push repeats them.
 
 concurrency:
   # The nightly run must neither cancel nor be cancelled by a merge to main.
@@ -94,7 +94,12 @@ jobs:
   simulator-ui:
     name: Acceptance / simulator-ui
     needs: [repository-checks, quick]
-    if: needs.repository-checks.outputs.ui == 'true'
+    # After successful quick lanes, or right away when a push to main skipped them on evidence.
+    if: >-
+      ${{ !cancelled() && needs.repository-checks.result == 'success'
+      && needs.repository-checks.outputs.ui == 'true'
+      && (needs.quick.result == 'success'
+      || (needs.quick.result == 'skipped' && needs.repository-checks.outputs.quick == 'false')) }}
     runs-on: xcode-27
     # Build 30, boot 11, settle 8 and test execution 60 minutes, plus checkout, caches and evidence upload.
     timeout-minutes: 120
@@ -113,7 +118,12 @@ jobs:
   voiceover:
     name: Acceptance / voiceover
     needs: [repository-checks, quick]
-    if: needs.repository-checks.outputs.voiceover == 'true'
+    # After successful quick lanes, or right away when a push to main skipped them on evidence.
+    if: >-
+      ${{ !cancelled() && needs.repository-checks.result == 'success'
+      && needs.repository-checks.outputs.voiceover == 'true'
+      && (needs.quick.result == 'success'
+      || (needs.quick.result == 'skipped' && needs.repository-checks.outputs.quick == 'false')) }}
     runs-on: xcode-27
     # Build, boot, settle and test execution are now separate phases inside this ceiling.
     timeout-minutes: 60
@@ -132,7 +142,12 @@ jobs:
   release-device-compile:
     name: Acceptance / release-device-compile
     needs: [repository-checks, quick]
-    if: needs.repository-checks.outputs.release == 'true'
+    # After successful quick lanes, or right away when a push to main skipped them on evidence.
+    if: >-
+      ${{ !cancelled() && needs.repository-checks.result == 'success'
+      && needs.repository-checks.outputs.release == 'true'
+      && (needs.quick.result == 'success'
+      || (needs.quick.result == 'skipped' && needs.repository-checks.outputs.quick == 'false')) }}
     runs-on: xcode-27
     timeout-minutes: 45
     env:

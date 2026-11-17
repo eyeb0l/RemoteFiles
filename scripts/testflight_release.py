@@ -5,6 +5,7 @@ Prints the plan unless --push is given. The tag is pushed with a deploy key, the
 credential a repository ruleset lets create `testflight/*` tags. See docs/TESTFLIGHT.md.
 """
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -20,6 +21,8 @@ REQUIRED_CHECKS = ("Repository checks", "CI gate")
 # The lanes that build and test the app. A change to documentation alone starts neither, and
 # still passes the two required checks.
 CODE_CHECKS = ("Quick / macos-openssh", "Quick / simulator-core")
+# A job skipped by its own condition is never expanded, so the skipped Quick matrix reports this name.
+SKIPPED_QUICK_CHECK = "Quick / ${{ matrix.lane }}"
 # How far back on main to look for a commit those lanes passed on.
 HISTORY_LIMIT = 50
 TAG_PREFIX = "testflight/"
@@ -109,6 +112,26 @@ def check_runs(commit):
                               "/check-runs?per_page=100&app_id=" + str(GITHUB_ACTIONS_APP_ID)))["check_runs"]
 
 
+def skipped_on_evidence(commit, runs):
+    """Whether a push to main skipped both Quick lanes because a pull request run passed them on this tree.
+
+    Only a passing run that skipped them counts: one that failed or was cancelled says nothing more,
+    whatever an earlier pull request run found. The evidence is looked up again, as CI did, around
+    the time of the merge.
+    """
+    code = [run for run in runs if run.get("name") in CODE_CHECKS + (SKIPPED_QUICK_CHECK,)
+            and run.get("app", {}).get("id") == GITHUB_ACTIONS_APP_ID]
+    if unmet_checks(runs) or not code or any(run.get("conclusion") != "skipped" for run in code):
+        return False
+    parent = capture("git", "rev-parse", "--verify", commit + "^1").strip()
+    merged = datetime.fromtimestamp(int(capture("git", "show", "-s", "--format=%ct", commit)), timezone.utc)
+    evidence = ci_scope.find_evidence(REPOSITORY, parent, commit, ci_scope.gh_api, ["quick"],
+                                      merged.strftime("%Y-%m-%dT%H:%M:%SZ")).get("quick")
+    if evidence:
+        print("Quick lanes for " + commit + " passed in pull request run " + str(evidence["id"]) + " on the same tree")
+    return bool(evidence)
+
+
 def tested_commit(commit, runs):
     """The newest commit on main, at or before `commit`, that the app's lanes passed on.
 
@@ -119,7 +142,8 @@ def tested_commit(commit, runs):
     """
     history = capture("git", "rev-list", "--first-parent", "--max-count=" + str(HISTORY_LIMIT), commit).split()
     for candidate in history:
-        if not unmet_checks(runs if candidate == commit else check_runs(candidate), CODE_CHECKS):
+        candidate_runs = runs if candidate == commit else check_runs(candidate)
+        if not unmet_checks(candidate_runs, CODE_CHECKS) or skipped_on_evidence(candidate, candidate_runs):
             if candidate != commit:
                 untested = ci_scope.classify(ci_scope.changed_paths(candidate, commit))
                 if untested["quick"]:
