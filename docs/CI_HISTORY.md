@@ -10,6 +10,44 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 17 November 2026: the post-boot settle wait is not dead time
+
+The CI cost audit below counted `simulator-settle` as roughly a third of simulator-core and the
+largest item left. A controlled experiment on the hosted runners shows the wait costs almost
+nothing in wall-clock time and prevents failures, so it stays at 480 seconds.
+
+**Method.** Run [44087050810](https://github.com/eyeb0l/RemoteFiles/actions/runs/44087050810),
+from the unmerged branch `experiment/settle-wait` at `main`'s `cf5cdc1`, ran simulator-core ten
+times: five jobs with no settle wait and five with the current bound, alternating and at most
+two at once, so both arms shared the same hours and runner conditions. Only an environment
+override of the bound differed. The decision rule, fixed before any result, was to drop the wait
+for simulator-core only if all five jobs without it passed, its slowest test stayed under half
+its 180-second allowance, and the job got shorter. The ten jobs used about 4.1 Mac-hours.
+
+| | No wait | 480-second bound |
+|---|---|---|
+| Lane passed | 3 of 5 | 5 of 5 |
+| 1-minute load at test start | 429–558 | 102–340 |
+| Mean load during tests | 410–516 | 55–162 |
+| Settle phase | 0 s | 257–485 s (one reached the bound) |
+| Test phase, median (range) | 903 s (611–963) | 621 s (499–644) |
+| Boot + settle + tests, median | 1,039 s | 1,000 s |
+| Job wall clock, median | 23.4 min | 23.0 min |
+| Slowest test | 20.8–60.7 s | 22.5–35.5 s |
+
+Without the wait the tests started inside the boot's load spike, so the spike moved into the test
+phase rather than going away. Two of the five jobs failed:
+`testAnswersWithoutWaitingForCloseStillCloseEveryHandleAndKeepTheChannel` threw "Already closed"
+after 71.6 seconds, where it takes at most 17 seconds settled, and in another job five SFTP
+integration tests hit `Connect timeout (10 s)` or an unfulfilled 5-second expectation, among them
+`testJumpHostCancellationAndDeadlineCloseTheSilentDestinationTunnel` and
+`testGeneratedEd25519AndReadOnlyJourney`. All five settled jobs passed.
+
+The rule failed on its first condition, and the job was not shorter either. A shorter bound would
+save time only where the load has already fallen, which is what the threshold already detects,
+so no intermediate bound was tried. Booting during the build to overlap the spike remains
+untested; it slows a three-CPU build and costs as much again to measure, for a few minutes at most.
+
 ## 17 November 2026: CI cost audit and repeated work on `main`
 
 **Baseline.** `ci.yml` runs created from 3 to 16 November (13.7 days): 319 runs, 2,379
@@ -54,9 +92,9 @@ to `main` that needs no Mac job reports in about a minute instead of 23 to 77.
 save less often and catch runner-image drift on an unchanged tree. The UI journeys still wait
 for the quick lanes on a pull request: starting them in parallel would cut that PR's feedback
 from about 77 to about 55 minutes, but 10 of 78 such runs failed a quick lane first, about 4
-extra Mac-hours a week. The post-boot settle wait is the largest single item left (roughly a
+extra Mac-hours a week. The post-boot settle wait looked like the largest single item left (roughly a
 third of simulator-core), but [Runner load and post-boot settling](#runner-load-and-post-boot-settling)
-records why a shorter bound failed, and changing it needs a controlled comparison on hosted runners.
+records why a shorter bound failed. The controlled comparison above, run the same day, keeps it.
 
 OpenClaw's [CI cost reduction](https://vincent.build/openclaw-ci-cost-reduction/) was the
 prompt for this audit. Most of its saving came from import-graph test selection inside a
