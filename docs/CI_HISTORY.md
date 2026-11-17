@@ -10,6 +10,37 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 17 November 2026: a download after a failed preview was refused once and not asked again
+
+PR #155 run [44086908805](https://github.com/eyeb0l/RemoteFiles/actions/runs/44086908805) failed
+**Quick / macos-openssh** in `SFTPIntegrationTests.testOneChannelServerLendsBrowsingToTransfersOnOneConnection`
+with `NIOSSHError.channelSetupRejected` after 4.4 s; the other 617 tests passed, and the PR changed
+only workflow, documentation and Python files. The method had not failed in the 11 failed jobs of
+the lane from 3 to 16 November. The fixture's `MaxSessions 1` log, read session by session, shows
+the third refusal arriving while the failed preview's retired browsing channel was still counted,
+its `Close session` straight after, and no further channel open: the download never asked again.
+
+**Cause.** A transfer refused while browsing holds no channel waits for retired browsing channels to
+close and asks again, but only if one is still closing when the refusal is handled. The count it read
+is updated on the event loop as the server's close arrives, independently of the service actor. On a
+loaded host the close of the preview's channel could arrive between the server's refusal and that
+check, so the transfer saw nothing closing and gave up, although the server had not yet freed the
+slot. This is a product race, not a test fault: the same download straight after a failed preview
+fails the same way in the app.
+
+**Reproduction.** Locally, with 16 busy processes on an 8-core Mac, the unchanged method failed 4 of
+40 runs, and 10 of 40 with tracing, which slows the client further. Every failure was this download;
+in each, the refusal was handled with browsing's close already complete or completing. Delaying the
+server's session exit with a `ForceCommand` wrapper did not reproduce it on its own, because OpenSSH
+then holds its close until the session's process exits.
+
+**Fix.** The transfer now also waits and asks again when one of the connection's channels closed
+within the last second (`slotReleaseAllowance`), as browsing already did. The new
+`testOneChannelDownloadRefusedAfterBrowsingClosedAsksAgain` uses that wrapper to make the server
+refuse the download every time, and a task-local observer to hold the refusal until browsing's close
+has arrived; without the fix it failed 3 of 3 runs. With it, under the same load, the original method
+passed 40 of 40 runs and the new one 20 of 20.
+
 ## 17 November 2026: the post-boot settle wait is not dead time
 
 The CI cost audit below counted `simulator-settle` as roughly a third of simulator-core and the
