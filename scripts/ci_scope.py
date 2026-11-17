@@ -135,6 +135,40 @@ def find_evidence(repository, base, head, api, wanted, created_before=None):
     return found
 
 
+def is_ancestor(commit, head):
+    return subprocess.run(["git", "merge-base", "--is-ancestor", commit, head], capture_output=True).returncode == 0
+
+
+def distance(commit, head):
+    return int(subprocess.check_output(["git", "rev-list", "--count", commit + ".." + head], text=True))
+
+
+def find_validated_base(repository, head, api):
+    """Return the nearest earlier commit on main whose push or nightly run of this workflow succeeded, or None.
+
+    Each push cancels the previous push's run, and its own diff from github.event.before would leave
+    the cancelled commits to the nightly run: a code merge followed by a documentation merge would run
+    nothing on main. Classifying from the last successful run covers them. Any doubt returns None,
+    which classifies every file.
+    """
+    try:
+        if not repository:
+            raise ValueError("GITHUB_REPOSITORY is not set")
+        runs = api("repos/" + repository + "/actions/workflows/" + Path(CI_WORKFLOW).name +
+                   "/runs?branch=main&status=success&per_page=50")["workflow_runs"]
+        candidates = {run["head_sha"] for run in runs
+                      if run["event"] in ("push", "schedule") and run["conclusion"] == "success" and run["path"] == CI_WORKFLOW
+                      and run["head_branch"] == "main" and run["head_repository"]["full_name"] == repository}
+        candidates = [commit for commit in candidates
+                      if re.fullmatch(r"[0-9a-f]{40,64}", commit) and commit != head and is_ancestor(commit, head)]
+        if candidates:
+            return min(candidates, key=lambda commit: distance(commit, head))
+        print("No earlier commit on main has a successful run, so every file is classified")
+    except Exception as error:  # Deliberately broad: whatever went wrong, every file is classified.
+        print("Validated base check failed, so every file is classified: " + repr(error))
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default=os.environ.get("CI_BASE_SHA", ""))
@@ -146,7 +180,17 @@ def main():
                         help="Classify a push to main: merged code also runs the UI journeys, and any lane "
                              "a pull request run already passed on the same tree is skipped")
     args = parser.parse_args()
-    result = classify(changed_paths(args.base, args.head), args.full, args.quick, args.main_push)
+    base = args.base
+    if args.main_push and not args.full:
+        repository = os.environ.get("GITHUB_REPOSITORY", "")
+        if repository:
+            # An empty base classifies every file.
+            base = find_validated_base(repository, args.head, gh_api) or ""
+            if base and base != args.base:
+                print("Push to main: classifying from " + base + ", the last commit whose run on main passed, not " + args.base)
+        else:
+            print("GITHUB_REPOSITORY is not set, so this preview classifies from --base without checking earlier runs")
+    result = classify(changed_paths(base, args.head), args.full, args.quick, args.main_push)
     evidence = {}
     if args.main_push and not args.full:
         evidence = find_evidence(os.environ.get("GITHUB_REPOSITORY", ""), args.base, args.head, gh_api,

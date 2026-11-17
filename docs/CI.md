@@ -29,7 +29,10 @@ before merge only when a change can be exercised nowhere else.
 ## Selection rules
 
 `scripts/ci_scope.py` classifies the complete change: every commit of a PR, both
-sides of a rename, and deletions. The first matching rule applies to each path, and
+sides of a rename, and deletions. A push to `main` classifies everything since the nearest
+earlier commit whose push or nightly run on `main` succeeded, not just since the previous
+tip: each push cancels the run before it, and the cancelled commits would otherwise wait
+for the nightly run. If no such commit can be read from the API, it classifies every file. The first matching rule applies to each path, and
 the change receives the broadest tier of any of its paths.
 
 - Documentation and repository metadata start no Mac runner: `docs/`, `README.md`,
@@ -75,11 +78,16 @@ at merge never qualifies, even if its test merge matched the merged tree, becaus
 does not report which merge commit a run tested. The nightly run still executes every
 lane on `main`.
 
+On 14 November 2026, for example, `e3c59a5` changed a workflow, which selects every lane,
+and its run on `main` was cancelled 26 minutes later by `76f8213`, whose own diff selected
+only the UI journeys. VoiceOver and the Release compile reached that workflow change only in
+the next nightly run.
+
 Preview a decision with
 `python3 -B scripts/ci_scope.py --base "$(git merge-base origin/main HEAD)" --head "$(git rev-parse HEAD)"`;
-add `--main-push` to see what the merge will run. That preview assumes no evidence
-unless `GITHUB_REPOSITORY=eyeb0l/RemoteFiles` is set, which checks the real evidence with
-your `gh` login. `scripts/test_ci_scope.py` covers each rule.
+add `--main-push` to see what the merge will run. That preview classifies from `--base`
+and assumes no evidence unless `GITHUB_REPOSITORY=eyeb0l/RemoteFiles` is set, which reads
+the real earlier runs and evidence with your `gh` login. `scripts/test_ci_scope.py` covers each rule.
 
 ## Required merge checks
 

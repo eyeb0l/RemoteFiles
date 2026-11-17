@@ -118,17 +118,25 @@ def jobs(ui="success", quick="success", voiceover="skipped", release="skipped"):
             {"name": VOICEOVER_JOB, "conclusion": voiceover}, {"name": RELEASE_JOB, "conclusion": release}]
 
 
-class FakeAPI:
-    """Answers the three requests the check makes and records them."""
+def main_run(head_sha=BASE, **overrides):
+    return {"id": 5, "event": "push", "conclusion": "success", "path": ci_scope.CI_WORKFLOW, "head_sha": head_sha,
+            "head_branch": "main", "head_repository": {"full_name": REPOSITORY}, **overrides}
 
-    def __init__(self, runs=None, run_jobs=None, compare="ahead"):
+
+class FakeAPI:
+    """Answers the requests the checks make and records them."""
+
+    def __init__(self, runs=None, run_jobs=None, compare="ahead", main_runs=None):
         self.runs = [pull_request_run()] if runs is None else runs
         self.run_jobs = jobs() if run_jobs is None else run_jobs
         self.compare = compare
+        self.main_runs = [main_run()] if main_runs is None else main_runs
         self.paths = []
 
     def __call__(self, path):
         self.paths.append(path)
+        if "/runs?branch=main&" in path:
+            return {"workflow_runs": self.main_runs}
         if "/runs?" in path:
             return {"workflow_runs": self.runs}
         if "/jobs?" in path:
@@ -300,16 +308,60 @@ class EvidenceTests(unittest.TestCase):
                                        "&per_page=50&created=%3C%3D2026-11-16T12%3A30%3A00Z")
 
 
+class ValidatedBaseTests(unittest.TestCase):
+    ANCESTORS = {BASE: 1, "e" * 40: 3, "f" * 40: 2}
+
+    def base(self, api, repository=REPOSITORY):
+        with mock.patch.object(ci_scope, "is_ancestor", side_effect=lambda commit, head: commit in self.ANCESTORS), \
+                mock.patch.object(ci_scope, "distance", side_effect=lambda commit, head: self.ANCESTORS[commit]), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.output = output
+            return ci_scope.find_validated_base(repository, MERGED, api)
+
+    def test_nearest_successful_push_or_nightly_ancestor_is_the_base(self):
+        api = FakeAPI(main_runs=[main_run("e" * 40, event="schedule"), main_run(BASE), main_run("f" * 40)])
+        self.assertEqual(self.base(api), BASE)
+        self.assertEqual(api.paths, ["repos/owner/repo/actions/workflows/ci.yml/runs?branch=main&status=success&per_page=50"])
+        self.assertEqual(self.base(FakeAPI(main_runs=[main_run("e" * 40, event="schedule")])), "e" * 40)
+
+    def test_the_head_itself_and_commits_off_its_history_are_not_bases(self):
+        self.assertIsNone(self.base(FakeAPI(main_runs=[main_run(MERGED), main_run("9" * 40)])))
+        self.assertIn("every file is classified", self.output.getvalue())
+
+    def test_runs_that_prove_nothing_about_main_are_not_bases(self):
+        for overrides in ({"event": "pull_request"}, {"event": "workflow_dispatch"}, {"conclusion": "failure"},
+                          {"conclusion": "cancelled"}, {"path": ".github/workflows/other.yml"}, {"head_branch": "feature"},
+                          {"head_repository": {"full_name": "someone/repo"}}, {"head_sha": "not a commit"}):
+            with self.subTest(overrides=overrides):
+                self.assertIsNone(self.base(FakeAPI(main_runs=[main_run(**overrides)])))
+
+    def test_any_doubt_returns_no_base(self):
+        self.assertIsNone(self.base(FakeAPI(), repository=""))
+        for api in (mock.Mock(side_effect=subprocess.CalledProcessError(1, "gh")), lambda path: {},
+                    lambda path: {"workflow_runs": [{"event": "push"}]}, lambda path: None):
+            with self.subTest(api=api):
+                self.assertIsNone(self.base(api))
+                self.assertIn("Validated base check failed", self.output.getvalue())
+
+
 class MainPushSelectionTests(unittest.TestCase):
     def select(self, paths, *arguments, api=None, repository=REPOSITORY):
         api = api or FakeAPI()
+        self.bases = []
+
+        def changed(base, head):
+            self.bases.append(base)
+            return paths
+
         with tempfile.TemporaryDirectory() as directory:
             output_path = Path(directory) / "output"
             environment = {"GITHUB_OUTPUT": str(output_path), "GITHUB_REPOSITORY": repository}
             with mock.patch.dict(os.environ, environment, clear=True), \
                     mock.patch("sys.argv", ["ci_scope.py", "--base", BASE, "--head", MERGED, *arguments]), \
-                    mock.patch.object(ci_scope, "changed_paths", return_value=paths), \
+                    mock.patch.object(ci_scope, "changed_paths", side_effect=changed), \
                     mock.patch.object(ci_scope, "tree_of", return_value=TREE), \
+                    mock.patch.object(ci_scope, "is_ancestor", return_value=True), \
+                    mock.patch.object(ci_scope, "distance", return_value=1), \
                     mock.patch.object(ci_scope, "gh_api", api), \
                     contextlib.redirect_stdout(io.StringIO()) as log:
                 ci_scope.main()
@@ -352,9 +404,32 @@ class MainPushSelectionTests(unittest.TestCase):
         self.assertEqual(self.select(["Sources/RemoteFilesUI/FolderView.swift"])["ui"], "false")
         self.assertEqual(self.api.paths, [])
 
-    def test_documentation_push_to_main_never_reads_the_api(self):
+    def test_documentation_push_to_main_reads_only_earlier_main_runs(self):
         self.assertEqual(self.select(["docs/CI.md"], "--main-push")["ui"], "false")
-        self.assertEqual(self.api.paths, [])
+        self.assertEqual(len(self.api.paths), 1)
+        self.assertIn("/runs?branch=main&", self.api.paths[0])
+
+    def test_main_push_classifies_from_its_event_base_when_that_run_passed(self):
+        self.select(["docs/CI.md"], "--main-push")
+        self.assertEqual(self.bases, [BASE])
+        self.assertNotIn("classifying from", self.log)
+
+    def test_main_push_after_a_cancelled_run_classifies_from_the_last_commit_that_passed(self):
+        earlier = "e" * 40
+        self.select(["docs/CI.md"], "--main-push", api=FakeAPI(main_runs=[main_run(earlier)]))
+        self.assertEqual(self.bases, [earlier])
+        self.assertIn("classifying from " + earlier + ", the last commit whose run on main passed, not " + BASE, self.log)
+
+    def test_main_push_without_a_passing_earlier_run_classifies_every_file(self):
+        for api in (FakeAPI(main_runs=[]), mock.Mock(side_effect=subprocess.CalledProcessError(1, "gh"))):
+            with self.subTest(api=api):
+                self.select(["docs/CI.md"], "--main-push", api=api)
+                self.assertEqual(self.bases, [""])
+
+    def test_local_preview_without_a_repository_uses_the_given_base(self):
+        self.select(["docs/CI.md"], "--main-push", repository="")
+        self.assertEqual(self.bases, [BASE])
+        self.assertIn("without checking earlier runs", self.log)
 
     def test_explicit_full_run_ignores_evidence(self):
         self.assertEqual(self.select(["Sources/RemoteFilesUI/FolderView.swift"], "--main-push", "--full"),
