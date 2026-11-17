@@ -200,7 +200,8 @@ five simulator-core jobs failed ([settle experiment](CI_HISTORY.md#17-november-2
 A failed build never boots the device or executes cached products. Each command receives a 30-minute
 deadline, except the UI lane's test execution, which receives 60 minutes for the whole
 journey inventory. Job ceilings are 45 minutes for the quick lanes and Release, 60 for
-VoiceOver and 120 for UI; methods receive 180/240-second allowances. The OpenSSH
+VoiceOver and 120 for UI; methods receive 180/240-second allowances, and the demo reader
+VoiceOver journey asks for the 240-second maximum. The OpenSSH
 fixture surrounds core and UI test execution.
 
 Each lane inventories the XCTest methods in its platform-specific sources and fails
@@ -361,8 +362,11 @@ row or persistent bottom control fails as `VoiceOverReaderLanding`. The focused 
 JSON/SVG and the slow-load fixture use that recorder for the opening helper too: speech can
 still name the old row after the title has actually received focus. Their preview speech
 assertions remain unchanged.
-The JSON/SVG and focused row checks explicitly disable VoiceOver while staging rows in touch
-mode, even if the simulator started with it enabled; XCTest teardown restores that original state.
+Every VoiceOver method starts with VoiceOver off and stages rows in touch mode: `setUp`
+turns it off if the simulator had it on, and XCTest teardown restores that original state.
+A method killed for exceeding its allowance skips its teardown and leaves VoiceOver on, so
+`setUp` must not trust the state it finds; see
+[17 November 2026](CI_HISTORY.md#17-november-2026-a-killed-voiceover-journey-left-voiceover-on-for-the-key-journey).
 See [Fast-load focus](CI_HISTORY.md#fast-load-focus), [SVG placeholder focus](CI_HISTORY.md#svg-placeholder-focus)
 and [Folder-row reader landing](CI_HISTORY.md#7-november-2026-folder-row-reader-landing).
 

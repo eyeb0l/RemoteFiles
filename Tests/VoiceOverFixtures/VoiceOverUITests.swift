@@ -17,7 +17,6 @@ extension XCUIApplication {
         defer {
             print("VO COMPLETE JSON SVG FOCUS\n\((try? String(contentsOfFile: focusLog, encoding: .utf8)) ?? "")VO COMPLETE JSON SVG FOCUS END")
         }
-        try service.disable() // Touch-stage the rows even when the simulator originally had VoiceOver on.
         app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
@@ -97,6 +96,11 @@ extension XCUIApplication {
             XCTAssertEqual(service.isEnabled, originalVoiceOver)
             print("VO TEARDOWN RESTORED enabled=\(service.isEnabled), original=\(originalVoiceOver)")
         }
+        // Every journey starts in touch mode and enables VoiceOver itself. A method that exceeds its
+        // time allowance is killed before this teardown runs, leaving VoiceOver on for the next one,
+        // whose touch taps would then only move focus (docs/CI_HISTORY.md, 17 November 2026).
+        if originalVoiceOver { try service.disable() }
+        print("VO SETUP original=\(originalVoiceOver)")
     }
     /// VoiceOver's speech can lag its focus, so a traversal that matters reads this as well.
     private func recordFocus(of app: XCUIApplication) -> String {
@@ -309,6 +313,10 @@ extension XCUIApplication {
     }
     func testDemoReaderVoiceOverJourney() throws {
         continueAfterFailure = true
+        // Hosted runs take 140–173 s. XCTest's idle wait after opening Document actions has twice run its
+        // full 60 s before continuing, which the default 180 s cannot absorb; 240 s is the lane's maximum
+        // (docs/CI_HISTORY.md, 17 November 2026).
+        executionTimeAllowance = 240
         let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]
         let focusLog = recordFocus(of: app)
         defer { print("VO MARKDOWN FOCUS LOG\n\((try? String(contentsOfFile: focusLog, encoding: .utf8)) ?? "")VO MARKDOWN FOCUS LOG END") }
@@ -368,9 +376,6 @@ extension XCUIApplication {
         let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]
         let focusLog = recordFocus(of: app)
         defer { print("VO ROW FOCUS LOG\n\((try? String(contentsOfFile: focusLog, encoding: .utf8)) ?? "")VO ROW FOCUS LOG END") }
-        // Stage the row in touch mode even if this simulator started with VoiceOver on.
-        // setUp's teardown still restores that original state.
-        try service.disable()
         app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
@@ -401,7 +406,6 @@ extension XCUIApplication {
         let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]
         let focusLog = recordFocus(of: app)
         defer { print("VO IMAGE FILE FOCUS LOG\n\((try? String(contentsOfFile: focusLog, encoding: .utf8)) ?? "")VO IMAGE FILE FOCUS LOG END") }
-        try service.disable()
         app.launch()
         let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
         XCTAssertTrue(projects.waitForExistence(timeout: 15)); projects.tap()
@@ -567,12 +571,10 @@ extension XCUIApplication {
     func testPublicKeyConfirmationVoiceOverAccountKeyCancelAndResult() throws {
         let app = XCUIApplication.underTest(); app.launchArguments = ["--small-features-fixture", "--feature-case=vo-key-install"]; app.launch()
         XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 15))
-        // The Settings screen can be seconds behind the tap on a loaded runner, and a synthesized tap is
-        // sometimes not delivered at all (docs/CI_HISTORY.md, 14 November 2026). Wait for the screen, and
-        // tap once more only if the home screen is still showing.
-        let settings = app.buttons["Settings"], keys = app.buttons["SSH Keys"]
-        settings.tap()
-        if !keys.waitForExistence(timeout: 15), settings.exists { settings.tap() }
+        // Staged in touch mode; setUp turns off any VoiceOver a killed method left on, under which these
+        // taps would only move focus (docs/CI_HISTORY.md, 17 November 2026).
+        app.buttons["Settings"].tap()
+        let keys = app.buttons["SSH Keys"]
         XCTAssertTrue(keys.waitForExistence(timeout: 15), app.debugDescription); keys.tap()
         let identity = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Fixture Public Identity")).firstMatch
         XCTAssertTrue(identity.waitForExistence(timeout: 10)); identity.tap()
