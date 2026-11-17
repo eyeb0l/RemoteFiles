@@ -1240,8 +1240,8 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
 
     /// Opens a dedicated channel. When the server refuses a transfer one, makes room on this connection rather
     /// than reconnecting, in this order: wait for a finished search's channels, or a retired browsing channel, to
-    /// close; reclaim the optional walk channel (`reclaimWalk`); on a server allowing one channel, borrow
-    /// browsing's (`lendForeground`).
+    /// close, or for the server to free a slot one of this connection's channels has just given up; reclaim the
+    /// optional walk channel (`reclaimWalk`); on a server allowing one channel, borrow browsing's (`lendForeground`).
     /// Each happens at most once. A transfer never shares a channel with browsing, so its cancellation and
     /// deadlines stay its own. Only an explicit channel-open refusal counts as a lack of room.
     private func openTransferSFTP(for session: LiveSession, purpose: DedicatedChannelPurpose) async throws -> TransferChannel {
@@ -1260,11 +1260,15 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
                 guard purpose == .transfer, Self.isChannelRefusal(error) else { throw error }
                 try Task.checkCancellation()
                 guard session.client.isConnected else { throw RemoteFileError.connectionEnded }
+                if let observe = TransferChannelRefusal.observer { await observe(session.sharedChannels) }
                 if !waited, session.helperChannels.count > 0 {
                     waited = true
                     await awaitHelperChannels(session)
-                } else if !settled, session.sftp.isEmpty, session.openingSFTP.isEmpty, session.sharedChannels.count > 0 {
-                    // Browsing's channel was retired and is still closing: the server counts it until it has closed.
+                } else if !settled, session.sftp.isEmpty, session.openingSFTP.isEmpty,
+                          session.mayStillHoldASlot(within: Self.slotReleaseAllowance, replacingShared: true) {
+                    // Browsing's channel was retired and is still closing, or a channel of this connection's has just
+                    // closed: the server counts it until its session process has exited. On a loaded host the close
+                    // can arrive before this refusal is handled, so having closed already is no sign of room.
                     settled = true
                     _ = await session.sharedChannels.closed(within: dedicatedCloseGrace)
                 } else if !reclaimed, await reclaimWalk(for: session) {
@@ -1791,6 +1795,13 @@ private final class ForegroundLoan: @unchecked Sendable {
     /// Set by a borrower that can give the slot back early, between its own operations.
     var returnWhenIdle: (() -> Void)?
     var ended = false
+}
+
+/// Called when the server refuses a transfer's channel, before the connection decides how to make room, with
+/// browsing's channels that are open or closing. A test uses it to handle the refusal only once a retired
+/// browsing channel has closed, as a loaded host may. Nil outside tests.
+enum TransferChannelRefusal {
+    @TaskLocal static var observer: (@Sendable (_ browsing: OpenChannels) async -> Void)?
 }
 
 /// Channels that the server may still count against its session limit: open, or closing but not yet closed.

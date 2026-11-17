@@ -50,7 +50,11 @@ has closed. The connection therefore tracks every channel it opens until it has 
 just made room (reclaimed the walk, let a transfer or helper channel close, or replaced a retired
 browsing channel), a refusal while one of its channels is still closing, or within a second of one
 closing, is asked again briefly (at most five seconds); nothing has been sent on a refused channel. A
-transfer refused while the only channels left are retired browsing ones waits for them to close first.
+transfer refused while browsing holds no channel waits for retired browsing channels to close first, and
+asks again whenever one of the connection's channels is still closing or closed within that second. A
+close that has already arrived is no sign of room: the server can still count that session, and on a
+loaded host the refusal can be handled after the close has arrived (17 November 2026,
+[CI history](CI_HISTORY.md#17-november-2026-a-download-after-a-failed-preview-was-refused-once-and-not-asked-again)).
 
 ### The Linux search helper
 

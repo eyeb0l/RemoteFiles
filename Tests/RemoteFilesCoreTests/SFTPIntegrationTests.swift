@@ -110,6 +110,39 @@ final class SFTPIntegrationTests: XCTestCase {
         XCTAssertEqual(metrics.connections, 1)
     }
 
+    /// OpenSSH frees a session's slot when its process exits, which can be after the client has seen the channel
+    /// close. A download refused while a failed preview's browsing channel is closing must ask again even when
+    /// that close has arrived before the refusal is handled, as it did once on a loaded CI runner
+    /// (docs/CI_HISTORY.md, 17 November 2026). Each round retires browsing's channel; the refusal waits for its
+    /// close before the connection decides how to make room.
+    func testOneChannelDownloadRefusedAfterBrowsingClosedAsksAgain() async throws {
+        let server = try await limitedServer(sessions: 1)
+        let (service, profile, fixture) = (server.service, server.profile, server.fixture)
+        let tree = try Self.offlineTree(in: fixture, folders: 1, files: 4)
+        let root = try await service.listDirectory(profile: profile, path: tree).path
+        let file = root + "/folder 0/file-3.txt"
+        let refusedAfterClose = LockedCount()
+        // The server usually refuses the first download; a few rounds make sure one refusal is handled this way.
+        for round in 0..<5 where refusedAfterClose.value == 0 {
+            do { _ = try await service.readFile(profile: profile, path: file, limit: 10); XCTFail("Oversized previews must fail") }
+            catch RemoteFileError.tooLarge { }
+            let destination = URL(fileURLWithPath: server.directory + "/one-channel-after-close-\(round)")
+            try await TransferChannelRefusal.$observer.withValue({ browsing in
+                if await browsing.closed(within: .seconds(60)) { refusedAfterClose.increment() }
+            }) {
+                _ = try await service.downloadSnapshotFile(profile: profile, path: file, canonicalRoot: root,
+                                                           destination: destination, limit: 100_000, progress: { _ in })
+            }
+            XCTAssertEqual(try Data(contentsOf: destination), try Data(contentsOf: URL(fileURLWithPath: file)))
+        }
+        XCTAssertGreaterThan(refusedAfterClose.value, 0, "A download must be refused while browsing's channel is closing")
+        let listing = try await service.listDirectory(profile: profile, path: root + "/folder 0")
+        XCTAssertEqual(listing.entries.count, 4)
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.connections, 1)
+        XCTAssertTrue(try server.log().contains("no more sessions"), "The fixture must actually exercise channel refusal")
+    }
+
     private static func waitForLoan(_ service: SFTPRemoteFileService) async throws {
         let deadline = ContinuousClock.now + .seconds(60)
         while await service.metrics().foregroundLoans == 0 {
