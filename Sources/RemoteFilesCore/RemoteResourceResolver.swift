@@ -115,11 +115,11 @@ private final class CacheClearings: @unchecked Sendable {
     func count(for directory: URL) -> Int { holding(directory) { $0 } }
     func holding<T>(_ directory: URL, _ body: (Int) throws -> T) rethrows -> T {
         lock.lock(); defer { lock.unlock() }
-        return try body(counts[directory.standardizedFileURL.path, default: 0])
+        return try body(counts[LocalStoreKey.path(of: directory), default: 0])
     }
     func clear(_ directory: URL, _ body: () -> Void) {
         lock.lock(); defer { lock.unlock() }
-        counts[directory.standardizedFileURL.path, default: 0] += 1
+        counts[LocalStoreKey.path(of: directory), default: 0] += 1
         body()
     }
 }

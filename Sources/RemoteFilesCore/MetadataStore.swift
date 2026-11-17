@@ -18,12 +18,12 @@ final class SharedFileStores<Store: AnyObject>: @unchecked Sendable {
     private var entries: [String: Entry] = [:]
     /// The store already open on this file, or a new one. Held weakly: when its last user goes, so does it.
     func store(at fileURL: URL, make: (URL) throws -> Store) rethrows -> Store {
-        let file = fileURL.standardizedFileURL
+        let key = LocalStoreKey.path(of: fileURL)
         lock.lock(); defer { lock.unlock() }
-        if let store = entries[file.path]?.store { return store }
-        let store = try make(file)
+        if let store = entries[key]?.store { return store }
+        let store = try make(URL(fileURLWithPath: key))
         entries = entries.filter { $0.value.store != nil }
-        entries[file.path] = Entry(store: store)
+        entries[key] = Entry(store: store)
         return store
     }
 }
