@@ -332,8 +332,10 @@ Not checked: iPad, and Escape on a hardware keyboard. Reduce Motion wasn't on th
 
 The first session on a physical iPad: an iPad Pro 11-inch (M5) (iOS 27.2.1, 24B156) against
 the MacBook Air's OpenSSH service, over Wi-Fi with a direct Tailscale route to the Mac's MagicDNS
-name. Automated runs used a signed Debug build of `9d131fe`; the hands-on pass used a signed
-Release build of the same commit. Fixtures were synthetic, generated for the session in a
+name. The first hosted core run used a signed Debug build of `d883793` (`main`). The runs after the
+store-key fix, the demo UI journeys and the Face ID check used a signed Debug build, and the
+hands-on pass a signed Release build, of the tree committed as `a3344ae`, before the offline reader
+and folder preview fixes. Fixtures were synthetic, generated for the session in a
 dedicated folder outside the repository and listed under [Setup](#ipad-setup).
 
 ### iPad setup
@@ -352,17 +354,19 @@ dedicated folder outside the repository and listed under [Setup](#ipad-setup).
 
 ### Automated on the device
 
-- **Hosted core suite** (`RemoteFilesTests`): 842 ran, 48 skipped (fixture-server, benchmark and
+- **Hosted core suite** (`RemoteFilesTests`, `d883793`): 842 ran, 48 skipped (fixture-server, benchmark and
   opt-in Face ID cases), 17 failed. The physical-only checks passed:
   `testTrustStoreWritesUseCompleteFileProtection`, `testDeviceKeychainPersistenceAndAccessibility`
   and `testBiometricKeychainItemIsStoredWithoutPromptingAndRemovable`.
   - Ten failures, about several windows and shared stores, came from the app's shared stores keying files by
     `standardizedFileURL.path`, which drops `/private` only once the shorter path exists. They
-    are fixed; see [CI history](CI_HISTORY.md#18-november-2026-shared-stores-on-a-device). After
-    the fix the six affected suites passed on the iPad (166 tests, three opt-in Face ID skips).
-  - Seven WebKit reading-position tests failed in both runs and remain open: two
-    `HTMLReadingPositionTests` (page zoom and root-zoom text size) and five `OverflowViewportTests`.
-    The same behaviours passed by hand (step 12 below).
+    are fixed; see [CI history](CI_HISTORY.md#18-november-2026-shared-stores-on-a-device). With the
+    fix (`a3344ae`) the six affected suites passed on the iPad (166 tests, three opt-in Face ID skips).
+  - Seven reading-position tests failed in both runs and remain open: two HTML
+    `HTMLReadingPositionTests` and five Markdown `OverflowViewportTests`. By hand, an HTML position
+    held through the reader's text size, rotation and window resizing (step 12 below), which
+    corresponds to the root-zoom test; nothing recorded matches the page-zoom test
+    (`WKWebView.pageZoom`) or the Markdown tests.
 - **Demo UI journeys** (`RemoteFilesUITests`): 13 passed, 22 failed, 1 skipped (the key import,
   which already skips on devices). The iPad workspace journey passed. Most failures are journeys
   written for the iPhone's stack navigation. Two looked iPad-specific: Subfolders → This Folder,
@@ -435,7 +439,7 @@ under Modifier Keys, so these results may differ from an attached keyboard.
 - **Folder row previews and focus rings spread across columns.** The folder column's cells run on
   under the floating library. The long-press preview now has its own shape; the keyboard focus
   ring, which the Simulator does not draw, is still too wide.
-- The keyboard and WebKit test findings above.
+- The keyboard and reading-position test findings above.
 
 | Offline reader before | Offline reader after |
 | --- | --- |
@@ -443,7 +447,7 @@ under Modifier Keys, so these results may differ from an attached keyboard.
 
 | Folder preview before | Folder preview after |
 | --- | --- |
-| <img src="screenshots/ipad/folder-preview-before.png" width="420" alt="Long-press preview of a folder row stretching from the screen edge across the library"> | <img src="screenshots/ipad/folder-preview-after.png" width="420" alt="The same preview inside the folder column"> |
+| <img src="screenshots/ipad/folder-preview-before.png" width="420" alt="Long-press preview of a folder row stretching from the screen edge across the library"> | <img src="screenshots/ipad/folder-preview-after.png" width="420" alt="The same preview following the row's bounds, overlapping the library divider by a few points"> |
 
 *Demo data on an iPad Pro 11-inch (M5) Simulator (iOS 27.2), reproducing what the device showed.*
 
@@ -457,7 +461,7 @@ under Modifier Keys, so these results may differ from an attached keyboard.
 
 Evidence on the MacBook Air: `/private/tmp/remotefiles-ipad-20261118/` holds the build and test
 logs, `core.xcresult` (first core run), `fix2.xcresult` (affected suites after the fix),
-`web.xcresult` (WebKit rerun), `ui.xcresult`, the four Face ID result bundles, `band-fixed` and
+`web.xcresult` (reading-position rerun), `ui.xcresult`, the four Face ID result bundles, `band-fixed` and
 `band-unfixed` (the offline regression with and without its fix), `session-log.md` (the hands-on
 record), the fixture and fixture-server scripts, `cold.trace`, and the iPad screenshots in
 `evidence/`, including the fixture server's log after the key change.

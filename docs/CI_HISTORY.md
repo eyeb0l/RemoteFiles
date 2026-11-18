@@ -38,18 +38,18 @@ each platform (the temporary folder on a device, `/private/tmp` elsewhere). With
 failed under `swift test` on macOS (four failures); with it they pass there and on the iPad, where
 the six affected suites then passed (166 tests, three opt-in Face ID skips).
 
-**Not fixed.** Seven WebKit reading-position tests failed in both device runs:
+**Not fixed.** Seven reading-position tests failed in both device runs. Two are HTML (WebKit):
 `HTMLReadingPositionTests.testTextAnchorRestoresAfterPageZoomChangesCSSPixelScale` and
 `testTextAnchorRestoresAfterRootZoomTextSizeChanges` (the attached renderer never reached the
 expected state in 15 seconds; at page zoom 1.6 the content widened to 576 points instead of
-reflowing), and five `OverflowViewportTests` (`testDominantCodeBlockReturnsAcrossRepeatedSourceSwitches`,
+reflowing). Five are Markdown, through the Textual reader: `OverflowViewportTests` (`testDominantCodeBlockReturnsAcrossRepeatedSourceSwitches`,
 `testDominantTableReturnsAcrossRepeatedSourceSwitches`,
 `testLargeFastJumpKeepsVisibleProseAnchorAndSourceReturnRestoresSameCharacter`,
 `testProseBoundaryAnchorRestoresTheSameViewport`,
-`testReadingAnchorRestorationWaitsForTheReplacementViewportToAttach`). The same behaviours passed by
-hand on the iPad ([18 November session](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-session)),
-so the hosted fixtures' assumptions about WebKit on a device need investigating before these can
-count as device evidence.
+`testReadingAnchorRestorationWaitsForTheReplacementViewportToAttach`). By hand on the iPad an HTML
+position held through text size, rotation and resizing ([18 November session](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-session)),
+matching the root-zoom test; nothing recorded matches the page-zoom test or the Markdown tests. Both groups need investigating on a device before
+they can count as device evidence.
 
 **UI journeys on the iPad.** The demo `RemoteFilesUITests` class passed 13, failed 22 and skipped 1
 on the device. Most failures assert the iPhone's stack navigation (navigation bar titles, Back

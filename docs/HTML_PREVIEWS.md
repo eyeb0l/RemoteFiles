@@ -111,8 +111,10 @@ both overlay checks), 3 HTML rendering/security tests and 7 reading-history test
 passed in `/private/tmp/remotefiles-html-anchor-fix-1.xcresult` (38 tests, no
 skips); two further HTML iterations passed in `remotefiles-html-anchor-fix-2.xcresult`
 (30 tests). This is focused simulator evidence, not a full acceptance-lane pass.
-On a physical iPad the anchor checks passed by hand ([18 November iPad session](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-session)), but the two hosted
-zoom tests fail there and remain open; the iPhone has not been checked.
+On a physical iPad the anchor checks passed by hand, including text size, rotation and window
+resizing ([18 November iPad session](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-session)), but the two hosted zoom tests fail
+there and remain open; nothing recorded by hand matches the page-zoom test, and the iPhone has not
+been checked.
 
 Hosted WebKit tests check static content and styling, script and resource blocking, and the explanation for script-only entries. A demo UI journey checks switching modes, copying source and refreshing. These are simulator checks; they do not establish physical-device HTML interaction.
 
