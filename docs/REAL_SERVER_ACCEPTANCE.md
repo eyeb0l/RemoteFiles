@@ -498,15 +498,17 @@ tests passed: 9 of 9, none skipped.
 - **HTML text size (product bug).** WebKit's recommended content mode is desktop on an iPad, even
   in a narrow view, and there it kept text at its unzoomed size under the reader's text size: only
   the margins grew. HTML previews now request mobile content, which an iPhone already resolves
-  ([details](HTML_PREVIEWS.md)). By hand, the first session's HTML positions had held only because
-  nothing reflowed.
+  ([details](HTML_PREVIEWS.md)). The first session's hand check recorded only that the position
+  held after a text-size change, not whether the text grew. On a simulator in desktop mode the text
+  kept its size and only the margins changed, so a position check can pass despite the defect.
 - **Prose-boundary test (test assumption).** Its 40-section fixture was 3.3 viewports tall in an
   iPad Pro 11-inch window, and the test looks for a scroll view at least four viewports tall. It
   now uses 100 sections.
 - On an iPad Pro 11-inch (M5) Simulator, `testLargeFastJumpKeepsVisibleProseAnchorAndSourceReturnRestoresSameCharacter`
-  still failed 3 times in 13 runs: the same character landed 36 points high, because one
-  correction for content above the viewport was skipped. It passed on the device. This looks
-  like a timing race in Textual's geometry corrections and remains open.
+  still failed 3 times in 13 runs. The same character landed 36 points high after the jump, and
+  in one run about 88 points away after returning from Source. It passed on the device. The cause
+  is not established; a trace pairing each of Textual's geometry corrections with the scroll
+  offset and caret position should settle it.
 
 ### Profiling (step 7)
 

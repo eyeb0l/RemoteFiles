@@ -116,8 +116,9 @@ resizing ([18 November iPad session](REAL_SERVER_ACCEPTANCE.md#18-november-2026-
 there. The cause was WebKit's content mode: the recommended mode is desktop on an iPad (a Mac user
 agent, even in a 360-point view), and there text kept its unzoomed size under root `zoom` and
 `pageZoom`. On an iPad Pro 11-inch (M5) simulator, iOS 27.2, text size 1.83 left the line pitch at
-30 points (computed font 20/1.83 px) and changed only the margins, so the position "held" because
-nothing reflowed; in mobile mode the pitch became 54.9 points. The reader now requests
+30 points (computed font 20/1.83 px) and changed only the margins, so a position check can pass
+despite the defect; in mobile mode the pitch became 54.9 points. The hand check recorded only that
+the position held, not whether the text grew. The reader now requests
 `.mobile`, as an iPhone already resolves, and `testTextSizeEnlargesRenderedTextInMobileContentMode`
 checks the configuration (which fails on an iPhone if it is removed) and the rendered line pitch.
 

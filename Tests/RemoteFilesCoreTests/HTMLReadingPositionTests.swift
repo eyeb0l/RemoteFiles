@@ -639,7 +639,9 @@ import RemoteFilesCore
         let probe = HTMLAnchorNavigationProbe()
         view.navigationDelegate = probe
         view.loadHTMLString(StaticHTMLWebView.html(source), baseURL: nil)
-        try await waitUntil(timeout: .seconds(30)) { probe.finished || probe.failure != nil }
+        // Each test's first navigation in a fresh web view may wait for a WebKit content process
+        // to launch, so it gets the 60-second cold-start bound docs/CI.md sets.
+        try await waitUntil(timeout: .seconds(60)) { probe.finished || probe.failure != nil }
         if let error = probe.failure { throw error }
         view.navigationDelegate = nil
         try await waitUntil(timeout: .seconds(30)) { view.scrollView.contentSize.height > view.bounds.height }
