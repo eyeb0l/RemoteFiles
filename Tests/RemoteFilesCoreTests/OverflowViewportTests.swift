@@ -68,10 +68,12 @@ private struct OverflowFixtureView: View {
         XCTFail("Timed out waiting for settled overflow viewport state", file: file, line: line)
         throw NSError(domain: "OverflowViewportTests", code: 1)
     }
-    private func host(text: String? = nil) throws -> (UIWindow, UIWindow?, OverflowFixtureState) {
+    /// `width` gives the window a fixed width, wider than an iPhone's to model a full-width iPad window.
+    private func host(text: String? = nil, width: CGFloat? = nil) throws -> (UIWindow, UIWindow?, OverflowFixtureState) {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previous = scene.windows.first { $0.isKeyWindow }
         let window = UIWindow(windowScene: scene)
+        if let width { window.frame = CGRect(x: 0, y: 0, width: width, height: scene.screen.bounds.height) }
         let state = OverflowFixtureState(text ?? fixture())
         window.rootViewController = UIHostingController(rootView: OverflowFixtureView(state: state))
         window.makeKeyAndVisible()
@@ -201,7 +203,9 @@ private struct OverflowFixtureView: View {
     private func visibleCharacter(_ window: UIWindow) throws -> (Int, CGFloat) {
         let scroll = try XCTUnwrap(outer(window)); let interaction = try XCTUnwrap(prose(window))
         let viewport = scroll.convert(scroll.bounds, to: window)
-        let point = CGPoint(x: viewport.minX + 30, y: viewport.minY + 60)
+        // Inside the text column, which a wide window centres with margins either side.
+        let column = interaction.convert(interaction.bounds, to: window)
+        let point = CGPoint(x: max(viewport.minX + 30, column.minX + 10), y: viewport.minY + 60)
         let position = try XCTUnwrap(interaction.model.closestPosition(to: interaction.convert(point, from: window)))
         return (interaction.model.offset(from: interaction.model.startPosition, to: position),
                 interaction.convert(interaction.model.caretRect(for: position), to: window).minY)
@@ -259,11 +263,29 @@ private struct OverflowFixtureView: View {
         }
     }
 
+    /// A full-width iPad window centres a 760-point column, so the viewport's left edge is empty margin.
+    /// The anchor must still come from the text there, as on an iPhone.
+    func testReadingAnchorIsFoundInACentredColumnOfAWideWindow() async throws {
+        let (window, previous, state) = try host(text: fixture(72), width: 1180); defer { cleanup(window, previous: previous) }
+        try await wait { self.prose(window).map { self.selectedText($0.model).string.contains("Paragraph 71") } == true }
+        let scroll = try XCTUnwrap(outer(window))
+        let column = try XCTUnwrap(prose(window)).convert(try XCTUnwrap(prose(window)).bounds, to: window)
+        XCTAssertGreaterThan(column.minX, scroll.convert(scroll.bounds, to: window).minX + 100, "The fixture must leave a margin left of the column")
+        scroll.setContentOffset(CGPoint(x: 0, y: scroll.contentSize.height * 0.73), animated: false)
+        try await Task.sleep(for: .seconds(2))
+        let cache = state.position.overflowGeometry
+        cache.recordReadingAnchor()
+        XCTAssertTrue(cache.hasReadingAnchor, "A wide window's reading anchor must come from its centred column")
+        XCTAssertNotNil(cache.snapshot)
+    }
+
     func testProseBoundaryAnchorRestoresTheSameViewport() async throws {
-        let text = (0..<40).map { "## Heading \($0)\n\nParagraph \($0) has enough words to wrap across multiple lines in the reader.\n\n" }.joined()
+        // `outer` needs content four viewports tall. Forty sections made 4,005 points in an
+        // iPad Pro 11-inch's 1,210-point window, so a hundred leave room for taller iPads.
+        let text = (0..<100).map { "## Heading \($0)\n\nParagraph \($0) has enough words to wrap across multiple lines in the reader.\n\n" }.joined()
         let (window, previous, state) = try host(text: text)
         defer { cleanup(window, previous: previous) }
-        try await wait { self.prose(window).map { self.selectedText($0.model).string.contains("Heading 39") } == true }
+        try await wait { self.prose(window).map { self.selectedText($0.model).string.contains("Heading 99") } == true }
         let scroll = try XCTUnwrap(outer(window))
         let interaction = try XCTUnwrap(prose(window))
         // A paragraph start and the preceding paragraph end share one character

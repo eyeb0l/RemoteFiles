@@ -23,8 +23,10 @@ struct HTMLContentView: View {
                     onFinish: { needsScripts = $0; loaded = true },
                     onFailure: { error = $0 }, openExternalLink: { openURL($0) }, confirmExternalLink: { linkToConfirm = $0 })
                     .scrollsToBottomEdge()
-                    .opacity(needsScripts ? 0 : 1)
-                    .accessibilityHidden(needsScripts)
+                    // Hidden until WebKit reports the page finished, as it paints before that and showed
+                    // through the placeholder's skeleton.
+                    .opacity(needsScripts || !loaded ? 0 : 1)
+                    .accessibilityHidden(needsScripts || !loaded)
                 if needsScripts {
                     ContentUnavailableView("This page needs JavaScript", systemImage: "globe",
                         description: Text("This file has no content to show without running its scripts. Open the running website to view the app, or choose Source to inspect the HTML."))
@@ -69,6 +71,9 @@ struct StaticHTMLWebView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
         config.defaultWebpagePreferences.allowsContentJavaScript = false
+        // The recommended mode is desktop on an iPad, where WebKit keeps text at its unzoomed
+        // size under root `zoom`, so text size changed only the margins. Mobile matches the iPhone.
+        config.defaultWebpagePreferences.preferredContentMode = .mobile
         config.userContentController.add(rules)
         return config
     }

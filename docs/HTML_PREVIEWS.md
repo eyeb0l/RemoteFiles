@@ -112,9 +112,15 @@ passed in `/private/tmp/remotefiles-html-anchor-fix-1.xcresult` (38 tests, no
 skips); two further HTML iterations passed in `remotefiles-html-anchor-fix-2.xcresult`
 (30 tests). This is focused simulator evidence, not a full acceptance-lane pass.
 On a physical iPad the anchor checks passed by hand, including text size, rotation and window
-resizing ([18 November iPad session](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-session)), but the two hosted zoom tests fail
-there and remain open; nothing recorded by hand matches the page-zoom test, and the iPhone has not
-been checked.
+resizing ([18 November iPad session](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-session)), but the two hosted zoom tests failed
+there. The cause was WebKit's content mode: the recommended mode is desktop on an iPad (a Mac user
+agent, even in a 360-point view), and there text kept its unzoomed size under root `zoom` and
+`pageZoom`. On an iPad Pro 11-inch (M5) simulator, iOS 27.2, text size 1.83 left the line pitch at
+30 points (computed font 20/1.83 px) and changed only the margins, so a position check can pass
+despite the defect; in mobile mode the pitch became 54.9 points. The hand check recorded only that
+the position held, not whether the text grew. The reader now requests
+`.mobile`, as an iPhone already resolves, and `testTextSizeEnlargesRenderedTextInMobileContentMode`
+checks the configuration (which fails on an iPhone if it is removed) and the rendered line pitch.
 
 Hosted WebKit tests check static content and styling, script and resource blocking, and the explanation for script-only entries. A demo UI journey checks switching modes, copying source and refreshing. These are simulator checks; they do not establish physical-device HTML interaction.
 

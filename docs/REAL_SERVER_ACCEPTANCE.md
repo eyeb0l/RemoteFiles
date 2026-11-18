@@ -362,7 +362,8 @@ dedicated folder outside the repository and listed under [Setup](#ipad-setup).
     `standardizedFileURL.path`, which drops `/private` only once the shorter path exists. They
     are fixed; see [CI history](CI_HISTORY.md#18-november-2026-shared-stores-on-a-device). With the
     fix (`a3344ae`) the six affected suites passed on the iPad (166 tests, three opt-in Face ID skips).
-  - Seven reading-position tests failed in both runs and remain open: two HTML
+  - Seven reading-position tests failed in both runs, explained and fixed in the
+    [follow-up](#18-november-2026-ipad-follow-up): two HTML
     `HTMLReadingPositionTests` and five Markdown `OverflowViewportTests`. By hand, an HTML position
     held through the reader's text size, rotation and window resizing (step 12 below), which
     corresponds to the root-zoom test; nothing recorded matches the page-zoom test
@@ -429,7 +430,7 @@ under Modifier Keys, so these results may differ from an attached keyboard.
   Escape did), and the arrows moved the row highlight although the field was being edited.
 - **Tab** only reached the folder's search field, never the library or the reader. This is the
   state the [9 November investigation](CI_HISTORY.md#9-november-2026-portrait-library-overlay-tab-report-pr-66)
-  could not settle; it needs a diagnostic build and an attached keyboard.
+  could not settle. A diagnostic build with a wired keyboard explained both ([follow-up](#18-november-2026-ipad-follow-up)).
 
 ### Found
 
@@ -438,7 +439,7 @@ under Modifier Keys, so these results may differ from an attached keyboard.
   hidden-character notice took as much height as the document.
 - **Folder row previews and focus rings spread across columns.** The folder column's cells run on
   under the floating library. The long-press preview now has its own shape; the keyboard focus
-  ring, which the Simulator does not draw, is still too wide.
+  ring, which the Simulator does not draw, stayed within the column with a wired keyboard ([follow-up](#18-november-2026-ipad-follow-up)).
 - The keyboard and reading-position test findings above.
 
 | Offline reader before | Offline reader after |
@@ -459,9 +460,153 @@ under Modifier Keys, so these results may differ from an attached keyboard.
 - Cellular, managed downloads and encrypted-key unlock on the iPad, and an attached hardware
   keyboard.
 
+All of these were done in the [follow-up](#18-november-2026-ipad-follow-up).
+
 Evidence on the MacBook Air: `/private/tmp/remotefiles-ipad-20261118/` holds the build and test
 logs, `core.xcresult` (first core run), `fix2.xcresult` (affected suites after the fix),
 `web.xcresult` (reading-position rerun), `ui.xcresult`, the four Face ID result bundles, `band-fixed` and
 `band-unfixed` (the offline regression with and without its fix), `session-log.md` (the hands-on
 record), the fixture and fixture-server scripts, `cold.trace`, and the iPad screenshots in
 `evidence/`, including the fixture server's log after the key change.
+
+## 18 November 2026 iPad follow-up
+
+The same iPad, connection, identity and fixtures as the [first iPad session](#18-november-2026-ipad-session),
+later the same day, to close what that session left open. Builds, all signed Release:
+
+- **Profiling:** `e510e81` (`main`).
+- **Hands-on checks** (keyboard, cellular, downloads, offline, encrypted key, the report's loading
+  view and the second folder trace): `8e0a9b0`, plus the change later committed as `4a050d8`, a
+  temporary patch that logged key presses and focus changes, and a folder-list change that was
+  then reverted.
+- **Hosted reading-position tests and the HTML text-size check:** `80ef359`.
+
+### Hosted reading-position tests
+
+All seven failures from the first session are explained and fixed. On the iPad, the five
+Markdown `OverflowViewportTests`, the two HTML `HTMLReadingPositionTests` and two new regression
+tests passed: 9 of 9, none skipped.
+
+- **Markdown reading anchor (product bug).** The rendered reader centres a 760-point column in a
+  wide window, but Textual sampled its reading anchor 30 points from the viewport's edge. In a
+  full-width iPad window that point is empty margin, so no anchor was captured. After a fast jump
+  through a large document, the visible line moved by hundreds of points, and Source/Rendered
+  switches fell back to raw offsets. The anchor is now sampled inside the content's column
+  ([provenance](../Vendor/Textual/UPSTREAM.md)). `testReadingAnchorIsFoundInACentredColumnOfAWideWindow`
+  hosts the reader in a 1,180-point window, so CI's iPhone simulators catch a regression; with the
+  fix reverted it fails there.
+- **HTML text size (product bug).** WebKit's recommended content mode is desktop on an iPad, even
+  in a narrow view, and there it kept text at its unzoomed size under the reader's text size: only
+  the margins grew. HTML previews now request mobile content, which an iPhone already resolves
+  ([details](HTML_PREVIEWS.md)). The first session's hand check recorded only that the position
+  held after a text-size change, not whether the text grew. On a simulator in desktop mode the text
+  kept its size and only the margins changed, so a position check can pass despite the defect.
+- **Prose-boundary test (test assumption).** Its 40-section fixture was 3.3 viewports tall in an
+  iPad Pro 11-inch window, and the test looks for a scroll view at least four viewports tall. It
+  now uses 100 sections.
+- On an iPad Pro 11-inch (M5) Simulator, `testLargeFastJumpKeepsVisibleProseAnchorAndSourceReturnRestoresSameCharacter`
+  still failed 3 times in 13 runs. The same character landed 36 points high after the jump, and
+  in one run about 88 points away after returning from Source. It passed on the device. The cause
+  is not established; a trace pairing each of Textual's geometry corrections with the scroll
+  offset and caret position should settle it.
+
+### Profiling (step 7)
+
+Instruments recorded on the iPad over the cable once `xcrun devicectl device info ddiServices`
+had run; until then `xctrace` listed the iPad as offline. The SwiftUI template, with or without
+Allocations, saved empty CPU, hitch and SwiftUI-update tables on this device, which explains the
+first session's empty trace. The Animation Hitches and Allocations templates recorded normally.
+Instruments writes its raw kernel trace to the Mac's temporary folder whatever output path it is
+given, and a 180-second Animation Hitches and Allocations recording grew past 19 GB, so the hitch
+recordings were kept to 60 seconds. Each opened a folder or report, scrolled it to the end, went
+Back and repeated.
+
+- **1,000-entry folder:** opening, Back and reopening stalled the main thread for 80–100 ms each.
+  Scrolling to the bottom dropped runs of consecutive frames: a 0.4-second cluster in one run, and
+  clusters of 0.2-0.75 seconds in another, in both its first and second scroll. In each cluster a
+  quarter to a third of the main thread's samples were in SwiftUI's List, finding each new cell's row for its separator
+  (`UICollectionViewListCoordinator.separatorConfiguration` → `ListDiffable.rowIndex(at:)` →
+  `ShadowRowCollection.index(after:)`), a walk that grows with the row's position. Skipping
+  refreshes that return identical rows did not help, so that change was reverted; the cause in
+  the folder's List is still open ([performance](PERFORMANCE.md)).
+- **191,002-byte report:** it renders in WebKit. Opening it stalled the main thread for 93 ms, with
+  one 92 ms render hitch. Scrolling dropped single frames (8 ms at 120 Hz) about every 0.6 seconds,
+  without clusters.
+- **Memory** (Allocations, 180 seconds of the same steps on both): at the end, 38.7 MB of heap was
+  live in 187,112 allocations, after 12.4 million transient allocations (1.83 GB) during the run.
+  Anonymous VM was 2.9 GB of address space, of which 2 GB was one JavaScriptCore reservation and
+  737 MB render surfaces (IOSurface). Allocations reports address space, not the app's footprint,
+  and inactive HTML reader memory was not profiled separately.
+
+### Found and fixed
+
+- **Loading view over the report.** Opening the large report showed the "Rendering Markdown…"
+  skeleton lying over real text for about a second: WebKit paints before it reports a page
+  finished. Markdown and HTML web views now stay hidden until they finish, as SVG previews
+  already did. Two opens on the device then showed no overlap.
+
+| Report opening before | Report opening after |
+| --- | --- |
+| <img src="screenshots/ipad/report-loading-overlap-before.png" width="420" alt="The large report's heading and paragraphs with grey skeleton bars drawn across them"> | <img src="screenshots/ipad/report-loading-overlap-after.png" width="420" alt="The same report with only its text"> |
+
+*Physical iPad, reader column only.*
+
+### Keyboard with a wired keyboard
+
+A temporary build logged each key press, focus change and keyboard-command decision on the iPad.
+
+- **Without focus:** Down, Up and Return moved and opened the app's row selection.
+- **Tab** put focus in the folder's search field and began editing. Ten further presses reached
+  the system, which left focus in the field. The library and the reader were never reached.
+- **In the search field:** the app declined Down, as designed, and iPadOS then moved keyboard focus
+  from the field to the first result row; Return, also declined, opened the focused row. The caret
+  kept blinking in the field throughout. Escape ended editing, after which the app's arrows and
+  Return acted again. So nothing in the app overrides the field: the arrows that seemed to act
+  through it in the first session were the system's focus moving into the results.
+- **Focus width:** the focused row's frame started at the window's left edge, under the library,
+  but its highlight was drawn only within the folder column. The over-wide ring from the first
+  session, seen through Universal Control, did not appear.
+
+### Passed by hand
+
+- **Cellular** (step 2): Wi-Fi off in Settings; the iPad's own cellular data reached the Mac
+  through a Tailscale relay (DERP). The fingerprint was accepted unchanged, the folder and
+  report opened, Back kept the folder position, Refresh reloaded, and Airplane Mode during a
+  further refresh left the previous copy readable and labelled. `scripts/test-cellular-tailscale.py --manual`
+  passed: 79 samples, the route always the relay, never local, and 63 samples with SSH sockets
+  from the iPad's tailnet address.
+- **Managed downloads**, over cellular, with the 120 MiB file: Downloads said background
+  continuation was available. The transfer continued in another app, with a Live Activity, and
+  while the iPad was locked. Cancelling from the Live Activity, Disconnect, and force-quitting
+  each stopped it; each time Retry continued from the kept bytes. The finished file copied out
+  of the app's container matched the server's SHA-256 (125,829,120 bytes). This covers iOS
+  stopping a background transfer at the person's request; iOS expiring one by itself was not seen.
+- **Offline** (step 9): a saved 12-page PDF reopened at page 7 after a force quit, in Airplane
+  Mode. An update of a saved 64 MiB file, interrupted with Airplane Mode, explained the failure
+  after about three minutes, the offline transfer limit, as on the iPhone. The saved copy kept its
+  date, and its bytes in the container still matched revision 1. In a narrow Stage Manager window
+  the Offline Files library, a saved file, the saved folder and the PDF all fitted and worked, and
+  VoiceOver read the library and a saved file sensibly.
+- **Encrypted key** (step 4): a throwaway passphrase-protected Ed25519 key, pasted from the Mac
+  through Universal Clipboard, imported with the expected fingerprint. It signed in to a
+  disposable unprivileged `sshd` with its own host key, `authorized_keys` and read-only SFTP, on
+  a separate port; the Mac account's `authorized_keys` was not touched. Cancelling and
+  swiping away the passphrase prompt each left the connection unopened. The passphrase was asked
+  again after Disconnect, after backgrounding and after locking, and the server log showed one sign-in
+  per passphrase entry. The fixture server was then stopped and deleted.
+- **HTML text size** (`80ef359`): the long HTML page looked as before, with no desktop layout or
+  sideways scrolling. Raising the system text size from Control Center enlarged the text itself
+  and kept the reader at about the same paragraph; so did lowering it again and rotating.
+
+### Not done
+
+- Inactive HTML reader memory (step 12), the storage and depth limits for saved folders on the
+  iPad (step 10), and the other-window and other-route link cases (step 11).
+- The demo UI journeys that assume the iPhone's stack (22 in the first session) were not adapted.
+
+Evidence is on an external SSD attached to the MacBook Air, in `remotefiles-ipad-20261119/`: the
+traces (`folder.trace`, `report.trace`, `folder-fixed.trace`; the Allocations run is
+`/private/tmp/remotefiles-ipad-20261119/profile-1000-report.trace`), their exported tables, the key
+log (`keydiag-1.log`) and its patch, the cellular capture (`cellular/`), the downloaded file and
+the offline copy after the interrupted update, the device test result `readpos-device.xcresult`,
+the encrypted-key fixture's server log and `session-log.md`.

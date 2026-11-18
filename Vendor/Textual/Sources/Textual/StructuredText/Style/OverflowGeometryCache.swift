@@ -143,7 +143,11 @@ import UIKit
   private func visibleAnchor() -> ReadingAnchor? {
     guard let scroll, let window = scroll.window else { return nil }
     let viewport = scroll.convert(scroll.bounds, to: window)
-    let point = CGPoint(x: viewport.minX + 30, y: viewport.minY + min(60, viewport.height / 4))
+    // Sample inside the content, not at the viewport's edge: a reader can centre a column
+    // narrower than a wide window, which leaves the edge in an empty margin.
+    let content = reader.map { $0.convert($0.bounds, to: window) }
+    let point = CGPoint(x: max(viewport.minX + 30, (content?.minX ?? viewport.minX) + 10),
+                        y: viewport.minY + min(60, viewport.height / 4))
     let candidates = visibleRegions(in: scroll)
     // Block geometry takes precedence over the enclosing prose selection model,
     // which can represent a code/table attachment with only one logical character.

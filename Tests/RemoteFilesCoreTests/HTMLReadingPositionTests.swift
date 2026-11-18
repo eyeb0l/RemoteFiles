@@ -86,6 +86,30 @@ import RemoteFilesCore
         }
     }
 
+    /// On an iPad the recommended content mode is desktop, where WebKit kept text at its unzoomed size
+    /// under root `zoom`: text size moved only the margins. The configuration check fails on an iPhone too.
+    func testTextSizeEnlargesRenderedTextInMobileContentMode() async throws {
+        let rules = try await SVGResourceBlocker.rules()
+        XCTAssertEqual(StaticHTMLWebView.configuration(rules: rules).defaultWebpagePreferences.preferredContentMode, .mobile)
+        let fixture = try await host()
+        addTeardownBlock { @MainActor in fixture.close() }
+        try await load(prose, in: fixture.view)
+        func linePitch() async throws -> Double {
+            let css = try await number("""
+            (() => { const node=document.getElementById('passage').firstChild; const range=document.createRange();
+            range.setStart(node, 0); range.setEnd(node, node.length); const lines=range.getClientRects();
+            return lines[2].top - lines[1].top; })()
+            """, in: fixture.view)
+            let visualWidth = try await number("visualViewport.width", in: fixture.view)
+            return css * Double(fixture.view.bounds.width) / visualWidth
+        }
+        let before = try await linePitch()
+        StaticHTMLWebView.applyTextScale(1.83, in: fixture.view)
+        try await waitUntil { try await linePitch() > before * 1.5 }
+        let after = try await linePitch()
+        XCTAssertEqual(after / before, 1.83, accuracy: 0.05, "Text size must scale the rendered text")
+    }
+
     func testVisualBlockAnchorKeepsItsProportionalPositionAfterResize() async throws {
         let fixture = try await host()
         addTeardownBlock { @MainActor in fixture.close() }
@@ -615,7 +639,9 @@ import RemoteFilesCore
         let probe = HTMLAnchorNavigationProbe()
         view.navigationDelegate = probe
         view.loadHTMLString(StaticHTMLWebView.html(source), baseURL: nil)
-        try await waitUntil(timeout: .seconds(30)) { probe.finished || probe.failure != nil }
+        // Each test's first navigation in a fresh web view may wait for a WebKit content process
+        // to launch, so it gets the 60-second cold-start bound docs/CI.md sets.
+        try await waitUntil(timeout: .seconds(60)) { probe.finished || probe.failure != nil }
         if let error = probe.failure { throw error }
         view.navigationDelegate = nil
         try await waitUntil(timeout: .seconds(30)) { view.scrollView.contentSize.height > view.bounds.height }
