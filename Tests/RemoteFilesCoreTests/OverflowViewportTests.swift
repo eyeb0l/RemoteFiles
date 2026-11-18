@@ -68,6 +68,18 @@ private struct OverflowFixtureView: View {
         XCTFail("Timed out waiting for settled overflow viewport state", file: file, line: line)
         throw NSError(domain: "OverflowViewportTests", code: 1)
     }
+    /// Waits for a jump's deferred-block corrections to finish. Each starts when a block first nears the
+    /// viewport, can run for its two-second budget plus a final frame, and its last shift can bring further
+    /// blocks near and start another. A fixed two-second sleep read the position between a block's layout
+    /// and the next frame's correction on a loaded iPad Simulator, 36 points high.
+    private func waitForGeometryCorrections(_ cache: OverflowGeometryCache) async throws {
+        try await wait { cache.geometryCorrectionCount > 0 }
+        var quietSince = ContinuousClock.now
+        try await wait {
+            if cache.isCorrectingGeometry { quietSince = ContinuousClock.now }
+            return ContinuousClock.now - quietSince >= .seconds(1)
+        }
+    }
     /// `width` gives the window a fixed width, wider than an iPhone's to model a full-width iPad window.
     private func host(text: String? = nil, width: CGFloat? = nil) throws -> (UIWindow, UIWindow?, OverflowFixtureState) {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
@@ -241,7 +253,7 @@ private struct OverflowFixtureView: View {
         scroll.setContentOffset(CGPoint(x: 0, y: scroll.contentSize.height * 0.73), animated: false)
         let before = try visibleCharacter(window)
         let initialOffset = scroll.contentOffset.y
-        try await Task.sleep(for: .seconds(2))
+        try await waitForGeometryCorrections(state.position.overflowGeometry)
         let settledCharacterY = try characterY(before.0, in: window)
         print("OVERFLOW RANGE initial_height=\(initialHeight) settled_height=\(scroll.contentSize.height) viewport_height=\(initialViewport) initial_offset=\(initialOffset) settled_offset=\(scroll.contentOffset.y) character=\(before.0) initial_caret_y=\(before.1) settled_caret_y=\(settledCharacterY) vertical_indicator=\(scroll.showsVerticalScrollIndicator)")
         XCTAssertEqual(settledCharacterY, before.1, accuracy: 2,

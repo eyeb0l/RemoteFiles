@@ -10,6 +10,44 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 18 November 2026: a fixed sleep read a reading anchor mid-correction
+
+`OverflowViewportTests.testLargeFastJumpKeepsVisibleProseAnchorAndSourceReturnRestoresSameCharacter`
+failed 3 of 13 times on an iPad Pro 11-inch (M5) Simulator (iOS 27.2) during the first iPad
+session: character 45642 settled 36 points high (52.92 → 16.88), at offset 32461.5 instead of
+32425.5. In one of those runs it was also about 88 points away after returning from Source.
+
+**Reproduction.** Unchanged, it passed 12 of 12 runs alone and 5 of 5 alongside the other overflow
+and HTML reading-position tests. Pausing the simulator's test host with `SIGSTOP` for 100 ms in
+every 200 still passed 8 of 8; 150 ms in every 200 failed 8 of 8, once with exactly the recorded
+numbers.
+
+**Cause.** The jump mounts deferred code and table blocks near the viewport. The first to arrive
+starts a correction that keeps the visible line in place for at most two seconds plus a final frame,
+and when that last shift brings further blocks near it can start another. Each block replaces a
+120-point placeholder with its measured height, and a frame later the correction compensates. Logs
+of the correction showed the last one, −36 points for an 84-point code block, landing 1.8–1.9
+seconds after the jump on an idle simulator; the test read the position after a fixed two-second
+sleep. In the reproduced failure a correction was still active when that block's layout landed, and
+the test read the position before the next frame applied it. The reader was not at fault; the
+sleep was shorter than the corrections it measured. Of 21 runs with that logging, none showed a block's layout
+landing after the jump with no correction active.
+
+**Fix.** Textual's geometry cache exposes two internal read-only values, whether a correction is
+active and how many have started, and the test waits for one to start and then for a second with
+none active. Afterwards the test passed 12 of 12 runs unthrottled and 8 of 8 at 100 ms in 200, and
+the whole `OverflowViewportTests` class passed. The return from Source did not fail in any of the
+36 runs of the fixed test, including the slowed ones below, so the 88-point failure's cause is not
+established.
+
+**Remaining.** At 150 ms in every 200 the fixed test still failed 2 of 8 and then 3 of 8 runs, with
+the character 124 points low. In each failure the first correction used up its two-second budget
+before every block had measured. The next correction then sampled a table whose frame still
+overlapped the prose line, and block geometry takes precedence over prose, so it followed the table
+instead of the line. That is a real limitation of the bounded correction, but only seen with the
+test host stopped three-quarters of the time, and it is left open. Logs are on the external SSD in
+`remotefiles-followup-20261118/` (`diag-combo.log`, `duty-run-*.log`, `fixed-*.log`, `diag75.log`).
+
 ## 18 November 2026: shared stores on a device
 
 The hosted core suite ran on a physical iPad for the first time (iPad Pro 11-inch (M5),

@@ -79,6 +79,10 @@ import UIKit
 
   public var isRestoringReadingAnchor: Bool { restoring }
   public var hasReadingAnchor: Bool { readingAnchor != nil || snapshot != nil }
+  /// Whether deferred-block geometry is still being corrected, and how many corrections have
+  /// started, so a test can wait for their bounded windows rather than sleep a fixed time.
+  var isCorrectingGeometry: Bool { geometryAnchor != nil }
+  private(set) var geometryCorrectionCount = 0
 
   public func documentDidChange(_ text: String) {
     let digest = SHA256.hash(data: Data(text.utf8))
@@ -252,7 +256,7 @@ import UIKit
   func captureAnchor() {
     guard !restoring, geometryAnchor == nil, let scroll, scroll.contentOffset.y + scroll.adjustedContentInset.top > 1,
           let saved = visibleAnchor(), resolve(saved, in: scroll) != nil else { return }
-    geometryAnchor = saved; readingAnchor = saved
+    geometryAnchor = saved; readingAnchor = saved; geometryCorrectionCount += 1
     documentY = saved.viewportY + scroll.contentOffset.y
     geometryDeadline = CACurrentMediaTime() + 2
     until = min(geometryDeadline, CACurrentMediaTime() + 1)
@@ -339,6 +343,8 @@ import UIKit
   func cancelGeometryAnchor() {}
   public var isRestoringReadingAnchor: Bool { false }
   public var hasReadingAnchor: Bool { false }
+  var isCorrectingGeometry: Bool { false }
+  var geometryCorrectionCount: Int { 0 }
   public func documentDidChange(_ text: String) {}
   public func recordReadingAnchor() {}
   public func restoreReadingAnchor(completion: @escaping (CGPoint) -> Void) {}
