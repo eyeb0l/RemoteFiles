@@ -2,6 +2,14 @@
 
 This is a dated record of feature work and validation, not a live test dashboard. Each result applies to the build, environment and date described with it; an installation or Simulator pass does not establish later physical-device acceptance. For current behavior, start with the [documentation index](docs/README.md). For checks still to perform, see [manual acceptance](docs/MANUAL_ACCEPTANCE.md) and the [roadmap](ROADMAP.md).
 
+**18 November 2026: iPad follow-up.**
+
+The same iPad closed what the first session left open ([18 November iPad follow-up](docs/REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-follow-up)). Two iPad product bugs explain the seven reading-position failures. The Markdown reader sampled its reading anchor in the empty margin beside its centred column, so a full-width window never captured one. HTML previews ran in WebKit's desktop mode, where the text-size control only widened the margins. Both are fixed, with regressions that CI's iPhone simulators catch; one test fixture was too short for an iPad window. Markdown and HTML web views now stay hidden until they finish, so the loading skeleton no longer lies over a large report's text. Passed by hand: cellular through a Tailscale relay, managed downloads interrupted by the Live Activity, Disconnect and a force quit, each resumed to the server's SHA-256, a saved PDF's position, an interrupted offline update, a narrow window and VoiceOver in Offline Files, and encrypted-key unlock. Profiling recorded with the Animation Hitches and Allocations templates; the SwiftUI template saves no data on this device.
+
+Open: scrolling the 1,000-entry folder drops runs of frames while SwiftUI's List locates each new cell's row; Tab reaches only the folder's search field; one Markdown fast-jump test fails 3 times in 13 on an iPad simulator; most demo UI journeys assume the iPhone's stack.
+
+On the iPad (Release, `80ef359`) the nine reading-position tests passed, none skipped. On an iPad Pro 11-inch (M5) Simulator and an iPhone 17 Pro Simulator (iOS 27.2) the changed and new tests passed; with each fix reverted, its regression failed on the iPhone simulator.
+
 **18 November 2026: first physical iPad acceptance.**
 
 An iPad Pro 11-inch (M5) (iOS 27.2.1) ran the hosted core suite and the demo UI journeys, and a hands-on pass against the MacBook Air over Tailscale ([18 November iPad session](docs/REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-session)). Passed on the device: the Data Protection, Keychain and Face ID enrolment-change checks; the workspace, rotation, Stage Manager and two windows; accessibility; content search; offline files, including removing a saved folder in one window while another updates it and locked-file protection; HTML reading positions; a changed host key blocked before authentication; and ten media formats. Instruments recorded no data, so profiling remains outstanding.

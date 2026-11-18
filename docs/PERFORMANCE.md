@@ -664,3 +664,17 @@ The `assisted` scenarios search the guest's `tree`, `big` and `docs` folders wit
 Keep the phone unlocked and allow Local Network on first run. Links vary, so alternate short runs and compare pairs, as for downloads above. Remove the host afterwards with `xcrun devicectl device uninstall app`; it is `dev.iris.RemoteFilesBenchTestHost`.
 
 Nothing in the harness fails on a timing, because shared machines are too noisy for that. `PerformanceBenchmarkTests` runs once in CI at its smallest size, so it can't rot without anyone noticing. To catch a regression, compare against a kept baseline when changing listing, search, reads, rows or transfers.
+
+## Open: scrolling a 1,000-entry folder on iPad, 18 November
+
+On an iPad Pro 11-inch (M5), iPadOS 27.2.1, Release builds, Instruments' Animation Hitches
+template recorded runs of consecutive dropped frames while a 1,000-entry folder was scrolled to its
+end: 0.2-0.75 seconds at a time, on the first and second open. In each run a quarter to a third of
+the main thread's samples were in SwiftUI's List configuring a new cell's separator, which finds
+the cell's row by walking the list's rows from the start
+(`UICollectionViewListCoordinator.separatorConfiguration` → `ListDiffable.rowIndex(at:)` →
+`ShadowRowCollection.index(after:)`), so each cell costs more the further down it is. Not
+refreshing identical rows didn't help, so a listing refresh is not what triggers it. A candidate
+to measure next is `FolderRowList`'s optional empty-state row ahead of its `ForEach`, the kind of
+condition that [made SwiftUI build every row](#what-changed-and-why) before. Not yet tried
+([evidence](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-follow-up)).
