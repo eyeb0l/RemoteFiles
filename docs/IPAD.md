@@ -54,7 +54,9 @@ Find, Find Next and Find Previous are the system's own Edit › Find items, whic
 
 Down selects the folder's first row and Up its last; each press then moves one row and the list scrolls to keep the selection visible. Return opens the selected folder or file, beside the folder in the workspace and pushed onto the stack on iPhone, and the selection stays when you come back. The keys also walk filtered rows and Subfolders or Contents search results, where Return opens a PDF match at its page as a tap does. The selection is a highlight with the VoiceOver Selected trait; taps and context menus are unchanged.
 
-A text field keeps the keys it edits with: while the folder's search field or the reader's Find field is being edited, the app's own arrow and Return commands stand aside. On a physical iPad with a wired keyboard, iPadOS then takes Down itself: it moves keyboard focus from the search field to the first result row, each further Down moves it on, and Return opens the focused row, while the caret keeps blinking in the field. Escape ends editing, and the app's arrows and Return act again. An alert, menu or picker shown over the window keeps Escape, Return and the arrows too. Tab puts keyboard focus in the folder's search field and goes no further: on iPadOS 27.2.1 it doesn't reach the library or the reader. Focus that Tab does move keeps the arrows and Return until it leaves, as elsewhere in iPadOS.
+A text field keeps the keys it edits with: while the folder's search field or the reader's Find field is being edited, the app's own arrow and Return commands stand aside, and Escape ends editing so that they act again. An alert, menu or picker shown over the window keeps Escape, Return and the arrows too.
+
+Tab moves keyboard focus between the library, the folder's search field and the folder's rows, and Shift-Tab goes back. In the library and the folder, the arrows then move that focus and Return opens the focused row: this is iPadOS's focus, not the app's selection, and it keeps the arrows and Return until it leaves. Escape doesn't clear it; a tap does, and the arrows and Return go back to the app's selection. UIKit had put the folder's rows in the search field's focus group, as its results, so Tab stopped at the field; the rows and subfolder results now have a group of their own (`ownFocusGroup()` in `FolderView.swift`). Down in the search field therefore no longer moves into the rows; Tab does.
 
 Escape, Up, Down and Return are UIKit key commands on the window's root view controller (Escape is also on the Offline Files sheet), so they don't appear in the menu bar. They ask for priority over system behaviour, since the iPad focus engine otherwise takes the arrows to focus the sidebar, and decline as each key arrives while anything else is presented. XCTest types Return and Escape as text instead of sending hardware key presses, so UI tests cover the arrow keys, and opening and Escape were checked on iPhone and iPad simulators with hardware key events. UIKit registers the app's shortcuts with the system only while a hardware keyboard is attached. XCTest attaches a new virtual keyboard for each key it sends, and sends the key at once. So in UI tests, the first ⌘F, ⌘G or ⇧⌘G after launch reaches SpringBoard, which registers those keys too, and does nothing. Other shortcuts reach the app. UI tests therefore start with another shortcut, and check that it acts. A keyboard that is already attached when the app starts is not affected: on a physical iPad, with the Mac's keyboard through Universal Control, ⌘F worked as the first shortcut after launch ([investigation](CI_HISTORY.md#9-november-2026-first-shortcut-after-launch), [18 November iPad session](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-session)).
 
@@ -63,12 +65,17 @@ Escape, Up, Down and Return are UIKit key commands on the window's root view con
 Checked on iPadOS 27.2.1, first with the Mac's keyboard through Universal Control, which iPadOS
 did not list as a hardware keyboard ([18 November iPad session](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-session)),
 then with a wired keyboard and a log of each key press and focus change
-([follow-up](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-follow-up)):
+([follow-up](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-follow-up)), and again with the wired
+keyboard once Tab reached the library and the folder's rows:
 
-- Tab reaches only the folder's search field, never the library or the reader, with either keyboard.
-  Further presses reach the system, which leaves focus in the field.
-- Return doesn't leave the search field. Down moves focus into the results instead, as described
-  above, so the arrows appear to act while the field is being edited.
+- The first time Tab enters the folder's search field, SwiftUI presents the search, and when that
+  animation ends, about 0.3 seconds later, it makes the field first responder. If Tab has already
+  moved on, focus comes back to the field once; pausing, or pressing Tab again, moves on. The call
+  comes from the presentation's animation completion, not from the app, and later visits don't do
+  it. Seen with a wired keyboard on 18 November, with a log of each key press, focus change and
+  the caller of each first-responder change.
+- The reader is not a Tab stop: its web content offers nothing UIKit's focus system can move to.
+- Return doesn't leave the search field.
 - A focused row's frame starts under the library, at the window's left edge, because the folder
   column's cells extend beneath it. Through Universal Control its focus ring was drawn that wide;
   with the wired keyboard the focus highlight stayed within the folder column.
