@@ -178,7 +178,8 @@ A folder save's files then had a fixed 180-second deadline rather than a transfe
 save stalled by an outage took three minutes to report failure, against about a minute for a single
 download. A folder save's file now fails after 60 seconds without receiving bytes, in the transport and in
 its exporter; `testStalledFolderSaveFailsAtTheIdleLimit` covers it in the macOS OpenSSH suite, and fails
-against the fixed deadline. Single-file offline saves and exports keep the 180-second total.
+against the fixed deadline. Single-file offline saves and exports kept the 180-second total. Since 18 November a
+single-file save or update also fails after 60 seconds without bytes ([Offline files](OFFLINE_FILES.md)).
 
 ## Physical iPhone, channels and faults: 9 November 2026
 
