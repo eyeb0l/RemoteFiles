@@ -403,6 +403,7 @@ struct FolderView: View {
         }
         .listStyle(.plain)
         .scrollDismissesKeyboard(.immediately)
+        .ownFocusGroup()
         }
     }
     /// Every row has one shape on purpose. A condition at the top of a List row, including one inside
@@ -721,6 +722,55 @@ private struct FolderRowList<Row: View>: View, Equatable {
             .listStyle(.plain)
             .scrollDismissesKeyboard(.immediately)
             .refreshable { await refresh() }
+            .ownFocusGroup()
+        }
+    }
+}
+
+extension View {
+    /// Gives a folder's list its own keyboard focus group.
+    ///
+    /// UIKit puts the list under a navigation bar's search field in the field's focus group, as its
+    /// results. Tab moves between focus groups, so it could reach the search field but never the
+    /// rows, and the field was the only stop in the window. SwiftUI has no focus group modifier on
+    /// iOS, so this sets UIKit's on the list's collection view.
+    func ownFocusGroup() -> some View { background(FocusGroupClaim()) }
+}
+
+/// Sits behind a list, which SwiftUI draws as a collection view beside it, and sets that
+/// collection view's focus group: the nearest collection view that covers this view's frame.
+private struct FocusGroupClaim: UIViewRepresentable {
+    static let identifier = "dev.iris.RemoteFiles.folder-rows"
+    func makeUIView(context: Context) -> Marker { Marker() }
+    func updateUIView(_ marker: Marker, context: Context) { marker.claim() }
+    final class Marker: UIView {
+        init() { super.init(frame: .zero); isUserInteractionEnabled = false; isAccessibilityElement = false }
+        required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+        override func didMoveToWindow() { super.didMoveToWindow(); claim() }
+        override func layoutSubviews() { super.layoutSubviews(); claim() }
+        func claim() {
+            guard let window, bounds.width > 0, bounds.height > 0 else { return }
+            let frame = convert(bounds, to: window)
+            var ancestor = superview
+            while let view = ancestor {
+                if let list = Self.list(in: view, matching: frame, window: window) {
+                    if list.focusGroupIdentifier != FocusGroupClaim.identifier { list.focusGroupIdentifier = FocusGroupClaim.identifier }
+                    return
+                }
+                ancestor = view.superview
+            }
+        }
+        private static func list(in view: UIView, matching frame: CGRect, window: UIWindow) -> UICollectionView? {
+            if let list = view as? UICollectionView {
+                // A list runs on under the bars, beyond the frame SwiftUI lays it out in. Its bounds
+                // move as it scrolls, so compare where it sits, not what it shows.
+                let placed = list.superview?.convert(list.frame, to: window) ?? .null
+                return placed.contains(frame.insetBy(dx: 1, dy: 1)) ? list : nil
+            }
+            for child in view.subviews where !(child is Marker) {
+                if let found = list(in: child, matching: frame, window: window) { return found }
+            }
+            return nil
         }
     }
 }
