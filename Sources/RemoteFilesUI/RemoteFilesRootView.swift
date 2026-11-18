@@ -305,13 +305,16 @@ private struct IPadWorkspace: View {
         libraryRevealAttempts = 3
         libraryRevealRequest += 1
     }
+    // Each column is a container element carrying its identifier. An identifier set on the column itself
+    // replaced the identifier of every element inside it, so the reader's source text read
+    // `workspace-reader` rather than `Bounded source text`, and UI tests could not find it on iPad.
     var body: some View {
         NavigationSplitView(columnVisibility: $visibility) {
             HomeView(model: model)
                 .listStyle(.sidebar)
                 .environment(\.workspaceNavigation, openFromLibrary)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
-                .accessibilityIdentifier("workspace-library")
+                .accessibilityElement(children: .contain).accessibilityIdentifier("workspace-library")
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames.library = $0 }
         } content: {
             NavigationStack {
@@ -331,7 +334,7 @@ private struct IPadWorkspace: View {
             }
             .environment(\.workspaceNavigation, openFromFolder)
             .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 420)
-            .accessibilityIdentifier("workspace-folder")
+            .accessibilityElement(children: .contain).accessibilityIdentifier("workspace-folder")
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames.folder = $0 }
         } detail: {
             NavigationStack {
@@ -343,7 +346,7 @@ private struct IPadWorkspace: View {
                 }
             }
             .environment(\.workspaceNavigation, { model.openInWorkspace($0) })
-            .accessibilityIdentifier("workspace-reader")
+            .accessibilityElement(children: .contain).accessibilityIdentifier("workspace-reader")
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frames.reader = $0 }
         }
         .navigationSplitViewStyle(.balanced)

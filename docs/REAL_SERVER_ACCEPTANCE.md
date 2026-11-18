@@ -606,6 +606,8 @@ A temporary build logged each key press, focus change and keyboard-command decis
 - Inactive HTML reader memory (step 12), the storage and depth limits for saved folders on the
   iPad (step 10), and the other-window and other-route link cases (step 11).
 - The demo UI journeys that assume the iPhone's stack (22 in the first session) were not adapted.
+  Later the same day, on an iPad simulator, nine of the 22 passed and thirteen were recorded as
+  iPhone-only ([UI journeys on an iPad](AUTOMATED_ACCEPTANCE.md#ui-journeys-on-an-ipad)).
 
 Evidence is on an external SSD attached to the MacBook Air, in `remotefiles-ipad-20261119/`: the
 traces (`folder.trace`, `report.trace`, `folder-fixed.trace`; the Allocations run is

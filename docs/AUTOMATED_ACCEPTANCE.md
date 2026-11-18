@@ -162,6 +162,45 @@ REMOTEFILES_SOURCE_PACKAGES_DIR=/private/tmp/remotefiles-acceptance-SourcePackag
   scripts/test-voiceover.sh SIMULATOR_UDID /private/tmp/remotefiles-voiceover-NEW_RUN
 ```
 
+## UI journeys on an iPad
+
+CI runs the demo UI journeys on an iPhone simulator only. On a physical iPad in the first iPad
+session, 22 of them failed ([18 November](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-session)).
+Run again on an iPad Pro 11-inch (M5) Simulator (iOS 27.2, portrait) on 18 November, those 22 now
+come out as follows:
+
+- Two passed already, after the first session's fixes: the arrow-key journey and the offline copy
+  journey.
+- Six failed because the workspace's column identifiers (`workspace-library`, `workspace-folder`,
+  `workspace-reader`) replaced the identifier of every element inside their column: the reader's
+  source text reported `workspace-reader`, not `Bounded source text`. Each column is now a container
+  element that carries its own identifier, and the six pass, among them the keyboard journey whose
+  first ⌘F had seemed iPad-specific.
+- `testSearchingSubfoldersFindsNestedNamesKeepsResultsAndSwitchesBack` tapped the iPhone's Back
+  button; on the iPad that button is the folder's title, whose menu then swallowed the next tap. The
+  journey goes back only on a stack now, and passes.
+
+The other thirteen are iPhone-only. Six are written for the iPhone's stack: they tap Back or wait
+for a pushed screen's title (`testBrowseReadRefreshAndReturn`,
+`testDisconnectFromNestedFolderClearsStackAndReconnectsFromHome`,
+`testHeadingOutlineAndLinkedDocumentHeadingInReader`, `testLargeFolderKeepsScrollPositionAfterOpeningFile`,
+`testLinkedFolderOpensInOneTapAndSortBySizeReordersFiles`,
+`testRelativeDocumentNavigationKeepsBackReadingPosition`). Seven expect the iPhone's presentation or
+layout, such as a sheet's Close button or a folder row clear of the bars
+(`testKeyDetailsShowFingerprintAndPublicKeyWithoutAddedHyphens`,
+`testLivePDFAndOCRSearchFindsPagesWithExplicitOptions`,
+`testOriginalExportSystemPickerCancellationKeepsReaderUsable`,
+`testSavedPDFAndOCRIndexPersistsRecognizedContents`, and the three `testSavedSearchIndex…` journeys).
+Their reasons come from the step each fails at, not from investigating them one by one, so check
+that step by hand before treating an iPad failure in one of them as an app bug. The workspace
+journey, `testAdaptiveWorkspaceKeepsLibraryFolderAndReaderOnIPad`, covers the iPad layout itself.
+
+On the same simulator the VoiceOver checks' two landing checks, `testFolderRowReaderLanding` and
+`testImageFileRowReaderLanding`, passed with and without the container change. Seven of the other
+VoiceOver journeys failed on `main` there as well, mostly unable to reach a target by traversal in
+the wider layout; with the change, five of those seven still failed and none newly did. CI runs
+VoiceOver on an iPhone.
+
 ## Feature-specific coverage
 
 These sections identify the regression tests and the limits of the evidence
