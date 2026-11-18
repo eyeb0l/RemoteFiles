@@ -607,9 +607,49 @@ A temporary build logged each key press, focus change and keyboard-command decis
   iPad (step 10), and the other-window and other-route link cases (step 11).
 - The demo UI journeys that assume the iPhone's stack (22 in the first session) were not adapted.
 
+The three hand checks were done in the [evening checks](#18-november-2026-ipad-evening-checks).
+
 Evidence is on an external SSD attached to the MacBook Air, in `remotefiles-ipad-20261119/`: the
 traces (`folder.trace`, `report.trace`, `folder-fixed.trace`; the Allocations run is
 `/private/tmp/remotefiles-ipad-20261119/profile-1000-report.trace`), their exported tables, the key
 log (`keydiag-1.log`) and its patch, the cellular capture (`cellular/`), the downloaded file and
 the offline copy after the interrupted update, the device test result `readpos-device.xcresult`,
 the encrypted-key fixture's server log and `session-log.md`.
+
+## 18 November 2026 iPad evening checks
+
+The same iPad and connection, the hand checks the [follow-up](#18-november-2026-ipad-follow-up)
+left open, on a signed Release build of `ad679dd` (`main`). The same evening's measurements of
+folder scrolling and Tab focus are in [Performance](PERFORMANCE.md#scrolling-deep-in-a-large-folder-18-november)
+and [iPad](IPAD.md#known-differences-on-a-physical-ipad).
+
+- **Saved-folder limits** (step 10). Four synthetic folders, each just over one limit: 20 nested
+  levels, 257 folders, 10,001 files, and five 110 MiB files of random bytes (550 MiB, over the
+  512 MiB for all offline copies). **Keep Folder Offline** on each was refused with that limit's
+  message, the storage one after downloading up to the space left. None of the four appeared in
+  Offline Files, and the copies saved before were unchanged.
+- **Links after another window changes the source** (step 11). In two windows, window A opened
+  `index.md` from the saved `offline-tree`. Window B updated the saved folder; a link in A then
+  said "This saved document was updated or removed. Reopen it from Offline Files before following
+  its links." After A reopened it, B removed the folder, and a link in A said the same. Neither
+  reconnected or downloaded anything.
+- **Links between individual copies and routes** (step 11). A second connection to the same Mac,
+  with the same account and key but its own starting folder, is a different route. With `from.md`
+  saved through one connection and its link target `to.md` saved only through the other, the
+  saved `from.md`'s link said "This linked file isn't saved here. Save it with the same
+  connection, or include it in this saved folder, then try again." Once `to.md` was saved through
+  the same connection too, the link opened it. (Opened from the live folder rather than Offline
+  Files, the same link opens `to.md` from the server, as a connected reader should.)
+- **Inactive HTML reader memory** (step 12). Instruments' Activity Monitor template recorded each
+  process's physical footprint about every three seconds, because an HTML reader's page lives in a
+  WebKit content process that Allocations on the app doesn't see. Opening `long-anchor.html`
+  started a content process at 43 MB, 50 MB after scrolling. On the Home Screen it shrank to 36 MB
+  and then ended. Returning rendered the page again in a new content process (40 MB), which ended
+  within about three seconds of opening another file. The app's own footprint was 41–46 MB with the
+  reader open and 68–70 MB after it had been in the background; what that growth is wasn't
+  established (the app-switcher snapshot and privacy cover are likely, but unmeasured). The Markdown
+  report opened afterwards took 103 MB in its own content process, with the app at 92–98 MB.
+
+Evidence is on the external SSD, in `remotefiles-followup-20261118/`: the Activity Monitor trace
+`device-traces/html-memory.trace` and its exported table. The limit fixtures were generated under
+`limits/` in the fixture folder and are not kept.
