@@ -280,10 +280,12 @@ private struct OverflowFixtureView: View {
     }
 
     func testProseBoundaryAnchorRestoresTheSameViewport() async throws {
-        let text = (0..<40).map { "## Heading \($0)\n\nParagraph \($0) has enough words to wrap across multiple lines in the reader.\n\n" }.joined()
+        // `outer` needs content four viewports tall. Forty sections made 4,005 points in an
+        // iPad Pro 11-inch's 1,210-point window, so a hundred leave room for taller iPads.
+        let text = (0..<100).map { "## Heading \($0)\n\nParagraph \($0) has enough words to wrap across multiple lines in the reader.\n\n" }.joined()
         let (window, previous, state) = try host(text: text)
         defer { cleanup(window, previous: previous) }
-        try await wait { self.prose(window).map { self.selectedText($0.model).string.contains("Heading 39") } == true }
+        try await wait { self.prose(window).map { self.selectedText($0.model).string.contains("Heading 99") } == true }
         let scroll = try XCTUnwrap(outer(window))
         let interaction = try XCTUnwrap(prose(window))
         // A paragraph start and the preceding paragraph end share one character

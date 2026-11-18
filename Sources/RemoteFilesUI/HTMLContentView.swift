@@ -71,6 +71,9 @@ struct StaticHTMLWebView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
         config.defaultWebpagePreferences.allowsContentJavaScript = false
+        // The recommended mode is desktop on an iPad, where WebKit keeps text at its unzoomed
+        // size under root `zoom`, so text size changed only the margins. Mobile matches the iPhone.
+        config.defaultWebpagePreferences.preferredContentMode = .mobile
         config.userContentController.add(rules)
         return config
     }
