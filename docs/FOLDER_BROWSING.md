@@ -107,7 +107,7 @@ Try **Explore Demo → Projects → Search samples** and search contents for `IN
 
 <img src="screenshots/folder-browsing/pdf-result-matching-page-simulator.png" width="240" alt="Text sample.pdf opened from its search result, with the page indicator showing Page 2 of 2">
 
-*Opening the embedded-text result shows its matching page. Captured from the passing UI test on an iPhone 18 Pro Simulator running iOS 27.2; physical-device acceptance is still outstanding.*
+*Opening the embedded-text result shows its matching page. Captured from the passing UI test on an iPhone 18 Pro Simulator running iOS 27.2. Content search passed on a physical iPad ([18 November iPad session](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-session)); the iPhone has not been checked.*
 
 Both options are off for an ordinary live search. OCR uses up to three supported device-preferred languages, falling back to English when none match. If Vision's accurate model cannot run, its fast model gets one attempt within the original time budget; cancellation never starts that fallback. The fast model supports fewer languages and can be less accurate. OCR can miss or misread text, especially handwriting, small text, unusual layouts and low-quality scans. Only the first frame of a multi-frame image is searched. Archives, audio and video remain unsupported, and encrypted or invalid PDFs cannot be searched. No document bytes or recognized text are sent to an OCR service.
 
