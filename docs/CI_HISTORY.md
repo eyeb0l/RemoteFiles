@@ -10,6 +10,52 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 18 November 2026: shared stores on a device
+
+The hosted core suite ran on a physical iPad for the first time (iPad Pro 11-inch (M5),
+iOS 27.2.1, signed Debug build of `d883793`). Ten tests about several windows and shared stores
+failed there that pass on every simulator, among them
+`OfflineFileTests.testSharedStoreReusesDirectoryAfterCreationAndAcrossURLVariants` and
+`AppModelLifecycleTests.testOfflineStoreIsSharedWhenAnotherWindowOpensAfterLibraryCreation`, which
+failed even for an identical URL.
+
+**Cause.** The metadata, trust, history, offline, download and resource-cache registries keyed each
+file by `standardizedFileURL.path`. Foundation drops a leading `/private` from that path only when
+the shorter path exists. A test library under the app's temporary folder, `/private/var/mobile/…`,
+was therefore spelt with `/private` before its file or folder was created and without it after, and
+a second window opened a separate store over the same files. Simulator paths have no `/private`
+alias, so CI could not see it. The search index registry had already avoided this with its own key.
+
+**Reach.** A probe on the iPad printed the app's library folder as `/var/mobile/…/Library/Application
+Support/RemoteFiles`, with no `/private`, and standardizing left it unchanged. Released builds were
+therefore not affected; only tests whose library lived in the temporary folder were.
+
+**Fix.** Every registry now uses that search index key, `LocalStoreKey`: dot components removed
+lexically, the deepest existing ancestor resolved, the last component left unresolved.
+`testSharedStoresKeepOneSpellingWhileTheirFilesAreCreated` and
+`testSharedStoreKeepsOneActorWhenItsPrivateDirectoryIsCreated` use a `/private` folder that exists on
+each platform (the temporary folder on a device, `/private/tmp` elsewhere). Without the fix they
+failed under `swift test` on macOS (four failures); with it they pass there and on the iPad, where
+the six affected suites then passed (166 tests, three opt-in Face ID skips).
+
+**Not fixed.** Seven reading-position tests failed in both device runs. Two are HTML (WebKit):
+`HTMLReadingPositionTests.testTextAnchorRestoresAfterPageZoomChangesCSSPixelScale` and
+`testTextAnchorRestoresAfterRootZoomTextSizeChanges` (the attached renderer never reached the
+expected state in 15 seconds; at page zoom 1.6 the content widened to 576 points instead of
+reflowing). Five are Markdown, through the Textual reader: `OverflowViewportTests` (`testDominantCodeBlockReturnsAcrossRepeatedSourceSwitches`,
+`testDominantTableReturnsAcrossRepeatedSourceSwitches`,
+`testLargeFastJumpKeepsVisibleProseAnchorAndSourceReturnRestoresSameCharacter`,
+`testProseBoundaryAnchorRestoresTheSameViewport`,
+`testReadingAnchorRestorationWaitsForTheReplacementViewportToAttach`). By hand on the iPad an HTML
+position held through text size, rotation and resizing ([18 November session](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-session)),
+matching the root-zoom test; nothing recorded matches the page-zoom test or the Markdown tests. Both groups need investigating on a device before
+they can count as device evidence.
+
+**UI journeys on the iPad.** The demo `RemoteFilesUITests` class passed 13, failed 22 and skipped 1
+on the device. Most failures assert the iPhone's stack navigation (navigation bar titles, Back
+buttons, hittability in one column), which CI only runs on an iPhone. The iPad workspace journey
+passed.
+
 ## 17 November 2026: a killed VoiceOver journey left VoiceOver on for the key journey
 
 The nightly run [44069815284](https://github.com/eyeb0l/RemoteFiles/actions/runs/44069815284)

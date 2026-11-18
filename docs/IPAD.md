@@ -18,7 +18,7 @@ A compact width or height, such as a folded iPhone Duo or a landscape iPhone, us
 
 Editing or deleting the visible connection clears its selected routes so old-server content is not shown under changed settings. Disconnect returns all columns to their initial state. Backgrounding retains location while closing connections and clearing unlocked keys; an edit leaves the keys other connections use unlocked. Demo uses the same workspace without contacting a server.
 
-Automated navigation tests cover route projection, preview replacement, folder history, recents, disconnect and the size-class layout decision. Simulator UI journeys include assertions for the workspace and adaptive overlays; consult their results for the build being tested. Simulator results do not establish physical iPad, iPhone Duo or Stage Manager behavior.
+Automated navigation tests cover route projection, preview replacement, folder history, recents, disconnect and the size-class layout decision. Simulator UI journeys include assertions for the workspace and adaptive overlays; consult their results for the build being tested. Simulator results do not establish physical iPad, iPhone Duo or Stage Manager behavior. On a physical iPad the workspace, rotation, Stage Manager, Split View and two windows passed by hand ([18 November iPad session](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-session)); an iPhone Duo has not been tested.
 
 ## Several windows
 
@@ -26,7 +26,7 @@ Each window browses on its own connection and has its own folder, reader and sea
 
 ## Keyboard shortcuts
 
-With a hardware keyboard, hold ⌘ to list these shortcuts, or open the iPad menu bar. They act on the folder and reader on screen, in the workspace and the stack alike; a command that doesn't apply there is greyed out.
+With a hardware keyboard, open the iPad menu bar (swipe down from the top, move the pointer there or press Globe-M) to see these shortcuts. iPadOS 26 replaced the list that holding ⌘ used to show. They act on the folder and reader on screen, in the workspace and the stack alike; a command that doesn't apply there is greyed out.
 
 | Shortcut | Command | Menu |
 | --- | --- | --- |
@@ -42,9 +42,9 @@ With a hardware keyboard, hold ⌘ to list these shortcuts, or open the iPad men
 | ⇧⌘J | Headings | Go |
 | ⌥⌘L | Downloads | Go |
 | ⇧⌘O | Offline Files | Go |
-| ↓ / ↑ | Select Next / Select Previous row in the folder or its search results | ⌘ list only |
-| Return | Open Selection, as tapping the row would | ⌘ list only |
-| Escape | Close Find, whether or not its field has focus | ⌘ list only |
+| ↓ / ↑ | Select Next / Select Previous row in the folder or its search results | Not listed |
+| Return | Open Selection, as tapping the row would | Not listed |
+| Escape | Close Find, whether or not its field has focus | Not listed |
 
 Find, Find Next and Find Previous are the system's own Edit › Find items, which the app answers for the reader on screen; Find and Replace and Use Selection for Find stay unavailable. In the Find field, Return moves to the next result and Escape closes Find. In Offline Files, the Find bar’s Done button is also the native cancel action, so Escape closes Find before the Mac sheet can dismiss itself. The live reader uses the root’s Escape key command. Opening Headings relinquishes Find-field focus and withdraws its cancel shortcut; dismissing Headings registers that shortcut again and restores a native Escape responder in the open Find bar, preserving its query and results. Cmd-F returns editing focus to the query. This keeps successive Escape presses with Headings, then Find, then the enclosing sheet. Offline copies support every reader shortcut except Refresh Document, since updating a saved copy needs a connection and is chosen in Offline Files. In Offline Files, Escape closes an open Find and otherwise closes the sheet as before. Focused values published inside that sheet never reach the scene's commands, so its shortcuts (⌘[, ⌘F, ⌘G, ⇧⌘G, ⌥⌘U, ⇧⌘J and Escape) are key commands installed on the sheet while it shows. Each presentation registers its actual UIKit controller after it appears and owns its reader/navigation actions separately. The focused scene identifies the command window; on Mac, multiple scenes can each retain a key UIKit window, so the last window-key notification alone cannot identify the foreground workspace. This keeps Escape and reader shortcuts attached to the correct sheet when switching windows. The menu bar observes the same actions for Back, Show Source/Rendered and Headings, and the system Find items act on its reader too. Menu availability and the source title update as you navigate, switch modes or find matches; Refresh Document remains unavailable for saved copies. While a sheet such as Downloads, Headings or a folder's search index is open, the reader and folder beneath it ignore shortcuts.
 
@@ -56,4 +56,15 @@ Down selects the folder's first row and Up its last; each press then moves one r
 
 A text field keeps its own keys: while the folder's search field or the reader's Find field has focus, the arrows and Return edit or submit there. Press Return to leave the search field, then use the arrows. An alert, menu or picker shown over the window keeps Escape, Return and the arrows too. On iPad, Tab still moves keyboard focus between the sidebar, search field and reader; once Tab has put focus in the sidebar, the arrows and Return move and open there, as elsewhere in iPadOS, until focus leaves it.
 
-Escape, Up, Down and Return are UIKit key commands on the window's root view controller (Escape is also on the Offline Files sheet), so they appear in the ⌘ list but not the menu bar. They ask for priority over system behaviour, since the iPad focus engine otherwise takes the arrows to focus the sidebar, and decline as each key arrives while anything else is presented. XCTest types Return and Escape as text instead of sending hardware key presses, so UI tests cover the arrow keys, and opening and Escape were checked on iPhone and iPad simulators with hardware key events. UIKit registers the app's shortcuts with the system only while a hardware keyboard is attached. XCTest attaches a new virtual keyboard for each key it sends, and sends the key at once. So in UI tests, the first ⌘F, ⌘G or ⇧⌘G after launch reaches SpringBoard, which registers those keys too, and does nothing. Other shortcuts reach the app. UI tests therefore start with another shortcut, and check that it acts. A keyboard that is already attached when the app starts is not affected, but this hasn't been checked on a device ([investigation](CI_HISTORY.md#9-november-2026-first-shortcut-after-launch)).
+Escape, Up, Down and Return are UIKit key commands on the window's root view controller (Escape is also on the Offline Files sheet), so they don't appear in the menu bar. They ask for priority over system behaviour, since the iPad focus engine otherwise takes the arrows to focus the sidebar, and decline as each key arrives while anything else is presented. XCTest types Return and Escape as text instead of sending hardware key presses, so UI tests cover the arrow keys, and opening and Escape were checked on iPhone and iPad simulators with hardware key events. UIKit registers the app's shortcuts with the system only while a hardware keyboard is attached. XCTest attaches a new virtual keyboard for each key it sends, and sends the key at once. So in UI tests, the first ⌘F, ⌘G or ⇧⌘G after launch reaches SpringBoard, which registers those keys too, and does nothing. Other shortcuts reach the app. UI tests therefore start with another shortcut, and check that it acts. A keyboard that is already attached when the app starts is not affected: on a physical iPad, with the Mac's keyboard through Universal Control, ⌘F worked as the first shortcut after launch ([investigation](CI_HISTORY.md#9-november-2026-first-shortcut-after-launch), [18 November iPad session](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-session)).
+
+### Known differences on a physical iPad
+
+Checked with the Mac's keyboard through Universal Control, which iPadOS did not list as a hardware
+keyboard, so an attached keyboard may behave differently ([18 November iPad session](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-session)):
+
+- With the cursor in the folder's search field, Return did not leave the field (Escape did), and
+  the arrows moved the row highlight although the field was being edited; the field is meant to keep both keys.
+- Tab only reached the folder's search field, never the library or the reader.
+- A row's keyboard focus ring in the folder column ran on under the library, because the column's
+  cells extend beneath it.

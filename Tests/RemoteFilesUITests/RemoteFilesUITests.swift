@@ -179,6 +179,11 @@ final class RemoteFilesUITests: XCTestCase {
     func testOfflineCopyFindsTextAndListsHeadings() throws {
         let app = openDemoOfflineNavigationGuide()
         let reader = app.scrollViews["Rendered Markdown document"].firstMatch
+        // The document fills the reader: an empty notice above it once took half the height,
+        // leaving a blank band under the title (iPad, 18 November 2026).
+        let title = app.navigationBars.containing(.staticText, identifier: "offline-copy-date").firstMatch
+        XCTAssertTrue(reader.waitForExistence(timeout: 10) && title.exists)
+        XCTAssertLessThan(reader.frame.minY - title.frame.maxY, 80, "The saved copy starts below its title, not partway down")
         let find = app.buttons["Find in Document"]
         XCTAssertTrue(find.waitForExistence(timeout: 5)); find.tap()
         let query = app.textFields["reader-find-query"]

@@ -146,6 +146,35 @@ final class StateAndPersistenceTests: XCTestCase {
         XCTAssertTrue(history === ReadingPositionStore.shared(fileURL: directory.appendingPathComponent("reading-positions-v1.json")))
     }
 
+    /// On a device the app's temporary folder is under `/private/var`, and Foundation drops `/private`
+    /// from a standardized path only once the shorter path exists. A window that opened the library
+    /// before its file was first saved must still share a store with one that opens it afterwards.
+    func testSharedStoresKeepOneSpellingWhileTheirFilesAreCreated() async throws {
+        let directory = LocalStoreKeyFixture.privateDirectory("remotefiles-store-key-")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let library = directory.appendingPathComponent("library-v1.json")
+        let before = try MetadataStore.shared(fileURL: library)
+        let trustBefore = try HostTrustStore.shared(fileURL: directory.appendingPathComponent("known-hosts-v1.json"))
+        let historyBefore = ReadingPositionStore.shared(fileURL: directory.appendingPathComponent("reading-positions-v1.json"))
+        let saved = profile()
+        try await before.update { $0.connections.append(saved) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: library.path))
+        XCTAssertNotEqual(library.standardizedFileURL.path, library.path, "Foundation now drops /private, as on a device")
+        for spelling in [library, LocalStoreKeyFixture.withoutPrivate(library)] {
+            let after = try MetadataStore.shared(fileURL: spelling)
+            XCTAssertTrue(before === after, "\(spelling.path) opened a second store over the same library")
+        }
+        let trustAfter = try HostTrustStore.shared(fileURL: directory.appendingPathComponent("known-hosts-v1.json"))
+        XCTAssertTrue(trustBefore === trustAfter)
+        let historyAfter = ReadingPositionStore.shared(fileURL: directory.appendingPathComponent("reading-positions-v1.json"))
+        XCTAssertTrue(historyBefore === historyAfter)
+        let downloads = directory.appendingPathComponent("Downloads-v1", isDirectory: true)
+        let downloadsBefore = try DownloadManager.shared(directory: downloads)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: downloads.path))
+        XCTAssertTrue(downloadsBefore === (try DownloadManager.shared(directory: downloads)))
+        XCTAssertTrue(downloadsBefore === (try DownloadManager.shared(directory: LocalStoreKeyFixture.withoutPrivate(downloads))))
+    }
+
     func testASharedStoreIsReadAgainOnceNothingHoldsIt() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -466,5 +495,19 @@ private actor ControlledFileService: RemoteFileService {
     private func cancel(_ id: UUID) {
         guard !holdCancelledRequestsUntilRelease, !ignoresCancellation else { return }
         pending.removeValue(forKey: id)?.resume(throwing: CancellationError())
+    }
+}
+
+/// A new folder spelt with a leading `/private`, which Foundation drops from a standardized path
+/// only once the shorter spelling exists. On a device the app's own temporary folder is spelt that
+/// way; a Mac or the Simulator, whose temporary folder isn't, has the same alias at `/private/tmp`.
+enum LocalStoreKeyFixture {
+    static func privateDirectory(_ prefix: String) -> URL {
+        let temporary = FileManager.default.temporaryDirectory.path
+        let base = temporary.hasPrefix("/private/") ? temporary : "/private/tmp"
+        return URL(fileURLWithPath: base, isDirectory: true).appendingPathComponent(prefix + UUID().uuidString, isDirectory: true)
+    }
+    static func withoutPrivate(_ url: URL) -> URL {
+        URL(fileURLWithPath: String(url.path.dropFirst("/private".count)), isDirectory: url.hasDirectoryPath)
     }
 }

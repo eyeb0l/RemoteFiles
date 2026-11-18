@@ -428,6 +428,9 @@ struct FolderView: View {
             .contentShape(Rectangle())
         }
         .disabled(destination == nil && resolving != nil)
+        // On iPad the folder column's cells run on under the floating library, so the system's
+        // preview of the whole cell, used without this shape, spread across both columns.
+        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 12))
         .contextMenu {
             if let destination { OfflinePinActions(model: model, profile: profile, entry: destination, includeHidden: showHidden) }
         }

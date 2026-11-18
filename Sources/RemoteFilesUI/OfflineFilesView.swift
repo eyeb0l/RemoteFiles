@@ -351,7 +351,9 @@ struct OfflineReaderView: View {
         // One view, not a Group: a Group's lifecycle modifiers would run per branch, and leaving the
         // placeholder would count as disappearing and release the lease.
         VStack(spacing: 0) {
-            Group {
+            // A stack, not a Group: a Group passes the frame below to each of its views, so the text
+            // case's empty notice took as much height as the document, a blank band above it.
+            VStack(spacing: 0) {
                 if let failure = failure ?? playback.failure {
                     ContentUnavailableView("Couldn’t open saved copy", systemImage: "exclamationmark.doc", description: Text(failure))
                 } else if loading {

@@ -386,9 +386,9 @@ private actor OfflineStores {
     static let shared = OfflineStores()
     var stores: [String: OfflineFileStore] = [:]
     func store(_ directory: URL) throws -> OfflineFileStore {
-        // URL directory hints and resource values can change when the store creates/protects
-        // its directory. The absolute path stays stable for every window using that library.
-        let key = directory.standardizedFileURL.path
+        // URL directory hints, resource values and Foundation's /private spelling can change
+        // when the store creates its directory. See `LocalStoreKey`.
+        let key = LocalStoreKey.path(of: directory)
         if let store = stores[key] { return store }
         let store = try OfflineFileStore(directory: URL(fileURLWithPath: key, isDirectory: true))
         stores[key] = store

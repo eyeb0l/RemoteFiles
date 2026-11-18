@@ -137,7 +137,7 @@ every speech, navigation and state-restoration assertion is unchanged.
 `RealServerUITests` are explicitly skipped in the Simulator run. The single
 `IdentityTests/testTrustStoreWritesUseCompleteFileProtection` method may also skip
 because Simulator filesystems do not report Data Protection classes; its actual
-protection assertion still requires a physical device. The three opt-in Face ID
+protection assertion still requires a physical device; it passed on a physical iPad ([18 November iPad session](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-session)). The three opt-in Face ID
 methods in `IdentityTests` also skip unless given the setup described in
 [KEY_SUPPORT.md](KEY_SUPPORT.md). Keychain tests must run.
 `PerformanceBenchmarkTests` runs once at its smallest size in the same lanes, asserting nothing about timing, so the [performance harness](PERFORMANCE.md) keeps working. The opt-in latency benchmark's operations run once against the generated

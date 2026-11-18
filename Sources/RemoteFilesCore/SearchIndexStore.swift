@@ -499,34 +499,10 @@ private actor SearchIndexStores {
     static let shared = SearchIndexStores()
     var stores: [String: SearchIndexStore] = [:]
     func store(_ directory: URL) -> SearchIndexStore {
-        let key = Self.directoryKey(directory)
+        let key = LocalStoreKey.path(of: directory)
         if let store = stores[key] { return store }
         let store = SearchIndexStore(directory: URL(fileURLWithPath: key, isDirectory: true))
         stores[key] = store
         return store
-    }
-
-    private static func directoryKey(_ directory: URL) -> String {
-        // Foundation can resolve /var and other parent aliases differently once the index
-        // exists. Normalize dot components lexically, then resolve only an existing parent:
-        // resolving a nonexistent whole path leaves its symlink ancestors unresolved.
-        var components: [String] = []
-        for component in directory.absoluteURL.path.split(separator: "/") {
-            if component == "." { continue }
-            if component == ".." { if !components.isEmpty { components.removeLast() } }
-            else { components.append(String(component)) }
-        }
-        guard let leaf = components.popLast() else { return "/" }
-        var suffix = [leaf]
-        var parent = URL(fileURLWithPath: "/" + components.joined(separator: "/"), isDirectory: true)
-        while parent.path != "/", !FileManager.default.fileExists(atPath: parent.path) {
-            suffix.insert(parent.lastPathComponent, at: 0)
-            parent.deleteLastPathComponent()
-        }
-        // Keep the final component unresolved: storage still rejects an index directory
-        // that is itself a symbolic link rather than silently accepting its target.
-        return suffix.reduce(parent.resolvingSymlinksInPath()) {
-            $0.appendingPathComponent($1, isDirectory: true)
-        }.path
     }
 }

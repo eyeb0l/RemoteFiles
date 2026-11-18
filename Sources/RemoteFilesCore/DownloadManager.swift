@@ -56,7 +56,7 @@ public enum DownloadManagerError: LocalizedError {
 public final class DownloadManager {
     private static var sharedManagers: [String: DownloadManager] = [:]
     public static func shared(directory: URL) throws -> DownloadManager {
-        let key = directory.standardizedFileURL.path
+        let key = LocalStoreKey.path(of: directory)
         if let manager = sharedManagers[key] { return manager }
         let manager = try DownloadManager(directory: directory)
         sharedManagers[key] = manager

@@ -327,3 +327,141 @@ a saved video in Airplane Mode, each certificate state, and each way of hiding a
   with `devicectl` after the session.
 
 Not checked: iPad, and Escape on a hardware keyboard. Reduce Motion wasn't on the checklist.
+
+## 18 November 2026 iPad session
+
+The first session on a physical iPad: an iPad Pro 11-inch (M5) (iOS 27.2.1, 24B156) against
+the MacBook Air's OpenSSH service, over Wi-Fi with a direct Tailscale route to the Mac's MagicDNS
+name. The first hosted core run used a signed Debug build of `d883793` (`main`). The runs after the
+store-key fix, the demo UI journeys and the Face ID check used a signed Debug build, and the
+hands-on pass a signed Release build, of the tree committed as `a3344ae`, before the offline reader
+and folder preview fixes. Fixtures were synthetic, generated for the session in a
+dedicated folder outside the repository and listed under [Setup](#ipad-setup).
+
+### iPad setup
+
+- Saved connection **My MacBook (iPad)**, starting in the dedicated fixture folder.
+- Dedicated identity **RemoteFiles iPad - MacBook**, generated in the iPad app. Its public key
+  was appended to the Mac account's `authorized_keys`, with explicit approval, tagged
+  `remotefiles-ipad-macbook` and restricted like the iPhone's: `restrict` plus a forced
+  `/usr/libexec/sftp-server -R -d` on the fixture folder. To revoke the iPad, remove only that line.
+- The host fingerprint the app showed matched the Mac's `/etc/ssh/ssh_host_ed25519_key.pub`.
+- Fixtures: the 1,000-entry folder and 191,002-byte report from `Fixtures/generate-fixtures.py`,
+  the format samples, a wide Markdown file, a content-search tree with a phrase only inside files
+  and 600 filler files, an offline tree with every link case, a long standalone HTML page with a
+  script and remote resources, a 12-page PDF, ten media files, a 160 MiB folder of 40 random files
+  and a 120 MiB download.
+
+### Automated on the device
+
+- **Hosted core suite** (`RemoteFilesTests`, `d883793`): 842 ran, 48 skipped (fixture-server, benchmark and
+  opt-in Face ID cases), 17 failed. The physical-only checks passed:
+  `testTrustStoreWritesUseCompleteFileProtection`, `testDeviceKeychainPersistenceAndAccessibility`
+  and `testBiometricKeychainItemIsStoredWithoutPromptingAndRemovable`.
+  - Ten failures, about several windows and shared stores, came from the app's shared stores keying files by
+    `standardizedFileURL.path`, which drops `/private` only once the shorter path exists. They
+    are fixed; see [CI history](CI_HISTORY.md#18-november-2026-shared-stores-on-a-device). With the
+    fix (`a3344ae`) the six affected suites passed on the iPad (166 tests, three opt-in Face ID skips).
+  - Seven reading-position tests failed in both runs and remain open: two HTML
+    `HTMLReadingPositionTests` and five Markdown `OverflowViewportTests`. By hand, an HTML position
+    held through the reader's text size, rotation and window resizing (step 12 below), which
+    corresponds to the root-zoom test; nothing recorded matches the page-zoom test
+    (`WKWebView.pageZoom`) or the Markdown tests.
+- **Demo UI journeys** (`RemoteFilesUITests`): 13 passed, 22 failed, 1 skipped (the key import,
+  which already skips on devices). The iPad workspace journey passed. Most failures are journeys
+  written for the iPhone's stack navigation. Two looked iPad-specific: Subfolders → This Folder,
+  which passed by hand, and the keyboard journey, whose first ⌘F did not open Find in time.
+- **Face ID enrolment change** (`testSimulatedEnrolmentChangeInvalidatesTheStoredKey`): a control
+  read before any change matched Face ID and read the item (the test failed, as expected). After
+  an alternate appearance was added, the prompt appeared and matched, and the read was still
+  refused with `biometricsUnavailable`: passed.
+
+### Passed by hand
+
+- **Workspace:** three columns; preview replacement with the folder kept; folder scroll position
+  kept; a new folder clears the reader; rotation slides the columns over the reader and back;
+  Stage Manager from three columns through overlays to the stack and back with the same folder
+  and file; Split View and Slide Over.
+- **Several windows:** independent folders and readers; a favourite added in one window appears in
+  the other; renaming a connection closes its routes in the other window; closing a window leaves
+  the other untouched.
+- **Accessibility** ([step 6](MANUAL_ACCEPTANCE.md)): selection and copy in Rendered and Source,
+  horizontal panning without widening, light and dark, the largest accessibility size in both
+  orientations, Reduce Motion, Reduce Transparency, VoiceOver landing, continuous reading, the
+  Headings rotor, focus returning to the opened row, the PDF page announcement, and VoiceOver
+  reaching and closing the library overlay in a narrow window.
+- **Contents search** (step 8): line 13 and line 5 snippets; the hidden-file choice; results kept
+  while reading; a file edited on the Mac found on refresh; cancellation on backgrounding and on
+  Disconnect; Stage Manager, accessibility sizes and VoiceOver. The 600 filler files stopped the
+  search at 500 files with "Stopped after 500 files. Search from a subfolder to go further."
+- **Offline files** (steps 9–11): saved date, position, Find, Headings and image zoom after
+  Airplane Mode and relaunch; the offline sheet's shortcuts; Share Original byte-identical to the
+  server; Update Offline Copy and removal; a saved folder with hidden files excluded and two links
+  skipped; every link case in Airplane Mode; eight link hops without running out of previews; and
+  removing a 160 MiB saved folder in one window while another window updated it. It never
+  reappeared, including after relaunch, and the other saved copies were unaffected.
+- **Locked-file protection:** with the iPad locked, copying the trust file, library, offline index
+  and three saved originals from the app's container over CoreDevice failed each time with
+  `EPERM`; unlocked, the same six copies succeeded and the original matched the server's file.
+- **HTML reading position** (step 12): scripts and remote resources blocked; position kept through
+  rotation, text size and Stage Manager resizing; independent Rendered and Source positions;
+  changed content opens at the top; touch, keyboard and VoiceOver scrolling during restoration;
+  backgrounding and Back.
+- **Changed host key** (step 4): a disposable OpenSSH server on another port, with its own host
+  key, was trusted and browsed. After its key was replaced the app showed **Host Key Changed**
+  with both fingerprints and only **Reset Saved Trust**. The server logged three connections, each
+  closed before authentication ("connections without attempting authentication"), and no
+  accepted key. The Mac's own host keys were not touched.
+- **Media:** H.264/AAC in MP4 and MOV, HEVC, a 90-degree rotated video (upright), M4A, MP3, WAV,
+  FLAC, AIFF and ADTS AAC all played, with full screen.
+
+### Keyboard through Universal Control
+
+The Mac's keyboard drove the iPad through Universal Control; iPadOS listed no hardware keyboard
+under Modifier Keys, so these results may differ from an attached keyboard.
+
+- Passed: ⌘F as the first shortcut with the keyboard present at launch, then ⌘G, ⇧⌘G and Escape;
+  ⌥⌘U, ⇧⌘J and layered Escape; ⇧⌘F, the arrows and Return; ⌘[, ⌘↑, ⇧⌘R, ⌘R, ⇧⌘., ⌥⌘L and ⇧⌘O;
+  shortcuts ignored under a sheet.
+- Holding ⌘ showed no list. iPadOS 26 replaced that list with the menu bar, which showed Edit,
+  View and Go.
+- **Search field:** with the cursor in the folder's search field, Return did not leave it (only
+  Escape did), and the arrows moved the row highlight although the field was being edited.
+- **Tab** only reached the folder's search field, never the library or the reader. This is the
+  state the [9 November investigation](CI_HISTORY.md#9-november-2026-portrait-library-overlay-tab-report-pr-66)
+  could not settle; it needs a diagnostic build and an attached keyboard.
+
+### Found
+
+- **Blank band in Offline Files readers.** Every saved text file opened with about half the sheet
+  blank above it. Fixed: the reader's frame reached each view of a `Group`, so the empty
+  hidden-character notice took as much height as the document.
+- **Folder row previews and focus rings spread across columns.** The folder column's cells run on
+  under the floating library. The long-press preview now has its own shape; the keyboard focus
+  ring, which the Simulator does not draw, is still too wide.
+- The keyboard and reading-position test findings above.
+
+| Offline reader before | Offline reader after |
+| --- | --- |
+| <img src="screenshots/ipad/offline-reader-band-before.png" width="420" alt="Saved Markdown in the Offline Files sheet with a blank band above the heading"> | <img src="screenshots/ipad/offline-reader-band-after.png" width="420" alt="The same saved Markdown starting directly below its title"> |
+
+| Folder preview before | Folder preview after |
+| --- | --- |
+| <img src="screenshots/ipad/folder-preview-before.png" width="420" alt="Long-press preview of a folder row stretching from the screen edge across the library"> | <img src="screenshots/ipad/folder-preview-after.png" width="420" alt="The same preview following the row's bounds, overlapping the library divider by a few points"> |
+
+*Demo data on an iPad Pro 11-inch (M5) Simulator (iOS 27.2), reproducing what the device showed.*
+
+### Not done
+
+- **Instruments profiling** (step 7). A 120-second SwiftUI and Allocations recording attached to
+  the app over the network connection held no process data, and later attempts, including over
+  the cable, timed out waiting for the device. The build was profileable (`get-task-allow`).
+- Cellular, managed downloads and encrypted-key unlock on the iPad, and an attached hardware
+  keyboard.
+
+Evidence on the MacBook Air: `/private/tmp/remotefiles-ipad-20261118/` holds the build and test
+logs, `core.xcresult` (first core run), `fix2.xcresult` (affected suites after the fix),
+`web.xcresult` (reading-position rerun), `ui.xcresult`, the four Face ID result bundles, `band-fixed` and
+`band-unfixed` (the offline regression with and without its fix), `session-log.md` (the hands-on
+record), the fixture and fixture-server scripts, `cold.trace`, and the iPad screenshots in
+`evidence/`, including the fixture server's log after the key change.

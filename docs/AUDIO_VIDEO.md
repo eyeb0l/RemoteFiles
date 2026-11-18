@@ -63,8 +63,9 @@ quiet sine tones); no user content is included. Small MP3, WAV, FLAC, AIFF,
 ADTS AAC and MOV variants support codec regression tests. Hosted tests exercise real AVKit
 assets, seeking, cache unlinking, cancellation, damaged refreshes, runtime
 failures and background cleanup. UI tests exercise both demo formats and their
-visible Play/Pause controls. Physical-device codec compatibility still needs device
-testing.
+visible Play/Pause controls. On a physical iPad, generated H.264/AAC MP4 and MOV, HEVC, a
+90-degree rotated video, M4A, MP3, WAV, FLAC, AIFF and ADTS AAC files all played ([18 November iPad session](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-session));
+the iPhone has played photos and a rotated video ([7 November](REAL_SERVER_ACCEPTANCE.md#7-november-2026-media-and-certificate-pass)), but the rest of this codec list and other codecs still need testing on it.
 
 ## Verification
 

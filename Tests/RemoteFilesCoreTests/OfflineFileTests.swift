@@ -134,6 +134,20 @@ final class OfflineFileTests: XCTestCase {
         XCTAssertFalse(first === other, "Separate libraries must keep separate actors")
     }
 
+    /// The app's temporary folder on a device is under `/private/var`, which Foundation spells without
+    /// `/private` only once the folder exists. See `LocalStoreKeyFixture`.
+    func testSharedStoreKeepsOneActorWhenItsPrivateDirectoryIsCreated() async throws {
+        let dir = LocalStoreKeyFixture.privateDirectory("remotefiles-offline-key-")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path))
+        let first = try await OfflineFileStore.shared(directory: dir)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.path))
+        for url in [dir, LocalStoreKeyFixture.withoutPrivate(dir)] {
+            let reopened = try await OfflineFileStore.shared(directory: url)
+            XCTAssertTrue(first === reopened, "\(url.path) opened a second actor over the same library")
+        }
+    }
+
     func testOriginalBytesAndAliasPersistWithPrivateFilesAndBoundedPreview() async throws {
         let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
         let bytes = Data(" \tCafé 東京\r\nsecond line  \r\n".utf8), service = OfflineTransport(Data(" \tCafé 東京\r\nsecond line  \r\n".utf8))
