@@ -75,6 +75,8 @@ private final class WeakOfflineLease {
 
 /// One actor owns a directory. The app uses `shared` so separate windows cannot overwrite pins.
 public actor OfflineFileStore {
+    /// How long saving or updating a copy may go without receiving bytes before it fails. Tests change it.
+    nonisolated(unsafe) static var fileIdleSeconds: TimeInterval = 60
     public static let maximumFileBytes = 128 * 1_024 * 1_024
     public static let maximumStoredBytes = 512 * 1_024 * 1_024
     public static let maximumFiles = 100
@@ -211,7 +213,10 @@ public actor OfflineFileStore {
         let transferRoot = directory.appendingPathComponent(".transfers")
         try Self.protectDirectory(transferRoot)
         let temporary = transferRoot.appendingPathComponent(transferID.uuidString)
-        let worker = RemoteOriginalExporter(service: service, directory: temporary, fileLimit: min(fileLimit, available))
+        // A save or update fails after `fileIdleSeconds` without bytes, as a managed download and a saved
+        // folder's file do, rather than only after three minutes in all; a slow file that keeps arriving finishes.
+        let worker = RemoteOriginalExporter(service: service, directory: temporary, fileLimit: min(fileLimit, available),
+                                            timeoutSeconds: Self.fileIdleSeconds, idleTimeout: true)
         operation = transferID; exporter = worker; cancelled = false; refreshingID = previous?.id
         var unpublished: URL?
         do {

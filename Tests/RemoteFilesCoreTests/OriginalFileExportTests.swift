@@ -384,7 +384,8 @@ final class OriginalFileExportTests: XCTestCase {
 
 /// First waits `queued` for a channel, as a folder save's file does while browsing has back the slot it lent.
 /// Then reports one more byte every `interval`, optionally stalling (ignoring cancellation) after `stallAfter` bytes.
-private actor SteppedTransportMock: RemoteFileService {
+/// Also used by OfflineFileTests.
+actor SteppedTransportMock: RemoteFileService {
     private let steps: Int, interval: Duration, stallAfter: Int?, queued: Duration?
     private var held: CheckedContinuation<Void, Never>?
     private(set) var lastProgress: ContinuousClock.Instant?

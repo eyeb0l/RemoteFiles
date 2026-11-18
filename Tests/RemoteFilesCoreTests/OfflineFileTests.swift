@@ -32,6 +32,46 @@ private actor OfflineTransport: RemoteFileService {
 }
 
 final class OfflineFileTests: XCTestCase {
+    /// An update whose bytes stop arriving fails after one idle interval, not after three minutes in all,
+    /// and the copy saved before it stays.
+    func testAnUpdateThatStopsReceivingBytesFailsAfterTheIdleInterval() async throws {
+        let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let idle = OfflineFileStore.fileIdleSeconds
+        OfflineFileStore.fileIdleSeconds = 1
+        defer { OfflineFileStore.fileIdleSeconds = idle }
+        let store = try OfflineFileStore(directory: dir)
+        let file = RemoteEntry(name: "report.bin", path: "/root/report.bin", kind: .file)
+        let saved = try await store.pin(profile: profile, entry: file, allowedRoot: "/root", service: OfflineTransport(Data("first".utf8)))
+        let stalling = SteppedTransportMock(steps: 10, interval: .milliseconds(100), stallAfter: 3)
+        let started = ContinuousClock.now
+        do {
+            _ = try await store.pin(profile: profile, entry: file, allowedRoot: "/root", service: stalling)
+            XCTFail("A stalled update finished")
+        } catch OfflineFileError.timedOut { }
+        let reported = await stalling.lastProgress
+        let lastProgress = try XCTUnwrap(reported)
+        XCTAssertGreaterThanOrEqual(lastProgress.duration(to: .now), .seconds(1), "Not before a whole idle interval without bytes")
+        XCTAssertLessThan(started.duration(to: .now), .seconds(60), "Ended by the idle interval, not the three-minute limit")
+        await stalling.resume()
+        let lease = try await store.lease(saved.id)
+        XCTAssertEqual(try Data(contentsOf: lease.url), Data("first".utf8), "The earlier copy stays")
+    }
+
+    /// A save that keeps receiving bytes may take longer in all than the idle interval.
+    func testASlowButSteadySaveOutlastsTheIdleInterval() async throws {
+        let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let idle = OfflineFileStore.fileIdleSeconds
+        OfflineFileStore.fileIdleSeconds = 1
+        defer { OfflineFileStore.fileIdleSeconds = idle }
+        let store = try OfflineFileStore(directory: dir)
+        let started = ContinuousClock.now
+        let pin = try await store.pin(profile: profile, entry: .init(name: "slow.bin", path: "/root/slow.bin", kind: .file),
+                                      allowedRoot: "/root", service: SteppedTransportMock(steps: 10, interval: .milliseconds(250), stallAfter: nil))
+        XCTAssertGreaterThan(started.duration(to: .now), .seconds(2), "Longer in all than the idle interval")
+        let lease = try await store.lease(pin.id)
+        XCTAssertEqual(try Data(contentsOf: lease.url).count, 10)
+    }
+
     func testAKeyInASavedCopyIsHiddenWhileItsOriginalBytesStay() async throws {
         let dir = directory(); defer { try? FileManager.default.removeItem(at: dir) }
         let store = try OfflineFileStore(directory: dir)
