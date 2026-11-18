@@ -659,22 +659,67 @@ python3 -B scripts/benchmark_performance.py server --output linux.jsonl --checko
   --port 22401 --user ubuntu --key KEY --host-key HOST_KEY.pub --root /srv/rf/bench --only assisted,bulk --rtt 0,40,150
 ```
 
-The `assisted` scenarios search the guest's `tree`, `big` and `docs` folders with the helper and with the walk; `REMOTEFILES_BENCHMARK_ASSISTED_MODE=helper` or `walk` runs one. `bulk` builds an index and saves an offline folder of `REMOTEFILES_BENCHMARK_BULK_ROOT`. `--cold-command` empties the server's caches before each search sample. `windowpairs` rotates a read window fixed at 16, a growing one and one fixed at 64 in one process, and records how far each grew. `linkbaseline` rotates SFTP with a plain TCP read of the same file: `REMOTEFILES_BENCHMARK_RAW_PORTS` lists ports on the server's host, or `HOST:PORT` elsewhere, that send `big-64m.bin` and close, such as a loop of `nc -l`; the two-stream arm also reads from the next port up, and `REMOTEFILES_BENCHMARK_SFTP_PORTS` lists other ports of the same server, such as one without the proxy. For 120 Hz frames, give the benchmark host an Info.plist with `CADisableMinimumFrameDurationOnPhone`; `REMOTEFILES_BENCHMARK_FRAME_RATE=60` asks for 60 Hz in the same build. `offline` saves the generated `offline` trees (`small50`, `tiny400`, `mixed`; `REMOTEFILES_BENCHMARK_OFFLINE_TREES` narrows them), then times folder taps during a save and cancelling or dropping one; `REMOTEFILES_BENCHMARK_OFFLINE_EXTRAS=0` skips those, `REMOTEFILES_BENCHMARK_OFFLINE_SAVES=0` keeps only them, and `REMOTEFILES_BENCHMARK_OFFLINE_ARMS=dedicated1,shared1,shared16` rotates transfer policies in one process. `windowtaps` rotates read-window policies with folder taps during each download; give it `--mbit`. `windowcarry` runs only when named: each arm downloads `REMOTEFILES_BENCHMARK_CARRY_FILE` (`big-64m.bin`) twice on one connection, `REMOTEFILES_BENCHMARK_CARRY_IDLE_MS` apart, with folder taps during the second. `REMOTEFILES_BENCHMARK_CARRY_ARMS` chooses and orders the arms from `growing`, `carry`, `carryhold`, `fixed64`, `stale64` and `stale64hold`; the default is the first four. `pipeline` runs a live contents search and an index build of the same tree.
+The `assisted` scenarios search the guest's `tree`, `big` and `docs` folders with the helper and with the walk; `REMOTEFILES_BENCHMARK_ASSISTED_MODE=helper` or `walk` runs one. `bulk` builds an index and saves an offline folder of `REMOTEFILES_BENCHMARK_BULK_ROOT`. `--cold-command` empties the server's caches before each search sample. `windowpairs` rotates a read window fixed at 16, a growing one and one fixed at 64 in one process, and records how far each grew. `linkbaseline` rotates SFTP with a plain TCP read of the same file: `REMOTEFILES_BENCHMARK_RAW_PORTS` lists ports on the server's host, or `HOST:PORT` elsewhere, that send `big-64m.bin` and close, such as a loop of `nc -l`; the two-stream arm also reads from the next port up, and `REMOTEFILES_BENCHMARK_SFTP_PORTS` lists other ports of the same server, such as one without the proxy. For 120 Hz frames, give the benchmark host an Info.plist with `CADisableMinimumFrameDurationOnPhone`; `REMOTEFILES_BENCHMARK_FRAME_RATE=60` asks for 60 Hz in the same build. `REMOTEFILES_BENCHMARK_SCROLL_START=0.7` starts `testFolderScreen`'s steady scroll 70% of the way down, where `List`'s work for each cell is largest, and `testFolderScreenFiltering` narrows, clears and widens a filter on the folder screen. `offline` saves the generated `offline` trees (`small50`, `tiny400`, `mixed`; `REMOTEFILES_BENCHMARK_OFFLINE_TREES` narrows them), then times folder taps during a save and cancelling or dropping one; `REMOTEFILES_BENCHMARK_OFFLINE_EXTRAS=0` skips those, `REMOTEFILES_BENCHMARK_OFFLINE_SAVES=0` keeps only them, and `REMOTEFILES_BENCHMARK_OFFLINE_ARMS=dedicated1,shared1,shared16` rotates transfer policies in one process. `windowtaps` rotates read-window policies with folder taps during each download; give it `--mbit`. `windowcarry` runs only when named: each arm downloads `REMOTEFILES_BENCHMARK_CARRY_FILE` (`big-64m.bin`) twice on one connection, `REMOTEFILES_BENCHMARK_CARRY_IDLE_MS` apart, with folder taps during the second. `REMOTEFILES_BENCHMARK_CARRY_ARMS` chooses and orders the arms from `growing`, `carry`, `carryhold`, `fixed64`, `stale64` and `stale64hold`; the default is the first four. `pipeline` runs a live contents search and an index build of the same tree.
 
 Keep the phone unlocked and allow Local Network on first run. Links vary, so alternate short runs and compare pairs, as for downloads above. Remove the host afterwards with `xcrun devicectl device uninstall app`; it is `dev.iris.RemoteFilesBenchTestHost`.
 
 Nothing in the harness fails on a timing, because shared machines are too noisy for that. `PerformanceBenchmarkTests` runs once in CI at its smallest size, so it can't rot without anyone noticing. To catch a regression, compare against a kept baseline when changing listing, search, reads, rows or transfers.
 
-## Open: scrolling a 1,000-entry folder on iPad, 18 November
+## Scrolling deep in a large folder, 18 November
 
 On an iPad Pro 11-inch (M5), iPadOS 27.2.1, Release builds, Instruments' Animation Hitches
 template recorded runs of consecutive dropped frames while a 1,000-entry folder was scrolled to its
 end: 0.2-0.75 seconds at a time, on the first and second open. In each run a quarter to a third of
-the main thread's samples were in SwiftUI's List configuring a new cell's separator, which finds
-the cell's row by walking the list's rows from the start
-(`UICollectionViewListCoordinator.separatorConfiguration` → `ListDiffable.rowIndex(at:)` →
-`ShadowRowCollection.index(after:)`), so each cell costs more the further down it is. Not
-refreshing identical rows didn't help, so a listing refresh is not what triggers it. A candidate
-to measure next is `FolderRowList`'s optional empty-state row ahead of its `ForEach`, the kind of
-condition that [made SwiftUI build every row](#what-changed-and-why) before. Not yet tried
+the main thread's samples were in SwiftUI's List configuring a new cell's separator
 ([evidence](REAL_SERVER_ACCEPTANCE.md#18-november-2026-ipad-follow-up)).
+
+**Cause.** To draw a cell's separator, `List` finds the cell's row by counting the rows of its
+section from the start (`ListDiffable.rowIndex(at:)` → `Collection.index(atOffset:)` →
+`ShadowRowCollection.index(after:)`), so each cell costs more the further down it is. Nothing about
+the rows themselves decides it: on an iPad Pro 11-inch (M5) Simulator, with the same 24 flings
+through the demo's 1,000-entry folder, the walk's share of main-thread samples was the same with the
+empty-state row moved into an overlay (3.6%), with separators hidden (3.7%) and with both (3.4%) as
+before (3.3%). It rose from 0.4% of the first part of a run to 6% near the end.
+
+**Change.** The folder's rows are now in header-less sections of a power of two near the square
+root of their count: 32 rows up to 1,024 entries, 128 at 10,000, 512 at 100,000. The walk only
+counts a section's rows; in the same flings it stayed at 0.2-0.4% throughout. Each new set of
+visible rows gives the sections new identities, so SwiftUI replaces them rather than moving rows
+between them. `FolderView.swift` explains both choices.
+
+Simulator, Release, alternating builds of one binary, medians of six runs
+([samples](performance/2026-11-18-folder-sections)):
+
+| | Entries | One section | Sections |
+|---|---|---|---|
+| Scrolling from 70% down, 95th-percentile frame | 10,000 | 57 ms | 17 ms |
+| | 100,000 | 268 ms | 17 ms |
+| Frames missed while scrolling there | 100,000 | 20% | 1.1% |
+| First rows on screen | 100,000 | 1,255 ms | 670 ms |
+| Longest frame narrowing a filter to 5,829 rows | 100,000 | 614 ms | 106 ms |
+| Longest frame widening it to 39,766 rows | 100,000 | 424 ms | 139 ms |
+| Longest frame while a folder arrives | 10,000 / 50,000 / 100,000 | 84 / 85 / 112 ms | 97 / 122 / 143 ms |
+| Scrolling at the top, and 1,000 entries throughout | | equal within noise | |
+
+Two other shapes were rejected. Sections of 50 rows made 2,000 sections at 100,000 entries, and the
+first rows took 1.9 s; sections keep a cost per section. With fixed identities, rows that arrive or
+are filtered out shift every later row into another section, and one update while 100,000 rows
+arrived took up to 958 ms. *Cost:* while a large folder arrives, its longest frame is 13-37 ms
+longer. A refresh replaces every section; a hosted test checks that the row at the top stays where
+it was.
+
+**On the iPad.** The same iPad, scrolling the same 1,000-entry folder over SFTP to its end by hand,
+with Animation Hitches recording 60 seconds from launch; one run of each, launched from one Release
+build:
+
+| | One section | Sections |
+|---|---|---|
+| Hitches, total | 22, 383 ms | 13, 183 ms |
+| Runs of consecutive dropped frames | 10 frames, then 6 longer ones | one of 9 |
+| Main-thread samples walking the rows | 13% (35% within the runs) | 0.9% |
+
+The walk is gone; what remains in the run of dropped frames is SwiftUI creating new cells and
+measuring their rows during a fast flick. One hand-scrolled run each varies with the flick, so the
+hitch counts show a direction, not a size. The scripted flings through the demo's 1,000-entry folder
+dropped no frames with either list. *Not shown:* how large folders behave on the device; those
+figures are from the simulator.
