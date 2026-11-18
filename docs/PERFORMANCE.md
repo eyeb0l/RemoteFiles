@@ -708,6 +708,18 @@ arrived took up to 958 ms. *Cost:* while a large folder arrives, its longest fra
 longer. A refresh replaces every section; a hosted test checks that the row at the top stays where
 it was.
 
-*Not yet shown:* that it removes the hitches on the iPad. The simulator shows the walk's share, not
-the device's dropped frames, so the Animation Hitches trace is to be repeated on the device with the
-same flings before this counts as fixed.
+**On the iPad.** The same iPad, scrolling the same 1,000-entry folder over SFTP to its end by hand,
+with Animation Hitches recording 60 seconds from launch; one run of each, launched from one Release
+build:
+
+| | One section | Sections |
+|---|---|---|
+| Hitches, total | 22, 383 ms | 13, 183 ms |
+| Runs of consecutive dropped frames | 10 frames, then 6 longer ones | one of 9 |
+| Main-thread samples walking the rows | 13% (35% within the runs) | 0.9% |
+
+The walk is gone; what remains in the run of dropped frames is SwiftUI creating new cells and
+measuring their rows during a fast flick. One hand-scrolled run each varies with the flick, so the
+hitch counts show a direction, not a size. The scripted flings through the demo's 1,000-entry folder
+dropped no frames with either list. *Not shown:* how large folders behave on the device; those
+figures are from the simulator.
