@@ -884,7 +884,14 @@ final class PerformanceBenchmarkTests: XCTestCase {
         let recorder = BenchmarkRecorder(label: environment["REMOTEFILES_BENCHMARK_LABEL"] ?? "unlabelled")
         let sizes = (environment["REMOTEFILES_BENCHMARK_SCREEN_SIZES"] ?? (measuring ? "10000,100000" : "100")).split(separator: ",").compactMap { Int($0) }
         for size in sizes {
-            let service = BenchmarkFolderService(entries: BenchmarkData.entries(count: size))
+            let entries = BenchmarkData.entries(count: size)
+            let service = BenchmarkFolderService(entries: entries)
+            // The rows each query must show, by the folder's own filter; an empty result is one row
+            // explaining it. A filter that never applies fails here rather than recording a time.
+            let listing = FolderListing(DirectorySnapshot(path: "/bench", entries: entries))
+            func expectedRows(_ query: String) -> Int {
+                max(1, listing.visible(query: query, showHidden: false, order: .name).count)
+            }
             for _ in 0..<runs {
                 let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
                 defer { try? FileManager.default.removeItem(at: directory) }
@@ -906,16 +913,23 @@ final class PerformanceBenchmarkTests: XCTestCase {
                 while (find(window, UICollectionView.self)?.visibleCells.isEmpty ?? true), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
                 let collection = try XCTUnwrap(find(window, UICollectionView.self))
                 let bar = try XCTUnwrap(find(window, UISearchBar.self))
+                while total(collection) != expectedRows(""), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+                XCTAssertEqual(total(collection), expectedRows(""), "The whole folder is listed before filtering")
                 try await Task.sleep(for: .milliseconds(measuring ? 800 : 50))
                 let frames = FrameSampler(); frames.start(); defer { frames.stop() }
                 for (name, query) in [("narrow", ".md"), ("clear", ""), ("wide", "1"), ("clear2", "")] {
-                    let before = total(collection)
+                    let expected = expectedRows(query)
                     frames.reset()
                     let started = ContinuousClock.now
                     bar.text = query
                     bar.delegate?.searchBar?(bar, textDidChange: query)
-                    let limit = ContinuousClock.now + .seconds(20)
-                    while total(collection) == before, ContinuousClock.now < limit { try await Task.sleep(for: .milliseconds(2)) }
+                    // Hosted runners are slow; this bound only ends a run whose filter never applies.
+                    let limit = ContinuousClock.now + .seconds(60)
+                    while total(collection) != expected, ContinuousClock.now < limit { try await Task.sleep(for: .milliseconds(2)) }
+                    guard total(collection) == expected else {
+                        XCTFail("\(name): the list shows \(total(collection)) rows, not the \(expected) its filter gives")
+                        return
+                    }
                     recorder.add("filter.\(name).\(size)", value: started.elapsedMilliseconds)
                     try await Task.sleep(for: .milliseconds(measuring ? 400 : 20))
                     recorder.add("filter.\(name).longestFrame.\(size)", value: frames.longestGapMilliseconds)
