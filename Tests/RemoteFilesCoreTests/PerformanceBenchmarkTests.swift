@@ -854,6 +854,11 @@ final class PerformanceBenchmarkTests: XCTestCase {
                 // Let loading settle, then scroll at a steady speed, a screen or so at a time.
                 try await Task.sleep(for: .milliseconds(measuring ? 500 : 50))
                 recorder.add("screen.memoryMB.\(size)", value: Double(BenchmarkMemory.footprint() - before) / 1_048_576, unit: "MB")
+                // A fraction such as 0.7 scrolls from deep in the folder, where SwiftUI's per-cell work is largest.
+                if let fraction = Double(environment["REMOTEFILES_BENCHMARK_SCROLL_START"] ?? "") {
+                    collection.setContentOffset(CGPoint(x: 0, y: (collection.contentSize.height - collection.bounds.height) * fraction), animated: false)
+                    try await Task.sleep(for: .milliseconds(measuring ? 1500 : 50))
+                }
                 frames.reset()
                 let scrollEnd = ContinuousClock.now + (measuring ? .seconds(3) : .milliseconds(100))
                 while ContinuousClock.now < scrollEnd {
@@ -868,6 +873,54 @@ final class PerformanceBenchmarkTests: XCTestCase {
                 recorder.add("screen.scroll.medianFrame.\(size)", value: frames.percentile(0.5))
                 recorder.add("screen.scroll.p99Frame.\(size)", value: frames.percentile(0.99))
                 recorder.add("screen.scroll.missedShare.\(size)", value: frames.missedShare * 100, unit: "%")
+            }
+        }
+        recorder.flush()
+    }
+
+    /// Filtering a folder on screen: narrowing it, clearing the filter, and a filter most rows match.
+    /// The query goes through the search bar's delegate, as typing does.
+    @MainActor func testFolderScreenFiltering() async throws {
+        let recorder = BenchmarkRecorder(label: environment["REMOTEFILES_BENCHMARK_LABEL"] ?? "unlabelled")
+        let sizes = (environment["REMOTEFILES_BENCHMARK_SCREEN_SIZES"] ?? (measuring ? "10000,100000" : "100")).split(separator: ",").compactMap { Int($0) }
+        for size in sizes {
+            let service = BenchmarkFolderService(entries: BenchmarkData.entries(count: size))
+            for _ in 0..<runs {
+                let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                defer { try? FileManager.default.removeItem(at: directory) }
+                let model = try AppModel(directory: directory, fileService: service)
+                let profile = ConnectionProfile(name: "Bench", host: "fixture.invalid", username: "bench", identityID: UUID(), startingDirectory: "/bench")
+                let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+                let previous = scene.windows.first { $0.isKeyWindow }
+                let window = UIWindow(windowScene: scene)
+                window.rootViewController = UIHostingController(rootView: NavigationStack {
+                    FolderView(model: model, profile: profile, requestedPath: "/bench")
+                })
+                window.makeKeyAndVisible()
+                defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+                func find<T: UIView>(_ view: UIView, _ type: T.Type) -> T? {
+                    (view as? T) ?? view.subviews.lazy.compactMap { find($0, type) }.first
+                }
+                func total(_ c: UICollectionView) -> Int { (0..<c.numberOfSections).reduce(0) { $0 + c.numberOfItems(inSection: $1) } }
+                let deadline = ContinuousClock.now + .seconds(120)
+                while (find(window, UICollectionView.self)?.visibleCells.isEmpty ?? true), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+                let collection = try XCTUnwrap(find(window, UICollectionView.self))
+                let bar = try XCTUnwrap(find(window, UISearchBar.self))
+                try await Task.sleep(for: .milliseconds(measuring ? 800 : 50))
+                let frames = FrameSampler(); frames.start(); defer { frames.stop() }
+                for (name, query) in [("narrow", ".md"), ("clear", ""), ("wide", "1"), ("clear2", "")] {
+                    let before = total(collection)
+                    frames.reset()
+                    let started = ContinuousClock.now
+                    bar.text = query
+                    bar.delegate?.searchBar?(bar, textDidChange: query)
+                    let limit = ContinuousClock.now + .seconds(20)
+                    while total(collection) == before, ContinuousClock.now < limit { try await Task.sleep(for: .milliseconds(2)) }
+                    recorder.add("filter.\(name).\(size)", value: started.elapsedMilliseconds)
+                    try await Task.sleep(for: .milliseconds(measuring ? 400 : 20))
+                    recorder.add("filter.\(name).longestFrame.\(size)", value: frames.longestGapMilliseconds)
+                    recorder.add("filter.\(name).rows.\(size)", value: Double(total(collection)), unit: "rows")
+                }
             }
         }
         recorder.flush()

@@ -709,12 +709,53 @@ private struct FolderRowList<Row: View>: View, Equatable {
                     ContentUnavailableView(empty.title, systemImage: empty.symbol, description: Text(empty.detail))
                         .listRowSeparator(.hidden)
                 }
-                ForEach(rows) { row($0).listRowInsets(.vertical, 7) }
+                // See `FolderRowSections` for why the rows are in sections and why each revision
+                // gives the sections new identities.
+                ForEach(0..<FolderRowSections.count(for: rows.count), id: \.self) { section in
+                    Section {
+                        ForEach(rows[FolderRowSections.rows(in: section, of: rows.count)]) { row($0).listRowInsets(.vertical, 7) }
+                    }
+                    .id(FolderRowSections.Identity(revision: revision, section: section))
+                }
             }
             .listStyle(.plain)
             .scrollDismissesKeyboard(.immediately)
             .refreshable { await refresh() }
         }
+    }
+}
+
+/// Splits a folder's rows into header-less sections, which look the same as one long list.
+///
+/// To draw each new cell's separator, SwiftUI's `List` finds the cell's row by counting the rows of
+/// its section from the start (`ListDiffable.rowIndex(at:)`), so in one long section a cell costs
+/// more the further down it is. Scrolled 70% of the way down on an iPad Simulator, the 95th
+/// percentile frame was 57 ms in 10,000 rows and 268 ms in 100,000; in sections it was 17 ms in both.
+/// Sections have a cost of their own: 2,000 sections of 50 rows took 1.9 s to show 100,000 rows'
+/// first cells. A power of two near the square root of the count keeps both small.
+///
+/// Rows stay sorted, so a row arriving or filtered out shifts every row after it across section
+/// boundaries, which SwiftUI diffs as moves between sections: one update while 100,000 rows arrived
+/// took 958 ms. So each revision of the rows gets new section identities and replaces the sections
+/// whole, which costs about what one long section's update did (143 ms against 112 ms). UIKit keeps
+/// the scroll offset, so unchanged rows stay where they were.
+enum FolderRowSections {
+    struct Identity: Hashable { let revision: Int; let section: Int }
+
+    /// Rows per section: the smallest power of two, at least 32, whose square covers `count`.
+    /// It changes only when the count crosses a power of four.
+    static func size(for count: Int) -> Int {
+        var size = 32
+        while size * size < count { size *= 2 }
+        return size
+    }
+    static func count(for rows: Int) -> Int {
+        let size = size(for: rows)
+        return (rows + size - 1) / size
+    }
+    static func rows(in section: Int, of count: Int) -> Range<Int> {
+        let size = size(for: count)
+        return section * size ..< min(count, section * size + size)
     }
 }
 
