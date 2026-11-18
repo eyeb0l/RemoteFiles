@@ -137,6 +137,11 @@ Local changes:
 - `WithInlineStyle.swift`: link colour no longer overrides a revealed match's colour.
 - `NavigationTarget.swift`: revealing a target keeps it clear of the scroll view's
   adjusted content insets, so a heading or Find match doesn't land under a bar.
+- `OverflowGeometryCache.swift`: internal, read-only `isCorrectingGeometry` and
+  `geometryCorrectionCount` let `OverflowViewportTests` wait for a jump's deferred-block
+  corrections to finish instead of sleeping two seconds. Behaviour is unchanged. The fixed
+  sleep could read the position after a block's layout and before the next frame's
+  correction (3 of 13 runs on an iPad Pro 11-inch (M5) Simulator).
 
 Before/after evidence and limitations are recorded in
 `../../docs/READER_PERFORMANCE.md`. Keep this fork small and return to the pinned

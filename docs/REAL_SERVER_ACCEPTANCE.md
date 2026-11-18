@@ -506,9 +506,12 @@ tests passed: 9 of 9, none skipped.
   now uses 100 sections.
 - On an iPad Pro 11-inch (M5) Simulator, `testLargeFastJumpKeepsVisibleProseAnchorAndSourceReturnRestoresSameCharacter`
   still failed 3 times in 13 runs. The same character landed 36 points high after the jump, and
-  in one run about 88 points away after returning from Source. It passed on the device. The cause
-  is not established; a trace pairing each of Textual's geometry corrections with the scroll
-  offset and caret position should settle it.
+  in one run about 88 points away after returning from Source. It passed on the device. The
+  36-point failures were the test's: it read the position after a fixed two-second sleep, which
+  could fall between a code block's layout and the next frame's correction. It now waits for the
+  corrections to finish ([18 November investigation](CI_HISTORY.md#18-november-2026-a-fixed-sleep-read-a-reading-anchor-mid-correction)).
+  The return from Source did not fail in 36 runs since, 16 of them with the test host slowed, so
+  its cause is still not established.
 
 ### Profiling (step 7)
 
