@@ -126,6 +126,14 @@ Local changes:
   the document's content rather than offset zero, so an anchor near the top keeps
   its position when the scroll view runs under the navigation bar, and is no
   longer clamped below its inset.
+- `OverflowGeometryCache.swift`: the reading anchor is sampled inside the content's
+  column, at least 10 points in from its left edge, rather than always 30 points
+  from the viewport's. A reader that centres a narrower column in a wide window,
+  as RemoteFiles does on a full-width iPad, left that point in the empty margin,
+  so no anchor was captured. Positions then fell back to raw offsets, and the
+  visible line moved by hundreds of points after a fast jump. Where the column
+  starts within 20 points of the viewport's edge, as on an iPhone, the point is
+  unchanged. `OverflowViewportTests` covers a 1,180-point-wide window.
 - `WithInlineStyle.swift`: link colour no longer overrides a revealed match's colour.
 - `NavigationTarget.swift`: revealing a target keeps it clear of the scroll view's
   adjusted content insets, so a heading or Find match doesn't land under a bar.
