@@ -41,6 +41,10 @@ struct EnhancedMarkdownView: View {
                     // Scripts are fixed when a web view is made. New text that needs others gets a new one.
                     .id(diagrams)
                     .scrollsToBottomEdge()
+                    // WebKit paints before it reports the page finished, which showed the text through
+                    // the placeholder's skeleton for a second on iPad. Show one or the other.
+                    .opacity(loaded ? 1 : 0)
+                    .accessibilityHidden(!loaded)
                 if !loaded { LoadingPlaceholder(label: "Rendering Markdown…", shape: .document) }
             } else { LoadingPlaceholder(label: "Preparing Markdown…", shape: .document) }
         }
