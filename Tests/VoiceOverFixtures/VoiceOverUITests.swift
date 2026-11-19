@@ -311,30 +311,33 @@ extension XCUIApplication {
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = name; shot.lifetime = .keepAlways; add(shot)
     }
+    /// Launches the demo with VoiceOver on and opens Weekly review.md from Projects by VoiceOver
+    /// alone, asserting the reader's landing. The caller enables VoiceOver.
+    private func openWeeklyReview(_ app: XCUIApplication, focusLog: String) throws -> XCUIElement {
+        // Launch with VoiceOver already enabled so the initial screen change
+        // establishes focus.
+        app.launch()
+        XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 10))
+        try focus("Projects", name: "home")
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch.doubleTap()
+        let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Latest report")).firstMatch
+        XCTAssertTrue(report.waitForExistence(timeout: 10), app.debugDescription)
+        print("VO FOLDER CURRENT: \(try service.currentSpeech().utterance)")
+        try focus("Weekly review.md", name: "folder")
+        let landingOffset = focusEventCount(focusLog)
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly review.md")).firstMatch.doubleTap()
+        XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 10))
+        try assertReaderLanding(focusLog, after: landingOffset, title: "Weekly review.md")
+        return report
+    }
+    /// Document actions has its own journey: see `testDocumentActionsVoiceOverJourney`.
     func testDemoReaderVoiceOverJourney() throws {
         continueAfterFailure = true
-        // Hosted runs take 140–173 s. XCTest's idle wait after opening Document actions has twice run its
-        // full 60 s before continuing, which the default 180 s cannot absorb; 240 s is the lane's maximum
-        // (docs/CI_HISTORY.md, 17 November 2026).
-        executionTimeAllowance = 240
         let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]
         let focusLog = recordFocus(of: app)
         defer { print("VO MARKDOWN FOCUS LOG\n\((try? String(contentsOfFile: focusLog, encoding: .utf8)) ?? "")VO MARKDOWN FOCUS LOG END") }
         try withVoiceOver {
-            // Launch with VoiceOver already enabled so the initial screen change
-            // establishes focus.
-            app.launch()
-            XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 10))
-            try focus("Projects", name: "home")
-            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch.doubleTap()
-            let report = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Latest report")).firstMatch
-            XCTAssertTrue(report.waitForExistence(timeout: 10), app.debugDescription)
-            print("VO FOLDER CURRENT: \(try service.currentSpeech().utterance)")
-            try focus("Weekly review.md", name: "folder")
-            let landingOffset = focusEventCount(focusLog)
-            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly review.md")).firstMatch.doubleTap()
-            XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 10))
-            try assertReaderLanding(focusLog, after: landingOffset, title: "Weekly review.md")
+            _ = try openWeeklyReview(app, focusLog: focusLog)
             print("VO MARKDOWN LANDING at=\(Date().timeIntervalSince1970): \(((try? String(contentsOfFile: focusLog, encoding: .utf8)) ?? "").split(separator: "\n").last.map(String.init) ?? "none")")
             let read = try speech("MARKDOWN")
             capture("VoiceOver rendered report", app)
@@ -356,10 +359,29 @@ extension XCUIApplication {
             XCTAssertFalse(source.contains { $0.localizedCaseInsensitiveContains("double-tap to edit") })
             try focus("Rendered", name: "rendered", limit: 20, backward: true)
             app.buttons["Rendered"].doubleTap()
-            try focus("Document actions", name: "actions", limit: 90, backward: true)
+            XCTAssertTrue(app.textViews["Bounded source text"].waitForNonExistence(timeout: 10), app.debugDescription)
+            XCTAssertTrue(app.scrollViews["Rendered Markdown document"].exists)
+        }
+    }
+    func testDocumentActionsVoiceOverJourney() throws {
+        continueAfterFailure = true
+        // On a starved runner the menu can open without XCTest's idle wait ever completing while it
+        // stays open: the double tap that opens it and the next one, on Refresh, each wait their full
+        // 60 s. Old hosted timings project reaching the menu about 54 s in and a stalled run near 211 s,
+        // so this needs the lane's 240 s maximum (docs/CI_HISTORY.md, 19 November 2026).
+        executionTimeAllowance = 240
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]
+        let focusLog = recordFocus(of: app)
+        defer { print("VO ACTIONS FOCUS LOG\n\((try? String(contentsOfFile: focusLog, encoding: .utf8)) ?? "")VO ACTIONS FOCUS LOG END") }
+        try withVoiceOver {
+            let report = try openWeeklyReview(app, focusLog: focusLog)
+            // The menu's button follows the title.
+            try focus("Document actions", name: "actions", limit: 12)
             app.buttons["Document actions"].doubleTap()
-            _ = try speech("ACTIONS", limit: 12)
+            let actions = try speech("ACTIONS", limit: 12)
             capture("VoiceOver document actions", app)
+            XCTAssertTrue(actions.contains { $0.contains("Refresh") && $0.contains("Button") })
+            XCTAssertTrue(actions.contains { $0.contains("Disconnect") && $0.contains("Button") })
             try focus("Refresh", name: "refresh", limit: 12, backward: true)
             app.buttons["Refresh"].doubleTap()
             XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 10))
