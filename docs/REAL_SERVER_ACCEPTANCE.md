@@ -462,7 +462,8 @@ under Modifier Keys, so these results may differ from an attached keyboard.
 
 All of these were done in the [follow-up](#18-november-2026-ipad-follow-up).
 
-Evidence on the MacBook Air: `/private/tmp/remotefiles-ipad-20261118/` holds the build and test
+Evidence is on the external SSD attached to the MacBook Air, in
+`remotefiles-ipad-tmp-evidence/remotefiles-ipad-20261118/` (moved there from `/private/tmp` on 19 November). It holds the build and test
 logs, `core.xcresult` (first core run), `fix2.xcresult` (affected suites after the fix),
 `web.xcresult` (reading-position rerun), `ui.xcresult`, the four Face ID result bundles, `band-fixed` and
 `band-unfixed` (the offline regression with and without its fix), `session-log.md` (the hands-on
@@ -613,7 +614,7 @@ The three hand checks were done in the [evening checks](#18-november-2026-ipad-e
 
 Evidence is on an external SSD attached to the MacBook Air, in `remotefiles-ipad-20261119/`: the
 traces (`folder.trace`, `report.trace`, `folder-fixed.trace`; the Allocations run is
-`/private/tmp/remotefiles-ipad-20261119/profile-1000-report.trace`), their exported tables, the key
+`remotefiles-ipad-tmp-evidence/remotefiles-ipad-20261119/profile-1000-report.trace` on the same SSD), their exported tables, the key
 log (`keydiag-1.log`) and its patch, the cellular capture (`cellular/`), the downloaded file and
 the offline copy after the interrupted update, the device test result `readpos-device.xcresult`,
 the encrypted-key fixture's server log and `session-log.md`.
