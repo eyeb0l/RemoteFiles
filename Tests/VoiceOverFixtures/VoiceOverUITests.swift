@@ -367,8 +367,8 @@ extension XCUIApplication {
         continueAfterFailure = true
         // On a starved runner the menu can open without XCTest's idle wait ever completing while it
         // stays open: the double tap that opens it and the next one, on Refresh, each wait their full
-        // 60 s. Old hosted timings project reaching the menu about 54 s in and a stalled run near 211 s,
-        // so this needs the lane's 240 s maximum (docs/CI_HISTORY.md, 19 November 2026).
+        // 60 s. A hosted run that stalled reached the menu 58.6 s in and passed in 215.4 s, so this
+        // needs the lane's 240 s maximum (docs/CI_HISTORY.md, 19 November 2026).
         executionTimeAllowance = 240
         let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]
         let focusLog = recordFocus(of: app)

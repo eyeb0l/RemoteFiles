@@ -48,7 +48,12 @@ ends by switching back to Rendered and asserts the source view has gone; it no l
 and takes the default allowance. Locally the reader journey took 91 seconds, and the new journey
 70 to 75 seconds in three starved runs without a stall and 190 seconds in the one with it. The old hosted
 journey reached the menu at about 54 seconds and needed about 37 more after it; applied to the new
-journey that projects about 211 seconds for a hosted stalled run, which no hosted run has yet measured.
+journey that projects about 211 seconds for a hosted stalled run.
+
+**Hosted result.** PR #169's run [44555357142](https://github.com/eyeb0l/RemoteFiles/actions/runs/44555357142/attempts/2)
+(attempt 2) stalled in the new journey and passed. It double-tapped **Document actions** at 58.6
+seconds, and both waits ran their full 60 seconds, ending at 120.2 and 195.4. It finished in 215.4
+seconds, 25 short of the allowance. The reader journey took 118.0 seconds and all 12 methods passed.
 
 **Limits.** A third 60-second wait in one launch would still exceed 240 seconds. The app is
 unchanged, and why the idle check does not complete while the menu is open was not found.
