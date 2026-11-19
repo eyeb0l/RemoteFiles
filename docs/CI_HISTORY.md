@@ -10,6 +10,54 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 19 November 2026: an open menu holds XCTest's idle wait twice
+
+The nightly runs [44286118535](https://github.com/eyeb0l/RemoteFiles/actions/runs/44286118535)
+and [44507525028](https://github.com/eyeb0l/RemoteFiles/actions/runs/44507525028) on `main` failed
+**Acceptance / voiceover** in one method each night: `VoiceOverChecks.testDemoReaderVoiceOverJourney`
+exceeded its 240-second allowance. The other 10 passed, and the
+[17 November](#17-november-2026-a-killed-voiceover-journey-left-voiceover-on-for-the-key-journey)
+fix held: every later method started with VoiceOver off.
+
+Both runs show the same sequence. The double tap on **Document actions**, at 112 and 119 seconds,
+waited its full 60 seconds for the app to idle (`App animations complete notification not received`).
+The journey read the open menu, focused **Refresh** and double-tapped it at 189 and 196 seconds,
+and that tap's wait *before* its event ran into the allowance. In the four passing runs retained
+from 16 to 18 November both waits took about a second.
+
+**Cause.** On a starved main thread the menu can open without XCTest's idle check ever completing
+while it stays open, so the tap that opens it and the next tap each wait 60 seconds. The cost is
+bounded: once the menu closes, waits are normal again. 17 November budgeted one 60-second wait
+(173 + 60 = 233); the second puts a 140 to 173-second journey past any allowance the lane allows.
+
+**Reproduction.** On an iPhone 18 Pro simulator with iOS 27.0 (24A434), the unchanged journey passed
+in 133 seconds. Pausing the app with `SIGSTOP` for 150 to 160 ms in every 200 for 15 to 20 seconds
+from the **Document actions** double tap stalled 2 of 5 runs, four of them with the tracer below
+loaded. Both stalled runs logged the two
+60-second waits and nothing else: one reported the second wait's timeout at 239.5 seconds and was
+killed at 240, as on the hosted runs, and
+the other, given 600 seconds, closed the menu with **Refresh** and finished in 257 seconds with every
+later wait normal. A tracer of UIKit view animations that started without stopping found none
+left open during the stall, so the animation XCTest is waiting for was not identified.
+
+**Fix.** The menu, **Refresh** and the return to Projects move to `testDocumentActionsVoiceOverJourney`,
+which opens the report the same way and then focuses **Document actions** next to the title, so it
+reaches the menu about 50 seconds in rather than 115. It keeps the 240-second maximum and now
+asserts that the menu speaks **Refresh** and **Disconnect** as buttons. The demo reader journey
+ends by switching back to Rendered and asserts the source view has gone; it no longer opens a menu
+and takes the default allowance. Locally the reader journey took 91 seconds, and the new journey
+70 to 75 seconds in three starved runs without a stall and 190 seconds in the one with it. The old hosted
+journey reached the menu at about 54 seconds and needed about 37 more after it; applied to the new
+journey that projects about 211 seconds for a hosted stalled run.
+
+**Hosted result.** PR #169's run [44555357142](https://github.com/eyeb0l/RemoteFiles/actions/runs/44555357142/attempts/2)
+(attempt 2) stalled in the new journey and passed. It double-tapped **Document actions** at 58.6
+seconds, and both waits ran their full 60 seconds, ending at 120.2 and 195.4. It finished in 215.4
+seconds, 25 short of the allowance. The reader journey took 118.0 seconds and all 12 methods passed.
+
+**Limits.** A third 60-second wait in one launch would still exceed 240 seconds. The app is
+unchanged, and why the idle check does not complete while the menu is open was not found.
+
 ## 18 November 2026: a fixed sleep read a reading anchor mid-correction
 
 `OverflowViewportTests.testLargeFastJumpKeepsVisibleProseAnchorAndSourceReturnRestoresSameCharacter`

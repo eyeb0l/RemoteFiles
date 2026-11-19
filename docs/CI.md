@@ -17,7 +17,7 @@ failures and the original timing baselines are in [CI history](CI_HISTORY.md).
 | CI gate, Linux, no builds or test reruns | Requires successful repository checks and successful selected lanes; accepts unselected lanes only if successful or skipped | Every run, even after a dependency fails or skips |
 | Quick, two Mac jobs in parallel, about 25 minutes | **Quick / macos-openssh**: every inventoried macOS core test with the loopback OpenSSH and bastion fixtures. **Quick / simulator-core**: every inventoried hosted iOS core test, with the fixture, on a disposable simulator | Every change outside documentation and scripts no lane executes, except a push to `main` whose exact tree already passed them in a PR run |
 | UI, one Mac job, about 50 minutes | **Acceptance / simulator-ui**: the whole UI journey inventory on one disposable simulator | Every push to `main` with code, unless its exact tree already passed the UI journeys in a PR run; PRs that change UI journeys, `App/`, packages, vendored code, `Fixtures/` or demo resources; CI infrastructure; unknown paths; the `full-acceptance` label |
-| Extended, two Mac jobs, about 30 minutes | **Acceptance / voiceover**: eleven `XCUIVoiceOverService` journeys against production views in the generated `RemoteFilesAccessibility` fixture app. **Acceptance / release-device-compile**: unsigned optimized device build | Nightly at 02:30 UTC on `main`; the label or a manual dispatch; VoiceOver fixture changes (VoiceOver only); CI infrastructure; unknown paths |
+| Extended, two Mac jobs, about 30 minutes | **Acceptance / voiceover**: twelve `XCUIVoiceOverService` journeys against production views in the generated `RemoteFilesAccessibility` fixture app. **Acceptance / release-device-compile**: unsigned optimized device build | Nightly at 02:30 UTC on `main`; the label or a manual dispatch; VoiceOver fixture changes (VoiceOver only); CI infrastructure; unknown paths |
 
 The quick tier finds logic, transport, Keychain, persistence and reader regressions
 within about twenty-five minutes and rarely fails for environmental reasons. The UI and
@@ -204,7 +204,7 @@ five simulator-core jobs failed ([settle experiment](CI_HISTORY.md#17-november-2
 A failed build never boots the device or executes cached products. Each command receives a 30-minute
 deadline, except the UI lane's test execution, which receives 60 minutes for the whole
 journey inventory. Job ceilings are 45 minutes for the quick lanes and Release, 60 for
-VoiceOver and 120 for UI; methods receive 180/240-second allowances, and the demo reader
+VoiceOver and 120 for UI; methods receive 180/240-second allowances, and the Document actions
 VoiceOver journey asks for the 240-second maximum. The OpenSSH
 fixture surrounds core and UI test execution.
 
