@@ -92,7 +92,9 @@ they can count as device evidence.
 **UI journeys on the iPad.** The demo `RemoteFilesUITests` class passed 13, failed 22 and skipped 1
 on the device. Most failures assert the iPhone's stack navigation (navigation bar titles, Back
 buttons, hittability in one column), which CI only runs on an iPhone. The iPad workspace journey
-passed.
+passed. Run again on an iPad simulator later that day, six of the failures came from the workspace's
+column identifiers hiding the identifiers inside each column, and thirteen remain iPhone-only
+([UI journeys on an iPad](AUTOMATED_ACCEPTANCE.md#ui-journeys-on-an-ipad)).
 
 ## 17 November 2026: a killed VoiceOver journey left VoiceOver on for the key journey
 

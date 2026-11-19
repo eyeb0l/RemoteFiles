@@ -860,7 +860,11 @@ final class RemoteFilesUITests: XCTestCase {
         let title = nested.staticTexts["Quarterly review.md"].firstMatch
         waitUntilHittable(title); title.tap()
         XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 15))
-        XCTAssertTrue(app.navigationBars.buttons["Projects"].waitForExistence(timeout: 5)); app.navigationBars.buttons["Projects"].tap()
+        // In the iPad workspace the folder stays beside the reader, and its title opens the folder menu rather
+        // than going back; on a stack, go back to the folder.
+        if !app.descendants(matching: .any).matching(identifier: "workspace-folder").firstMatch.exists {
+            XCTAssertTrue(app.navigationBars.buttons["Projects"].waitForExistence(timeout: 5)); app.navigationBars.buttons["Projects"].tap()
+        }
         // Searching again would show its status for at least the pause before listing.
         let searching = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Searching")).firstMatch
         for _ in 0..<20 {
@@ -870,9 +874,13 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(nested.exists && summary.exists, "Results stay after opening one")
 
         app.buttons["This Folder"].tap()
+        // Weekly review is among the subfolder results too, so its row says nothing about which scope shows:
+        // wait for the nested result to go instead.
+        let gone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: nested)
+        gone.expectationDescription = "This Folder filters only the folder's own names"
+        wait(for: [gone], timeout: 10)
         let filtered = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly review.md,")).firstMatch
-        XCTAssertTrue(filtered.waitForExistence(timeout: 10))
-        XCTAssertFalse(nested.exists, "This Folder filters only the folder's own names")
+        XCTAssertTrue(filtered.exists)
     }
 
     func testContentSearchShowsSourceSnippetsAndKeepsResultsWhenOpeningAFile() throws {
