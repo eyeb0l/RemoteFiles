@@ -242,8 +242,9 @@ struct WorkspaceLink<Label: View>: View {
     @ViewBuilder var label: () -> Label
     var body: some View {
         if let navigate {
+            // The default style makes the button its list cell's action, which is what lets a
+            // keyboard focus the row; with `.plain`, Tab could never reach the library.
             Button { navigate(route) } label: { label().frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle()) }
-                .buttonStyle(.plain)
                 .accessibilityAddTraits(.isLink)
         } else {
             NavigationLink(value: route, label: label)
