@@ -46,6 +46,41 @@ enum RemoteFilesStyle {
     }
 }
 
+/// The popover belongs to its button, but a cleanup failure can outlive the last row and button.
+struct DeleteAllLocalFilesAction: ViewModifier {
+    let title: String
+    let message: String
+    let isAvailable: Bool
+    let remove: () async throws -> Void
+    @State private var confirming = false
+    @State private var failure: String?
+
+    func body(content: Content) -> some View {
+        content
+            .toolbar {
+                if isAvailable {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Delete All", systemImage: "trash", role: .destructive) { confirming = true }
+                            .tint(.red)
+                            .confirmationDialog(title, isPresented: $confirming, titleVisibility: .visible) {
+                                Button("Delete All", role: .destructive) {
+                                    Task {
+                                        do { try await remove() }
+                                        catch { failure = error.localizedDescription }
+                                    }
+                                }
+                                Button("Cancel", role: .cancel) {}
+                            } message: { Text(message) }
+                    }
+                }
+            }
+            .alert("Couldn’t delete all items", isPresented: Binding(
+                get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+                Button("OK") { failure = nil }
+            } message: { Text(failure ?? "") }
+    }
+}
+
 /// One line of a list: an icon, a name and at most one quiet line beneath it. The spoken label can
 /// say more than the row shows, such as "Folder", which every folder's icon already says by sight.
 struct LocationRow: View {

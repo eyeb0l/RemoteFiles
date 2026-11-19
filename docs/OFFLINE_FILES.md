@@ -4,6 +4,10 @@
 
 Save files or complete folder trees on this device when you want to read them without a connection. Copies do not update automatically, and removing a copy never deletes the server original.
 
+Use **Delete All** in Offline Files to remove every saved file and folder on this device. Confirming also cancels any offline save in progress. The server originals stay available.
+
+<img src="screenshots/managed-features/ipad-offline-actions.png" width="720" alt="Offline Files on an 11-inch iPad in Dark Mode, showing the Delete All toolbar button and the blue Update and red Remove swipe actions">
+
 ## Save and open copies
 
 - **Save a file:** Choose **Keep Offline** in its **Document actions** menu, or long-press a regular file in its folder. The app saves its original bytes and filename on this device. The save shows byte progress and a Cancel action; only one offline file or folder save runs at a time.

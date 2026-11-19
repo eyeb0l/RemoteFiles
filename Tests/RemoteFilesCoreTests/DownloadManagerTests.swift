@@ -368,6 +368,51 @@ final class DownloadManagerTests: XCTestCase {
         XCTAssertEqual(requests.first?.root, "/safe", "A file's own folder bounds its download")
         XCTAssertEqual(requests.first?.limit, DownloadManager.maximumFileBytes)
     }
+    func testRemoveAllKeepsOnlyDownloadsWhoseFilesCouldNotBeDeleted() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let manager = try DownloadManager(service: DownloadFixture(bytes: Data([1])), directory: directory)
+        let retained = try manager.enqueue(profile: profile, entry: entry("retained.bin"))
+        let removed = try manager.enqueue(profile: profile, entry: entry("removed.bin"))
+        try await wait { manager.activeID == nil }
+        manager.removeItem = { url in
+            if url.lastPathComponent == retained.uuidString { throw CocoaError(.fileWriteNoPermission) }
+            try FileManager.default.removeItem(at: url)
+        }
+        XCTAssertThrowsError(try manager.removeAll())
+        let reopened = try DownloadManager(directory: directory)
+        XCTAssertEqual(reopened.items.map(\.id), [retained])
+        XCTAssertEqual(try Data(contentsOf: reopened.completedURL(retained)), Data([1]))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(removed.uuidString).path))
+        let later = try manager.enqueue(profile: profile, entry: entry("later.bin"))
+        try await wait { manager.items.first(where: { $0.id == later })?.state == .completed }
+        manager.removeItem = { try FileManager.default.removeItem(at: $0) }
+        try manager.removeAll()
+        XCTAssertTrue(manager.items.isEmpty)
+    }
+
+    func testRemoveAllDrainsActiveTransferAndPreservesLaterEnqueues() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let service = DownloadFixture(bytes: Data([1]), holdFirst: true)
+        let manager = try DownloadManager(service: service, directory: directory)
+        let active = try manager.enqueue(profile: profile, entry: entry("active.bin"))
+        _ = try manager.enqueue(profile: profile, entry: entry("queued.bin"))
+        try await wait { await service.requests.count == 1 }
+        try manager.removeAll()
+        XCTAssertEqual(manager.items.map(\.id), [active])
+        XCTAssertEqual(manager.items.first?.state, .cancelled)
+        let later = try manager.enqueue(profile: profile, entry: entry("later.bin"))
+        await service.resume()
+        try await wait { manager.activeID == nil }
+        let restored = try DownloadManager(directory: directory)
+        XCTAssertEqual(restored.items.map(\.id), [later])
+        XCTAssertEqual(restored.items.first?.state, .completed)
+        let requests = await service.requests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(active.uuidString).path))
+        try restored.removeAll()
+        XCTAssertTrue(try DownloadManager(directory: directory).items.isEmpty)
+    }
+
     func testCancellationDrainsBeforeNextJobAndDiscardsLateBytes() async throws {
         let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
         let service = DownloadFixture(bytes: Data([1, 2]), holdFirst: true)

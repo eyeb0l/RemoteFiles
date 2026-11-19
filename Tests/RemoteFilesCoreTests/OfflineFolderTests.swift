@@ -397,6 +397,49 @@ final class OfflineFolderTests: XCTestCase {
         let lists = await service.lists, saved = await store.librarySnapshot()
         XCTAssertEqual(lists.count, 1); XCTAssertTrue(saved.files.isEmpty); XCTAssertTrue(saved.folders.isEmpty)
     }
+    func testRemoveAllReportsUndeletedBlobAndContinuesCleaningOtherCopies() async throws {
+        let (dir, store, service) = try setup()
+        let entry = RemoteEntry(name: "one.txt", path: path + "/one.txt", kind: .file)
+        let single = try await store.pin(profile: profile, entry: entry, allowedRoot: "/root", service: service)
+        let folder = try await store.pinFolder(profile: profile, path: path, service: service)
+        let lease = try await store.lease(single.id)
+        let before = await store.snapshot()
+        let blob = dir.appendingPathComponent(single.blobID.uuidString)
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: blob.path)
+        defer { try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: blob.path) }
+
+        do { try await store.removeAll(); XCTFail("A blob could not be removed") }
+        catch { XCTAssertEqual((error as NSError).domain, NSCocoaErrorDomain) }
+        let after = await store.librarySnapshot()
+        XCTAssertTrue(after.files.isEmpty)
+        XCTAssertTrue(after.folders.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: blob.path))
+        for pin in before where folder.fileIDs.contains(pin.id) {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent(pin.blobID.uuidString).path))
+        }
+        XCTAssertEqual(try Data(contentsOf: lease.url), Data("old\r\n".utf8))
+    }
+
+    func testRemoveAllRetiresFilesAndFoldersAndPreventsLateRefresh() async throws {
+        let (dir, store, service) = try setup()
+        let folder = try await store.pinFolder(profile: profile, path: path, service: service)
+        let individual = try await store.pin(profile: profile,
+            entry: .init(name: "one.txt", path: path + "/one.txt", kind: .file), allowedRoot: "/root", service: service)
+        let old = try await store.lease(try XCTUnwrap(folder.fileIDs.first))
+        await service.configure(holdFile: true)
+        let update = Task { try await store.pinFolder(profile: self.profile, path: self.path, service: service) }
+        try await waitFor { await service.waiting() }
+        try await store.removeAll()
+        await service.release()
+        do { _ = try await update.value; XCTFail("A cleared folder must not return") } catch is CancellationError {}
+        await store.cancelAndDrain()
+        XCTAssertEqual(try Data(contentsOf: old.url), Data("old\r\n".utf8))
+        let restored = try await OfflineFileStore(directory: dir).librarySnapshot()
+        XCTAssertTrue(restored.files.isEmpty)
+        XCTAssertTrue(restored.folders.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent(individual.blobID.uuidString).path))
+    }
+
     func testRemovingDuringRefreshDoesNotResurrectFolderOrRemoveIndividualCopy() async throws {
         let (_, store, service) = try setup()
         let folder = try await store.pinFolder(profile: profile, path: path, service: service)

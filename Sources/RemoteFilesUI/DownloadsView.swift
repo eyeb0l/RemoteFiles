@@ -37,9 +37,17 @@ struct DownloadsView: View {
             } else if let error = model.downloadError { Text(error).foregroundStyle(.red) }
         }
         .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Color(uiColor: .systemBackground))
+        .presentationBackground(Color(uiColor: .systemBackground))
         .navigationTitle("Downloads")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        .modifier(DeleteAllLocalFilesAction(title: "Delete all downloads?",
+            message: "This cancels queued and active downloads and removes all download files and history from this app. Copies saved to Files are unchanged.",
+            isAvailable: model.downloads?.items.isEmpty == false) { [store = model.downloads] in
+            try store?.removeAll()
+        })
         .sheet(item: $saving) { value in DownloadSavePicker(url: value.url) }
     }
 }
@@ -102,7 +110,7 @@ private struct DownloadRow: View {
         }
         .padding(.vertical, 2)
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            if !isActive { Button("Remove", systemImage: "trash", role: .destructive, action: remove) }
+            if !isActive { Button("Remove", systemImage: "trash", role: .destructive, action: remove).tint(.red) }
         }
         .contextMenu {
             if !isActive { Button("Remove", systemImage: "trash", role: .destructive, action: remove) }

@@ -311,7 +311,7 @@ private struct IPadWorkspace: View {
     // `workspace-reader` rather than `Bounded source text`, and UI tests could not find it on iPad.
     var body: some View {
         NavigationSplitView(columnVisibility: $visibility) {
-            HomeView(model: model)
+            HomeView(model: model, inSidebar: true)
                 .listStyle(.sidebar)
                 .environment(\.workspaceNavigation, openFromLibrary)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
@@ -387,6 +387,7 @@ private struct DownloadsBarButton: View {
 
 struct HomeView: View {
     @Bindable var model: AppModel
+    var inSidebar = false
     /// A connection being deleted that still has downloads, which are kept or removed by choice.
     @State private var connectionToDelete: ConnectionProfile?
     /// Connection names only help tell servers apart when there's more than one.
@@ -436,7 +437,7 @@ struct HomeView: View {
                 }
             }
             if !model.metadata.connections.isEmpty {
-                Section("Connections") {
+                Section {
                     ForEach(model.metadata.connections) { profile in
                         let state = state(profile)
                         WorkspaceLink(route: AppModel.Route.folder(profile.id, profile.startingDirectory)) {
@@ -453,6 +454,16 @@ struct HomeView: View {
                                 }
                             }
                             Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnectAndGoHome() } }
+                        }
+                    }
+                } header: {
+                    HStack {
+                        Text("Connections")
+                        if inSidebar && !model.demo {
+                            Spacer()
+                            Button { model.sheet = .connection(nil) } label: { IconTarget(symbol: "plus") }
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel("Add Connection")
                         }
                     }
                 }
@@ -501,7 +512,7 @@ struct HomeView: View {
         .navigationSubtitle(model.demo ? "Demo workspace · sample files" : "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if !model.demo && !model.metadata.connections.isEmpty {
+            if !inSidebar && !model.demo && !model.metadata.connections.isEmpty {
                 ToolbarItem(placement: .primaryAction) {
                     Button("Add Connection", systemImage: "plus") { model.sheet = .connection(nil) }
                 }

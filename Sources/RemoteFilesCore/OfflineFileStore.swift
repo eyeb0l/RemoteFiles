@@ -297,6 +297,26 @@ public actor OfflineFileStore {
         try? FileManager.default.removeItem(at: directory.appendingPathComponent(pin.blobID.uuidString))
     }
 
+    public func removeAll() async throws {
+        try save([], folders: [])
+        let retired = pins
+        pins = []
+        folders = []
+        publishChange()
+        var firstError: Error?
+        for pin in retired {
+            do { try FileManager.default.removeItem(at: directory.appendingPathComponent(pin.blobID.uuidString)) }
+            catch let error as CocoaError where error.code == .fileNoSuchFile { continue }
+            catch { firstError = firstError ?? error }
+        }
+        // A save from another window must not publish its old selection after the clear.
+        cancelled = true
+        let fileWorker = exporter, snapshotWorker = folderWorker
+        await fileWorker?.cancelAll()
+        await snapshotWorker?.cancel()
+        if let firstError { throw firstError }
+    }
+
     public func lease(_ id: UUID) throws -> OfflineFileLease {
         leases.removeAll { $0.value == nil }
         guard leases.count < 4 else { throw OfflineFileError.tooManyReaders }
