@@ -384,7 +384,9 @@ final class DownloadManagerTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: reopened.completedURL(retained)), Data([1]))
         XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(removed.uuidString).path))
         let later = try manager.enqueue(profile: profile, entry: entry("later.bin"))
-        try await wait { manager.items.first(where: { $0.id == later })?.state == .completed }
+        // The item reads completed before its worker closes the session; until then it is still
+        // active, and removeAll() only cancels it.
+        try await wait { manager.activeID == nil && manager.items.first(where: { $0.id == later })?.state == .completed }
         manager.removeItem = { try FileManager.default.removeItem(at: $0) }
         try manager.removeAll()
         XCTAssertTrue(manager.items.isEmpty)
