@@ -185,6 +185,11 @@ struct OfflineFilesView: View {
                 .navigationTitle("Offline Files")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+                .modifier(DeleteAllLocalFilesAction(title: "Delete all offline files and folders?",
+                    message: "This removes all offline copies from this device and cancels any offline save in progress. Files on the server are unchanged.",
+                    isAvailable: model.offlineStore != nil && (!model.offlineFolders.isEmpty || !model.offlinePins.isEmpty)) { [store = model.offlineStore] in
+                    try await store?.removeAll()
+                })
                 .navigationDestination(for: OfflineFolderRoute.self) { route in
                     OfflineFolderView(model: model, route: route)
                 }
@@ -196,6 +201,7 @@ struct OfflineFilesView: View {
                     }
                 }
         }
+        .presentationBackground(Color(uiColor: .systemBackground))
         .environment(\.offlineKeyboardScope, keyboardScope)
         .background { OfflineKeyboardHost(scope: keyboardScope).frame(width: 0, height: 0) }
         // The library's own navigation replaces the app's while this sheet covers it.
@@ -239,7 +245,9 @@ struct OfflineFilesView: View {
                     .contextMenu { OfflineFolderLibraryActions(model: model, folder: folder) }
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button("Remove", systemImage: "trash", role: .destructive) { Task { await model.removeOfflineFolder(folder) } }
+                            .tint(.red)
                         Button("Update", systemImage: "arrow.clockwise") { model.refreshOfflineFolder(folder) }
+                            .tint(.blue)
                             .disabled(model.pinningName != nil || !model.isForeground)
                     }
                 }
@@ -256,7 +264,9 @@ struct OfflineFilesView: View {
                     .accessibilityIdentifier("offline-file-" + pin.filename)
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button("Remove", systemImage: "trash", role: .destructive) { Task { await model.removeOfflinePin(pin) } }
+                            .tint(.red)
                         Button("Update", systemImage: "arrow.clockwise") { model.refreshOfflinePin(pin) }
+                            .tint(.blue)
                             .disabled(model.pinningName != nil || !model.isForeground)
                     }
                     .contextMenu {
@@ -282,6 +292,8 @@ struct OfflineFilesView: View {
             }
         }
         .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Color(uiColor: .systemBackground))
     }
 }
 

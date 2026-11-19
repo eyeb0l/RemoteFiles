@@ -6,7 +6,7 @@
 
 When both size classes are regular — an iPad window or an unfolded iPhone Duo — RemoteFiles uses three native split-view columns:
 
-- **Library:** favourites, connections and recents, with settings and adding a connection in its toolbar, and Offline Files and Downloads in its bottom bar.
+- **Library:** favourites, connections and recents, with Settings in the toolbar, Add Connection beside the Connections heading, and Offline Files and Downloads in the bottom bar.
 - **Folder:** the selected folder, with search, sorting, a title menu of its ancestors and a Previous Folder button for nested navigation.
 - **Reader:** the selected file, with Find, Rendered/Source and Headings in its bottom bar, plus document links and export actions. Rendered Markdown stops at a comfortable line length in wide windows.
 

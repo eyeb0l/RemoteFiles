@@ -100,6 +100,7 @@ public final class DownloadManager {
         try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
         #endif
     }
+    private var removeActiveWhenFinished = false
     private var stopped = false
 
     public init(service: (any RemoteFileService)? = nil, directory: URL,
@@ -209,9 +210,33 @@ public final class DownloadManager {
 
     public func remove(_ id: UUID) throws {
         guard activeID != id else { cancel(id); return }
+        try removeRecord(id)
+        publish(); startNext()
+    }
+
+    public func removeAll() throws {
+        if let activeID {
+            removeActiveWhenFinished = true
+            cancel(activeID)
+        }
+        // Retire queued jobs together so removing one cannot start the next.
+        defer { publish(); startNext() }
+        var firstError: Error?
+        for item in items where item.id != activeID {
+            do { try removeRecord(item.id) }
+            catch {
+                cancel(item.id)
+                if !item.retainsDownloadedBytes && !item.keepsPartialBytes { cleanupBlockedIDs.insert(item.id) }
+                firstError = firstError ?? error
+            }
+        }
+        if let firstError { throw firstError }
+    }
+
+    private func removeRecord(_ id: UUID) throws {
         try removeDirectory(jobDirectory(id))
         cleanupBlockedIDs.remove(id); contexts.removeValue(forKey: id)
-        items.removeAll { $0.id == id }; publish(); startNext()
+        items.removeAll { $0.id == id }
     }
 
     public func completedURL(_ id: UUID) throws -> URL {
@@ -420,6 +445,17 @@ public final class DownloadManager {
                 await closer.closeSessionPreservingUnlockedIdentities()
             } else { await service.disconnect() }
             self.contexts.removeValue(forKey: item.id)
+            if self.removeActiveWhenFinished {
+                self.removeActiveWhenFinished = false
+                do { try self.removeRecord(item.id) }
+                catch {
+                    if let index = self.index(item.id) {
+                        let retained = self.items[index]
+                        if !retained.retainsDownloadedBytes && !retained.keepsPartialBytes { self.cleanupBlockedIDs.insert(item.id) }
+                        self.items[index].message = "Could not remove this download. " + error.localizedDescription
+                    }
+                }
+            }
             self.activeID = nil; self.worker = nil; self.publish(); self.startNext()
         }
         publish()
