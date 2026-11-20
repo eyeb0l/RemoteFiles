@@ -202,10 +202,11 @@ CPU, then run the same products with `test-without-building`. The wait costs alm
 wall-clock time: without it the boot's load spike lengthens the tests instead, and two of
 five simulator-core jobs failed ([settle experiment](CI_HISTORY.md#17-november-2026-the-post-boot-settle-wait-is-not-dead-time)).
 A failed build never boots the device or executes cached products. Each command receives a 30-minute
-deadline, except the UI lane's test execution, which receives 60 minutes for the whole
-journey inventory. Job ceilings are 45 minutes for the quick lanes and Release, 60 for
-VoiceOver and 120 for UI; methods receive 180/240-second allowances, and the Document actions
-VoiceOver journey asks for the 240-second maximum. The OpenSSH
+deadline, except test execution in the VoiceOver lane, which receives 45 minutes, and in the UI
+lane, which receives 60 minutes for the whole
+journey inventory. Job ceilings are 45 minutes for the quick lanes and Release, 90 for
+VoiceOver and 120 for UI; methods receive 180/360-second allowances, and the Document actions
+VoiceOver journey asks for the 360-second maximum. The OpenSSH
 fixture surrounds core and UI test execution.
 
 Each lane inventories the XCTest methods in its platform-specific sources and fails

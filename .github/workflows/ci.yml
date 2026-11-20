@@ -123,7 +123,8 @@ jobs:
       || (needs.quick.result == 'skipped' && needs.repository-checks.outputs.quick == 'false')) }}
     runs-on: xcode-27
     # Build, boot, settle and test execution are now separate phases inside this ceiling.
-    timeout-minutes: 60
+    # A run on image 20261119.0378 took 53 minutes with test execution at 29 of the 45 it may take.
+    timeout-minutes: 90
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
       EVIDENCE: /private/tmp/remotefiles-validation

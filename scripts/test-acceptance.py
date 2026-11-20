@@ -46,7 +46,8 @@ SIMULATOR_LANES = {
 STAGED_LANES = ("simulator-core", "simulator-ui", "voiceover")
 DEFAULT_COMMAND_MINUTES = 30
 # Test execution that outgrows the default; an explicit --timeout-minutes still bounds every command.
-EXECUTION_DEADLINE_SECONDS = {"simulator-ui": 60 * 60}
+# VoiceOver's took 1,736 seconds on runner image 20261119.0378 (docs/CI_HISTORY.md, 20 November 2026).
+EXECUTION_DEADLINE_SECONDS = {"simulator-ui": 60 * 60, "voiceover": 45 * 60}
 # A new device's first boot on a hosted runner. Of 266 boots from 3 to 9 November the median took
 # 104 seconds, 20 took over three minutes and the slowest that finished took 298, counting both
 # commands. One was stopped at the old 300-second bound while the load was still 512, so it was
@@ -563,7 +564,7 @@ def execute_lanes(run, lanes, packages, scratch, derived, simulator=None, boot_s
             action = "test-without-building"
         sim = run.command(execution_name, wrapper + simulator_base + ["-configuration", "Debug", "-destination", "platform=iOS Simulator,id=" + simulator,
             "-resultBundlePath", sim_result, "-parallel-testing-enabled", "NO", "-collect-test-diagnostics", "never",
-            "-test-timeouts-enabled", "YES", "-default-test-execution-time-allowance", "180", "-maximum-test-execution-time-allowance", "240",
+            "-test-timeouts-enabled", "YES", "-default-test-execution-time-allowance", "180", "-maximum-test-execution-time-allowance", "360",
             "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"] + execution_selection + [action], timeout=execution_deadlines.get(lane))
         if ui_shard is not None:
             sim["ui_shard"] = ui_shard

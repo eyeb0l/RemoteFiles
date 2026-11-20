@@ -416,7 +416,7 @@ class LaneSelectionTests(unittest.TestCase):
                 self.assertEqual(execution[-1], "test-without-building")
                 self.assertNotIn("-only-testing:RemoteFilesUITests", execution)
                 self.assertEqual(execution[execution.index("-default-test-execution-time-allowance") + 1], "180")
-                self.assertEqual(execution[execution.index("-maximum-test-execution-time-allowance") + 1], "240")
+                self.assertEqual(execution[execution.index("-maximum-test-execution-time-allowance") + 1], "360")
 
     def test_ui_shard_cli_rejects_other_lanes_and_invalid_shards_before_creating_evidence(self):
         script = Path(__file__).with_name("test-acceptance.py")
@@ -548,7 +548,7 @@ class LaneSelectionTests(unittest.TestCase):
         self.assertEqual(build[-1], "build-for-testing")
         self.assertEqual(execution[-1], "test-without-building")
         self.assertEqual(execution[execution.index("-default-test-execution-time-allowance") + 1], "180")
-        self.assertEqual(execution[execution.index("-maximum-test-execution-time-allowance") + 1], "240")
+        self.assertEqual(execution[execution.index("-maximum-test-execution-time-allowance") + 1], "360")
         self.assertEqual(execution[execution.index("-resultBundlePath") + 1], run.output / "voiceover.xcresult")
         self.assertEqual(run.inventories[0], acceptance.expected_tests(run.root, "iOS", ["Tests/VoiceOverFixtures"]))
         self.assertEqual(len(run.inventories[0]), 12)
@@ -569,12 +569,11 @@ class LaneSelectionTests(unittest.TestCase):
         for command in run.commands:
             self.assertIn("COMPILATION_CACHE_CAS_PATH=cas", command)
 
-    def test_only_ui_test_execution_receives_the_longer_deadline(self):
+    def test_only_ui_and_voiceover_test_execution_receive_longer_deadlines(self):
         ui = self.run_lane("simulator-ui")
         self.assertEqual(ui.deadlines, {"simulator-ui-build": None, "simulator-ui": 3600})
-        for lane in ("simulator-core", "voiceover"):
-            with self.subTest(lane=lane):
-                self.assertEqual(self.run_lane(lane).deadlines, {lane + "-build": None, lane: None})
+        self.assertEqual(self.run_lane("voiceover").deadlines, {"voiceover-build": None, "voiceover": 2700})
+        self.assertEqual(self.run_lane("simulator-core").deadlines, {"simulator-core-build": None, "simulator-core": None})
         self.assertEqual(self.run_lane("simulator").deadlines, {"simulator": None})
         self.assertEqual(self.run_lane("simulator-ui", 1).deadlines["simulator-ui-shard-1"], 3600)
 
@@ -582,7 +581,7 @@ class LaneSelectionTests(unittest.TestCase):
         run = self.run_lane("simulator-ui")
         execution = run.commands[1][1]
         self.assertEqual(execution[execution.index("-default-test-execution-time-allowance") + 1], "180")
-        self.assertEqual(execution[execution.index("-maximum-test-execution-time-allowance") + 1], "240")
+        self.assertEqual(execution[execution.index("-maximum-test-execution-time-allowance") + 1], "360")
         self.assertEqual(run.inventories[0], acceptance.expected_tests(run.root, "iOS", ["Tests/RemoteFilesUITests"]))
         self.assertEqual(run.skips[0], acceptance.SIMULATOR_ALLOWED_SKIPS | {name for name in run.inventories[0] if name.startswith("RealServerUITests/")})
 
@@ -599,8 +598,8 @@ class LaneSelectionTests(unittest.TestCase):
                 acceptance.main()  # Stops after the lanes: the stubbed snapshot wrote no source manifest.
         self.assertEqual(calls, [(command_seconds, overrides)])
 
-    def test_default_timeouts_are_thirty_minutes_with_the_ui_override(self):
-        self.check_main_deadlines([], 30 * 60, {"simulator-ui": 60 * 60})
+    def test_default_timeouts_are_thirty_minutes_with_the_ui_and_voiceover_overrides(self):
+        self.check_main_deadlines([], 30 * 60, {"simulator-ui": 60 * 60, "voiceover": 45 * 60})
 
     def test_explicit_timeout_bounds_ui_execution_as_well(self):
         self.check_main_deadlines(["--timeout-minutes", "5"], 5 * 60, {})
