@@ -242,6 +242,8 @@ Budget every wait for that:
   production guard, and make UI waits outlast the app's own guard so the app reports
   the failure. The HTML preview guard is 30 seconds; SVG keeps 15 and Markdown 20.
 - Only tests of a deadline itself use short bounds.
+- After pressing Home, use `waitForBackground`, which allows 30 seconds: XCTest has still reported
+  the app in the foreground five seconds after the Home screen appeared.
 - Wait for a loading placeholder by its text, not its spinner. `LoadingPlaceholder` shows the
   spinner only after 1.5 seconds, so a wait for an activity indicator to go can pass before one
   exists.

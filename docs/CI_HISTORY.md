@@ -96,6 +96,30 @@ its time with VoiceOver starting. This rests on the comparison above and was not
 the warm launch took 8.6 and 10.7 seconds, and the first method and the Document actions journey
 each passed once with it.
 
+### The PR's own run: a third wait, for the app to reach the background
+
+Run [44778788601](https://github.com/eyeb0l/RemoteFiles/actions/runs/44778788601) of PR #172 put
+its two lanes on different images.
+
+**Acceptance / voiceover** ran on 20261104.0337, settled, and passed all 12 methods in 989 seconds.
+The warm launch took 22.8 seconds, 5.9 of them from the launch to `Setting up automation session`,
+and the first launch with VoiceOver on then took 11, where it had taken 18 to 34 on that image. So
+the comparison holds there, in one run; the newer image has not been measured.
+
+**Acceptance / simulator-ui** ran on 20261119.0378, did not settle (770 falling to 376 and back to
+608), and averaged a load of 316. The fixed SVG test passed, waiting 11.5 seconds for the
+placeholder's text to go. One other method failed:
+`testOfflineFolderSnapshotBrowsesSubfoldersAfterDisconnectBackgroundAndRelaunch`, at
+`Expected a live background app, got XCUIApplicationState(rawValue: 4)`. `waitForBackground` allowed
+five seconds after the Home press for XCTest to report the app in the background. The method's
+screen recording shows the Home screen within about a second of the press, so the press was not
+lost: the state XCTest reports lagged the screen. The same wait took 0.7 to 1.8 seconds in the eight
+other uses across this run and two earlier ones.
+
+**Fix.** `waitForBackground` looks for either background state each second for up to 30 seconds and
+prints `BACKGROUND state N after N s`. This was not reproduced, and if the report never arrives a
+longer wait will fail the same way with that line showing 30 seconds.
+
 ### Not fixed: the open-menu stall, and the lane's budgets
 
 In the same run `testDocumentActionsVoiceOverJourney` stalled as on

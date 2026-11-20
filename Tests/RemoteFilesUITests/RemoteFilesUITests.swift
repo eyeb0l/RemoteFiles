@@ -1763,9 +1763,17 @@ final class RemoteFilesUITests: XCTestCase {
 
     private func waitForBackground(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
         // Use native application-state observation, then validate the final state.
-        // A fast suspension can skip the transient running-background state.
-        _ = app.wait(for: .runningBackground, timeout: 5)
-        let state = app.state
+        // A fast suspension can skip the transient running-background state, so look for either
+        // state each second. On a loaded hosted runner the Home screen was showing and the app was
+        // still reported in the foreground five seconds after Home, so allow 30
+        // (docs/CI_HISTORY.md, 20 November 2026).
+        let start = Date(), deadline = start.addingTimeInterval(30)
+        var state = app.state
+        while state != .runningBackground && state != .runningBackgroundSuspended && Date() < deadline {
+            _ = app.wait(for: .runningBackground, timeout: 1)
+            state = app.state
+        }
+        print("BACKGROUND state \(state.rawValue) after \(String(format: "%.1f", Date().timeIntervalSince(start))) s")
         XCTAssertTrue(state == .runningBackground || state == .runningBackgroundSuspended,
                       "Expected a live background app, got \(state)", file: file, line: line)
     }
