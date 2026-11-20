@@ -60,8 +60,9 @@ In a restricted agent environment, use
 the supported approved shell execution workflow for compiler caches,
 CoreSimulator and the loopback fixture. Do not change system permissions or
 disable sandbox/security checks to make a test pass. Each command has a 30-minute
-deadline, including test-host startup, except the UI lane's test execution, which has
-60 minutes for its whole journey inventory. `--timeout-minutes` replaces both; use
+deadline, including test-host startup, except test execution in the VoiceOver lane, which has
+45 minutes, and in the UI lane, which has 60 minutes for its whole journey inventory.
+`--timeout-minutes` replaces them all; use
 `--timeout-minutes 5` for a bounded infrastructure check. A timeout interrupts only that stage's process group and
 allows its fixture cleanup trap to finish before escalation to termination.
 

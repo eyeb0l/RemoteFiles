@@ -136,6 +136,15 @@ seconds, about 200 of them after the failed launch, and the job 53 of its 60 min
 maximum, the command deadline and the settle wait all belong to the runner, which this change
 leaves alone.
 
+**Budgets raised.** A following change raises the method maximum from 240 to 360 seconds, which the
+Document actions journey now asks for, VoiceOver test execution from 30 to 45 minutes and the
+VoiceOver job from 60 to 90. Unstalled, the journey has taken 79 to 120 seconds on hosted runners,
+so 360 leaves it twice that beside both waits. Nothing runs longer unless it would otherwise have
+been stopped. The settle wait is unchanged: on the newer image the load did not fall however long
+the wait ran, and no longer bound was measured. CI already selects Xcode 27.0 and boots iOS 27.0,
+and both images carry the same simulator runtimes, so there is no newer toolchain to opt out of;
+hosted runners cannot be held on an older image.
+
 ## 20 November 2026: the menu journey read speech before VoiceOver opened the menu
 
 The `main` run [44600565533](https://github.com/eyeb0l/RemoteFiles/actions/runs/44600565533) for
