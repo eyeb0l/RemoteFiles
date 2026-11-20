@@ -10,6 +10,132 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 20 November 2026: a nightly on a slower runner image failed a spinner wait and a first launch
+
+The nightly run [44718262394](https://github.com/eyeb0l/RemoteFiles/actions/runs/44718262394) on
+`main` at `59bbc56` failed **Acceptance / simulator-ui** and **Acceptance / voiceover** in one
+method each. Neither is the speech race fixed earlier the same day (the entry below), and that fix
+held: the Document actions journey logged `VO FOCUS moved from Document actions after 0.1 s:
+Refresh Button` and passed.
+
+### The runners
+
+Both lanes ran on runner image `xcode-27-arm64` 20261119.0378, published on 19 November, which adds
+Xcode 27.3 beta and its simulator SDKs. Jobs have landed on it and on its predecessor, 20261104.0337,
+in turn since. The job logs of 13 runs from 18 to 20 November give 24 simulator lanes:
+
+| | 20261104.0337 | 20261119.0378 |
+|---|---|---|
+| Lanes | 18 | 6 |
+| Settle wait ran its full 480 seconds | 6 | 6 |
+| Mean 1-minute load during tests | 46–214 (11 lanes that logged it) | 102–499 |
+| VoiceOver test command in the retained artifacts (1,800-second deadline) | 1,093–1,245 s (4 lanes) | 1,294–1,736 s (3 lanes) |
+| Lanes that failed | 1 | 3 |
+
+On the older image the load fell through the settle wait, for example from 587 to 108 in 360
+seconds. On the newer one it did not fall: the samples of this run's VoiceOver lane ran from 582 to
+499 over the full wait, and those of PR #171's run rose from 665 to 817. The load then took 12 to
+20 minutes of the test phase to reach 150 to 200. The busiest processes by CPU are the same on both
+images, so what holds the load up was not identified. The three failures on the newer image are
+the speech race below and the two here. The one on the older image is the
+[19 November](#19-november-2026-an-open-menu-holds-xctests-idle-wait-twice) stall.
+
+### UI lane: a wait for the spinner to go passed before the spinner appeared
+
+`RemoteFilesUITests.testLongJSONAndSVGRenderedSourcePreview` failed after 46 seconds at its assertion
+that the SVG image is hittable. The wait before it, 20 seconds for the first activity indicator to
+stop existing, began at 40.51 seconds and returned after its first check, at 41.59. The hierarchy
+captured 0.6 seconds later holds the indicator, `Preparing image…` and a web view whose content
+process had no accessibility server yet. Nothing timed out: the page was still loading.
+
+**Cause.** `LoadingPlaceholder` adds its spinner 1.5 seconds after it appears, so a quick load never
+flashes one, and has done since #80 on 5 November. Its text is there from the start. `SVGContentView`
+replaces one placeholder with another when the web view is created, which restarts that delay, so
+for 1.5 seconds the image element exists and no indicator does. A check inside that window passes
+the wait. Usually the check comes later, or the page has loaded by then.
+
+**Reproduction.** On an iPhone 18 Pro simulator with iOS 27.0 (24A434) the test at `59bbc56` passed
+unaided: its first check found the spinner and the second found it gone. Pausing WebKit's content
+processes outright blocks the accessibility snapshot and fails the hittability check with a
+different message. With the content processes paused for 180 ms in every 200 and, in a build used
+only for this, SVG preparation delayed by 1.2 seconds as the runner delayed it, the test failed with
+the hosted signature: the wait returned after one check, XCTest logged the same
+`kAXErrorServerNotFound` for the content process, and line 769 failed.
+
+**Fix.** The test waits for the placeholder's text to go, as the VoiceOver SVG journey already does.
+Under the same conditions it passed 2 of 2 runs, waiting 13.2 and 9.2 seconds. No other test waits
+on an activity indicator.
+
+### VoiceOver lane: the first launch timed out
+
+`VoiceOverChecks.testCachedRefreshingAndFailureSpeech`, the lane's first method, failed with
+`Timed out while launching application via Xcode`. It asked for the launch 13.4 seconds in and was
+in teardown at 101.5. The method then ran to 301.9 seconds, the runner was restarted for exceeding
+the allowance, and the other 11 methods passed.
+
+The lane's first launch is its slowest. From the launch to `Setting up automation session`, in
+seconds:
+
+| Run | Image | First launch | Second | Later |
+|---|---|---|---|---|
+| 44286118535 | 20261104.0337 | 34 | 4 | 0–3 |
+| 44507525028 | 20261104.0337 | 24 | 3 | 1–4 |
+| 44555357142 | 20261104.0337 | 32 | 3 | 0–6 |
+| 44571430047 | 20261104.0337 | 18 | 5 | 1–5 |
+| 44600565533 | 20261119.0378 | 73 | 38 | 2–12 |
+| 44654727936 | 20261119.0378 | 50 | 12 | 2–11 |
+| 44718262394 | 20261119.0378 | timed out | 8 | 2–10 |
+
+That method switches VoiceOver on and then launches. The UI lane, which never runs VoiceOver, took
+8 and 15 seconds over its first launch in runs 44600565533 and 44718262394, the second of them on
+the newer image with a higher load than the VoiceOver lane had.
+
+**Fix.** The class launches the lightest fixture once, with VoiceOver off, before the first journey
+of each runner process, and prints `VO WARM LAUNCH took N s`. The cold launch then no longer shares
+its time with VoiceOver starting. This rests on the comparison above and was not reproduced: locally
+the warm launch took 8.6 and 10.7 seconds, and the first method and the Document actions journey
+each passed once with it.
+
+### The PR's own run: a third wait, for the app to reach the background
+
+Run [44778788601](https://github.com/eyeb0l/RemoteFiles/actions/runs/44778788601) of PR #172 put
+its two lanes on different images.
+
+**Acceptance / voiceover** ran on 20261104.0337, settled, and passed all 12 methods in 989 seconds.
+The warm launch took 22.8 seconds, 5.9 of them from the launch to `Setting up automation session`,
+and the first launch with VoiceOver on then took 11, where it had taken 18 to 34 on that image. So
+the comparison holds there, in one run; the newer image has not been measured.
+
+**Acceptance / simulator-ui** ran on 20261119.0378, did not settle (770 falling to 376 and back to
+608), and averaged a load of 316. The fixed SVG test passed, waiting 11.5 seconds for the
+placeholder's text to go. One other method failed:
+`testOfflineFolderSnapshotBrowsesSubfoldersAfterDisconnectBackgroundAndRelaunch`, at
+`Expected a live background app, got XCUIApplicationState(rawValue: 4)`. `waitForBackground` allowed
+five seconds after the Home press for XCTest to report the app in the background. The method's
+screen recording shows the Home screen within about a second of the press, so the press was not
+lost: the state XCTest reports lagged the screen. The same wait took 0.7 to 1.8 seconds in the eight
+other uses across this run and two earlier ones.
+
+**Fix.** `waitForBackground` looks for either background state each second for up to 30 seconds and
+prints `BACKGROUND state N after N s`. This was not reproduced, and if the report never arrives a
+longer wait will fail the same way with that line showing 30 seconds.
+
+### Not fixed: the open-menu stall, and the lane's budgets
+
+In the same run `testDocumentActionsVoiceOverJourney` stalled as on
+[19 November](#19-november-2026-an-open-menu-holds-xctests-idle-wait-twice), waiting 60 seconds
+after the **Document actions** tap and 60 before the **Refresh** tap, and passed in 239.6 seconds
+of its 240. Double-tapping through SpringBoard's coordinates, to keep XCTest from waiting on the
+app, was tried and does not work: VoiceOver did not act on the taps, speech stayed on the button
+for 30 seconds, and XCTest still waited for the app to idle while checking for interrupting
+elements.
+
+The stall costs at most 120 seconds, and without it the journey took about 120 on this run, so
+240 seconds leaves nothing on the newer image. The VoiceOver test command took 1,736 of its 1,800
+seconds, about 200 of them after the failed launch, and the job 53 of its 60 minutes. The method
+maximum, the command deadline and the settle wait all belong to the runner, which this change
+leaves alone.
+
 ## 20 November 2026: the menu journey read speech before VoiceOver opened the menu
 
 The `main` run [44600565533](https://github.com/eyeb0l/RemoteFiles/actions/runs/44600565533) for

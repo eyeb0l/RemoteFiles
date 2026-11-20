@@ -228,6 +228,8 @@ Hosted `xcode-27-arm64` runners have three logical CPUs and 7 GiB of RAM. Their
 sits near 100 while tests run. Measured there: WebKit content processes have taken
 13 seconds or more to launch, fixture SSH authentication 2.5 seconds, a trivial
 remote command 1.5 seconds, and app termination between UI tests over a minute.
+On image 20261119.0378 the load has not fallen during the settle wait and averaged 100 to 500
+through the tests ([20 November 2026](CI_HISTORY.md#20-november-2026-a-nightly-on-a-slower-runner-image-failed-a-spinner-wait-and-a-first-launch)).
 Budget every wait for that:
 
 - Give a test's first WebKit navigation a 60-second cold-start bound; later
@@ -240,6 +242,11 @@ Budget every wait for that:
   production guard, and make UI waits outlast the app's own guard so the app reports
   the failure. The HTML preview guard is 30 seconds; SVG keeps 15 and Markdown 20.
 - Only tests of a deadline itself use short bounds.
+- After pressing Home, use `waitForBackground`, which allows 30 seconds: XCTest has still reported
+  the app in the foreground five seconds after the Home screen appeared.
+- Wait for a loading placeholder by its text, not its spinner. `LoadingPlaceholder` shows the
+  spinner only after 1.5 seconds, so a wait for an activity indicator to go can pass before one
+  exists.
 - When a timeout fails in CI, read `phase-timings.json`, `<lane>-load.log` and the
   method durations in the lane artifact before changing a limit.
 - To reproduce slow WebKit locally, pause each new `com.apple.WebKit.WebContent`
@@ -364,6 +371,10 @@ control, and a traversal started from it skips the first element of whatever ope
 helper and the Document actions journey therefore wait for speech to leave the control's phrase and
 print `VO FOCUS moved from <control> after N s`; see
 [20 November 2026](CI_HISTORY.md#20-november-2026-the-menu-journey-read-speech-before-voiceover-opened-the-menu).
+
+The lane's first launch is cold and, made just after VoiceOver starts, has taken 18 to 73 seconds
+and once timed out. `setUpWithError` therefore launches the lightest fixture once per runner
+process with VoiceOver off and prints `VO WARM LAUNCH took N s`.
 
 Speech can lag focus, so do not use it to decide where VoiceOver went. The JSON, slow-load,
 SVG, demo Markdown and focused row-opening journeys print the elements VoiceOver focused,
