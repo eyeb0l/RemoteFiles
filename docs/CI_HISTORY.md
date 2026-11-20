@@ -10,6 +10,48 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 20 November 2026: the menu journey read speech before VoiceOver opened the menu
+
+The `main` run [44600565533](https://github.com/eyeb0l/RemoteFiles/actions/runs/44600565533) for
+PR #169 failed **Acceptance / voiceover** in the journey that PR added:
+`VoiceOverChecks.testDocumentActionsVoiceOverJourney` failed its new assertion that the menu speaks
+**Refresh** as a button, after 122 seconds. The other 11 methods passed. This is not the
+[19 November](#19-november-2026-an-open-menu-holds-xctests-idle-wait-twice) stall: the double tap
+on **Document actions** returned within 3 seconds and no wait ran long.
+
+The traversal began on `Document actions Button` and its first step read `Download Button`, so
+**Refresh** was never read. The app's focus log shows VoiceOver focused **Refresh** at 20:36:19.175
+and **Download** at 20:36:19.458. In the four other retained runs, two of them under the old
+journey, the traversal began on `Refresh Button`.
+
+**Cause.** VoiceOver can act on a double tap after XCTest's tap has returned. The tap's idle wait
+watches the app, which has nothing to do until VoiceOver activates the button, so the wait can end
+before the menu opens. Locally VoiceOver focused the menu's first item 0.8 seconds after the tap's
+events ended, and on the failed run 1.0 second. The journey read speech in that gap, got the
+button's own phrase, and its first step forward then left **Refresh** as the menu took focus. The
+old journey read the menu the same way but asserted nothing about **Refresh**, so #169's assertion
+exposed the race rather than creating it. Its stalled hosted run could not show it: there the tap
+waited 60 seconds.
+
+**Reproduction.** On an iPhone 18 Pro simulator with iOS 27.0 (24A434), the journey at `e8231aa`
+passed unaided, with **Refresh** and **Download** focused 0.2 seconds apart. Pausing `vot` with
+`SIGSTOP` for 160 ms in every 200, for 3 seconds from 1.55 seconds after the app logged focus on
+**Document actions**, failed it with the hosted signature: the same two phrases and the one
+assertion. The start matters. Pausing from the focus itself spans the taps and VoiceOver no longer
+sees a double tap, and a solid pause fails the read with `No speech available` instead.
+
+**Fix.** After the double tap the journey waits, for up to 30 seconds, until speech has left the
+button's phrase, then reads the menu. `open(_:_:)` already waited this way after opening a row; both
+now use `waitForSpeechToLeave`, which prints `VO FOCUS moved from <control> after N s`. With the
+same pausing the fixed journey passed 4 of 4 runs. The three run after the elapsed time was added
+to that line waited 0.4 to 0.5 seconds, and unpaused it waited 0.0 seconds. The image-viewer journey, which uses the shared wait through
+`open`, passed once.
+
+**Limits.** The 19 November stall is unchanged, with the same 25-second margin: in a stalled run
+the tap has already waited 60 seconds, so this wait adds nothing to it. Two other checks read
+speech straight after an action without waiting, the image viewer's focus return and the Recents
+action. Neither has a recorded failure and neither is changed.
+
 ## 19 November 2026: an open menu holds XCTest's idle wait twice
 
 The nightly runs [44286118535](https://github.com/eyeb0l/RemoteFiles/actions/runs/44286118535)

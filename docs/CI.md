@@ -358,6 +358,13 @@ busy to reply. So the first read after each enable waits up to 30 seconds and pr
 To reproduce one, pause `vot` with `SIGSTOP`; see
 [First VoiceOver speech](CI_HISTORY.md#first-voiceover-speech).
 
+A double tap can return before VoiceOver acts on it: the tap waits for the app to idle, and the
+app is idle until VoiceOver activates the control. Speech read at that point still names the
+control, and a traversal started from it skips the first element of whatever opened. The row-opening
+helper and the Document actions journey therefore wait for speech to leave the control's phrase and
+print `VO FOCUS moved from <control> after N s`; see
+[20 November 2026](CI_HISTORY.md#20-november-2026-the-menu-journey-read-speech-before-voiceover-opened-the-menu).
+
 Speech can lag focus, so do not use it to decide where VoiceOver went. The JSON, slow-load,
 SVG, demo Markdown and focused row-opening journeys print the elements VoiceOver focused,
 from `UIAccessibility.elementFocusedNotification`. The Markdown and image-file row checks
