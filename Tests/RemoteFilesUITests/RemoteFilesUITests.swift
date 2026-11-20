@@ -765,7 +765,10 @@ final class RemoteFilesUITests: XCTestCase {
         revealFolderRow(svg, in: app, searchingDown: false).tap()
         let image = app.descendants(matching: .any).matching(identifier: "Rendered SVG image").firstMatch
         XCTAssertTrue(image.waitForExistence(timeout: 15), app.debugDescription)
-        XCTAssertTrue(app.activityIndicators.firstMatch.waitForNonExistence(timeout: 20), app.debugDescription)
+        // The placeholder shows its spinner only after 1.5 seconds, so a wait for the spinner to go can
+        // pass before it has appeared. Its text is there from the start (docs/CI_HISTORY.md, 20 November 2026).
+        let preparing = app.descendants(matching: .any).matching(identifier: "Preparing image…").firstMatch
+        XCTAssertTrue(preparing.waitForNonExistence(timeout: 20), app.debugDescription)
         XCTAssertTrue(image.exists && image.isHittable, app.debugDescription)
         // WebKit can expose the element before its first paint, so sample until the SVG is visible.
         func purplePixels() throws -> Int {

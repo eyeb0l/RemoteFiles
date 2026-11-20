@@ -87,6 +87,7 @@ extension XCUIApplication {
     /// Budgeted for vot at full CPU on a loaded runner; see "First VoiceOver speech" in docs/CI_HISTORY.md.
     private let firstSpeechTimeout: TimeInterval = 30
     private var service: XCUIVoiceOverService { XCUIDevice.shared.voiceOverService }
+    private static var launchedOnce = false
     override func setUpWithError() throws {
         continueAfterFailure = true
         originalVoiceOver = service.isEnabled
@@ -101,6 +102,17 @@ extension XCUIApplication {
         // whose touch taps would then only move focus (docs/CI_HISTORY.md, 17 November 2026).
         if originalVoiceOver { try service.disable() }
         print("VO SETUP original=\(originalVoiceOver)")
+        // The lane's first launch is cold. Made just after a journey switches VoiceOver on, it took 18
+        // to 73 seconds on hosted runners and once outlasted XCTest's launch timeout, where the UI
+        // lane's first launch takes 8 to 15. Pay for it here, with VoiceOver still off
+        // (docs/CI_HISTORY.md, 20 November 2026).
+        if !Self.launchedOnce {
+            Self.launchedOnce = true
+            let start = Date()
+            let app = XCUIApplication.underTest(); app.launchArguments = ["--missing-image-fixture"]
+            app.launch(); app.terminate()
+            print("VO WARM LAUNCH took \(String(format: "%.1f", Date().timeIntervalSince(start))) s")
+        }
     }
     /// VoiceOver's speech can lag its focus, so a traversal that matters reads this as well.
     private func recordFocus(of app: XCUIApplication) -> String {
