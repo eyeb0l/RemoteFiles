@@ -291,17 +291,23 @@ extension XCUIApplication {
             throw NSError(domain: "VoiceOverFocusNotMoved", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "Actual focus stayed on \(latest) after opening \(label)"])
         }
-        // The destination's elements can exist before VoiceOver handles its screen change.
-        // Until then focus stays on the activated control, and traversal from there skips
-        // the destination's first elements, so wait for the focus to move before speaking.
         // The loading placeholder is not the destination: traversal from there starts wherever
         // VoiceOver lands when the placeholder goes, so also wait for the focus to leave it.
-        let deadline = Date().addingTimeInterval(30)
+        try waitForSpeechToLeave(activated, placeholder: "Reading document…", opening: label)
+    }
+    /// What an activated control opens can exist before VoiceOver handles the screen change. Until
+    /// then speech still names the control, and a traversal started from that phrase skips the
+    /// element focus lands on, so wait for the speech to move on before reading what opened.
+    private func waitForSpeechToLeave(_ activated: String, placeholder: String? = nil, opening label: String) throws {
+        let start = Date(), deadline = start.addingTimeInterval(30)
         var current = activated
         while Date() < deadline {
             // Speech is briefly unavailable while VoiceOver moves focus between screens.
             if let value = try? service.currentSpeech().utterance { current = value }
-            if current != activated && current != "Reading document…" { print("VO FOCUS moved from \(label): \(current)"); return }
+            if current != activated && current != placeholder {
+                print("VO FOCUS moved from \(label) after \(String(format: "%.1f", Date().timeIntervalSince(start))) s: \(current)")
+                return
+            }
             Thread.sleep(forTimeInterval: 0.25)
         }
         throw NSError(domain: "VoiceOverFocusNotMoved", code: 1, userInfo: [NSLocalizedDescriptionKey: "VoiceOver focus stayed on \(current) after opening \(label)"])
@@ -376,8 +382,12 @@ extension XCUIApplication {
         try withVoiceOver {
             let report = try openWeeklyReview(app, focusLog: focusLog)
             // The menu's button follows the title.
-            try focus("Document actions", name: "actions", limit: 12)
+            let button = try focus("Document actions", name: "actions", limit: 12)
             app.buttons["Document actions"].doubleTap()
+            // VoiceOver opens the menu after the tap's own wait can end. Reading speech before it
+            // has focused the first item starts on the button's phrase and steps past Refresh
+            // (docs/CI_HISTORY.md, 20 November 2026).
+            try waitForSpeechToLeave(button, opening: "Document actions")
             let actions = try speech("ACTIONS", limit: 12)
             capture("VoiceOver document actions", app)
             XCTAssertTrue(actions.contains { $0.contains("Refresh") && $0.contains("Button") })
