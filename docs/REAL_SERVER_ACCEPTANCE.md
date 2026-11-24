@@ -1193,6 +1193,38 @@ covers the foot of the sheet, and the row for the server's port then lies below 
 where a tap closes it. The journeys' form steps were altered for it in the course of the day,
 and the final runs on both devices used them as they now are in the tree.
 
+### 24 November: merged `main`
+
+The change was merged as `1b97d54` with two commits of review fixes that no device had run. They
+changed when the destination folder is asked about, how Retry continues a partial file, a second
+look at a copy's source once it is read, and what counts against a source's idle limit. So the
+journeys were run again on both devices (iOS 27.2.1), on a signed Debug build of `1b97d54` under
+the separate bundle identifier, each trial app set up afresh, against a new throwaway daemon. Each
+device had a relay held to 16 Mbit/s and a folder of its own, so that both ran at once. Each copy
+was compared with its source by `cmp`, and no partial file was left.
+
+- iPhone 17 Pro, seven of seven: two servers (the first server's folder back 1.9 seconds after
+  its row was tapped); Disconnect ("39.5 MB / 100.7 MB. Retry continues from there."); a force
+  quit (36.1 MB); the background (went on, no Retry); the cut (the relay stopped at 25,460,736
+  bytes for 25 seconds; 25.2 MB); the Files picker (5 MiB, identical); and the lock, left locked:
+  the side button was pressed with about 36 MB on the server, and the copy went on and finished
+  about 35 seconds later as `big.bin`, identical, with the phone locked.
+- iPad Pro 11-inch (M5), eight of eight: two servers (1.5 seconds); Disconnect (61.3 MB); a
+  force quit (35.7 MB); the background (went on, no Retry); the cut (25,165,824 bytes; 24.5 MB);
+  the Files picker (identical); a 3 MiB file dragged from Files onto an empty folder, identical;
+  and the lock: pressed with about 37 MB on the server, finished about 35 seconds later,
+  identical, with the iPad locked.
+- Once the owner had unlocked each, `testEveryTransferIsListedAsFinishedAndStaysSoAfterARelaunch`,
+  told `big.bin`, passed on both: one row, "Copied · inbox on Transfer fixture", and the same
+  after a relaunch.
+
+Not run: the photo picker, on either device, and a drag onto a row of a folder that holds files.
+
+The iPad's first set failed in every journey at the connection form, before any transfer. That
+was a fault of the run, not of the app: its relay had been given port 24023, and the journeys'
+form helper can put right a port typed in front of the field's own "22" only when the port ends
+in 22. With the relay on 25022 the set passed as above.
+
 ### Found and fixed
 
 - **A locked device could leave the app taking itself to be in front.** Found by the timed
