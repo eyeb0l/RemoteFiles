@@ -1648,7 +1648,7 @@ extension SFTPRemoteFileService: RemoteFileUploading, RemoteFileStreaming {
             }
             let partial = try? await partialAttributes.get()
             // A link under the partial name was not made by this app; it is removed, never written through.
-            let partialIsLink = (try? await partialLink.get()) != nil
+            var partialIsLink = (try? await partialLink.get()) != nil
             let occupied = (try? await taken.get()) != nil
             // Known before a byte is sent, so a large file isn't sent only to be refused its name.
             if request.conflict == .fail, occupied { throw RemoteUploadError.destinationExists(request.name) }
@@ -1660,7 +1660,14 @@ extension SFTPRemoteFileService: RemoteFileUploading, RemoteFileStreaming {
                let length = partial.size, length > 0, length <= version.size {
                 let candidate = try await sftp.openFile(filePath: partialPath, flags: [.read, .write])
                 do {
-                    if try await Self.partialMatches(candidate, length: length, readSource: readSource, activity: activity) {
+                    // This open follows a link, and the name was looked at a round trip ago. It is looked at again
+                    // now, before anything is written: a link put there since is not continued through, and is
+                    // removed below. One swapped in and out for an instant is not caught; SFTP can't refuse to
+                    // follow a link as it opens a name.
+                    let linkedSince = sftp.sendReadSymbolicLink(atPath: partialPath)
+                    let matches = try await Self.partialMatches(candidate, length: length, readSource: readSource, activity: activity)
+                    if (try? await linkedSince.get()) != nil { partialIsLink = true }
+                    if matches, !partialIsLink {
                         opened = candidate; start = length
                     } else { try await candidate.close() }
                 } catch {
@@ -2058,6 +2065,10 @@ extension SFTPRemoteFileService: RemoteFileUploading, RemoteFileStreaming {
                     return bytes
                 }) { chunk in
                     try await consume(Data(chunk.readableBytesView))
+                    // Bytes taken on are activity too. Reads already answered wait here for a destination slower
+                    // than its source, and with none arriving this channel would be taken for one that had
+                    // stopped. A destination that takes nothing still ends the copy, by its own deadline.
+                    activity.receivedBytes(chunk.readableBytes)
                 }.bytes
             } catch RemoteFileError.tooLarge { throw RemoteUploadError.sourceChanged } // It grew while it was read.
             guard end == Int(version.size) else { throw RemoteUploadError.sourceChanged }

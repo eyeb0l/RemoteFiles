@@ -221,10 +221,13 @@ public final class TransferManager {
         return id
     }
 
-    /// Finished transfers give way to new ones, oldest first; unfinished ones never do.
+    /// Finished transfers give way to new ones, oldest first; unfinished ones never do, and nor does one
+    /// that still has the worker's slot, whose partial copy on the server the worker has yet to remove.
     private func makeRoom() throws {
         while items.count >= Self.maximumItems {
-            guard let finished = items.firstIndex(where: { $0.state == .completed || $0.state == .cancelled }) else { throw TransferManagerError.queueFull }
+            guard let finished = items.firstIndex(where: { ($0.state == .completed || $0.state == .cancelled) && $0.id != activeID }) else {
+                throw TransferManagerError.queueFull
+            }
             removeLocalFiles(items[finished].id)
             items.remove(at: finished)
         }

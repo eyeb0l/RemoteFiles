@@ -209,6 +209,30 @@ final class TransferManagerTests: XCTestCase {
         XCTAssertEqual(manager.items.map(\.id), [next])
     }
 
+    /// A full list gives up its oldest finished transfer for a new one. One cancelled a moment ago still has
+    /// the worker's slot, and giving it up would leave its partial copy on the server with nothing to remove it.
+    func testAFullListKeepsATransferThatIsStillStopping() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let service = UploadFixture(held: ["held.bin"])
+        let manager = try TransferManager(directory: directory)
+        let held = try manager.enqueueUpload(consuming: try file("held.bin"), named: "held.bin", to: profile, directory: "/srv", service: service)
+        for number in 1..<TransferManager.maximumItems {
+            try manager.enqueueUpload(consuming: try file("queued.bin"), named: "queued \(number).bin", to: profile, directory: "/srv", service: service)
+        }
+        try await wait { await service.waiting == ["held.bin"] }
+        manager.cancel(held)
+        XCTAssertEqual(manager.activeID, held)
+        XCTAssertThrowsError(try manager.enqueueUpload(consuming: try file("more.bin"), named: "more.bin", to: profile, directory: "/srv", service: service)) {
+            guard case TransferManagerError.queueFull = $0 else { return XCTFail("\($0)") }
+        }
+        XCTAssertNotNil(manager.items.first { $0.id == held })
+        manager.removeAll()
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.count, 0)
+        let removed = await service.removedPartials
+        XCTAssertEqual(removed, [UploadRequest.partialName(for: held)])
+    }
+
     /// A folder's list may be some time old when a file is copied from it. What is sent is the file as it is
     /// when the copy starts, and the progress and the time asked of iOS are measured by that.
     func testACopyWhoseSourceHasGrownSinceItWasListedIsMeasuredByWhatIsSent() async throws {

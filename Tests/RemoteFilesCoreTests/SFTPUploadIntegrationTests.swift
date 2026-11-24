@@ -433,6 +433,28 @@ final class SFTPUploadIntegrationTests: XCTestCase {
         XCTAssertEqual(seen, seen.sorted())
     }
 
+    /// A copy's source is read on a channel of its own, with its own deadline. A destination slower than the
+    /// source leaves reads already answered waiting to be taken on; that wait is the destination's, and the
+    /// source must not be taken for one that has stopped.
+    func testACopyToASlowDestinationDoesNotTimeOutItsSource() async throws {
+        let server = try await connected(name: "Copy slow destination")
+        await server.service.setTransferTimings(idle: .seconds(2), closeGrace: .seconds(1))
+        let bytes = Self.pattern(30 * 64 * 1024)
+        let path = server.fixture + "/files/slow-destination-" + UUID().uuidString + ".bin"
+        try bytes.write(to: URL(fileURLWithPath: path))
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: path) }
+        let root = server.fixture + "/files"
+        let version = try await server.service.transferVersion(profile: server.profile, path: path, canonicalRoot: root)
+        let taken = Collected()
+        // Every read is answered at once; taking the bytes on lasts more than twice the idle limit.
+        try await server.service.streamFile(profile: server.profile, path: path, canonicalRoot: root, from: 0, expecting: version) { chunk in
+            try await Task.sleep(for: .milliseconds(150))
+            await taken.append(chunk)
+        }
+        let received = await taken.data
+        XCTAssertEqual(received, bytes)
+    }
+
     /// Disconnect closes a connection without cancelling what is using it. A transfer on it must end with an
     /// error, as one whose network has gone does: one left waiting would hold the queue's only slot for good.
     func testATransferWhoseConnectionIsClosedUnderItFailsAndDoesNotWait() async throws {
@@ -744,6 +766,10 @@ private struct RewrittenSource: TransferSource {
             try await sink(chunk)
         }
     }
+}
+private actor Collected {
+    private(set) var data = Data()
+    func append(_ chunk: Data) { data.append(chunk) }
 }
 private final class OnceFlag: @unchecked Sendable {
     private let lock = NSLock()
