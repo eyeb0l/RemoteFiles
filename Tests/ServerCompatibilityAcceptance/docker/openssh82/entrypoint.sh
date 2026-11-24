@@ -5,6 +5,8 @@ cp -a /fixture/files /fixture/outside.txt /srv/chroot/
 chown -R root:root /srv/chroot && chmod 755 /srv/chroot
 install -m 600 /fixture/host /etc/remotefiles/host
 install -m 644 /fixture/client.pub /etc/remotefiles/authorized_keys
+# WRITABLE=1 lets the account write in /files/uploads, for the upload check; it is read-only everywhere else.
+readonly=" -R"; if [ "${WRITABLE:-0}" = 1 ]; then readonly=""; chown fixture /srv/chroot/files/uploads; fi
 cat > /etc/remotefiles/sshd_config <<CONF
 Port 2222
 HostKey /etc/remotefiles/host
@@ -18,7 +20,7 @@ MaxSessions ${CHANNELS:-10}
 Subsystem sftp internal-sftp
 Match User fixture
     ChrootDirectory /srv/chroot
-    ForceCommand internal-sftp -R
+    ForceCommand internal-sftp$readonly
 LogLevel VERBOSE
 CONF
 exec /usr/sbin/sshd -D -e -f /etc/remotefiles/sshd_config

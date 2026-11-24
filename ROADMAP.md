@@ -1,6 +1,6 @@
 # RemoteFiles roadmap
 
-RemoteFiles is a read-only SFTP browser. This page separates work that remains to be done from features already available. It is a list of possibilities and outstanding checks, not a release schedule.
+RemoteFiles is an SFTP browser: browsing is read-only, and uploads and copies between servers are explicit. This page separates work that remains to be done from features already available. It is a list of possibilities and outstanding checks, not a release schedule.
 
 <a id="after-the-first-real-usage-session"></a>
 ## Acceptance still needed
@@ -25,7 +25,9 @@ does not block RemoteFiles; see [dependency maintenance](docs/CITADEL_UPSTREAM.m
 <a id="separate-write-capable-iteration"></a>
 ## Newly implemented
 
-- Downloads accept files up to 4 GiB and hold up to 16 GiB in total, always leaving 1 GiB of device storage free. See [downloads](docs/DOWNLOADS.md).
+- Uploads, and copies from one server to another, with a taken name always asked about and interrupted transfers continued from the bytes the server kept. See [uploads and copies](docs/TRANSFERS.md).
+- Several servers stay connected at once, each where it was left, so switching between them in the iPad library is immediate. See [iPad workspace](docs/IPAD.md#several-servers-at-once).
+- Downloads accept files up to 16 GiB and hold up to 64 GiB in total, always leaving 1 GiB of device storage free. See [downloads](docs/DOWNLOADS.md).
 - **Update Automatically** keeps a saved search index current: opening its folder updates it in the background, while the app is open and connected, once it is more than 15 minutes old. See [folder search](docs/FOLDER_BROWSING.md#updating-automatically).
 - **Update Index** refreshes a saved search index by reading only new files and files whose size or modification date changed, and drops removed files. See [folder search](docs/FOLDER_BROWSING.md#updating-an-index).
 - Retry continues interrupted downloads from the bytes already received when the remote file's size, modification time and final received bytes are unchanged. See [downloads](docs/DOWNLOADS.md#resuming-interrupted-downloads).
@@ -39,8 +41,10 @@ does not block RemoteFiles; see [dependency maintenance](docs/CITADEL_UPSTREAM.m
 
 These features still need physical-device acceptance; see [the dated status record](PREVIEW_STATUS.md) for validation.
 
-## Remote editing and uploads
+## Remote editing
 
-Editing and uploads would require a separate write-capable iteration with conflict detection and safe replacement. Remote browsing does not write files. The separately confirmed [public-key installation](docs/PUBLIC_KEY_INSTALLATION.md) feature can update `authorized_keys` on a compatible server.
+[Uploads and copies between servers](docs/TRANSFERS.md) are available: each is asked for, written under a partial name until complete, and never replaces a file without an answer. Uploading or copying a whole folder, choosing several files to copy at once, new folders, renaming and deleting are not.
+
+Editing a remote file in place would need its own iteration: detecting that the server's copy changed since it was read, and saving through the same safe replacement. Remote browsing does not write files. The separately confirmed [public-key installation](docs/PUBLIC_KEY_INSTALLATION.md) feature can update `authorized_keys` on a compatible server.
 
 A VPN, companion Mac service, accounts, analytics, monetisation, backend and App Store release preparation are outside this preview.

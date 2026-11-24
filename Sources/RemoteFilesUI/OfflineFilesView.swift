@@ -118,6 +118,10 @@ struct OfflinePinActions: View {
         if entry.kind == .file {
             Button("Download", systemImage: "arrow.down.circle") { model.enqueueDownload(profile: profile, entry: entry) }
                 .disabled(!model.isForeground || model.downloads == nil)
+            if model.supportsTransfers {
+                Button("Copy to Server…", systemImage: "arrow.left.arrow.right") { model.sheet = .copy(profile, [entry]) }
+                    .disabled(!model.canTransfer)
+            }
             let pin = model.offlinePin(profile: profile, path: entry.path)
             Button(pin == nil ? "Keep Offline" : "Update Offline Copy", systemImage: "pin") {
                 model.pinOffline(profile: profile, entry: entry)

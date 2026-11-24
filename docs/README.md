@@ -15,8 +15,9 @@ Choose a guide by what you want to do.
 - [Server compatibility](SERVER_COMPATIBILITY.md): verified implementations, session-channel limits and reproducible acceptance.
 - [Read and preview files](READER.md): supported formats, navigation, source, sharing and size limits.
 - [Manage downloads](DOWNLOADS.md): queues, progress, retry, Files export and background SSH transfers.
+- [Upload files and copy between servers](TRANSFERS.md): what is written and where, taken names, retry and limits.
 - [Save files and folders for offline use](OFFLINE_FILES.md): snapshots, updates, storage limits and offline links.
-- [Use the iPad workspace](IPAD.md): navigate the library, folder and reader in different window sizes.
+- [Use the iPad workspace](IPAD.md): navigate the library, folder and reader in different window sizes, with several servers connected at once.
 
 For a closer look at specific behavior, see [rich Markdown](MARKDOWN_RENDERING.md), [document links](DOCUMENT_LINKS.md), [saving original files](ORIGINAL_EXPORT.md), [remote Markdown images](REMOTE_IMAGES.md), [audio and video](AUDIO_VIDEO.md), [static HTML](HTML_PREVIEWS.md), [certificates](CERTIFICATE_PREVIEWS.md) and [private keys in text files](PRIVATE_KEYS_IN_TEXT.md).
 

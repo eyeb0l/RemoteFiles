@@ -237,3 +237,43 @@ stand-ins above), other server versions, and cellular-only paths or loss rates o
 over a tailnet). Missing interpreter/procfs capability still uses the
 bounded SFTP fallback. Existing canonical path checks and the portable SFTP atomic-confinement
 limitation remain unchanged.
+
+## Uploads on other servers: 22 November 2026
+
+[Uploads and copies](TRANSFERS.md) had only met OpenSSH 10.5. The compatibility suite gained an upload
+check, `testUploadsAreNamedWhenWholeOrRefusedLeavingNothing`, and servers that let the account write to
+one folder. On those it sends a file and reads it back, has a taken name refused before a byte is sent,
+keeps a second copy beside it, replaces it, stops a source part-way and continues from what the server
+kept, and removes a partial copy it gives up, checking after each step that the folder lists the files
+and nothing else of the app's. On the read-only servers the upload must be refused and leave nothing.
+Every byte is read back over SFTP.
+
+| Server | Result | How a file took its name |
+|---|---|---|
+| OpenSSH 10.5p1, `internal-sftp` | Passed | Hard link |
+| OpenSSH 8.2p1, chrooted (container) | Passed | Hard link |
+| ProFTPD 1.3.8 `mod_sftp` (container) | Passed | Hard link |
+| SFTPGo 2.6.6 (container) | Passed | Looked, then renamed: it offers no hard link |
+| AsyncSSH 2.24.1 | Passed | Hard link |
+| AsyncSSH without `hardlink@openssh.com` or `posix-rename@openssh.com` | Passed | Looked, then renamed; Replace by moving the old file aside |
+| The same, with a RENAME that replaces an existing name | Passed | As above |
+| Read-only: OpenSSH `internal-sftp -R` at 10, 2 and 1 channels and 8.2p1 chrooted at 10 and 1, AsyncSSH, Paramiko at 10, 2 and 1, ProFTPD, SFTPGo | Refused with permission denied, nothing left | — |
+
+Both runs passed every scenario: eleven local servers, and seven containers on a Linux host over a
+tailnet. The last AsyncSSH row is the server the [security notes](SECURITY.md) warn about, whose rename
+replaces a taken name: every check holds there, because the name is looked at before it is renamed. The
+instant between that look and the rename is still not something a test can hit on demand.
+
+**Found.** The vendored SFTP client sent `SSH_FXP_RENAME` with a trailing flags word, which belongs to
+protocol version 5; it negotiates version 3. OpenSSH ignores the word. AsyncSSH answers
+`SSH_FX_BAD_MESSAGE`, so wherever a plain rename was needed, on a server without the two extensions or
+with them switched off, a file could not be named and Replace could not move the old file aside. The
+request now ends with its two paths ([vendoring notes](../Vendor/Citadel/UPSTREAM.md)), and
+`SFTPRenameWireFormatTests` pins its bytes. Browsing never renames, so nothing before uploads met this.
+
+Run against AsyncSSH with the fixture of `scripts/test-openssh.sh`, the whole macOS suite passed but for
+two tests of the search helper, which needs a remote command the stand-in did not offer.
+
+*Not covered:* vendor NAS firmware, Windows servers, servers with quotas or full disks, and file systems
+without hard links under a server that offers them (the link then fails and the look-and-rename path is
+taken, which the two AsyncSSH variants exercise).

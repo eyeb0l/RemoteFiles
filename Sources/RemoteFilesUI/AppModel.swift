@@ -15,22 +15,29 @@ private final class OfflineLibraryObservation {
 private final class DownloadSceneRegistration {
     let id = UUID()
     let manager: DownloadManager
+    /// The queue of uploads and copies, which this window is counted in as it is in the downloads'.
+    let transfers: TransferManager?
     private let protectedDataObserver: NSObjectProtocol
-    init(manager: DownloadManager) {
-        self.manager = manager
+    init(manager: DownloadManager, transfers: TransferManager?) {
+        self.manager = manager; self.transfers = transfers
         protectedDataObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil, queue: .main
-        ) { [weak manager] _ in
-            Task { @MainActor in manager?.finalizePendingDownloads() }
+        ) { [weak manager, weak transfers] _ in
+            Task { @MainActor in manager?.finalizePendingDownloads(); transfers?.saveIfUnsaved() }
         }
     }
     deinit {
         NotificationCenter.default.removeObserver(protectedDataObserver)
-        let manager = manager, id = id
+        let manager = manager, transfers = transfers, id = id
         Task { @MainActor in
             manager.removeScene(id)
             if !manager.isForeground, !BackgroundDownloadCoordinator.shared(for: manager).canContinue {
                 await manager.interrupt(reason: "The download window closed. Retry to continue.")
+            }
+            guard let transfers else { return }
+            transfers.removeScene(id)
+            if !transfers.isForeground, !BackgroundDownloadCoordinator.shared(for: transfers).canContinue {
+                await transfers.interrupt(reason: "The window closed. Retry to continue.")
             }
         }
     }
@@ -45,13 +52,15 @@ final class AppModel {
         }
     }
     enum Sheet: Identifiable {
-        case connection(UUID?), settings, offlineFiles, downloads, trust(HostEndpoint, HostKeyDetails), changed(HostEndpoint, HostKeyDetails, HostKeyDetails), unlock(IdentityMetadata)
+        case connection(UUID?), settings, offlineFiles, downloads, transfers, copy(ConnectionProfile, [RemoteEntry]), trust(HostEndpoint, HostKeyDetails), changed(HostEndpoint, HostKeyDetails, HostKeyDetails), unlock(IdentityMetadata)
         var id: String {
             switch self {
             case .connection: return "connection"
             case .settings: return "settings"
             case .offlineFiles: return "offlineFiles"
             case .downloads: return "downloads"
+            case .transfers: return "transfers"
+            case .copy: return "copy"
             case .trust: return "trust"
             case .changed: return "changed"
             case .unlock: return "unlock"
@@ -83,6 +92,18 @@ final class AppModel {
     private let downloadTransport: any RemoteFileService
     private let demoDownloadTransport = DemoRemoteFileService()
     private var downloadSceneRegistration: DownloadSceneRegistration?
+    let transferDirectory: URL
+    /// Uploads and copies between servers. Shared between windows, as the download queue is.
+    private(set) var transfers: TransferManager?
+    private(set) var transferError: String?
+    private(set) var backgroundTransfers = BackgroundDownloadCoordinator(wording: ("transfer", "transferring", "Transfers"))
+    /// Uploads and copies use connections of their own, one for each server they reach, apart from browsing's.
+    private let transferTransport: (any RemoteFileUploading)?
+    private let demoTransferTransport = DemoRemoteFileService()
+    var uploadTransport: (any RemoteFileUploading)? { demo ? demoTransferTransport : transferTransport }
+    /// Counts what uploads and copies have added to each folder, so one on screen lists itself again.
+    private var folderChanges: [String: Int] = [:]
+    func folderChangeCount(_ id: UUID, path: String) -> Int { folderChanges[id.uuidString + "|" + path, default: 0] }
     let offlineDirectory: URL
     private(set) var offlineStore: OfflineFileStore?
     private(set) var offlinePins: [OfflinePin] = []
@@ -192,6 +213,7 @@ final class AppModel {
         self.preferences = preferences
         self.identities = identities
         downloadDirectory = directory.appendingPathComponent("Downloads-v1", isDirectory: true)
+        transferDirectory = directory.appendingPathComponent("Transfers-v1", isDirectory: true)
         offlineDirectory = directory.appendingPathComponent("Offline-v1", isDirectory: true)
         resourceDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("RemoteImages-v1")
         // Shared with every other window on this library: each has its own model, and with a store
@@ -200,9 +222,12 @@ final class AppModel {
         readingPositions = ReadingPositionStore.shared(fileURL: directory.appendingPathComponent("reading-positions-v1.json"))
         trust = try HostTrustStore.shared(fileURL: directory.appendingPathComponent("known-hosts-v1.json"))
         self.publicKeyInstaller = publicKeyInstaller ?? SSHPublicKeyInstaller(trust: trust)
-        connectionService = fileService ?? CoalescingFileService(base: SFTPRemoteFileService(identityStore: identities, trustStore: trust, metadataStore: metadataStore))
+        // One session for each server, so opening a second leaves the first connected.
+        connectionService = fileService ?? CoalescingFileService(base: MultiHostFileService(identityStore: identities, trustStore: trust, metadataStore: metadataStore))
         service = connectionService
         downloadTransport = fileService ?? SFTPRemoteFileService(identityStore: identities, trustStore: trust, metadataStore: metadataStore)
+        transferTransport = fileService.map { $0 as? any RemoteFileUploading }
+            ?? MultiHostFileService(identityStore: identities, trustStore: trust, metadataStore: metadataStore)
     }
     func load() async {
         let saved = await metadataStore.current()
@@ -225,6 +250,7 @@ final class AppModel {
         RemotePlaybackController.removeLeftovers()
         #endif
         RemoteOriginalExporter.removeAbandonedExports(in: FileManager.default.temporaryDirectory.appendingPathComponent("RemoteOriginalExports-v1", isDirectory: true))
+        PickedLibraryFile.removeAbandoned()
         await resources.trimCache()
     }
     /// Follows the saved library, so a connection, key, favourite or recent changed in another window
@@ -274,8 +300,15 @@ final class AppModel {
         if let downloads {
             Task { await downloads.interrupt(reason: Self.changedConnectionDownloadMessage) { affected.contains($0.profile.id) && !current.contains($0.profile) } }
         }
+        if let transfers {
+            Task {
+                await transfers.interrupt(reason: Self.changedConnectionTransferMessage) { item in
+                    item.profiles.contains { affected.contains($0.id) && !current.contains($0) }
+                }
+            }
+        }
         routes.removeAll { affected.contains($0.connectionID) }
-        affected.forEach { forgetListings(of: $0) }
+        affected.forEach { forgetListings(of: $0); parkedRoutes[$0] = nil }
         guard affected.contains(where: { connectionStates[$0] != nil || foregroundConnectionID == $0 }) else {
             // No session to end, but keys are kept after a reset or Demo, so one nothing uses now is locked.
             Task { await lockUnreferencedKeys() }
@@ -307,6 +340,17 @@ final class AppModel {
         libraryChanged(to: saved.metadata)
     }
     private func loadDownloads() {
+        let queue: TransferManager?
+        do {
+            let loaded = try TransferManager.shared(directory: demo ? transferDirectory.appendingPathComponent("Demo", isDirectory: true) : transferDirectory)
+            let coordinator = BackgroundDownloadCoordinator.shared(for: loaded)
+            backgroundTransfers = coordinator
+            loaded.didChange = { [weak coordinator, weak loaded] in
+                guard let coordinator, let loaded else { return }
+                coordinator.update(loaded)
+            }
+            queue = loaded; transferError = nil
+        } catch { queue = nil; transferError = error.localizedDescription }
         do {
             let manager = try DownloadManager.shared(directory: demo ? downloadDirectory.appendingPathComponent("Demo", isDirectory: true) : downloadDirectory)
             manager.protectedDataAvailable = { UIApplication.shared.isProtectedDataAvailable }
@@ -316,12 +360,13 @@ final class AppModel {
                 guard let coordinator, let manager else { return }
                 coordinator.update(manager)
             }
-            if downloadSceneRegistration?.manager !== manager {
-                downloadSceneRegistration = DownloadSceneRegistration(manager: manager)
+            if downloadSceneRegistration?.manager !== manager || downloadSceneRegistration?.transfers !== queue {
+                downloadSceneRegistration = DownloadSceneRegistration(manager: manager, transfers: queue)
             }
             manager.setForeground(isForeground, sceneID: downloadSceneRegistration?.id)
-            downloads = manager; downloadError = nil
-        } catch { downloads = nil; downloadSceneRegistration = nil; downloadError = error.localizedDescription }
+            queue?.setForeground(isForeground, sceneID: downloadSceneRegistration?.id)
+            downloads = manager; downloadError = nil; transfers = queue
+        } catch { downloads = nil; transfers = nil; downloadSceneRegistration = nil; downloadError = error.localizedDescription }
     }
     func enqueueDownload(profile: ConnectionProfile, entry: RemoteEntry) {
         guard isForeground, !isDisconnecting, disconnectWork == nil, let downloads else { return }
@@ -354,7 +399,137 @@ final class AppModel {
         guard isForeground, isSecurityError(error) else { return }
         handleTransferFailure(error, profile: profile)
     }
-    func foregroundDownloads() { downloads?.setForeground(true, sceneID: downloadSceneRegistration?.id) }
+    func foregroundDownloads() {
+        downloads?.setForeground(true, sceneID: downloadSceneRegistration?.id)
+        transfers?.setForeground(true, sceneID: downloadSceneRegistration?.id)
+    }
+
+    // MARK: Uploads and copies between servers
+
+    var canTransfer: Bool { isForeground && !isDisconnecting && disconnectWork == nil && transfers != nil && uploadTransport != nil }
+    /// Whether uploads and copies can run at all: an injected transport may only read.
+    var supportsTransfers: Bool { transfers != nil && uploadTransport != nil }
+    /// Where files picked or dropped for upload are copied before they are queued, inside the queue's own
+    /// protected folder so that moving them into it is a rename.
+    func incomingUploadDirectory() throws -> URL {
+        let base = demo ? transferDirectory.appendingPathComponent("Demo", isDirectory: true) : transferDirectory
+        let folder = base.appendingPathComponent(TransferManager.incomingFolderName, isDirectory: true).appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        return folder
+    }
+    /// Queues copies this app owns, which are moved into the queue. `taken` are the names the folder is known
+    /// to hold; a file with one of them is sent with `answer`, or left out when there is none. The server
+    /// still decides when each file is named: a name taken since is never written over without being asked.
+    func enqueueUploads(_ files: [URL], to profile: ConnectionProfile, directory: String,
+                        taken: Set<String> = [], answer: UploadConflictPolicy? = nil) {
+        defer { for file in files { try? FileManager.default.removeItem(at: file) } }
+        guard canTransfer, let transfers, let transport = uploadTransport else { return }
+        var used = Set<String>()
+        for file in files {
+            let name = file.lastPathComponent
+            let conflict: UploadConflictPolicy
+            if taken.contains(name) {
+                guard let answer else { continue }
+                conflict = answer
+            } else { conflict = used.contains(name) ? .keepBoth : .fail } // Two files of one name were chosen together.
+            used.insert(name)
+            do {
+                try transfers.enqueueUpload(consuming: file, named: name, to: profile, directory: directory, conflict: conflict,
+                                            service: transport, onFailure: transferFailureHandler(), onCompletion: transferCompletionHandler())
+            } catch { errorMessage = "“\(RemotePath.displayName(name))” wasn’t queued. \(error.localizedDescription)" }
+        }
+    }
+    /// Queues copies of files on one server into a folder on another, or elsewhere on the same one.
+    func enqueueCopies(_ entries: [RemoteEntry], from source: ConnectionProfile, to profile: ConnectionProfile, directory: String,
+                       taken: Set<String> = [], answer: UploadConflictPolicy? = nil) {
+        guard canTransfer, let transfers, let transport = uploadTransport else { return }
+        var used = Set<String>()
+        for entry in entries {
+            let name = entry.exportFilename ?? entry.name
+            let conflict: UploadConflictPolicy
+            if taken.contains(name) {
+                guard let answer else { continue }
+                conflict = answer
+            } else { conflict = used.contains(name) ? .keepBoth : .fail }
+            used.insert(name)
+            do {
+                try transfers.enqueueCopy(of: entry.selectedForTransfer, from: source, to: profile, directory: directory, conflict: conflict,
+                                          service: transport, onFailure: transferFailureHandler(), onCompletion: transferCompletionHandler())
+            } catch { errorMessage = "“\(RemotePath.displayName(name))” wasn’t queued. \(error.localizedDescription)" }
+        }
+    }
+    /// Retry continues from the bytes the server kept. `conflict` answers a name that turned out to be taken.
+    func retryTransfer(_ item: ManagedTransfer, conflict: UploadConflictPolicy? = nil) {
+        guard canTransfer, let transport = uploadTransport else { return }
+        seenTransferProblems.remove(item.id)
+        do {
+            try transfers?.retry(item.id, profiles: item.profiles.compactMap { profile($0.id) }, conflict: conflict, service: transport,
+                                 onFailure: transferFailureHandler(), onCompletion: transferCompletionHandler())
+        } catch { errorMessage = error.localizedDescription }
+    }
+    func removeTransfer(_ item: ManagedTransfer) { transfers?.remove(item.id, service: isForeground ? uploadTransport : nil) }
+    /// Failed and interrupted transfers already looked at in the Transfers list, which the progress bar no
+    /// longer points to.
+    private var seenTransferProblems: Set<UUID> = []
+    func unseenTransferProblems(in items: [ManagedTransfer]) -> Int {
+        items.filter { ($0.state == .failed || $0.state == .interrupted) && !seenTransferProblems.contains($0.id) }.count
+    }
+    func transferProblemsSeen() {
+        let problems = Set(transfers?.items.filter { $0.state == .failed || $0.state == .interrupted }.map(\.id) ?? [])
+        if problems != seenTransferProblems { seenTransferProblems = problems }
+    }
+    /// A server reached outside the folder and reader on screen, as when choosing where a copy goes.
+    func noteConnected(_ id: UUID) {
+        if connectionStates[id] != "Connected" { connectionStates[id] = "Connected" }
+        // Counted among the servers kept connected, as the one used longest ago.
+        if !hostOrder.contains(id) { hostOrder.insert(id, at: 0) }
+    }
+    /// The uploads and copies using a connection that are still in the Transfers list.
+    func transfers(using profile: ConnectionProfile) -> [ManagedTransfer] {
+        transfers?.items.filter { $0.profiles.contains { $0.id == profile.id } } ?? []
+    }
+    private func transferFailureHandler() -> (Error, ConnectionProfile) -> Void {
+        let queuedInDemo = demo
+        return { [weak self] error, profile in
+            guard let self, self.demo == queuedInDemo else { return }
+            self.handleDownloadFailure(error, profile: profile)
+        }
+    }
+    private func transferCompletionHandler() -> (ManagedTransfer) -> Void {
+        let queuedInDemo = demo
+        return { [weak self] item in
+            guard let self, self.demo == queuedInDemo else { return }
+            self.folderChanged(item.destination.id, path: item.directory)
+            self.noteFinished(item)
+        }
+    }
+    /// What the progress bar says for a few seconds once the queue has nothing left: a transfer into a folder
+    /// that isn't on screen would otherwise end without a sign.
+    private(set) var transferNotice: String?
+    @ObservationIgnored private var transferNoticeTask: Task<Void, Never>?
+    @ObservationIgnored private var finishedSinceIdle: [ManagedTransfer] = []
+    private func noteFinished(_ item: ManagedTransfer) {
+        finishedSinceIdle.append(item)
+        guard transfers?.items.contains(where: { $0.isPending && $0.id != item.id }) != true else { return }
+        let finished = finishedSinceIdle
+        finishedSinceIdle = []
+        let folder = RemotePath.displayName(RemotePath.name(of: item.directory))
+        let verb = finished.allSatisfy(\.isCopy) ? "Copied" : finished.contains(where: \.isCopy) ? "Transferred" : "Uploaded"
+        transferNotice = finished.count == 1 ? "\(verb) \(RemotePath.displayName(item.filename)) to \(folder)" : "\(verb) \(finished.count) files"
+        transferNoticeTask?.cancel()
+        transferNoticeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            if !Task.isCancelled { self?.transferNotice = nil }
+        }
+    }
+    /// A file arrived in this folder. What is remembered of it is checked with the server when next shown,
+    /// and a view showing it now lists it again.
+    private func folderChanged(_ id: UUID, path: String) {
+        for key in directories.keys where key.id == id && directories[key]?.listing.path.utf8.elementsEqual(path.utf8) == true {
+            directories[key]?.storedAt = nil
+        }
+        folderChanges[id.uuidString + "|" + path, default: 0] += 1
+    }
     /// The scene is active again. Only the background ends a session, so only a return from it starts
     /// a new one, which has every folder, reader and search on screen read again. Control Centre,
     /// Notification Centre, a system prompt and Face ID leave the scene inactive with its connection
@@ -399,7 +574,7 @@ final class AppModel {
               let store = offlineStore else { return }
         let token = UUID(), revision = sessionRevision
         let transport = entry.kind == .directory ? searchService : service
-        pinToken = token; pinningName = entry.exportFilename ?? entry.name
+        pinToken = token; pinningName = entry.exportFilename ?? entry.name; pinConnectionID = profile.id
         pinProgress = .init(); cancellingPin = false
         folderPinProgress = entry.kind == .directory ? .init() : nil
         pinTask = Task {
@@ -433,7 +608,7 @@ final class AppModel {
             await store.waitForCancelledTransfer(token)
             guard pinToken == token else { return }
             await refreshOfflineSnapshot(store)
-            pinTask = nil; pinToken = nil; pinningName = nil; cancellingPin = false
+            pinTask = nil; pinToken = nil; pinningName = nil; cancellingPin = false; pinConnectionID = nil
             folderPinProgress = nil
         }
     }
@@ -510,10 +685,16 @@ final class AppModel {
         // Its downloads stop, in every window: its server, account or key may have changed, and Retry won't
         // continue one across a changed connection. Other connections' downloads go on.
         await downloads?.interrupt(reason: Self.changedConnectionDownloadMessage) { $0.profile.id == value.id }
-        await disconnect(preservingDownloads: true, keepingKeys: true)
+        await transfers?.interrupt(reason: Self.changedConnectionTransferMessage) { $0.profiles.contains { $0.id == value.id } }
+        // A connection being added has no session and nothing read through it, so the servers already
+        // connected stay connected and their folders aren't listed again. An edit ends every session, as before.
+        if metadata.connections.contains(where: { $0.id == value.id }) {
+            await disconnect(preservingDownloads: true, keepingKeys: true)
+            sessionRevision += 1
+        }
         // The iPad sidebar can edit the connection whose reader is still on screen.
         routes.removeAll { $0.connectionID == value.id }
-        sessionRevision += 1
+        parkedRoutes[value.id] = nil
         do { try await searchIndexStore().remove(connectionID: value.id) }
         catch { errorMessage = error.localizedDescription }
         await updateLibrary { library in
@@ -530,11 +711,15 @@ final class AppModel {
     }
     func removeConnection(_ profile: ConnectionProfile, removingDownloads: Bool = false) async {
         await downloads?.interrupt(reason: Self.changedConnectionDownloadMessage) { $0.profile.id == profile.id }
+        await transfers?.interrupt(reason: Self.changedConnectionTransferMessage) { $0.profiles.contains { $0.id == profile.id } }
         if removingDownloads {
             for item in downloads(from: profile) {
                 do { try downloads?.remove(item.id) } catch { errorMessage = error.localizedDescription }
             }
         }
+        // An upload or copy can't be retried once its connection is gone, so it goes with it, staged file and all.
+        for item in transfers(using: profile) { transfers?.remove(item.id) }
+        parkedRoutes[profile.id] = nil
         await disconnect(preservingDownloads: true, keepingKeys: true)
         // Images, PDFs and media previewed from it are on disk until they age out.
         await forgetPreviewedFiles()
@@ -658,11 +843,12 @@ final class AppModel {
     /// Stops every download that reaches a server whose trusted key is being forgotten, directly or through it
     /// as a jump host, whichever connection it was started from. Downloads from other servers go on.
     private func interruptDownloads(through endpoint: HostEndpoint) async {
-        await downloads?.interrupt(reason: "This server's trusted key was forgotten. Retry to check it again and continue.") {
-            HostEndpoint.all(of: $0.profile).contains(endpoint)
-        }
+        let reason = "This server's trusted key was forgotten. Retry to check it again and continue."
+        await downloads?.interrupt(reason: reason) { HostEndpoint.all(of: $0.profile).contains(endpoint) }
+        await transfers?.interrupt(reason: reason) { $0.profiles.contains { HostEndpoint.all(of: $0).contains(endpoint) } }
     }
     static let changedConnectionDownloadMessage = "This download's connection was changed or removed. Download the file again."
+    static let changedConnectionTransferMessage = "A connection this transfer uses was changed or removed. Start it again."
     func addIdentity(_ value: IdentityMetadata) async throws {
         guard !demo else { throw RemoteFileError.unavailable("Leave Demo before saving keys.") }
         // Shown only once it's saved.
@@ -782,7 +968,7 @@ final class AppModel {
     /// connections, trust or Demo, which close the connection but must not make every key in this window,
     /// including those downloads and other connections use, ask for its passphrase again. Disconnect and
     /// backgrounding lock them.
-    func disconnect(preservingDownloads: Bool = false, keepingListings: Bool = false, keepingKeys: Bool = false) async {
+    func disconnect(preservingDownloads: Bool = false, preservingTransfers: Bool? = nil, keepingListings: Bool = false, keepingKeys: Bool = false) async {
         if let disconnectWork {
             // Joining a close that keeps keys must not leave them unlocked for a call that locks them.
             let joinedKeepsKeys = disconnectKeepsKeys
@@ -794,6 +980,10 @@ final class AppModel {
             if !preservingDownloads {
                 await downloads?.interrupt(reason: "Transfer interrupted. Retry to continue.")
                 backgroundDownloads.finish(success: false)
+            }
+            if !(preservingTransfers ?? preservingDownloads) {
+                await transfers?.interrupt(reason: "Transfer interrupted. Retry to continue.")
+                backgroundTransfers.finish(success: false)
             }
             await closeSession(keepingListings: keepingListings, keepingKeys: keepingKeys)
         }
@@ -817,9 +1007,46 @@ final class AppModel {
         isDisconnecting = true
         sessionRevision += 1
         routes = []; sheet = nil; errorMessage = nil
+        parkedRoutes = [:]; hostOrder = []
         connectionStates = [:]; clearCaches()
         await disconnect()
         isDisconnecting = false
+    }
+    /// Disconnects one server and leaves the others connected, each where it was. With no other server
+    /// connected this is Disconnect as it has always been: everything closes, transfers stop and keys lock.
+    func disconnect(_ profile: ConnectionProfile) async {
+        guard connectionStates.contains(where: { $0.key != profile.id && $0.value != Self.disconnectedState }) else {
+            await disconnectAndGoHome(); return
+        }
+        guard !isDisconnecting, disconnectWork == nil else { return }
+        let id = profile.id
+        routes.removeAll { $0.connectionID == id }
+        parkedRoutes[id] = nil; hostOrder.removeAll { $0 == id }
+        if foregroundConnectionID == id { foregroundConnectionID = nil; cancelPrefetch() }
+        if pinConnectionID == id { cancelOfflinePin() }
+        forgetListings(of: id)
+        connectionStates[id] = nil; mediaSecurityFailures[id] = nil
+        await closeHostSession(id)
+        // Its key locks unless a server still connected, or a transfer under way, uses it too.
+        var inUse = Set(metadata.connections.filter { connectionStates[$0.id] != nil }.flatMap(\.identityIDs))
+        for item in downloads?.items ?? [] where item.state == .queued || item.state == .downloading { inUse.formUnion(item.profile.identityIDs) }
+        for item in transfers?.items ?? [] where item.isPending { inUse.formUnion(item.profiles.flatMap(\.identityIDs)) }
+        await identities.clearSession(keeping: inUse)
+    }
+    private func closeHostSession(_ id: UUID) async {
+        await (service as? any HostSessionClosing)?.closeSession(of: id)
+    }
+    /// Opens a library row in the workspace. Leaving one server for another keeps the first one's place, and
+    /// its connection: choosing that server again returns to the folder and file it was showing. Choosing the
+    /// server already on screen, or a favourite or recent file, goes where the row says.
+    func openFromLibrary(_ route: Route) {
+        let id = route.connectionID, current = routes.last?.connectionID
+        if let current, current != id { parkedRoutes[current] = routes }
+        if current != id, let parked = parkedRoutes[id], !parked.isEmpty, case .folder(_, let path) = route,
+           path == profile(id)?.startingDirectory {
+            routes = parked
+        } else { routes = [route] }
+        parkedRoutes[id] = nil
     }
     private func closeSession(keepingListings: Bool = false, keepingKeys: Bool = false) async {
         let previousPin = pinTask
@@ -840,7 +1067,7 @@ final class AppModel {
         await previousExporter?.cancelAndDrain()
         exportService = nil
         if !keepingKeys { await identities.clearSession() }
-        connectionStates = [:]
+        connectionStates = [:]; hostOrder = []
         // Names already seen stay in memory for an instant return from the background, unless they
         // were read with a key that locks again now. All are checked with the server when next
         // shown; an explicit disconnect forgets them.
@@ -855,9 +1082,11 @@ final class AppModel {
     func background() async {
         // Offline navigation owns no connection or credentials. Keep its stack while the reader
         // releases protected local resources; transient trust/key/edit sheets still disappear.
-        if case .offlineFiles = sheet { } else if case .downloads = sheet { } else { sheet = nil }
+        if case .offlineFiles = sheet { } else if case .downloads = sheet { } else if case .transfers = sheet { } else { sheet = nil }
         downloads?.setForeground(false, sceneID: downloadSceneRegistration?.id)
-        await disconnect(preservingDownloads: downloads?.isForeground == true || backgroundDownloads.canContinue, keepingListings: true)
+        transfers?.setForeground(false, sceneID: downloadSceneRegistration?.id)
+        await disconnect(preservingDownloads: downloads?.isForeground == true || backgroundDownloads.canContinue,
+                         preservingTransfers: transfers?.isForeground == true || backgroundTransfers.canContinue, keepingListings: true)
     }
     /// Breadcrumb navigation: pop back to a folder already in the stack instead of pushing a
     /// duplicate. A route may hold a non-canonical request such as ".", so its cached listing's
@@ -991,13 +1220,36 @@ final class AppModel {
         return try await service.listDirectory(profile: profile, path: path)
     }
     /// Which connection the screen is using. Work prepared ahead for another one stops here.
+    /// Whether the transport keeps a session for each server. One that keeps a single session, as Demo's and
+    /// an injected one may, closes the first server's when a second opens.
+    private var keepsSessionPerServer: Bool { searchService is any HostSessionClosing }
     func noteForegroundConnection(_ id: UUID) {
+        hostOrder.removeAll { $0 == id }; hostOrder.append(id)
         guard foregroundConnectionID != id else { return }
         foregroundConnectionID = id
         folderPrefetchQueue.removeAll()
-        // The transport keeps one session, so opening this one ends any other.
-        connectionStates = connectionStates.filter { $0.key == id }
+        guard keepsSessionPerServer else {
+            // Opening this server ended any other's session, so Home must not still show it connected.
+            connectionStates = connectionStates.filter { $0.key == id }; hostOrder = [id]
+            return
+        }
+        // Every server keeps its own session, so the others stay connected. Past the limit, the one used
+        // longest ago closes; it connects again when it is next opened.
+        while hostOrder.count > Self.liveHostLimit, let oldest = hostOrder.first(where: { $0 != pinConnectionID }), oldest != id {
+            hostOrder.removeAll { $0 == oldest }
+            connectionStates[oldest] = nil
+            forgetListings(of: oldest)
+            Task { await closeHostSession(oldest) }
+        }
     }
+    /// Servers this window keeps connected at once.
+    static let liveHostLimit = 6
+    /// Servers used in this session, the most recent last.
+    @ObservationIgnored private var hostOrder: [UUID] = []
+    /// Where each server other than the one on screen was left. See `openFromLibrary`.
+    @ObservationIgnored private var parkedRoutes: [UUID: [Route]] = [:]
+    /// The server an offline save is reading from, which must stay connected until it ends.
+    @ObservationIgnored private var pinConnectionID: UUID?
     private func cancelPrefetch() {
         folderPrefetchQueue.removeAll()
         folderPrefetch?.cancel(); folderPrefetch = nil; folderPrefetchToken = nil
@@ -1048,7 +1300,7 @@ final class AppModel {
         // Other windows' downloads go on. This window's place among the queue's windows goes when `loadDownloads`
         // replaces its registration; if no window is then left in the foreground, the queue is interrupted as when
         // the last window closes.
-        await disconnect(preservingDownloads: true, keepingKeys: true); routes = []
+        await disconnect(preservingDownloads: true, keepingKeys: true); routes = []; parkedRoutes = [:]
         if enabled {
             realMetadata = metadata
             metadata = AppMetadata()

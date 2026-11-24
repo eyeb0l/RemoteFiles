@@ -620,6 +620,61 @@ Theoretical until measured, most promising first.
 3. **A connection for every queued download.** Read from the code, not measured: the Downloads queue closes its session after each file, so the next pays about nine round trips of setup, 1.4 s at 150 ms. Keeping the connection between files that are already queued would save them, and is what a [carried read window](#starting-at-the-last-transfers-window-measured-not-adopted) would need before it had anything to carry. The queue closes the session to release the socket, so what holds it open, and for how long, needs deciding first.
 4. **A transfer's own `CLOSE`, a walk's sorting and the rich renderer's second parse.** Each is described, with why it was left, under [the audit of 11 November](#an-audit-of-what-was-left-11-november).
 
+## Uploads and copies, 21 November
+
+Uploads, and copies from one server to another, are new ([what they do](TRANSFERS.md)). Their cost was measured as it was built, on a MacBook Air (M3), macOS 27.2, loopback OpenSSH through `scripts/latency_proxy.py`, with the upload and copy lines added to `LatencyBenchmarkTests`. Medians of five runs at 40 ms and three at 150 ms.
+
+| | 40 ms | 150 ms |
+| --- | ---: | ---: |
+| Upload 50 B, first version | 453 ms | — |
+| Upload 50 B, a channel of its own | 460 ms | 1,561 ms |
+| Upload 50 B, in a queue | 283 ms | 939 ms |
+| Upload 3 MiB, first version | 634 ms | — |
+| Upload 3 MiB, a channel of its own | 558 ms | 1,896 ms |
+| Upload 3 MiB, in a queue | 369 ms | 1,267 ms |
+| Copy 3 MiB between two connections, channels of their own | 982 ms | 3,308 ms |
+| Copy 3 MiB between two connections, in a queue | 612 ms | 2,052 ms |
+| Download 3 MiB (unchanged) | 510 ms | 1,737 ms |
+
+**What limits an upload** is round trips, as it does a download: the first version spent about eleven on a file of any size. Two changes took a queued file to about seven, one of them given back for safety.
+
+- *Naming a file costs two round trips, on purpose.* It first looked at the name and renamed, and for a while sent the look with the close to save a round trip (229 ms and 785 ms for the queued 50 B file). A look and a rename only refuse a taken name on a server whose rename does, so a file now takes its name by a hard link, refused in one step on any server that has the extension, and its partial name is removed afterwards: one round trip more than the fastest version. The two can't go out together: a refused link followed by a removal that succeeded would lose the bytes.
+- *A queue shares one SFTP channel on each server*, as an offline folder's files do (`SnapshotTransferBatch`): the open, subsystem, version and close of a channel are four of a small file's round trips. A copy shares one on the server it reads from as well. A file that is refused closes only its own handle; a deadline or cancellation closes the channel, and the next file opens another.
+- *The write window starts at 32 requests*, 1 MiB, where a download's read window starts at 16. A transfer's connection carries no browsing to hold up, and a file of a few mebibytes goes in a round trip or two fewer. It still grows to 128 and shrinks back, by `TransferPacing`.
+
+The queue keeps each server's connection open until it has nothing left for it, so only the first file pays for the handshake. The download queue still closes its connection after every file (see "A connection for every queued download" above); that was not changed here.
+
+**On a phone.** An iPhone 17 Pro (Debug build, separate bundle ID) ran the `upload`, `copy` and `download` scenarios against the fixture on this Mac over Tailscale, three runs each ([samples](performance/2026-11-21-transfers/iphone-17-pro-tailscale.jsonl)). Each upload and copy was read back over SFTP and compared.
+
+| | Network's own delay | +40 ms |
+| --- | ---: | ---: |
+| Upload 50 B, in a queue | 147 ms | 393 ms |
+| Upload 64 MiB, in a queue | 7.3 MiB/s | 7.6 MiB/s |
+| Copy 64 MiB between two connections, in a queue | 6.7 MiB/s | 4.2 MiB/s |
+| Download 64 MiB | 11.0 MiB/s | 8.9 MiB/s |
+| Peak memory above idle: upload, copy, download | 3.2, 2.7, 1.2 MB | 3.4, 4.8, 1.4 MB |
+
+An upload ran at about two thirds of a download's rate in that session, which left open whether the phone's uplink or the client was slower. Two further measurements say it is the path.
+
+**Against the link itself, on an iPad.** The plain TCP baseline (`linkbaseline`) gained the other direction: a sink that reads a stream to its end, and an upload of the same 64 MiB beside each download. On an iPad Pro 11-inch (M5) over Tailscale to the fixture on this Mac, the same wireless-to-wireless path [measured on 7 November](#the-phones-download-cap-not-the-client), four rotations in one process ([samples](performance/2026-11-21-transfers/ipad-link-baseline.jsonl)):
+
+| iPad ↔ MacBook Air | Median | Each rotation |
+| --- | ---: | --- |
+| Plain TCP to the iPad | 8.5 MiB/s | 8.4, 8.7, 9.1, 7.6 |
+| Plain TCP to the iPad, 8 MiB `SO_RCVBUF` | 10.8 MiB/s | 11.3, 10.4, 11.2, 8.1 |
+| Plain TCP to the iPad, two streams together | 12.4 MiB/s | 12.0, 12.6, 12.2, 12.8 |
+| Plain TCP from the iPad | 8.6 MiB/s | 9.1, 8.0, 8.0, 9.9 |
+| SFTP download | 13.0 MiB/s | 8.9, 13.5, 12.5, 14.0 |
+| SFTP upload | 11.5 MiB/s | 6.7, 11.6, 11.3, 12.5 |
+
+An upload moved more than a single plain TCP stream did in either direction, and within about a tenth of a download in each rotation after the first. Nothing above TCP is holding it back on this path.
+
+**With no link, on the Mac.** Over loopback with nothing added, three runs ([samples](performance/2026-11-21-transfers/mac-loopback-updown.jsonl)): downloads of 64 MiB ran at 952 MiB/s, uploads at 803 MiB/s and copies between two connections at 631 MiB/s, with 0.9, 0.6 and 2.2 MB of memory above idle. The client's own ceiling is some seventy times what the wireless path carried, in both directions. An upload is about a sixth slower than a download there, which no link in ordinary use would show.
+
+*Not measured:* cellular, a wired or otherwise fast path to a device (the Mac mini of 7 November was not set up again), a capped link, or a server other than OpenSSH. The plain TCP ends were a few lines of Python on the Mac, so their single-stream figures are a floor for the path, not its limit. The proxy adds a fixed delay and nothing else.
+
+*Cost:* one more SSH connection per server while a queue runs; up to 4 MiB of file data in flight per transfer; a second channel on a server a copy reads from and writes to at once, which a server allowing one channel refuses.
+
 ## Run it
 
 ```sh
@@ -633,7 +688,7 @@ python3 -B scripts/benchmark_performance.py compare before.jsonl after.jsonl
 CAND=. BASE=../baseline bash docs/performance/2026-11-08-offline/paired.sh.txt offline.jsonl 0,5,40 2 22502
 ```
 
-To compare fairly, `git worktree add` the baseline, build both, and alternate `run --skip-build --checkout PATH` between them. `--only download,search` narrows the scenarios, `--mbit 100` caps the rate.
+To compare fairly, `git worktree add` the baseline, build both, and alternate `run --skip-build --checkout PATH` between them. `--only download,search` narrows the scenarios, `--mbit 100` caps the rate. `--only upload,copy` sends a 64 MiB file to the fixture's `uploads` folder and copies it between two connections, as a queue would, reads both back over SFTP to compare, and records time, throughput and peak memory; it runs on a device as well.
 
 On a phone, build with a separate bundle ID so the installed app is left alone: copy the checkout, replace `dev.iris.RemoteFiles` with `dev.iris.RemoteFilesBench` in its `project.pbxproj`, then:
 
@@ -659,7 +714,7 @@ python3 -B scripts/benchmark_performance.py server --output linux.jsonl --checko
   --port 22401 --user ubuntu --key KEY --host-key HOST_KEY.pub --root /srv/rf/bench --only assisted,bulk --rtt 0,40,150
 ```
 
-The `assisted` scenarios search the guest's `tree`, `big` and `docs` folders with the helper and with the walk; `REMOTEFILES_BENCHMARK_ASSISTED_MODE=helper` or `walk` runs one. `bulk` builds an index and saves an offline folder of `REMOTEFILES_BENCHMARK_BULK_ROOT`. `--cold-command` empties the server's caches before each search sample. `windowpairs` rotates a read window fixed at 16, a growing one and one fixed at 64 in one process, and records how far each grew. `linkbaseline` rotates SFTP with a plain TCP read of the same file: `REMOTEFILES_BENCHMARK_RAW_PORTS` lists ports on the server's host, or `HOST:PORT` elsewhere, that send `big-64m.bin` and close, such as a loop of `nc -l`; the two-stream arm also reads from the next port up, and `REMOTEFILES_BENCHMARK_SFTP_PORTS` lists other ports of the same server, such as one without the proxy. For 120 Hz frames, give the benchmark host an Info.plist with `CADisableMinimumFrameDurationOnPhone`; `REMOTEFILES_BENCHMARK_FRAME_RATE=60` asks for 60 Hz in the same build. `REMOTEFILES_BENCHMARK_SCROLL_START=0.7` starts `testFolderScreen`'s steady scroll 70% of the way down, where `List`'s work for each cell is largest, and `testFolderScreenFiltering` narrows, clears and widens a filter on the folder screen. `offline` saves the generated `offline` trees (`small50`, `tiny400`, `mixed`; `REMOTEFILES_BENCHMARK_OFFLINE_TREES` narrows them), then times folder taps during a save and cancelling or dropping one; `REMOTEFILES_BENCHMARK_OFFLINE_EXTRAS=0` skips those, `REMOTEFILES_BENCHMARK_OFFLINE_SAVES=0` keeps only them, and `REMOTEFILES_BENCHMARK_OFFLINE_ARMS=dedicated1,shared1,shared16` rotates transfer policies in one process. `windowtaps` rotates read-window policies with folder taps during each download; give it `--mbit`. `windowcarry` runs only when named: each arm downloads `REMOTEFILES_BENCHMARK_CARRY_FILE` (`big-64m.bin`) twice on one connection, `REMOTEFILES_BENCHMARK_CARRY_IDLE_MS` apart, with folder taps during the second. `REMOTEFILES_BENCHMARK_CARRY_ARMS` chooses and orders the arms from `growing`, `carry`, `carryhold`, `fixed64`, `stale64` and `stale64hold`; the default is the first four. `pipeline` runs a live contents search and an index build of the same tree.
+The `assisted` scenarios search the guest's `tree`, `big` and `docs` folders with the helper and with the walk; `REMOTEFILES_BENCHMARK_ASSISTED_MODE=helper` or `walk` runs one. `bulk` builds an index and saves an offline folder of `REMOTEFILES_BENCHMARK_BULK_ROOT`. `--cold-command` empties the server's caches before each search sample. `windowpairs` rotates a read window fixed at 16, a growing one and one fixed at 64 in one process, and records how far each grew. `linkbaseline` rotates SFTP with a plain TCP read of the same file: `REMOTEFILES_BENCHMARK_RAW_PORTS` lists ports on the server's host, or `HOST:PORT` elsewhere, that send `big-64m.bin` and close, such as a loop of `nc -l`; the two-stream arm also reads from the next port up, and `REMOTEFILES_BENCHMARK_SFTP_PORTS` lists other ports of the same server, such as one without the proxy. `REMOTEFILES_BENCHMARK_RAW_SINK_PORTS` lists ports that read a stream to its end and then close, for the other direction, and adds an upload of 64 MiB beside each download; on a device these are passed as `TEST_RUNNER_…`. For 120 Hz frames, give the benchmark host an Info.plist with `CADisableMinimumFrameDurationOnPhone`; `REMOTEFILES_BENCHMARK_FRAME_RATE=60` asks for 60 Hz in the same build. `REMOTEFILES_BENCHMARK_SCROLL_START=0.7` starts `testFolderScreen`'s steady scroll 70% of the way down, where `List`'s work for each cell is largest, and `testFolderScreenFiltering` narrows, clears and widens a filter on the folder screen. `offline` saves the generated `offline` trees (`small50`, `tiny400`, `mixed`; `REMOTEFILES_BENCHMARK_OFFLINE_TREES` narrows them), then times folder taps during a save and cancelling or dropping one; `REMOTEFILES_BENCHMARK_OFFLINE_EXTRAS=0` skips those, `REMOTEFILES_BENCHMARK_OFFLINE_SAVES=0` keeps only them, and `REMOTEFILES_BENCHMARK_OFFLINE_ARMS=dedicated1,shared1,shared16` rotates transfer policies in one process. `windowtaps` rotates read-window policies with folder taps during each download; give it `--mbit`. `windowcarry` runs only when named: each arm downloads `REMOTEFILES_BENCHMARK_CARRY_FILE` (`big-64m.bin`) twice on one connection, `REMOTEFILES_BENCHMARK_CARRY_IDLE_MS` apart, with folder taps during the second. `REMOTEFILES_BENCHMARK_CARRY_ARMS` chooses and orders the arms from `growing`, `carry`, `carryhold`, `fixed64`, `stale64` and `stale64hold`; the default is the first four. `pipeline` runs a live contents search and an index build of the same tree.
 
 Keep the phone unlocked and allow Local Network on first run. Links vary, so alternate short runs and compare pairs, as for downloads above. Remove the host afterwards with `xcrun devicectl device uninstall app`; it is `dev.iris.RemoteFilesBenchTestHost`.
 

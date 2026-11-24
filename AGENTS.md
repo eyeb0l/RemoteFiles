@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-RemoteFiles is a native SwiftUI, read-only SFTP browser targeting iOS 27. `App/` contains app/test-host entry points and icon assets. `Sources/RemoteFilesCore/` owns transport, persistence, trust, and document policies; `Sources/RemoteFilesUI/` contains views and presentation state. Bundled samples live in `Sources/RemoteFilesCore/Resources/`. `Tests/` holds core XCTest suites, UI tests, and specialized fixture apps. Use `docs/` for feature policies, `scripts/` for verification, and `Fixtures/` for synthetic inputs. `ci_scripts/` runs only in Xcode Cloud; see `docs/TESTFLIGHT.md`. Vendored Citadel/Textual changes require corresponding `Vendor/*/UPSTREAM.md` provenance updates.
+RemoteFiles is a native SwiftUI SFTP browser targeting iOS 27. Browsing is read-only; uploads and copies between servers are explicit (`docs/TRANSFERS.md`). `App/` contains app/test-host entry points and icon assets. `Sources/RemoteFilesCore/` owns transport, persistence, trust, and document policies; `Sources/RemoteFilesUI/` contains views and presentation state. Bundled samples live in `Sources/RemoteFilesCore/Resources/`. `Tests/` holds core XCTest suites, UI tests, and specialized fixture apps. Use `docs/` for feature policies, `scripts/` for verification, and `Fixtures/` for synthetic inputs. `ci_scripts/` runs only in Xcode Cloud; see `docs/TESTFLIGHT.md`. Vendored Citadel/Textual changes require corresponding `Vendor/*/UPSTREAM.md` provenance updates.
 
 ## Build, Test, and Development Commands
 
@@ -46,4 +46,4 @@ Use short imperative subjects, such as `Add persistent line wrapping controls to
 
 ## Security & Configuration
 
-Preserve read-only browsing, canonical folder boundaries, bounded transfers, and explicit host-key trust. Public-key installation requires explicit confirmation. Keep private keys in Keychain and exclude credentials, private attachments, and generated test/build output from commits.
+Preserve read-only browsing, canonical folder boundaries, bounded transfers, and explicit host-key trust. Uploads and copies write only inside the chosen folder, under a partial name until complete, and never replace a file without an answer. Public-key installation requires explicit confirmation. Keep private keys in Keychain and exclude credentials, private attachments, and generated test/build output from commits.

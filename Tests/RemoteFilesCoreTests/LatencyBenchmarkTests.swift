@@ -71,6 +71,55 @@ final class LatencyBenchmarkTests: XCTestCase {
         try await measure("download 3 MiB file") {
             _ = try await warm.downloadFile(profile: profile, path: files + "/oversized.txt", allowedRoot: files, destination: temp, limit: 4 * 1024 * 1024)
         }
+        // Uploads: each goes to a new name in a folder of this run's own, under its partial name first.
+        let uploads = files + "/benchmark-uploads-" + UUID().uuidString
+        try FileManager.default.createDirectory(atPath: uploads, withIntermediateDirectories: false)
+        let sources = FileManager.default.temporaryDirectory.appendingPathComponent("benchmark-sources-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: uploads); try? FileManager.default.removeItem(at: sources) }
+        let small = sources.appendingPathComponent("small"), large = sources.appendingPathComponent("large")
+        try Data(repeating: 0x41, count: 50).write(to: small)
+        try Data((0..<3 * 1024 * 1024).map { UInt8(truncatingIfNeeded: $0 &* 31) }).write(to: large)
+        func upload(_ source: any TransferSource, over transport: any RemoteFileUploading) async throws {
+            _ = try await transport.uploadFile(profile: profile,
+                request: .init(directory: uploads, name: UUID().uuidString + ".bin", conflict: .fail,
+                               partialName: UploadRequest.partialName(for: UUID()), limit: 64 * 1024 * 1024),
+                source: source, started: { _, _ in }, progress: { _ in })
+        }
+        try await measure("upload 50 B file") { try await upload(LocalFileTransferSource(url: small), over: warm) }
+        try await measure("upload 3 MiB file") { try await upload(LocalFileTransferSource(url: large), over: warm) }
+        // As the transfer queue sends a batch: every file after the first finds the channel open.
+        let batch = SnapshotTransferBatch()
+        func queued(_ source: any TransferSource) async throws {
+            _ = try await warm.uploadFile(profile: profile,
+                request: .init(directory: uploads, name: UUID().uuidString + ".bin", conflict: .fail,
+                               partialName: UploadRequest.partialName(for: UUID()), limit: 64 * 1024 * 1024),
+                source: source, batch: batch, started: { _, _ in }, progress: { _ in })
+        }
+        try await queued(LocalFileTransferSource(url: small))
+        try await measure("upload 50 B file, queued") { try await queued(LocalFileTransferSource(url: small)) }
+        try await measure("upload 3 MiB file, queued") { try await queued(LocalFileTransferSource(url: large)) }
+        await warm.endSnapshotBatch(batch)
+        // A copy reads over one connection while it writes over another, as between two servers.
+        let reader = service()
+        addTeardownBlock { await reader.disconnect() }
+        _ = try await reader.listDirectory(profile: profile, path: files)
+        try await measure("copy 3 MiB file between connections") {
+            try await upload(RemoteFileTransferSource(service: reader, profile: profile, path: files + "/oversized.txt", canonicalRoot: files), over: warm)
+        }
+        // As the queue copies a batch: one channel on each server, already open after the first file.
+        let reads = SnapshotTransferBatch(), writes = SnapshotTransferBatch()
+        func queuedCopy() async throws {
+            var source = RemoteFileTransferSource(service: reader, profile: profile, path: files + "/oversized.txt", canonicalRoot: files)
+            source.batch = reads
+            _ = try await warm.uploadFile(profile: profile,
+                request: .init(directory: uploads, name: UUID().uuidString + ".bin", conflict: .fail,
+                               partialName: UploadRequest.partialName(for: UUID()), limit: 64 * 1024 * 1024),
+                source: source, batch: writes, started: { _, _ in }, progress: { _ in })
+        }
+        try await queuedCopy()
+        try await measure("copy 3 MiB file between connections, queued") { try await queuedCopy() }
+        await reader.endSnapshotBatch(reads); await warm.endSnapshotBatch(writes)
         print(lines.joined(separator: "\n"))
     }
 }

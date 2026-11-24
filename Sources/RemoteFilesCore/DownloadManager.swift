@@ -43,7 +43,7 @@ public enum DownloadManagerError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .queueFull: return "The download list is full. Remove an item before adding another."
-        case .storageFull: return "Downloads use at most 16 GiB. Remove a completed download to make room."
+        case .storageFull: return "Downloads use at most \(DownloadManager.maximumStoredBytes / (1024 * 1024 * 1024)) GiB. Remove a completed download to make room."
         case .deviceStorageFull: return "This device doesn't have enough free storage for this download. Downloads keep 1 GiB free. Free up storage, then Retry."
         case .unavailable: return "This download is not available. Download it again."
         }
@@ -62,8 +62,10 @@ public final class DownloadManager {
         sharedManagers[key] = manager
         return manager
     }
-    public static let maximumFileBytes = 4 * 1024 * 1024 * 1024
-    public static let maximumStoredBytes = 16 * 1024 * 1024 * 1024
+    /// A transfer streams to disk and continues after an interruption, so neither memory nor one sitting
+    /// bounds a file. These bound what the app will hold; `reservedDeviceBytes` guards the device itself.
+    public static let maximumFileBytes = 16 * 1024 * 1024 * 1024
+    public static let maximumStoredBytes = 64 * 1024 * 1024 * 1024
     /// Device storage a download never consumes, so a large transfer cannot fill the volume.
     public static let reservedDeviceBytes = 1024 * 1024 * 1024
     public static let maximumItems = 100
@@ -256,7 +258,14 @@ public final class DownloadManager {
     }
 
     /// Used for explicit disconnect, background expiration and lock. No automatic reconnect.
-    public func interrupt(reason: String) async {
+    public func interrupt(reason: String) async { await interruptNow(reason: reason).value }
+
+    /// The part of an interruption that can't wait, done before this returns: every queued or active
+    /// download is marked interrupted, the one under way is told to stop, and the list is saved. What is
+    /// left, closing the connection and letting the worker drain, is the task returned. iOS suspends an app
+    /// as soon as it gives back its background time, so a caller about to do that must have the list right
+    /// first.
+    @discardableResult public func interruptNow(reason: String) -> Task<Void, Never> {
         stopped = true
         for index in items.indices where items[index].state == .queued || items[index].state == .downloading {
             items[index].state = .interrupted; items[index].message = reason
@@ -267,8 +276,10 @@ public final class DownloadManager {
         // Retire only the contexts present at interruption, before yielding. New work
         // admitted by another foreground window while the old worker drains owns new contexts.
         contexts.removeAll()
-        if activeWorker != nil { await activeService?.disconnect() }
-        await activeWorker?.value
+        return Task {
+            if activeWorker != nil { await activeService?.disconnect() }
+            await activeWorker?.value
+        }
     }
 
     /// Interrupts only the queued and active downloads `matching` selects, as when the connection they use

@@ -270,6 +270,27 @@ public final class SFTPFile {
         self.logger.debug("SFTP finished writing \(data.readerIndex) bytes @ \(offset) to file \(self.handle.sftpHandleDebugDescription)")
     }
 
+    /// RemoteFiles: queues one WRITE of the whole buffer at `offset` and returns without waiting, so a caller
+    /// can keep several in flight. The caller chooses a size every server takes in one request (32 KiB of data
+    /// fits the 34,000-byte packet the protocol asks servers to accept). The result fails unless the status is `ok`.
+    public func sendWrite(_ data: ByteBuffer, at offset: UInt64) -> EventLoopFuture<Void> {
+        guard isActive else { return client.eventLoop.makeFailedFuture(SFTPError.fileHandleInvalid) }
+        return client.sendRequestFuture(.write(.init(requestId: client.allocateRequestId(), handle: handle, offset: offset, data: data))).flatMapThrowing { response in
+            guard case .status(let status) = response else { throw SFTPError.invalidResponse }
+            guard status.errorCode == .ok else { throw SFTPError.errorStatus(status) }
+        }
+    }
+
+    /// RemoteFiles: queues FSETSTAT at once and returns without waiting, so it can go out with the CLOSE
+    /// that follows it. The result fails unless the status is `ok`.
+    public func sendSetAttributes(to attributes: SFTPFileAttributes) -> EventLoopFuture<Void> {
+        guard isActive else { return client.eventLoop.makeFailedFuture(SFTPError.fileHandleInvalid) }
+        return client.sendRequestFuture(.fsetstat(.init(requestId: client.allocateRequestId(), handle: handle, attributes: attributes))).flatMapThrowing { response in
+            guard case .status(let status) = response else { throw SFTPError.invalidResponse }
+            guard status.errorCode == .ok else { throw SFTPError.errorStatus(status) }
+        }
+    }
+
     /// Close the file handle.
     ///
     /// - Throws: SFTPError if close fails

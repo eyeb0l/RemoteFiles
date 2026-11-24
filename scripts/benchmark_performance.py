@@ -102,6 +102,7 @@ def generate_fixture(bench, include_huge):
     text_tree(bench / "texts", 5, random.Random(0x7E87))
     for index in range(40):
         mixed_folder(bench / "wide" / f"folder {index}", 1_000, rng)
+    (bench / "uploads").mkdir()  # Where the upload and copy scenarios write.
     (bench / "report.md").write_text("# Fixture report\n\nRead over independent OpenSSH.\n")
     (bench / "large-report.md").write_text("# Report\n" + "".join(
         f"- Measurement {i}: the remote preview reads Markdown, keeps useful content, and refreshes.\n" for i in range(1800)))

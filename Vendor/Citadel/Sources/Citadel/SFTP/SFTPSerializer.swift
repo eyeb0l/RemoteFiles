@@ -130,7 +130,15 @@ final class SFTPMessageSerializer: MessageToByteEncoder {
             out.writeInteger(rename.requestId)
             out.writeSSHString(rename.oldPath)
             out.writeSSHString(rename.newPath)
-            out.writeInteger(rename.flags)
+            // RemoteFiles: version 3, the only one this client asks for, has no flags after the two paths.
+            // They belong to version 5. OpenSSH ignores the extra word; a server that checks the length of
+            // what it is sent answers SSH_FX_BAD_MESSAGE.
+        case .posixRename(let rename):
+            out.writeInteger(SFTPMessage.PosixRename.id.rawValue)
+            out.writeInteger(rename.requestId)
+            out.writeSSHString(rename.request)
+            out.writeSSHString(rename.oldPath)
+            out.writeSSHString(rename.newPath)
         }
         
         let length = out.writerIndex - lengthIndex - 4

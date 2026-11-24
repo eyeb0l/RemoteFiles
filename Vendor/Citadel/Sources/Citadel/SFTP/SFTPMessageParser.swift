@@ -393,8 +393,7 @@ struct SFTPMessageParser: ByteToMessageDecoder {
             guard
                 let requestId = payload.readInteger(as: UInt32.self),
                 let oldPath = payload.readSSHString(),
-                let newPath = payload.readSSHString(),
-                let flags = payload.readInteger(as: UInt32.self)
+                let newPath = payload.readSSHString()
             else {
                 throw SFTPError.invalidPayload(type: type)
             }
@@ -404,7 +403,9 @@ struct SFTPMessageParser: ByteToMessageDecoder {
                     requestId: requestId,
                     oldPath: oldPath,
                     newPath: newPath,
-                    flags: flags
+                    // RemoteFiles: a version 3 request ends with the two paths; a client that adds the
+                    // version 5 flags, as this library's did, is still read.
+                    flags: payload.readInteger(as: UInt32.self) ?? 0
                 )
             )
 

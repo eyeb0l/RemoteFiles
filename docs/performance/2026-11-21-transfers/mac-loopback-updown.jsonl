@@ -1,0 +1,14 @@
+{"label": "loopback", "scenario": "#environment", "unit": "", "samples": [], "machine": "arm64", "os": "27.2.1", "git": "3ccc272", "load": 5.91796875, "time": "2026-11-22T00:29:49"}
+{"label":"loopback@rtt0","samples":[67.196665999999993,62.003709000000001,67.334500000000006],"scenario":"download.64MiB.quiet","unit":"ms"}
+{"label":"loopback@rtt0","samples":[952.42820529220921,1032.1963158687813,950.47858081666891],"scenario":"download.64MiB.quiet.throughput","unit":"MiB\/s"}
+{"label":"loopback@rtt0","samples":[57.786124999999998,61.792416000000003,63.182958999999997],"scenario":"download.64MiB.mainactor","unit":"ms"}
+{"label":"loopback@rtt0","samples":[1107.5323012228282,1035.7258081639015,1012.9313506827054],"scenario":"download.64MiB.mainactor.throughput","unit":"MiB\/s"}
+{"label":"loopback@rtt0","samples":[3],"scenario":"download.64MiB.progressUpdates","unit":"updates"}
+{"label":"loopback@rtt0","samples":[0.88348388671875],"scenario":"download.64MiB.peakMB","unit":"MB"}
+{"label":"loopback@rtt0","samples":[1.385791,1.0092909999999999,0.98545899999999997],"scenario":"upload.50B.queued","unit":"ms"}
+{"label":"loopback@rtt0","samples":[78.910542000000007,79.671334000000002,84.829875000000001],"scenario":"upload.64MiB.queued","unit":"ms"}
+{"label":"loopback@rtt0","samples":[811.04499320255593,803.30021836963351,754.45118833429854],"scenario":"upload.64MiB.queued.throughput","unit":"MiB\/s"}
+{"label":"loopback@rtt0","samples":[0.6025238037109375],"scenario":"upload.64MiB.peakMB","unit":"MB"}
+{"label":"loopback@rtt0","samples":[99.540166999999997,101.35654100000001,101.910208],"scenario":"copy.64MiB.queued","unit":"ms"}
+{"label":"loopback@rtt0","samples":[642.95652628350524,631.4343343662448,628.00382077524557],"scenario":"copy.64MiB.queued.throughput","unit":"MiB\/s"}
+{"label":"loopback@rtt0","samples":[2.2386474609375],"scenario":"copy.64MiB.peakMB","unit":"MB"}

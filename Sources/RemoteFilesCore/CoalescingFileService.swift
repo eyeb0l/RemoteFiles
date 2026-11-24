@@ -1,7 +1,7 @@
 import Foundation
 
 /// Lists folders ahead of need. Returns nil when no session is open for this profile; it must never
-/// open one, because connecting to one server closes the session of another.
+/// open one: work nobody asked for must not connect, prompt for a key or replace a session.
 public protocol BackgroundFolderListing: Sendable {
     func listDirectoryInBackground(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot?
 }
@@ -16,7 +16,7 @@ public protocol ProgressiveFolderListing: Sendable {
 
 /// Shares an in-flight request for the same resource. Cancellation retires the shared request;
 /// all its waiters observe cancellation, and the next explicit request starts fresh work.
-public actor CoalescingFileService: RemoteFileService, ProgressiveFolderListing, RemoteFileSessionClosing {
+public actor CoalescingFileService: RemoteFileService, ProgressiveFolderListing, RemoteFileSessionClosing, HostSessionClosing {
     private struct Key: Hashable {
         let profile: ConnectionProfile; let path: RemotePathKey; let limit: Int
         init(profile: ConnectionProfile, path: String, limit: Int) { self.profile = profile; self.path = RemotePathKey(path); self.limit = limit }
@@ -121,6 +121,14 @@ public actor CoalescingFileService: RemoteFileService, ProgressiveFolderListing,
         cancelCoalesced()
         if let closer = base as? any RemoteFileSessionClosing { await closer.closeSessionPreservingUnlockedIdentities() }
         else { await base.disconnect() }
+    }
+    /// Closes one server's connection where the base keeps one for each, and everything otherwise.
+    public func closeSession(of connectionID: UUID) async {
+        guard let closer = base as? any HostSessionClosing else { await closeSessionPreservingUnlockedIdentities(); return }
+        for (key, value) in lists where key.profile.id == connectionID { value.1.cancel(); lists[key] = nil }
+        for (key, value) in reads where key.profile.id == connectionID { value.1.cancel(); reads[key] = nil }
+        for (key, value) in versionedReads where key.read.profile.id == connectionID { value.1.cancel(); versionedReads[key] = nil }
+        await closer.closeSession(of: connectionID)
     }
     private func cancelCoalesced() {
         lists.values.forEach { $0.1.cancel() }; reads.values.forEach { $0.1.cancel() }

@@ -5,12 +5,56 @@ import RemoteFilesCore
 import UIKit
 #endif
 
+/// Carries a window's scene phases to its model: going to the background closes what the window holds
+/// open, and becoming active again, once that has finished, opens it again.
+///
+/// Becoming active is acted on only if nothing has happened to the window since, by the time its turn
+/// comes. A device being locked reports the scene active for a few hundredths of a second on its way to
+/// the background, and a view's own `scenePhase`, read in a task, is the phase the view had when the task
+/// was made. Going by that, the window was told it was in front after it had been told it was in the
+/// background: with the device locked it connected again, and its queues took themselves to be in front.
+/// So each change is numbered, and a becoming-active that a later change has overtaken does nothing: the
+/// later one, if it too is a becoming-active, waits for the leaving that is then under way. Leavings are
+/// carried out one after another, so the one a return waits for is the last to finish.
+@MainActor final class ScenePhaseRelay {
+    private var changes = 0
+    private var leaving: Task<Void, Never>?
+    nonisolated init() {}
+    /// The task that carries this change out, where there is one.
+    @discardableResult func changed(to phase: ScenePhase, model: AppModel?) -> Task<Void, Never>? {
+        changed(to: phase, leave: { model?.isForeground = false }, close: { await model?.background() }, arrive: { model?.sceneBecameActive() })
+    }
+    /// `leave` is done at once as the window goes to the background and `close` after it, which takes a
+    /// while; `arrive` is done when the window is active, once any `close` begun before it has finished.
+    @discardableResult func changed(to phase: ScenePhase, leave: () -> Void, close: @escaping @MainActor () async -> Void,
+                                    arrive: @escaping @MainActor () -> Void) -> Task<Void, Never>? {
+        changes += 1
+        switch phase {
+        case .background:
+            leave()
+            let earlier = leaving
+            let task = Task<Void, Never> { await earlier?.value; await close() }
+            leaving = task
+            return task
+        case .active:
+            let change = changes, leaving = leaving
+            return Task<Void, Never> {
+                await leaving?.value
+                guard self.changes == change else { return }
+                arrive()
+            }
+        default:
+            return nil
+        }
+    }
+}
+
 public struct RemoteFilesRootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var model: AppModel?
     @State private var startupError: String?
     @State private var keyboardWindow: KeyboardWindowReference?
-    @State private var lifecycleTask: Task<Void, Never>?
+    @State private var lifecycle = ScenePhaseRelay()
     public init() {}
     public var body: some View {
         Group {
@@ -41,18 +85,8 @@ public struct RemoteFilesRootView: View {
             } catch { startupError = error.localizedDescription }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .background {
-                ReaderWarmUp.cancel()
-                model?.isForeground = false
-                lifecycleTask = Task { await model?.background() }
-            }
-            if phase == .active {
-                Task {
-                    await lifecycleTask?.value
-                    guard scenePhase == .active else { return }
-                    model?.sceneBecameActive()
-                }
-            }
+            if phase == .background { ReaderWarmUp.cancel() }
+            lifecycle.changed(to: phase, model: model)
         }
         #if canImport(UIKit)
         .background(RootWindowPrivacyInstaller(isVisible: scenePhase != .active))
@@ -199,6 +233,8 @@ struct AppNavigation: View {
                         case .settings: SettingsView(model: model)
                         case .offlineFiles: EmptyView()
                         case .downloads: DownloadsView(model: model)
+                        case .transfers: TransfersView(model: model)
+                        case .copy(let source, let entries): TransferDestinationPicker(model: model, source: source, entries: entries)
                         case .trust(let endpoint, let key): TrustView(model: model, endpoint: endpoint, key: key)
                         case .changed(let endpoint, let previous, let current): ChangedHostView(model: model, endpoint: endpoint, previous: previous, current: current)
                         case .unlock(let identity): UnlockKeyView(model: model, identity: identity)
@@ -286,8 +322,9 @@ private struct IPadWorkspace: View {
     /// selecting one, the folder whenever the library shows, and the reader, which as the detail
     /// column is never hidden and so follows every resize.
     private func openFromLibrary(_ route: AppModel.Route) {
-        model.routes = [route]
-        if case .file = route, WorkspaceColumnFrames.overlaps(frames.library, frames.reader) {
+        // A server left earlier comes back where it was, which may be on a file.
+        model.openFromLibrary(route)
+        if model.workspaceFile != nil, WorkspaceColumnFrames.overlaps(frames.library, frames.reader) {
             collapse(to: .detailOnly)
         } else if WorkspaceColumnFrames.overlaps(frames.library, frames.folder) || WorkspaceColumnFrames.overlaps(frames.library, frames.reader) {
             collapse(to: .doubleColumn)
@@ -392,6 +429,8 @@ struct HomeView: View {
     @State private var connectionToDelete: ConnectionProfile?
     /// Connection names only help tell servers apart when there's more than one.
     private var showsConnectionNames: Bool { model.metadata.connections.count > 1 }
+    /// Servers with a connection open or opening.
+    private var connectedCount: Int { model.connectionStates.values.filter { $0 == "Connected" || $0 == "Connecting…" }.count }
     private func state(_ profile: ConnectionProfile) -> (label: String, color: Color?) {
         switch model.connectionStates[profile.id] {
         case "Connected": return ("Connected", .green)
@@ -409,7 +448,7 @@ struct HomeView: View {
                             .accessibilityHidden(true)
                         VStack(spacing: 6) {
                             Text("Browse your remote files").font(.title3.weight(.semibold))
-                            Text("Connect to a server you control. Read-only over SFTP.")
+                            Text("Connect to a server you control over SFTP.")
                                 .font(.subheadline).foregroundStyle(.secondary)
                         }
                         Button("Add Connection", systemImage: "plus") { model.sheet = .connection(nil) }
@@ -453,7 +492,10 @@ struct HomeView: View {
                                     else { connectionToDelete = profile }
                                 }
                             }
-                            Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnectAndGoHome() } }
+                            Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnect(profile) } }
+                            if connectedCount > 1 {
+                                Button("Disconnect All", systemImage: "network.slash") { Task { await model.disconnectAndGoHome() } }
+                            }
                         }
                     }
                 } header: {
@@ -517,6 +559,8 @@ struct HomeView: View {
                     Button("Add Connection", systemImage: "plus") { model.sheet = .connection(nil) }
                 }
             }
+            // Only once something has been uploaded or copied, so the bar is no busier for anyone who hasn't.
+            TransferStatus(model: model, whenListed: true)
             ToolbarItem(placement: .primaryAction) {
                 Button("Settings", systemImage: "gearshape") { model.sheet = .settings }
             }

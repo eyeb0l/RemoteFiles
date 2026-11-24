@@ -29,7 +29,12 @@ import threading
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
-SCENARIOS = ("openssh-10", "openssh-2", "openssh-1", "asyncssh-default", "paramiko-10", "paramiko-2", "paramiko-1")
+SCENARIOS = ("openssh-10", "openssh-2", "openssh-1", "asyncssh-default", "paramiko-10", "paramiko-2", "paramiko-1",
+             "opensshwrite-10", "asyncsshwrite-default", "asyncsshbare-default", "asyncsshreplacing-default")
+# Servers whose account may write to the fixture's `uploads` folder. `asyncsshbare` offers neither
+# hardlink@openssh.com nor posix-rename@openssh.com; `asyncsshreplacing` is that with a RENAME that replaces
+# an existing name, as rename(2) does and the SFTP draft forbids.
+WRITABLE = ("opensshwrite", "asyncsshwrite", "asyncsshbare", "asyncsshreplacing")
 PINS = {"asyncssh": "2.24.1", "paramiko": "5.1.0"}
 DOCKER_DIRECTORY = ROOT / "Tests/ServerCompatibilityAcceptance/docker"
 # Scenario: (image directory, channel limit or 0 for the server's own, root path the client browses).
@@ -40,6 +45,9 @@ DOCKER_SCENARIOS = {
     "proftpd-1": ("proftpd", 1, "/files"),
     "sftpgo-default": ("sftpgo", 0, "/"),
     "dropbear-default": ("dropbear", 0, "/srv/files"),
+    "openssh82write-10": ("openssh82", 10, "/files"),
+    "proftpdwrite-10": ("proftpd", 10, "/files"),
+    "sftpgowrite-default": ("sftpgo", 0, "/"),
 }
 # Reproduce documented incompatibilities only when named: this Dropbear offers no AES-GCM, the only ciphers
 # the app's SSH stack implements, and ProFTPD disconnects the whole session when SFTPMaxChannels is exceeded.
@@ -102,9 +110,10 @@ def docker_server(name, directory, output, host, address, workspace):
     listening = remote(host, "ss -ltnH", capture_output=True, text=True).stdout
     port = next(port for port in DOCKER_PORTS if f"{address}:{port} " not in listening)
     container = f"remotefiles-compat-{name}"
+    writable = name.split("-")[0].endswith("write")
     remote(host, f"sudo -n docker rm -f {container} >/dev/null 2>&1; sudo -n docker run -d --name {container} "
                  f"-p {address}:{port}:2222 -v {fixture_directory}:/fixture:ro -e CHANNELS={maximum or 10} "
-                 f"remotefiles-compat-{backend}:local", stdout=subprocess.DEVNULL)
+                 f"-e WRITABLE={int(writable)} remotefiles-compat-{backend}:local", stdout=subprocess.DEVNULL)
     try:
         deadline = time.monotonic() + 60
         while True:
@@ -119,7 +128,7 @@ def docker_server(name, directory, output, host, address, workspace):
                 raise RuntimeError(f"{name} did not answer within 60 seconds")
             time.sleep(0.5)
         yield {"name": name, "directory": str(directory), "host": address, "port": port, "username": "fixture",
-               "root": root, "channels": maximum}
+               "root": root, "channels": maximum, "writable": writable}
     finally:
         with (output / (name + "-server.log")).open("w") as log:
             subprocess.run(["ssh", "-o", "BatchMode=yes", host, f"sudo -n docker logs {container}"], stdout=log, stderr=subprocess.STDOUT)
@@ -261,25 +270,40 @@ def paramiko_server(directory, ready, maximum):
             threading.Thread(target=connection, args=(sock,), daemon=True).start()
 
 
-async def asyncssh_server(directory, ready):
+async def asyncssh_server(directory, ready, mode="asyncssh"):
     import asyncssh
 
-    class ReadOnlyFiles(asyncssh.SFTPServer):
+    class ShortReads(asyncssh.SFTPServer):
+        def read(self, file_obj, offset, size):
+            return super().read(file_obj, offset, min(size, 1024))
+
+    class ReadOnlyFiles(ShortReads):
         def open(self, path, flags, attrs):
             if flags & (asyncssh.FXF_WRITE | asyncssh.FXF_APPEND | asyncssh.FXF_CREAT | asyncssh.FXF_TRUNC):
                 raise asyncssh.SFTPPermissionDenied("Read-only fixture")
             return super().open(path, flags, attrs)
-
-        def read(self, file_obj, offset, size):
-            return super().read(file_obj, offset, min(size, 1024))
 
         def deny_write(self, *args):
             raise asyncssh.SFTPPermissionDenied("Read-only fixture")
 
         remove = mkdir = rmdir = rename = posix_rename = symlink = link = setstat = fsetstat = deny_write
 
+    class Bare(ShortReads):
+        """No hardlink@openssh.com and no posix-rename@openssh.com, as a minimal server has."""
+        def link(self, oldpath, newpath):
+            raise asyncssh.SFTPOpUnsupported("No hard links")
+
+        def posix_rename(self, oldpath, newpath):
+            raise asyncssh.SFTPOpUnsupported("No posix-rename")
+
+    class Replacing(Bare):
+        """RENAME replaces an existing name, which the SFTP draft forbids and rename(2) does."""
+        def rename(self, oldpath, newpath):
+            os.rename(self.map_path(oldpath), self.map_path(newpath))
+
+    files = {"asyncssh": ReadOnlyFiles, "asyncsshwrite": ShortReads, "asyncsshbare": Bare, "asyncsshreplacing": Replacing}[mode]
     listener = await asyncssh.listen("127.0.0.1", 0, server_host_keys=[directory / "host"],
-        authorized_client_keys=str(directory / "client.pub"), sftp_factory=lambda channel: ReadOnlyFiles(channel, chroot=os.fsencode(directory)),
+        authorized_client_keys=str(directory / "client.pub"), sftp_factory=lambda channel: files(channel, chroot=os.fsencode(directory)),
         sftp_version=3, allow_scp=False)
     ready.write_text(str(listener.get_port()))
     await listener.wait_closed()
@@ -293,6 +317,7 @@ def fixture(directory):
     files.mkdir()
     (directory / "control").mkdir()
     (files / "held").mkdir()
+    (files / "uploads").mkdir() # Where the upload check writes, or is refused.
     (files / "Unicode café 東京.txt").write_text("Unicode contents café 東京\n")
     (files / "large.txt").write_bytes(b"0123456789abcdef" * 16384)
     (directory / "outside.txt").write_text("outside secret needle\n")
@@ -305,7 +330,7 @@ def fixture(directory):
             (child / f"file-{folder}-{index}.txt").write_text(f"needle {folder} {index}\n" * 100)
 
 
-def openssh(directory, maximum, log):
+def openssh(directory, maximum, log, writable=False):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -325,7 +350,7 @@ PermitRootLogin no
 AllowUsers {username}
 MaxSessions {maximum}
 Subsystem sftp internal-sftp
-ForceCommand internal-sftp -R
+ForceCommand internal-sftp{"" if writable else " -R"}
 LogLevel VERBOSE
 """)
     if subprocess.run(["/usr/sbin/sshd", "-t", "-f", str(config), "-o", "PerSourcePenalties=no"], capture_output=True).returncode == 0:
@@ -338,11 +363,11 @@ LogLevel VERBOSE
 @contextlib.contextmanager
 def server(name, directory, output):
     backend, limit = name.split("-")
-    maximum = 0 if backend == "asyncssh" else int(limit) # AsyncSSH uses its ordinary unrestricted handler.
+    maximum = 0 if backend.startswith("asyncssh") else int(limit) # AsyncSSH uses its ordinary unrestricted handler.
     ready = directory / "ready"
     with (output / (name + "-server.log")).open("w") as log:
-        if backend == "openssh":
-            process, port, username = openssh(directory, maximum, log)
+        if backend.startswith("openssh"):
+            process, port, username = openssh(directory, maximum, log, writable=backend in WRITABLE)
         else:
             process = subprocess.Popen([sys.executable, "-B", str(Path(__file__).resolve()), "--serve", backend,
                 "--directory", str(directory), "--ready", str(ready), "--channels", str(maximum)], stdout=log, stderr=subprocess.STDOUT)
@@ -364,7 +389,8 @@ def server(name, directory, output):
             else:
                 raise RuntimeError(f"{name} did not start within 15 seconds")
             yield {"name": name, "directory": str(directory), "port": port, "username": username,
-                "root": str(directory / "files") if backend == "openssh" else "/files", "channels": maximum}
+                "root": str(directory / "files") if backend.startswith("openssh") else "/files", "channels": maximum,
+                "writable": backend in WRITABLE}
         finally:
             process.terminate()
             try:
@@ -459,15 +485,15 @@ def main():
     parser.add_argument("--scenarios", nargs="+", choices=(*SCENARIOS, *DOCKER_SCENARIOS))
     parser.add_argument("--docker-host", help="SSH destination of a host with Docker and passwordless sudo for docker")
     parser.add_argument("--docker-address", help="address on that host to publish the servers on")
-    parser.add_argument("--serve", choices=("asyncssh", "paramiko"), help=argparse.SUPPRESS)
+    parser.add_argument("--serve", choices=("asyncssh", "asyncsshwrite", "asyncsshbare", "asyncsshreplacing", "paramiko"), help=argparse.SUPPRESS)
     parser.add_argument("--directory", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--ready", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--channels", type=int, default=10, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.serve:
         logging.basicConfig(level=logging.DEBUG)
-    if args.serve == "asyncssh":
-        asyncio.run(asyncssh_server(args.directory, args.ready))
+    if args.serve and args.serve.startswith("asyncssh"):
+        asyncio.run(asyncssh_server(args.directory, args.ready, args.serve))
         return 0
     if args.serve == "paramiko":
         paramiko_server(args.directory, args.ready, args.channels)
