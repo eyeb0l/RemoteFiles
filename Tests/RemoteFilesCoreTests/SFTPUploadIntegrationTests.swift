@@ -455,6 +455,48 @@ final class SFTPUploadIntegrationTests: XCTestCase {
         XCTAssertEqual(received, bytes)
     }
 
+    /// When the source does give up with the destination still taking a chunk on, the destination is stopped
+    /// with it and says only that it was stopped. The copy must end as timed out, which keeps its bytes for
+    /// Retry, and not as cancelled, which removes them. A copy that is cancelled still ends as cancelled.
+    func testACopyWhoseSourceGivesUpIsTimedOutAndNotCancelled() async throws {
+        let server = try await connected(name: "Copy source gives up")
+        let path = server.fixture + "/files/source-gives-up-" + UUID().uuidString + ".bin"
+        try Self.pattern(4 * 64 * 1024).write(to: URL(fileURLWithPath: path))
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: path) }
+        let root = server.fixture + "/files"
+        let version = try await server.service.transferVersion(profile: server.profile, path: path, canonicalRoot: root)
+        // A destination that holds its first chunk until it is stopped.
+        let copy: @Sendable (Collected) async throws -> Void = { held in
+            try await server.service.streamFile(profile: server.profile, path: path, canonicalRoot: root, from: 0, expecting: version) { chunk in
+                await held.append(chunk)
+                try await Task.sleep(for: .seconds(300))
+            }
+        }
+
+        await server.service.setTransferTimings(idle: .seconds(3), closeGrace: .seconds(1))
+        let heldAtTheLimit = Collected()
+        do {
+            try await copy(heldAtTheLimit)
+            XCTFail("The copy finished")
+        } catch {
+            if case RemoteFileError.timedOut = error {} else { XCTFail("A source that gave up reported \(error)") }
+        }
+        let reached = await heldAtTheLimit.data
+        XCTAssertFalse(reached.isEmpty, "The destination was holding a chunk when the source gave up")
+
+        await server.service.setTransferTimings(idle: .seconds(60), closeGrace: .seconds(1))
+        let heldWhenCancelled = Collected()
+        let cancelled = Task { try await copy(heldWhenCancelled) }
+        try await waitUntil("the destination holds a chunk") { await !heldWhenCancelled.data.isEmpty }
+        cancelled.cancel()
+        do {
+            try await cancelled.value
+            XCTFail("The copy finished")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "A cancelled copy reported \(error)")
+        }
+    }
+
     /// Disconnect closes a connection without cancelling what is using it. A transfer on it must end with an
     /// error, as one whose network has gone does: one left waiting would hold the queue's only slot for good.
     func testATransferWhoseConnectionIsClosedUnderItFailsAndDoesNotWait() async throws {

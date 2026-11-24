@@ -2032,7 +2032,11 @@ extension SFTPRemoteFileService: RemoteFileUploading, RemoteFileStreaming {
                 do { try await consume(chunk) } catch { failure.record(error); throw error }
             }
         } catch {
-            throw failure.error ?? Self.sourceFailure(error)
+            // A destination stopped because this side gave up, at its idle limit say, says only that it was
+            // stopped. The reason is this side's: reported as a cancellation, the copy would be listed as
+            // cancelled and lose the bytes Retry continues from. A real cancellation ends this side as one too.
+            if let destination = failure.error, !(destination is CancellationError) { throw destination }
+            throw Self.sourceFailure(error)
         }
         measurements.fileOperations += 1; measurements.bytesReceived += received
     }
