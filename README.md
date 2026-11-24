@@ -2,9 +2,9 @@
 
 RemoteFiles is an iPhone and iPad app for browsing and reading files on a Mac or Unix server over SFTP. It is useful when you want to check a report, look through a project, or read a file away from your computer without copying an entire directory to your device.
 
-Connect to a server you already control, choose a folder, and open files in a reader or preview. You can also save selected files or complete folders on the device for reading without a connection.
+Connect to a server you already control, choose a folder, and open files in a reader or preview. You can also save selected files or complete folders on the device for reading without a connection, upload files, and copy a file from one server to another.
 
-> **Read-only browsing:** RemoteFiles does not edit or delete remote files. The optional public-key installer is a separate, explicitly confirmed server write. See [connections and security](docs/CONNECTIONS.md).
+> **Read-only browsing:** browsing, reading, searching and downloading never write to a server, and RemoteFiles does not edit or delete remote files. It writes only when you ask: an [upload or a copy between servers](docs/TRANSFERS.md), which never replaces a file without asking, and the optional public-key installer. See [connections and security](docs/CONNECTIONS.md).
 
 ## A look inside
 
@@ -14,7 +14,7 @@ Connect to a server you already control, choose a folder, and open files in a re
 
 *Screenshots from the demo workspace.*
 
-On iPad, the [workspace](docs/IPAD.md) can show the library, folder and reader side by side. It adapts to the available window size.
+On iPad, the [workspace](docs/IPAD.md) can show the library, folder and reader side by side. It adapts to the available window size, and keeps [several servers connected](docs/IPAD.md#several-servers-at-once) so that switching between them is immediate.
 
 <img src="docs/screenshots/ipad/workspace.png" width="840" alt="RemoteFiles on iPad with the library, folder list and reader visible together">
 

@@ -492,11 +492,11 @@ public final class SFTPClient: Sendable {
     ) async throws {
         self.logger.info("SFTP requesting mkdir at '\(path)'")
         
-        let _ = try await sendRequest(.mkdir(.init(
+        try Self.requireOK(try await sendRequest(.mkdir(.init(
             requestId: self.allocateRequestId(),
             filePath: path,
             attributes: attributes
-        )))
+        ))))
         
         self.logger.debug("SFTP created directory \(path)")
     }
@@ -515,10 +515,10 @@ public final class SFTPClient: Sendable {
     ) async throws {
         self.logger.info("SFTP requesting remove file at '\(filePath)'")
 
-        let _ = try await sendRequest(.remove(.init(
+        try Self.requireOK(try await sendRequest(.remove(.init(
             requestId: allocateRequestId(),
             filename: filePath
-        )))
+        ))))
 
         self.logger.debug("SFTP removed file at \(filePath)")
     }
@@ -550,7 +550,8 @@ public final class SFTPClient: Sendable {
     /// - Parameters:
     ///   - oldPath: Current path of the file
     ///   - newPath: Desired new path
-    ///   - flags: Optional flags affecting the rename operation
+    ///   - flags: Must be zero. RemoteFiles: flags belong to SFTP version 5 and this client speaks version 3,
+    ///     whose rename has none, so asking for any is refused before a request is sent.
     /// - Throws: SFTPError if rename fails
     ///
     /// ## Example
@@ -565,16 +566,52 @@ public final class SFTPClient: Sendable {
         to newPath: String,
         flags: UInt32 = 0
     ) async throws {
+        try Self.requireNoRenameFlags(flags)
         self.logger.info("SFTP requesting rename file at '\(oldPath)' to '\(newPath)'")
 
-        let _ = try await sendRequest(.rename(.init(
+        try Self.requireOK(try await sendRequest(.rename(.init(
             requestId: allocateRequestId(),
             oldPath: oldPath,
             newPath: newPath,
             flags: flags
-        )))
+        ))))
 
         self.logger.debug("SFTP renamed file at \(oldPath) to \(newPath)")
+    }
+
+    /// RemoteFiles: a version 3 rename carries no flags, so a caller that wants some must not be told a plain
+    /// rename did what it asked.
+    static func requireNoRenameFlags(_ flags: UInt32) throws {
+        guard flags == 0 else { throw SFTPError.unsupportedVersion(.v3) }
+    }
+
+    /// RemoteFiles: renames with `posix-rename@openssh.com`, which replaces an existing `newPath` atomically.
+    /// A server without the extension answers `unsupportedOperation` (thrown as its status).
+    public func posixRename(at oldPath: String, to newPath: String) async throws {
+        try Self.requireOK(try await sendRequest(.posixRename(.init(
+            requestId: allocateRequestId(),
+            oldPath: oldPath,
+            newPath: newPath
+        ))))
+    }
+
+    /// RemoteFiles: gives `oldPath` a second name with `hardlink@openssh.com`. Unlike RENAME, whose handling
+    /// of a taken name differs between servers, this refuses an existing `newPath` in one step wherever it
+    /// is supported. A server without the extension answers `unsupportedOperation` (thrown as its status).
+    public func hardLink(at oldPath: String, to newPath: String) async throws {
+        try Self.requireOK(try await sendRequest(.posixRename(.init(
+            requestId: allocateRequestId(),
+            oldPath: oldPath,
+            newPath: newPath,
+            request: SFTPMessage.PosixRename.hardLinkName
+        ))))
+    }
+
+    /// RemoteFiles: the inbound handler lets `eof` through as well as `ok`, and a request that changes the
+    /// server must not count anything but `ok` as done.
+    private static func requireOK(_ response: SFTPResponse) throws {
+        guard case .status(let status) = response else { throw SFTPError.invalidResponse }
+        guard status.errorCode == .ok else { throw SFTPError.errorStatus(status) }
     }
 
     /// Get the canonical absolute path.

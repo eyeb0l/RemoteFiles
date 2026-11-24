@@ -28,6 +28,18 @@ SFTPMaxChannels ${CHANNELS:-10}
   DenyAll
 </Limit>
 CONF
+# WRITABLE=1 lets the account write in /files/uploads, for the upload check; it is read-only everywhere else.
+if [ "${WRITABLE:-0}" = 1 ]; then
+  chown fixture /srv/files/uploads
+  cat >> /etc/remotefiles/proftpd.conf <<CONF
+AllowOverwrite on
+<Directory /srv/files/uploads>
+  <Limit WRITE SITE_CHMOD>
+    AllowAll
+  </Limit>
+</Directory>
+CONF
+fi
 # mod_sftp will not log to a symlink such as /proc/self/fd/2; stream its file into the container log instead.
 touch /var/log/proftpd-sftp.log && tail -F /var/log/proftpd-sftp.log &
 exec proftpd --nodaemon --config /etc/remotefiles/proftpd.conf

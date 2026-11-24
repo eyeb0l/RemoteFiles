@@ -38,6 +38,7 @@ enum SFTPRequest: CustomDebugStringConvertible, Sendable {
     case rename(SFTPMessage.Rename)
     case fsetstat(SFTPMessage.FileSetStat)
     case setstat(SFTPMessage.SetStat)
+    case posixRename(SFTPMessage.PosixRename)
 
     var requestId: UInt32 {
         get {
@@ -73,6 +74,8 @@ enum SFTPRequest: CustomDebugStringConvertible, Sendable {
             case .fsetstat(let message):
                 return message.requestId
             case .setstat(let message):
+                return message.requestId
+            case .posixRename(let message):
                 return message.requestId
             }
         }
@@ -112,6 +115,8 @@ enum SFTPRequest: CustomDebugStringConvertible, Sendable {
             return .fsetstat(message)
         case .setstat(let message):
             return .setstat(message)
+        case .posixRename(let message):
+            return .posixRename(message)
         }
     }
     
@@ -133,6 +138,7 @@ enum SFTPRequest: CustomDebugStringConvertible, Sendable {
         case .rename(let message): return message.debugDescription
         case .fsetstat(let message): return message.debugDescription
         case .setstat(let message): return message.debugDescription
+        case .posixRename(let message): return message.debugDescription
         }
     }
 }
@@ -209,7 +215,7 @@ enum SFTPResponse: Sendable {
             self = .fsetstat(message)
         case .setstat(let message):
             self = .setstat(message)
-        case .realpath, .openFile, .fstat, .closeFile, .read, .write, .initialize, .version, .stat, .lstat, .rmdir, .opendir, .readdir, .remove, .symlink, .readlink, .rename:
+        case .realpath, .openFile, .fstat, .closeFile, .read, .write, .initialize, .version, .stat, .lstat, .rmdir, .opendir, .readdir, .remove, .symlink, .readlink, .rename, .posixRename:
             return nil
         }
     }
@@ -380,6 +386,24 @@ public enum SFTPMessage: Sendable {
         public var flags: UInt32
 
         public var debugDescription: String { "{\(self.requestId)}(\(self.oldPath),\(self.newPath),\(self.flags))" }
+        fileprivate var debugVariantWithoutLargeData: Self { self }
+    }
+
+    /// RemoteFiles: an SSH_FXP_EXTENDED request that names two paths and is answered with a status.
+    /// `posix-rename@openssh.com` replaces an existing `newPath` atomically, as rename(2) does;
+    /// `hardlink@openssh.com` gives `oldPath` a second name and fails if `newPath` exists, as link(2) does.
+    public struct PosixRename: SFTPMessageContent, Sendable {
+        public static let id = SFTPMessageType.extended
+        public static let name = "posix-rename@openssh.com"
+        public static let hardLinkName = "hardlink@openssh.com"
+
+        public let requestId: UInt32
+        public var oldPath: String
+        public var newPath: String
+        /// The extension asked for.
+        public var request: String = PosixRename.name
+
+        public var debugDescription: String { "{\(self.requestId)}(\(self.request),\(self.oldPath),\(self.newPath))" }
         fileprivate var debugVariantWithoutLargeData: Self { self }
     }
 
@@ -589,6 +613,7 @@ public enum SFTPMessage: Sendable {
     case attributes(Attributes)
     case readdir(ReadDir)
     case rename(Rename)
+    case posixRename(PosixRename)
     
     public var messageType: SFTPMessageType {
         switch self {
@@ -617,7 +642,8 @@ public enum SFTPMessage: Sendable {
                 .setstat(let message as SFTPMessageContent),
                 .symlink(let message as SFTPMessageContent),
                 .readlink(let message as SFTPMessageContent),
-                .rename(let message as SFTPMessageContent):
+                .rename(let message as SFTPMessageContent),
+                .posixRename(let message as SFTPMessageContent):
             return message.id
         }
     }
@@ -649,7 +675,8 @@ public enum SFTPMessage: Sendable {
                 .setstat(let message as SFTPMessageContent),
                 .symlink(let message as SFTPMessageContent),
                 .readlink(let message as SFTPMessageContent),
-                .rename(let message as SFTPMessageContent):
+                .rename(let message as SFTPMessageContent),
+                .posixRename(let message as SFTPMessageContent):
             return "\(message.id)\(message.debugDescription)"
         }
     }
@@ -681,6 +708,7 @@ public enum SFTPMessage: Sendable {
         case .symlink(let message): return Self.symlink(message.debugVariantWithoutLargeData)
         case .readlink(let message): return Self.readlink(message.debugVariantWithoutLargeData)
         case .rename(let message): return Self.rename(message.debugVariantWithoutLargeData)
+        case .posixRename(let message): return Self.posixRename(message.debugVariantWithoutLargeData)
         }
     }
     

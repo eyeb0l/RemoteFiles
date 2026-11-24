@@ -310,7 +310,8 @@ extension XCUIApplication {
     /// What an activated control opens can exist before VoiceOver handles the screen change. Until
     /// then speech still names the control, and a traversal started from that phrase skips the
     /// element focus lands on, so wait for the speech to move on before reading what opened.
-    private func waitForSpeechToLeave(_ activated: String, placeholder: String? = nil, opening label: String) throws {
+    @discardableResult
+    private func waitForSpeechToLeave(_ activated: String, placeholder: String? = nil, opening label: String) throws -> String {
         let start = Date(), deadline = start.addingTimeInterval(30)
         var current = activated
         while Date() < deadline {
@@ -318,7 +319,7 @@ extension XCUIApplication {
             if let value = try? service.currentSpeech().utterance { current = value }
             if current != activated && current != placeholder {
                 print("VO FOCUS moved from \(label) after \(String(format: "%.1f", Date().timeIntervalSince(start))) s: \(current)")
-                return
+                return current
             }
             Thread.sleep(forTimeInterval: 0.25)
         }
@@ -399,7 +400,21 @@ extension XCUIApplication {
             // VoiceOver opens the menu after the tap's own wait can end. Reading speech before it
             // has focused the first item starts on the button's phrase and steps past Refresh
             // (docs/CI_HISTORY.md, 20 November 2026).
-            try waitForSpeechToLeave(button, opening: "Document actions")
+            // Now and then the double tap chooses Refresh instead: the menu opens over its own button and a
+            // second tap lands on the item it puts there, its first. The menu is gone, the document loads
+            // again and focus starts over at the Back button (docs/CI_HISTORY.md, 22 November 2026). Seen
+            // by where speech went, without a query of the app while a menu may be open. Once the document
+            // is back, a touch puts VoiceOver on the button again, and it is then double tapped.
+            var opened = try waitForSpeechToLeave(button, opening: "Document actions")
+            for attempt in 1...2 where opened.localizedCaseInsensitiveContains("Back button") {
+                print("VO DOUBLE TAP CHOSE REFRESH \(attempt): \(opened)")
+                XCTAssertTrue(app.scrollViews["Rendered Markdown document"].waitForExistence(timeout: 30))
+                app.buttons["Document actions"].tap()
+                opened = try waitForSpeechToLeave(opened, opening: "Document actions")
+                guard opened == button else { continue }
+                app.buttons["Document actions"].doubleTap()
+                opened = try waitForSpeechToLeave(button, opening: "Document actions")
+            }
             let actions = try speech("ACTIONS", limit: 12)
             capture("VoiceOver document actions", app)
             XCTAssertTrue(actions.contains { $0.contains("Refresh") && $0.contains("Button") })
@@ -552,8 +567,20 @@ extension XCUIApplication {
             XCTAssertTrue(refreshing.contains { $0.contains("Updating") })
             let banner = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Too Large to Preview")).firstMatch
             XCTAssertTrue(banner.waitForExistence(timeout: 18))
-            for _ in 0..<8 { _ = try service.moveBackward() }
-            let failed = try speech("REFRESH FAILED", limit: 9)
+            // The banner has only just taken the place of "Updating…". Twice, on a slow simulator,
+            // VoiceOver stepped from the bar above the document straight to the bar below it, though the
+            // banner and the document were on screen. The supposition, which nothing has yet shown, is
+            // that it was still going by what had been there and would read them a moment later. So a
+            // pass that met nothing of the document is made again, three passes in all, and the banner
+            // must be read in the last of them.
+            var failed: [String] = []
+            for pass in 1...3 {
+                for _ in 0..<8 { _ = try service.moveBackward() }
+                failed = try speech("REFRESH FAILED", limit: 9)
+                if failed.contains(where: { $0.contains("Previously loaded") || $0.contains("Cached local report") }) { break }
+                print("VO STEPPED PAST THE DOCUMENT \(pass): \(failed)")
+                if pass < 3 { sleep(3) }
+            }
             capture("VoiceOver cached refresh failed", app)
             XCTAssertTrue(failed.contains { $0.contains("Previously loaded copy") && $0.contains("Too Large") })
         }

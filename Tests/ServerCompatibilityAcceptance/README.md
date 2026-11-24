@@ -66,6 +66,15 @@ All scenarios require:
   one-channel server must lend browsing's channel to the save; other servers must never lend it.
 - Snapshot symlink rejection, preview/transfer byte limits (a download straight after a failed
   preview, on every server), and continued browsing.
+- An upload: refused with nothing left on a read-only server; on one that takes writes, exact bytes
+  read back, a taken name refused, Keep Both, Replace, an interrupted upload continued from what the
+  server kept, a given-up partial copy removed, and nothing of the app's own left in the folder.
+
+The writable servers let the account write only to the fixture's `uploads` folder: `opensshwrite-10`
+(`internal-sftp` without `-R`), `asyncsshwrite-default`, `asyncsshbare-default` (no
+`hardlink@openssh.com` or `posix-rename@openssh.com`), `asyncsshreplacing-default` (that, with a
+RENAME that replaces an existing name), and in containers `openssh82write-10`, `proftpdwrite-10` and
+`sftpgowrite-default`.
 
 AsyncSSH caps replies at 1 KiB and Paramiko at 4 KiB to exercise real short-read handling.
 Against `paramiko-2`, two additional tests gate an actual READDIR with files outside the saved tree.

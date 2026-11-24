@@ -355,6 +355,9 @@ final class DownloadManagerTests: XCTestCase {
         let bytes = Data([0, 255, 13, 10, 128])
         let service = DownloadFixture(bytes: bytes)
         let manager = try DownloadManager(service: service, directory: directory)
+        // The limit a download is given is lowered to what the device has free, so the free space is
+        // stated here and not left to whatever the machine running the test happens to have.
+        manager.availableDeviceBytes = { _ in Int64(64) * 1024 * 1024 * 1024 }
         let id = try manager.enqueue(profile: profile, entry: entry())
         try await wait { manager.activeID == nil }
         XCTAssertEqual(manager.items.first?.state, .completed)
@@ -434,6 +437,64 @@ final class DownloadManagerTests: XCTestCase {
         let maximum = await service.maximumConcurrent
         XCTAssertEqual(maximum, 1)
     }
+    /// iOS may suspend the app the moment it gives back its background time, so by the time `interruptNow`
+    /// returns the list, in memory and as saved, must already say what happened. Only the connection closing
+    /// is left to wait for.
+    func testAnInterruptionIsInTheSavedListBeforeItsConnectionHasClosed() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let service = DownloadFixture(bytes: Data([1]), holdFirst: true)
+        let manager = try DownloadManager(service: service, directory: directory)
+        _ = try manager.enqueue(profile: profile, entry: entry("held.bin"))
+        _ = try manager.enqueue(profile: profile, entry: entry("queued.bin"))
+        try await wait { await service.requests.count == 1 }
+        let draining = manager.interruptNow(reason: "Stopped by the test")
+        // Nothing has been awaited since the call.
+        XCTAssertEqual(manager.items.map(\.state), [.interrupted, .interrupted])
+        let saved = String(decoding: try Data(contentsOf: directory.appendingPathComponent("downloads.json")), as: UTF8.self)
+        XCTAssertEqual(saved.components(separatedBy: "Stopped by the test").count - 1, 2, "Both rows are saved as interrupted.")
+        await service.resume()
+        await draining.value
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.map(\.state), [.interrupted, .interrupted])
+    }
+
+    /// The download list can't be written while the device is locked. An interruption made then is in memory
+    /// only, and is saved when the list next can be. If the app is ended first, the next launch finds the
+    /// row as it was last saved, still downloading, and opens that as interrupted too: the row is the same
+    /// but for its words, and Retry continues it.
+    func testAnInterruptionThatCouldNotBeSavedIsStillAnInterruptedDownloadAtTheNextLaunch() async throws {
+        let directory = directory(), copy = self.directory()
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            try? FileManager.default.removeItem(at: directory); try? FileManager.default.removeItem(at: copy)
+        }
+        let service = DownloadFixture(bytes: Data([1, 2, 3]), holdFirst: true)
+        let manager = try DownloadManager(service: service, directory: directory)
+        let id = try manager.enqueue(profile: profile, entry: entry("held.bin"))
+        try await wait { await service.requests.count == 1 }
+        // As on a locked device: nothing can be written beside the list, so it can't be replaced.
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
+        let draining = manager.interruptNow(reason: "Stopped by the test")
+        XCTAssertEqual(manager.items.map(\.state), [.interrupted])
+        XCTAssertNotNil(manager.persistenceError, "The list could not be saved.")
+        // The app is ended here: what the next launch has is the folder as it stands.
+        try FileManager.default.copyItem(at: directory, to: copy)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: copy.path)
+        let relaunched = try DownloadManager(service: service, directory: copy)
+        XCTAssertEqual(relaunched.items.map(\.state), [.interrupted])
+        XCTAssertEqual(relaunched.items.first?.message, "The app stopped before this download finished. Retry to continue.")
+        try relaunched.retry(id, profile: profile)
+        try await wait { relaunched.activeID == nil }
+        XCTAssertEqual(relaunched.items.map(\.state), [.completed])
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        await service.resume()
+        await draining.value
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.map(\.state), [.interrupted])
+        XCTAssertNil(manager.persistenceError, "Saved once the list could be written again.")
+    }
+
     func testNewJobsKeepTheirContextsWhileInterruptedWorkerDrains() async throws {
         let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
         let service = DownloadFixture(bytes: Data([1]), holdFirst: true)
@@ -602,8 +663,8 @@ final class DownloadManagerTests: XCTestCase {
         XCTAssertEqual(manager.items.first?.message, DownloadManagerError.storageFull.localizedDescription)
     }
     func testExpandedQuotasAdmitMultiGigabyteFiles() async throws {
-        XCTAssertEqual(DownloadManager.maximumFileBytes, 4 * 1024 * 1024 * 1024)
-        XCTAssertEqual(DownloadManager.maximumStoredBytes, 16 * 1024 * 1024 * 1024)
+        XCTAssertEqual(DownloadManager.maximumFileBytes, 16 * 1024 * 1024 * 1024)
+        XCTAssertEqual(DownloadManager.maximumStoredBytes, 64 * 1024 * 1024 * 1024)
         let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
         let service = DownloadFixture(bytes: Data([1, 2, 3]))
         let manager = try DownloadManager(service: service, directory: directory)

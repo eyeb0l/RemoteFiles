@@ -192,3 +192,40 @@ server search can look up the descriptors either side of the search root's OPEN 
 as it arrives instead of keeping it, so server search can show results before the helper finishes.
 What it hands on still counts towards `maxResponseSize`, with stderr, and overflow still closes the
 child channel. Without it, behaviour is unchanged.
+
+### Uploads: pipelined writes and safe replacement
+
+RemoteFiles uploads files and copies them between servers (`docs/TRANSFERS.md`). Four additions to the
+SFTP client serve that; none changes what an existing caller sends.
+
+`SFTPFile.sendWrite(_:at:)` queues one `SSH_FXP_WRITE` of the whole buffer and returns its future, like
+`sendClose`. Upstream's `write` awaits each 32,000-byte slice before sending the next, which holds an
+upload to one slice per round trip. RemoteFiles keeps a window of writes in flight and sizes each one
+itself (32 KiB of data). `SFTPFile.sendSetAttributes(to:)` queues `SSH_FXP_FSETSTAT` the same way, so the
+modification time goes out with the `CLOSE` that follows it. Both fail unless the status is `ok`.
+
+`SFTPClient.posixRename(at:to:)` sends `posix-rename@openssh.com` and `SFTPClient.hardLink(at:to:)` sends
+`hardlink@openssh.com`, both `SSH_FXP_EXTENDED` requests naming two paths, through a new
+`SFTPMessage.PosixRename` (whose `request` says which) and its serializer case. They are the only protocol
+extensions the client sends. RemoteFiles names an uploaded file with the hard link, which refuses an
+existing name in one step whatever the server's RENAME does, and replaces one, when asked, with the
+rename. A server without either answers `SSH_FX_OP_UNSUPPORTED`, and RemoteFiles then looks and renames,
+or moves the old file aside. The message parser still rejects extended packets, so the bundled server
+never receives them, and its inbound switch lists the new case with the other messages a client cannot
+send it.
+
+`SSH_FXP_RENAME` is sent as version 3 defines it, the two paths and nothing after them. Upstream appends a
+`flags` word, which belongs to version 5, though it only ever negotiates version 3. OpenSSH ignores the
+extra word; a server that checks the length of each request, such as AsyncSSH's, answers
+`SSH_FX_BAD_MESSAGE`, which stopped a file being named wherever the extensions above weren't used. The
+message parser reads a rename with or without the word, so the bundled server takes both.
+`SFTPClient.rename(at:to:flags:)` keeps its parameter and throws `unsupportedVersion(.v3)` for any flags
+but zero, before sending anything: a plain rename must not pass for a flagged one.
+
+`createDirectory`, `remove` and `rename` now require an `ok` status. The inbound handler passes `eof`
+through as success, and upstream discarded the response, so a request that changes the server could
+count an `eof` as done. RemoteFiles calls `remove` and `rename` only for uploads; `createDirectory` is
+not called.
+
+`SFTPUploadIntegrationTests` exercises all of these against real OpenSSH, including replacement with
+`posix-rename` and, through a test switch, without it.

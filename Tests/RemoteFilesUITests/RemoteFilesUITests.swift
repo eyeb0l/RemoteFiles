@@ -837,6 +837,67 @@ final class RemoteFilesUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.navigationBars.buttons["RemoteFiles"].exists)
     }
+    /// Copy to Server puts a file in the folder chosen for it without leaving the folder it was started
+    /// from, asks before taking a name that is already there, and lists both copies in Transfers.
+    func testCopyToServerPutsAFileInTheChosenFolderAndAsksAboutATakenName() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
+        let reports = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Reports, Studio Server")).firstMatch
+        XCTAssertTrue(reports.waitForExistence(timeout: 15)); reports.tap()
+        XCTAssertTrue(app.navigationBars["Reports"].waitForExistence(timeout: 10))
+        let file = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Linked notes.md")).firstMatch
+        func copyToEmptyFolder() {
+            XCTAssertTrue(file.waitForExistence(timeout: 10)); file.press(forDuration: 1.2)
+            let copy = app.buttons["Copy to Server…"]
+            XCTAssertTrue(copy.waitForExistence(timeout: 10), app.debugDescription); copy.tap()
+            let server = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Studio Server · Demo, demo.invalid")).firstMatch
+            XCTAssertTrue(server.waitForExistence(timeout: 10), app.debugDescription); server.tap()
+            let empty = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Empty,")).firstMatch
+            XCTAssertTrue(empty.waitForExistence(timeout: 15), app.debugDescription); empty.tap()
+            XCTAssertTrue(app.navigationBars["Empty"].waitForExistence(timeout: 15), app.debugDescription)
+            let here = app.buttons["copy-here"]
+            XCTAssertTrue(here.waitForExistence(timeout: 15), app.debugDescription)
+            waitUntilHittable(here, app.debugDescription); here.tap()
+        }
+        copyToEmptyFolder()
+        // The folder the copy was started from is still on screen.
+        XCTAssertTrue(app.navigationBars["Reports"].waitForExistence(timeout: 15), app.debugDescription)
+        // A second copy of the same file finds its name taken and asks.
+        copyToEmptyFolder()
+        let keepBoth = app.buttons["Keep Both"]
+        XCTAssertTrue(keepBoth.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "is already in this folder")).firstMatch.exists, app.debugDescription)
+        keepBoth.tap()
+        XCTAssertTrue(app.navigationBars["Reports"].waitForExistence(timeout: 15), app.debugDescription)
+
+        // Home is a screen back on a stack, and the library column in the workspace.
+        let back = app.navigationBars.buttons["RemoteFiles"]
+        if back.exists { back.tap() }
+        let transfers = app.buttons["transfer-manager"].firstMatch
+        revealWorkspaceColumn(containing: transfers, in: app)
+        transfers.tap()
+        XCTAssertTrue(app.navigationBars["Transfers"].waitForExistence(timeout: 10))
+        let second = app.staticTexts["Linked notes 2.md"]
+        XCTAssertTrue(second.waitForExistence(timeout: 20), "The second copy is kept beside the first under a numbered name. " + app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Linked notes.md"].exists)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Copied · Empty on Studio Server")).firstMatch.waitForExistence(timeout: 20), app.debugDescription)
+        // Leave the list as it was found, so that Home has no Transfers button for other journeys.
+        app.buttons["Delete All"].firstMatch.tap()
+        let confirm = app.buttons.matching(NSPredicate(format: "label == %@", "Delete All")).allElementsBoundByIndex.last
+        XCTAssertNotNil(confirm); confirm?.tap()
+        XCTAssertTrue(app.staticTexts["No Transfers"].waitForExistence(timeout: 10), app.debugDescription)
+        app.buttons["Done"].tap()
+
+        // Both copies are in the folder they were sent to.
+        let projects = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Projects, Studio Server")).firstMatch
+        revealWorkspaceColumn(containing: projects, in: app)
+        projects.tap()
+        let empty = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Empty,")).firstMatch
+        XCTAssertTrue(empty.waitForExistence(timeout: 15)); empty.tap()
+        XCTAssertTrue(app.navigationBars["Empty"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Linked notes.md")).firstMatch.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Linked notes 2.md")).firstMatch.exists, app.debugDescription)
+    }
     func testSearchingSubfoldersFindsNestedNamesKeepsResultsAndSwitchesBack() throws {
         continueAfterFailure = false
         let app = XCUIApplication.underTest(); app.launchArguments = ["--demo"]; app.launch()
@@ -1866,7 +1927,14 @@ final class RealServerUITests: XCTestCase {
             let name = app.textFields.firstMatch
             XCTAssertTrue(name.waitForExistence(timeout: 5))
             name.tap(); name.typeText(keyName)
-            try XCTUnwrap(app.buttons.matching(identifier: "Generate Key").allElementsBoundByIndex.first(where: { $0.isHittable })).tap()
+            // The on-screen keyboard moves the sheet as it comes up, and a tap made meanwhile misses.
+            let made = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "ssh-ed25519 ")).firstMatch
+            for _ in 0..<4 where !made.exists {
+                sleep(2)
+                if app.buttons["Hide keyboard"].exists { app.buttons["Hide keyboard"].tap(); sleep(1) }
+                if let button = app.buttons.matching(identifier: "Generate Key").allElementsBoundByIndex.last(where: { $0.isHittable }), app.navigationBars["Generate Key"].exists { button.tap() }
+                _ = made.waitForExistence(timeout: 4)
+            }
         }
         let publicKey = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "ssh-ed25519 ")).firstMatch
         XCTAssertTrue(publicKey.waitForExistence(timeout: 10))
@@ -2206,5 +2274,596 @@ extension RealServerUITests {
         localProfile.press(forDuration: 1)
         app.buttons["Delete Connection"].tap()
         XCTAssertFalse(localProfile.exists)
+    }
+}
+
+/// Opt-in hardware acceptance of copies between folders of a real server: a transfer whose network is cut
+/// stops, keeps what it sent and continues on Retry, and one left in the background either goes on or stops
+/// and can be finished. The server side cuts and restores the network and compares the files afterwards
+/// (docs/REAL_SERVER_ACCEPTANCE.md, 21 November 2026). `REMOTEFILES_TRANSFER_DIRECTORY` holds a large
+/// `big.bin` and an `inbox` folder.
+extension RealServerUITests {
+    private struct TransferServer { let host: String, port: String, user: String, directory: String, fingerprint: String }
+    private func transferServer() throws -> TransferServer {
+        let env = ProcessInfo.processInfo.environment
+        return TransferServer(host: try XCTUnwrap(env["REMOTEFILES_TRANSFER_HOST"]), port: try XCTUnwrap(env["REMOTEFILES_TRANSFER_PORT"]),
+                              user: try XCTUnwrap(env["REMOTEFILES_TRANSFER_USER"]), directory: try XCTUnwrap(env["REMOTEFILES_TRANSFER_DIRECTORY"]),
+                              fingerprint: try XCTUnwrap(env["REMOTEFILES_TRANSFER_FINGERPRINT"]))
+    }
+    private static let transferConnection = "Transfer fixture", inboxConnection = "Transfer inbox"
+
+    /// Opens the fixture's folder, adding its connection and trusting its host key the first time. `inbox`
+    /// opens the fixture's `inbox` folder as a second connection of its own.
+    private func openTransferFixture(in app: XCUIApplication, _ server: TransferServer, inbox: Bool = false) {
+        // Every journey that copies opens this connection first, from Home.
+        if !inbox { startWithNoTransfers(in: app) }
+        let name = inbox ? Self.inboxConnection : Self.transferConnection
+        let connection = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", name + ",")).firstMatch
+        if !connection.waitForExistence(timeout: 5) {
+            app.buttons["Add Connection"].firstMatch.tap()
+            for (label, value) in [("Display name", name), ("Hostname or IP address", server.host), ("Account username", server.user),
+                                   ("Starting directory (optional)", server.directory + (inbox ? "/inbox" : ""))] {
+                let field = app.textFields[label]
+                if !field.isHittable { app.swipeUp() }
+                field.tap(); field.typeText(value)
+            }
+            app.expandAdvancedConnectionOptions()
+            // The row's label and the field's own are read together, so the label only begins with the name.
+            let port = app.textFields.matching(NSPredicate(format: "label BEGINSWITH %@", "SSH port")).firstMatch
+            // An on-screen keyboard, there when no hardware keyboard is attached, covers the foot of the form.
+            let hideKeyboard = app.buttons["Hide keyboard"]
+            if !(port.exists && port.isHittable), hideKeyboard.exists { hideKeyboard.tap(); sleep(1) }
+            for _ in 0..<4 { if port.exists && port.isHittable { break }; app.swipeUp() }
+            // A tap on Advanced made while the keyboard was still moving the sheet misses, and the row stays closed.
+            if !port.exists {
+                let advanced = app.buttons["Advanced"].firstMatch
+                if advanced.exists { advanced.tap(); sleep(1) }
+                for _ in 0..<3 { if port.exists && port.isHittable { break }; app.swipeUp() }
+            }
+            // The form is a sheet shorter than the screen, and a row below its foot still counts as hittable:
+            // a tap there falls outside the sheet and closes it. So the form itself is drawn up first.
+            let handle = app.buttons["Advanced"].firstMatch
+            if handle.exists, port.exists, port.frame.midY > handle.frame.maxY {
+                let from = handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                from.press(forDuration: 0.1, thenDragTo: from.withOffset(CGVector(dx: 0, dy: -360)))
+                sleep(1)
+            }
+
+            XCTAssertTrue(port.exists && port.isHittable, app.debugDescription)
+            // The element spans the row; the field is at its trailing edge, and a tap past its digits puts
+            // the insertion point after them.
+            // Where the element is the field alone and not its row, its last few points don't take the tap.
+            port.coordinate(withNormalizedOffset: CGVector(dx: port.frame.width > 400 && port.frame.width < 600 ? 0.97 : 0.995, dy: 0.5)).tap()
+            sleep(2)
+            // Typed at the app, which sends it to the field with the insertion point: with an on-screen
+            // keyboard up the form moves under it and the field is not always found by its label.
+            // Where the tap leaves the insertion point isn't certain, so what is there is selected and replaced.
+            port.press(forDuration: 1.0)
+            let selectAll = app.menuItems["Select All"]
+            if selectAll.waitForExistence(timeout: 3) { selectAll.tap(); app.typeText(server.port) }
+            else { app.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 5) + server.port) }
+            // The insertion point was before the "22" already there, not after it: take back what was
+            // typed and type only what goes in front, for a port that ends in 22.
+            if (port.value as? String) == server.port + "22", server.port.hasSuffix("22") {
+                app.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: server.port.count) + String(server.port.dropLast(2)))
+            }
+            if hideKeyboard.exists, hideKeyboard.isHittable { hideKeyboard.tap() }
+            XCTAssertTrue(port.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertEqual(port.value as? String, server.port, app.debugDescription)
+            // An on-screen keyboard coming up moves the sheet, and a tap aimed at Save where it was misses.
+            let form = app.navigationBars["Add Connection"]
+            for _ in 0..<3 where form.exists {
+                sleep(1)
+                if hideKeyboard.exists, hideKeyboard.isHittable { hideKeyboard.tap(); sleep(1) }
+                app.buttons["Save"].tap()
+                _ = form.waitForNonExistence(timeout: 4)
+            }
+        }
+        XCTAssertTrue(connection.waitForExistence(timeout: 15), app.debugDescription)
+        connection.tap()
+        let trust = app.buttons["Trust & Connect"]
+        if trust.waitForExistence(timeout: 12) {
+            XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", server.fingerprint)).firstMatch.exists,
+                          "The host fingerprint must match the one read on the server. " + app.debugDescription)
+            trust.tap()
+        }
+        if inbox {
+            XCTAssertTrue(app.navigationBars["inbox"].waitForExistence(timeout: 30), app.debugDescription)
+        } else {
+            let file = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "big.bin,")).firstMatch
+            XCTAssertTrue(file.waitForExistence(timeout: 30), app.debugDescription)
+        }
+    }
+
+    /// Copies `big.bin` into `inbox`, answering a taken name if the folder already holds one: to that folder of
+    /// the same connection, or to the second connection, which starts in it.
+    private func copyBigFileToInbox(in app: XCUIApplication, answering answer: String? = nil, overSecondConnection: Bool = false) {
+        let file = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "big.bin,")).firstMatch
+        file.press(forDuration: 1.2)
+        let copy = app.buttons["Copy to Server…"]
+        XCTAssertTrue(copy.waitForExistence(timeout: 10), app.debugDescription); copy.tap()
+        // The window's own list of connections stays in the tree behind the chooser; its rows end with their state.
+        let name = overSecondConnection ? Self.inboxConnection : Self.transferConnection
+        let server = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@ AND NOT (label ENDSWITH %@)", name + ",", "nected")).firstMatch
+        XCTAssertTrue(server.waitForExistence(timeout: 10), app.debugDescription); server.tap()
+        if !overSecondConnection {
+            let inbox = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "inbox,")).firstMatch
+            XCTAssertTrue(inbox.waitForExistence(timeout: 30), app.debugDescription); inbox.tap()
+        }
+        let here = app.buttons["copy-here"]
+        XCTAssertTrue(here.waitForExistence(timeout: 30), app.debugDescription); here.tap()
+        if let answer {
+            let button = app.buttons[answer]
+            if button.waitForExistence(timeout: 8) { button.tap() }
+        }
+    }
+
+    /// What each row of Transfers says of its transfer and where it went, as "Copied · inbox on Transfer
+    /// fixture". Only the rows on screen, which is all of them for the one row a journey leaves itself.
+    private func transferRows(in app: XCUIApplication) -> [String] {
+        app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", " · ", " on ")).allElementsBoundByIndex.map(\.label)
+    }
+    /// The list holds the journey's one transfer and nothing else, and it is finished: not stopped, waiting,
+    /// under way or asking about a taken name.
+    private static func isTheOneFinished(_ rows: [String]) -> Bool {
+        rows.count == 1 && (rows[0].hasPrefix("Copied · ") || rows[0].hasPrefix("Uploaded · "))
+    }
+    /// Empties Transfers before a journey starts its copy, so that the list then holds that copy alone: a
+    /// finished copy from an earlier run can't stand in for it, and a missing one shows as a missing row. Only
+    /// finished and cancelled rows are cleared (**Clear Finished**, which removes nothing from a server). One
+    /// an earlier run left unfinished is not this journey's to cancel, and Retry would reach it first, so the
+    /// journey stops there.
+    ///
+    /// Called at Home, whose bar shows the Transfers button whenever the list holds anything at all. A
+    /// folder's shows it only while something is under way or newly gone wrong.
+    private func startWithNoTransfers(in app: XCUIApplication) {
+        XCTAssertTrue(app.buttons["Settings"].firstMatch.waitForExistence(timeout: 15), "Home, where Transfers is offered. " + app.debugDescription)
+        let status = app.buttons["transfer-manager"].firstMatch
+        guard status.waitForExistence(timeout: 3) else { return }
+        putAwayTransferBanner(covering: status); status.tap()
+        XCTAssertTrue(app.navigationBars["Transfers"].waitForExistence(timeout: 10))
+        let clear = app.buttons["Clear Finished"]
+        if clear.waitForExistence(timeout: 3) { clear.tap() }
+        XCTAssertTrue(app.staticTexts["No Transfers"].waitForExistence(timeout: 10),
+                      "An earlier run left transfers unfinished. Finish or remove them before this journey: \(transferRows(in: app))")
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.navigationBars["Transfers"].waitForNonExistence(timeout: 10))
+    }
+
+    /// With Transfers open, taps Retry until the list is the journey's one copy, finished: one that is running
+    /// or queued offers Cancel, one that stopped offers Retry, and one whose name was taken offers that
+    /// question. The list was emptied before the copy began (`startWithNoTransfers`), so its one row is that
+    /// copy. Returns whether Retry was ever needed.
+    private func finishTransfers(in app: XCUIApplication, within seconds: TimeInterval) -> Bool {
+        // Any of them: a list can hold several transfers that stopped.
+        let retry = app.buttons["Retry"].firstMatch, running = app.buttons["Cancel"].firstMatch
+        let nameTaken = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Name Taken")).firstMatch
+        var retried = false, finished = false
+        let deadline = Date().addingTimeInterval(seconds)
+        // What each row says, printed when it changes, so a run that never finishes shows where it stood.
+        let states = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@ OR label CONTAINS %@", " · ", "Retry"))
+        var last = ""
+        while Date() < deadline, !finished {
+            let now = states.allElementsBoundByIndex.map(\.label).joined(separator: " | ")
+            if now != last { print("REMOTEFILES_TRANSFERS \(now)"); last = now }
+            if retry.exists {
+                // Retry is disabled while the copy it stopped is still letting go of its connection.
+                if retry.isEnabled, retry.isHittable { retry.tap(); retried = true }
+            } else if !running.exists, nameTaken.exists {
+                // Nothing here answers that question, and the app rightly waits for an answer: a copy an
+                // earlier run left unfinished has taken the name this run's copy was to have.
+                XCTFail("A transfer is asking about a taken name, which this journey doesn't expect: \(now)")
+                return retried
+            } else if !running.exists, Self.isTheOneFinished(transferRows(in: app)) { finished = true; break }
+            sleep(3)
+        }
+        XCTAssertTrue(finished, "The journey's one transfer must be listed, alone, as finished: \(transferRows(in: app)). " + app.debugDescription)
+        return retried
+    }
+
+    private func attach(_ name: String, of app: XCUIApplication) {
+        let capture = XCTAttachment(screenshot: app.screenshot()); capture.name = name; capture.lifetime = .keepAlways; add(capture)
+    }
+
+    func testTransferStopsWhenItsNetworkIsCutAndRetryContinuesIt() throws {
+        try enabled()
+        let server = try transferServer()
+        let app = XCUIApplication.underTest()
+        app.launch()
+        openTransferFixture(in: app, server)
+        // An earlier journey may have left `big.bin` in the folder; this one is then kept beside it.
+        copyBigFileToInbox(in: app, answering: "Keep Both")
+        let status = app.buttons["transfer-manager"].firstMatch
+        XCTAssertTrue(status.waitForExistence(timeout: 30), "The folder shows the transfer's progress. " + app.debugDescription)
+        print("REMOTEFILES_TRANSFER_STARTED")
+        putAwayTransferBanner(covering: status); status.tap()
+        XCTAssertTrue(app.navigationBars["Transfers"].waitForExistence(timeout: 10))
+        // The server side cuts the network once part of the file has arrived.
+        let retry = app.buttons["Retry"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 300), "A transfer whose network has gone must stop and offer Retry. " + app.debugDescription)
+        let kept = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Retry continues from there")).firstMatch
+        XCTAssertTrue(kept.waitForExistence(timeout: 15), "What was sent is kept for Retry. " + app.debugDescription)
+        print("REMOTEFILES_TRANSFER_INTERRUPTED \(kept.label)")
+        attach("Transfer interrupted with bytes kept", of: app)
+        // The network comes back shortly; a Retry before then fails again and is offered again.
+        _ = finishTransfers(in: app, within: 480)
+        attach("Transfer finished after Retry", of: app)
+        print("REMOTEFILES_TRANSFER_DONE")
+    }
+
+    func testTransferLeftInTheBackgroundGoesOnOrStopsAndCanBeFinished() throws {
+        try enabled()
+        let server = try transferServer()
+        let app = XCUIApplication.underTest()
+        app.launch()
+        openTransferFixture(in: app, server)
+        // An earlier journey may have left `big.bin` in the folder; this one is then kept beside it.
+        copyBigFileToInbox(in: app, answering: "Keep Both")
+        let status = app.buttons["transfer-manager"].firstMatch
+        XCTAssertTrue(status.waitForExistence(timeout: 30), app.debugDescription)
+        sleep(4)
+        XCUIDevice.shared.press(.home)
+        sleep(30)
+        app.activate()
+        XCTAssertTrue(status.waitForExistence(timeout: 20), app.debugDescription)
+        putAwayTransferBanner(covering: status); status.tap()
+        XCTAssertTrue(app.navigationBars["Transfers"].waitForExistence(timeout: 10))
+        attach("Transfers after thirty seconds in the background", of: app)
+        let retried = finishTransfers(in: app, within: 480)
+        print("REMOTEFILES_BACKGROUND=\(retried ? "stopped and finished by Retry" : "went on")")
+        attach("Transfers finished", of: app)
+    }
+
+    /// Two connections stay open side by side, the first folder is back at once, and a file copies from one
+    /// connection to the other through this device.
+    func testTwoServersStayConnectedWhileAFileCopiesBetweenThem() throws {
+        try enabled()
+        let server = try transferServer()
+        let app = XCUIApplication.underTest()
+        app.launch()
+        openTransferFixture(in: app, server)
+        let home = app.navigationBars.buttons["RemoteFiles"]
+        if home.exists { home.tap() }
+        openTransferFixture(in: app, server, inbox: true)
+        if home.exists { home.tap() }
+        let connected = { (name: String) in
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@ AND label ENDSWITH %@", name + ",", "Connected")).firstMatch
+        }
+        XCTAssertTrue(connected(Self.transferConnection).waitForExistence(timeout: 10), "The first server stays connected. " + app.debugDescription)
+        XCTAssertTrue(connected(Self.inboxConnection).exists, app.debugDescription)
+        attach("Two servers connected", of: app)
+        // Going back to the first server needs no new connection, so its folder is there at once.
+        let returned = Date()
+        connected(Self.transferConnection).tap()
+        let file = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "big.bin,")).firstMatch
+        XCTAssertTrue(file.waitForExistence(timeout: 10), app.debugDescription)
+        print("REMOTEFILES_TRANSFER_RETURNED_IN \(Int(Date().timeIntervalSince(returned) * 1000)) ms")
+        copyBigFileToInbox(in: app, answering: "Keep Both", overSecondConnection: true)
+        let status = app.buttons["transfer-manager"].firstMatch
+        XCTAssertTrue(status.waitForExistence(timeout: 30), app.debugDescription)
+        putAwayTransferBanner(covering: status); status.tap()
+        XCTAssertTrue(app.navigationBars["Transfers"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["From " + Self.transferConnection].waitForExistence(timeout: 20), app.debugDescription)
+        XCTAssertFalse(finishTransfers(in: app, within: 480), "A copy between two connected servers needs no Retry.")
+        attach("Copy between two servers finished", of: app)
+        app.buttons["Done"].tap()
+        if home.waitForExistence(timeout: 5) { home.tap() }
+        XCTAssertTrue(connected(Self.transferConnection).waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(connected(Self.inboxConnection).exists, app.debugDescription)
+        print("REMOTEFILES_TRANSFER_DONE")
+    }
+
+    /// Starts the copy and waits until the server has had time to take a good part of it.
+    private func startCopyAndLetItRun(in app: XCUIApplication, _ server: TransferServer) -> XCUIElement {
+        openTransferFixture(in: app, server)
+        copyBigFileToInbox(in: app, answering: "Keep Both")
+        let status = app.buttons["transfer-manager"].firstMatch
+        XCTAssertTrue(status.waitForExistence(timeout: 30), "The folder shows the transfer's progress. " + app.debugDescription)
+        sleep(10)
+        return status
+    }
+    /// On an iPad, iOS lays its banner for a transfer that may go on in the background across the top of the
+    /// screen, over the folder's title and buttons, for as long as the transfer runs unless it is swiped
+    /// away, and a tap on a button beneath it lands nowhere. A person swipes it up, and so does this: when
+    /// what it is about to tap is there and has stayed unhittable for six seconds, and SpringBoard has a
+    /// banner on screen. Anything else in the way is left for the journey's own checks to find.
+    private func putAwayTransferBanner(covering element: XCUIElement) {
+        let settled = Date().addingTimeInterval(6)
+        while Date() < settled, !(element.exists && element.isHittable) { usleep(300_000) }
+        guard element.exists, !element.isHittable else { return }
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        guard springboard.debugDescription.contains("BannerNotification") else { return }
+        let banner = springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.035))
+        banner.press(forDuration: 0.05, thenDragTo: springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0)),
+                     withVelocity: .fast, thenHoldForDuration: 0)
+        sleep(1)
+        print("REMOTEFILES_BANNER_PUT_AWAY \(element.isHittable)")
+    }
+    /// Opens Transfers from wherever its button is and checks that the stopped copy kept its bytes.
+    private func expectKeptBytes(in app: XCUIApplication, _ status: XCUIElement, after what: String) {
+        XCTAssertTrue(status.waitForExistence(timeout: 30), "Transfers is offered after \(what). " + app.debugDescription)
+        putAwayTransferBanner(covering: status); status.tap()
+        XCTAssertTrue(app.navigationBars["Transfers"].waitForExistence(timeout: 10))
+        let kept = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Retry continues from there")).firstMatch
+        XCTAssertTrue(kept.waitForExistence(timeout: 20), "What was sent before \(what) is kept for Retry. " + app.debugDescription)
+        print("REMOTEFILES_TRANSFER_INTERRUPTED \(kept.label)")
+        attach("Transfer kept after \(what)", of: app)
+    }
+
+    func testTransferStoppedByDisconnectKeepsItsBytesAndRetryContinuesIt() throws {
+        try enabled()
+        let server = try transferServer()
+        let app = XCUIApplication.underTest()
+        app.launch()
+        let status = startCopyAndLetItRun(in: app, server)
+        let actions = app.buttons["Folder actions"].firstMatch
+        putAwayTransferBanner(covering: actions)
+        let uncovered = Date().addingTimeInterval(30)
+        while Date() < uncovered, !actions.isHittable { usleep(500_000) }
+        XCTAssertTrue(actions.isHittable, "The folder's bar is on screen and uncovered. " + app.debugDescription)
+        actions.tap()
+        let disconnect = app.buttons["Disconnect"]
+        XCTAssertTrue(disconnect.waitForExistence(timeout: 10), app.debugDescription)
+        disconnect.tap()
+        // With one server connected, Disconnect closes everything and goes Home.
+        expectKeptBytes(in: app, status, after: "Disconnect")
+        XCTAssertTrue(finishTransfers(in: app, within: 480), "Disconnect stops a transfer, so finishing it takes a Retry.")
+        print("REMOTEFILES_TRANSFER_DONE")
+    }
+
+    func testTransferCutShortByAForceQuitIsKeptAndRetryContinuesIt() throws {
+        try enabled()
+        let server = try transferServer()
+        let app = XCUIApplication.underTest()
+        app.launch()
+        _ = startCopyAndLetItRun(in: app, server)
+        app.terminate()
+        app.launch()
+        expectKeptBytes(in: app, app.buttons["transfer-manager"].firstMatch, after: "a force quit")
+        XCTAssertTrue(finishTransfers(in: app, within: 480), "A transfer the app was closed on takes a Retry.")
+        print("REMOTEFILES_TRANSFER_DONE")
+    }
+
+    /// `REMOTEFILES_TRANSFER_PICK` names a file that Files shows under On My iPhone or On My iPad, inside the
+    /// folder `REMOTEFILES_TRANSFER_PICK_FOLDER`. It is chosen in the system picker and uploaded to `inbox`.
+    func testUploadFilesSendsAFileChosenInTheSystemPicker() throws {
+        try enabled()
+        let server = try transferServer()
+        let env = ProcessInfo.processInfo.environment
+        guard let name = env["REMOTEFILES_TRANSFER_PICK"], let folder = env["REMOTEFILES_TRANSFER_PICK_FOLDER"] else {
+            throw XCTSkip("Needs a file Files can reach on this device.")
+        }
+        let app = XCUIApplication.underTest()
+        app.launch()
+        openTransferFixture(in: app, server, inbox: true)
+        // The file must not be there already, or a row left by an earlier run would pass for this upload.
+        let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", name + ",")).firstMatch
+        let listed = app.collectionViews.buttons.firstMatch, empty = app.staticTexts["This folder is empty"]
+        let loaded = Date().addingTimeInterval(30)
+        while Date() < loaded, !listed.exists, !empty.exists { usleep(250_000) }
+        XCTAssertTrue(listed.exists || empty.exists, "The folder's listing. " + app.debugDescription)
+        XCTAssertFalse(row.waitForExistence(timeout: 3), "“\(name)” is already in the folder. Remove it on the server and run this again.")
+        app.buttons["Folder actions"].firstMatch.tap()
+        let upload = app.buttons["Upload Files…"]
+        XCTAssertTrue(upload.waitForExistence(timeout: 10), app.debugDescription)
+        upload.tap()
+        // The picker opens wherever it was last. Browse, chosen until its top level shows, lists the locations.
+        let device = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "On My iP")).firstMatch
+        let browse = app.buttons["Browse"].firstMatch
+        for _ in 0..<3 where !device.waitForExistence(timeout: 5) { if browse.exists { browse.tap() } }
+        XCTAssertTrue(device.waitForExistence(timeout: 10), "The picker's locations. " + app.debugDescription)
+        device.tap()
+        let container = app.cells.matching(NSPredicate(format: "label BEGINSWITH %@", folder)).firstMatch
+        XCTAssertTrue(container.waitForExistence(timeout: 15), "The folder holding the file. " + app.debugDescription)
+        // A location with many folders lists this one at or below the foot of the screen, where a tap lands on
+        // the picker's bar or on nothing, so its middle is brought clear of both edges first.
+        let clear = app.frame.insetBy(dx: 0, dy: 90)
+        func isClear(_ element: XCUIElement) -> Bool { clear.contains(CGPoint(x: element.frame.midX, y: element.frame.midY)) }
+        let file = app.cells.matching(NSPredicate(format: "label BEGINSWITH %@", (name as NSString).deletingPathExtension)).firstMatch
+        for _ in 0..<8 where !file.exists {
+            if isClear(container) { container.tap(); _ = file.waitForExistence(timeout: 5) } else { app.swipeUp() }
+        }
+        XCTAssertTrue(file.waitForExistence(timeout: 15), "The file to send. " + app.debugDescription)
+        for _ in 0..<4 where !isClear(file) { app.swipeUp() }
+        file.tap()
+        let open = app.buttons["Open"]
+        if open.waitForExistence(timeout: 5), open.isEnabled { open.tap() }
+        // The folder stays on screen and lists the file once it has arrived.
+        XCTAssertTrue(row.waitForExistence(timeout: 120), "The uploaded file appears in the folder without a refresh. " + app.debugDescription)
+        attach("Uploaded through the Files picker", of: app)
+        print("REMOTEFILES_TRANSFER_DONE \(row.label)")
+    }
+
+    /// `REMOTEFILES_TRANSFER_PHOTO=1` says the photo library holds nothing private, as a simulator's doesn't:
+    /// the first item the system picker shows is chosen and uploaded to `inbox`, which must be empty.
+    func testUploadPhotosSendsAnItemChosenInTheSystemPicker() throws {
+        try enabled()
+        let server = try transferServer()
+        guard ProcessInfo.processInfo.environment["REMOTEFILES_TRANSFER_PHOTO"] == "1" else {
+            throw XCTSkip("Chooses a photo from the library, so it runs only where that is said to be harmless.")
+        }
+        let app = XCUIApplication.underTest()
+        app.launch()
+        openTransferFixture(in: app, server, inbox: true)
+        let empty = app.staticTexts["This folder is empty"]
+        XCTAssertTrue(empty.waitForExistence(timeout: 30), "The folder must be empty, so that the row that appears is this upload. " + app.debugDescription)
+        app.buttons["Folder actions"].firstMatch.tap()
+        let upload = app.buttons["Upload Photos…"]
+        XCTAssertTrue(upload.waitForExistence(timeout: 10), app.debugDescription)
+        upload.tap()
+        // The picker is the system's own, in another process: its photos are the images of its grid, and it
+        // may open with a banner about itself above them.
+        let photo = app.images.matching(NSPredicate(format: "label BEGINSWITH %@ OR label BEGINSWITH %@", "Photo,", "Video,")).firstMatch
+        XCTAssertTrue(photo.waitForExistence(timeout: 30), "The picker's photos. " + app.debugDescription)
+        photo.tap()
+        let done = app.buttons["Done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 10) && done.isEnabled, "The picker takes the choice. " + app.debugDescription)
+        done.tap()
+        // A file's row reads "name, size · date". On iPad the library's rows are on screen as well, and
+        // they are buttons in a list too, so any button would not do.
+        let row = app.buttons.matching(NSPredicate(format: "label MATCHES %@", ".+, [0-9.,]+ (bytes|KB|MB|GB) · .+")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 120), "The photo appears in the folder without a refresh. " + app.debugDescription)
+        XCTAssertFalse(empty.exists, app.debugDescription)
+        attach("Uploaded through the photo picker", of: app)
+        print("REMOTEFILES_TRANSFER_DONE \(row.label)")
+    }
+
+    /// `REMOTEFILES_TRANSFER_LOCK=1` says the device has no passcode, as a simulator hasn't, so that it can be
+    /// woken again: a copy is left running while the device is locked for 30 seconds, and then goes on or has
+    /// stopped and is finished by Retry. `REMOTEFILES_TRANSFER_LOCK=leave` is for a device with a passcode:
+    /// the copy is started, the device is locked and left locked, and whether the copy went on is read on
+    /// the server.
+    func testTransferLeftWhileTheDeviceIsLockedGoesOnOrStopsAndCanBeFinished() throws {
+        try enabled()
+        let server = try transferServer()
+        let mode = ProcessInfo.processInfo.environment["REMOTEFILES_TRANSFER_LOCK"]
+        guard mode == "1" || mode == "leave" else {
+            throw XCTSkip("Locks the device, which this test can only undo where there is no passcode.")
+        }
+        let app = XCUIApplication.underTest()
+        app.launch()
+        let status = startCopyAndLetItRun(in: app, server)
+        // XCTest has no public way to press the side button.
+        let lock = NSSelectorFromString("pressLockButton")
+        XCUIDevice.shared.perform(lock)
+        if mode == "leave" {
+            print("REMOTEFILES_LOCKED_AND_LEFT")
+            sleep(75)
+            return
+        }
+        sleep(30)
+        XCUIDevice.shared.perform(lock)
+        sleep(1)
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(status.waitForExistence(timeout: 30), app.debugDescription)
+        putAwayTransferBanner(covering: status); status.tap()
+        XCTAssertTrue(app.navigationBars["Transfers"].waitForExistence(timeout: 10))
+        attach("Transfers after thirty seconds locked", of: app)
+        let retried = finishTransfers(in: app, within: 480)
+        print("REMOTEFILES_LOCKED=\(retried ? "stopped and finished by Retry" : "went on")")
+    }
+
+    /// After the copy a journey started and left, with the app away or the device locked
+    /// (`REMOTEFILES_TRANSFER_LOCK=leave`): it is listed as finished, and still is once the app has been
+    /// closed and opened again, so the list was saved. `REMOTEFILES_TRANSFER_EXPECT` is the name that copy
+    /// has on the server, `big 2.bin` say, which is the name its row shows once it is finished.
+    func testEveryTransferIsListedAsFinishedAndStaysSoAfterARelaunch() throws {
+        try enabled()
+        guard let expected = ProcessInfo.processInfo.environment["REMOTEFILES_TRANSFER_EXPECT"], !expected.isEmpty else {
+            throw XCTSkip("Needs the name the server shows for the copy the journey before this one left.")
+        }
+        let app = XCUIApplication.underTest()
+        app.activate()
+        var returned: [String] = []
+        for relaunched in [false, true] {
+            if relaunched { app.terminate(); app.launch() }
+            let status = app.buttons["transfer-manager"].firstMatch
+            XCTAssertTrue(status.waitForExistence(timeout: 30), "Transfers is offered. " + app.debugDescription)
+            putAwayTransferBanner(covering: status); status.tap()
+            XCTAssertTrue(app.navigationBars["Transfers"].waitForExistence(timeout: 10))
+            XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", " · ")).firstMatch.waitForExistence(timeout: 10),
+                          "A transfer is listed. " + app.debugDescription)
+            // The journey before this one emptied the list and then started one copy, so that copy is the
+            // one row, under the name it was given on the server: a list without it, or with it stopped or
+            // asking about a taken name, or with some other finished transfer in its place, fails here.
+            let rows = transferRows(in: app)
+            XCTAssertTrue(Self.isTheOneFinished(rows), "The one transfer is listed as finished: \(rows)")
+            XCTAssertTrue(app.staticTexts[expected].exists, "It is “\(expected)”. " + app.debugDescription)
+            if relaunched { XCTAssertEqual(rows, returned) } else { returned = rows }
+            attach(relaunched ? "Transfers after a relaunch" : "Transfers on return", of: app)
+            app.buttons["Done"].tap()
+        }
+        print("REMOTEFILES_TRANSFER_DONE \(returned)")
+    }
+
+    /// `REMOTEFILES_TRANSFER_DRAG` names a file Files shows under On My iPad inside `REMOTEFILES_TRANSFER_PICK_FOLDER`.
+    /// On an iPad set to windowed apps, Files and the app are put one above the other and the file is dragged
+    /// from Files onto the folder on screen, which must not hold it yet.
+    func testAFileDraggedFromFilesIsUploadedToTheFolderOnScreen() throws {
+        try enabled()
+        let server = try transferServer()
+        let env = ProcessInfo.processInfo.environment
+        guard let name = env["REMOTEFILES_TRANSFER_DRAG"], let container = env["REMOTEFILES_TRANSFER_PICK_FOLDER"] else {
+            throw XCTSkip("Needs a file Files can reach on this iPad.")
+        }
+        let app = XCUIApplication.underTest()
+        app.launch()
+        openTransferFixture(in: app, server, inbox: true)
+        let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", name + ",")).firstMatch
+        XCTAssertFalse(row.waitForExistence(timeout: 5), "“\(name)” is already in the folder. Remove it on the server and run this again.")
+        // The app fills the screen now, so its frame is the screen's, the way round the iPad is held.
+        let screen = app.frame
+        let folder = app.otherElements["workspace-folder"].firstMatch
+        XCTAssertTrue(folder.waitForExistence(timeout: 10), app.debugDescription)
+        let list = folder.frame
+        let files = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
+        // Started afresh: a Files window left open can still list a folder as it was before the app that
+        // owns it was removed and installed again, and a file dragged from that list has nothing behind it.
+        files.terminate()
+        files.activate()
+        /// A point on the screen, reached through Files, whose window is the one in front.
+        func point(_ x: CGFloat, _ y: CGFloat) -> XCUICoordinate {
+            files.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: x - files.frame.minX, dy: y - files.frame.minY))
+        }
+        // Files opens wherever it was last, which can be a preview of a file: close that, then go to
+        // On My iPad and the folder that holds the file.
+        let preview = files.buttons["QLOverlayDoneButtonAccessibilityIdentifier"].firstMatch
+        if preview.waitForExistence(timeout: 3) { preview.tap() }
+        // An earlier run leaves Files as a window low on the screen, its lower part off it: raise it, so
+        // that what it lists can be reached.
+        let left = files.windows.firstMatch.frame
+        if left.height < screen.height * 0.9, left.maxY > screen.maxY + 10 {
+            point(left.minX + 150, left.minY + 16)
+                .press(forDuration: 0.3, thenDragTo: point(left.minX + 150, max(screen.minY + 40, screen.maxY - left.height) + 16))
+            sleep(2)
+        }
+        let source = files.cells.matching(NSPredicate(format: "label BEGINSWITH %@", (name as NSString).deletingPathExtension)).firstMatch
+        if !source.waitForExistence(timeout: 5) {
+            let device = files.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "On My iP")).firstMatch
+            let browse = files.buttons["Browse"].firstMatch
+            for _ in 0..<3 where !device.waitForExistence(timeout: 5) { if browse.exists { browse.tap() } }
+            XCTAssertTrue(device.waitForExistence(timeout: 10), "Files' locations. " + files.debugDescription)
+            device.tap()
+            let folderCell = files.cells.matching(NSPredicate(format: "label BEGINSWITH %@", container)).firstMatch
+            // Tapped only where its middle is clear of the bars at the top and foot of the screen.
+            let clear = screen.insetBy(dx: 0, dy: 90)
+            for _ in 0..<8 where !source.exists {
+                if folderCell.exists, clear.contains(CGPoint(x: folderCell.frame.midX, y: folderCell.frame.midY)) {
+                    folderCell.tap(); _ = source.waitForExistence(timeout: 5)
+                } else { files.swipeUp() }
+            }
+        }
+        XCTAssertTrue(source.waitForExistence(timeout: 15), "The file to drag. " + files.debugDescription)
+        // Files becomes a window over the lower part of the screen, leaving the folder's list in view above it:
+        // its corner handle is dragged in, as an iPad set to windowed apps allows, and its top strip down.
+        var window = files.windows.firstMatch.frame
+        if window.height > screen.height * 0.9 {
+            point(screen.maxX - 12, screen.maxY - 12).press(forDuration: 0.3, thenDragTo: point(screen.maxX - 60, screen.minY + screen.height * 0.6))
+            sleep(2)
+            window = files.windows.firstMatch.frame
+        }
+        XCTAssertLessThan(window.height, screen.height * 0.9, "Files' window must shrink, as on an iPad set to windowed apps. \(window)")
+        let top = list.minY + 230
+        if window.minY < top - 20 {
+            point(window.minX + 150, window.minY + 16).press(forDuration: 0.3, thenDragTo: point(window.minX + 150, top + 16))
+            sleep(2)
+            window = files.windows.firstMatch.frame
+        }
+        XCTAssertGreaterThan(window.minY, list.minY + 120, "The folder's list must show above Files. \(window) \(list)")
+        XCTAssertLessThan(source.frame.midY, screen.maxY - 10, "The file must be on screen to be picked up. \(source.frame)")
+        // Onto a row where the folder has one in reach, which is where a file dropped on a folder usually
+        // lands and is not the same thing to the list as the empty space below its rows.
+        let rows = app.buttons.matching(NSPredicate(format: "label MATCHES %@", ".+, [0-9.,]+ (bytes|KB|MB|GB) · .+")).allElementsBoundByIndex
+            .map(\.frame).filter { list.contains(CGPoint(x: $0.midX, y: $0.midY)) && $0.maxY < window.minY - 10 }
+        let target = rows.last.map { point($0.midX, $0.midY) } ?? point(list.midX, min(list.minY + 160, window.minY - 40))
+        print("REMOTEFILES_DRAG onto \(rows.isEmpty ? "the empty list" : "a row, of \(rows.count) in reach") screen \(screen) files \(window) list \(list) source \(source.frame)")
+        attach("Before the drag", of: files)
+        source.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
+            .press(forDuration: 1.2, thenDragTo: target, withVelocity: .slow, thenHoldForDuration: 1.0)
+        app.activate()
+        XCTAssertTrue(row.waitForExistence(timeout: 120), "The dropped file appears in the folder. " + app.debugDescription)
+        attach("Dropped file in the folder", of: app)
+        print("REMOTEFILES_TRANSFER_DONE \(row.label)")
     }
 }

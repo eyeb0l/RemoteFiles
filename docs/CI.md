@@ -373,6 +373,18 @@ helper and the Document actions journey therefore wait for speech to leave the c
 print `VO FOCUS moved from <control> after N s`; see
 [20 November 2026](CI_HISTORY.md#20-november-2026-the-menu-journey-read-speech-before-voiceover-opened-the-menu).
 
+Now and then the simulator hands a double tap to the app as two plain taps. On a menu's button the
+first opens the menu and the second chooses its first item, which the menu puts where the button was.
+The Document actions journey sees this by speech landing on the Back button, prints
+`VO DOUBLE TAP CHOSE REFRESH`, and opens the menu again; see
+[22 November 2026](CI_HISTORY.md#22-november-2026-a-double-tap-voiceover-did-not-take-chose-refresh-from-the-document-actions-menu).
+
+Just after a screen's contents are replaced, VoiceOver on a slow simulator can step from the bar
+above a document straight to the bar below it, as though the new contents weren't there yet. The
+cached-refresh journey reads again when a pass meets nothing of the document, and prints
+`VO STEPPED PAST THE DOCUMENT`; see
+[22 November 2026](CI_HISTORY.md#22-november-2026-voiceover-stepped-past-a-document-whose-contents-had-just-been-replaced).
+
 The lane's first launch is cold and, made just after VoiceOver starts, has taken 18 to 73 seconds
 and once timed out. `setUpWithError` therefore launches the lightest fixture once per runner
 process with VoiceOver off and prints `VO WARM LAUNCH took N s`.

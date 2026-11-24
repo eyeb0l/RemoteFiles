@@ -6,9 +6,10 @@ import NIOCore
 import NIOPosix
 import NIOSSH
 
-/// Read-only SFTP adapter. The SSH connection is reused, and listings, metadata and document
-/// reads share one SFTP channel per session. Streaming downloads own a child channel, so
-/// cancelling one also releases all of its remote file handles.
+/// SFTP adapter for one server at a time (`MultiHostFileService` keeps one of these for each server).
+/// Everything but `uploadFile` and `removePartialUpload` only reads. The SSH connection is reused, and
+/// listings, metadata and document reads share one SFTP channel per session. Streaming downloads and
+/// uploads own a child channel, so cancelling one also releases all of its remote file handles.
 public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing, FolderWalking, BackgroundFolderListing, ServerFolderSearching, RemoteFileSessionClosing, ResumableManagedDownloading, HostKeyAttesting {
     private let identityStore: IdentityStore
     private let trustStore: HostTrustStore
@@ -47,6 +48,12 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
         managedTransferIdle = idle; dedicatedCloseGrace = closeGrace
     }
     func setProgressInterval(_ interval: Duration) { progressInterval = interval }
+    /// Lets a test replace a file as a server without `posix-rename@openssh.com` has to.
+    func setReplacesWithPosixRename(_ value: Bool) { replacesWithPosixRename = value }
+    private var replacesWithPosixRename = true
+    /// Lets a test name a file as a server without `hardlink@openssh.com` has to.
+    func setPublishesWithHardLinks(_ value: Bool) { publishesWithHardLinks = value }
+    private var publishesWithHardLinks = true
     /// Lets a benchmark compare fixed and growing read windows in one process.
     func setTransferWindow(floor: Int, limit: Int) { transferWindowFloor = floor; transferWindowLimit = limit }
     /// Lets a benchmark start each transfer at the window the last one on the connection settled at, or, with
@@ -1557,6 +1564,602 @@ public actor SFTPRemoteFileService: RemoteFileService, ProgressiveFolderListing,
     }
 }
 
+// MARK: - Uploads and copies between servers
+
+extension SFTPRemoteFileService: RemoteFileUploading, RemoteFileStreaming {
+    /// File bytes in one WRITE. Every server takes a request this size: the protocol asks for 34,000-byte packets.
+    static let uploadChunkBytes = 32 * 1024
+    /// Writes an upload starts with (1 MiB in flight), and the most it grows to on a fast, distant connection
+    /// (4 MiB). It starts higher than a download's read window: a transfer's connection carries no browsing
+    /// that would wait behind it, and a file of a few mebibytes is then sent in a round trip or two fewer.
+    static let uploadWriteWindow = 32
+    static let uploadWriteWindowLimit = 128
+
+    /// Writes `source` into `request.directory` under a hidden partial name, then gives it its real name.
+    ///
+    /// Nothing is written outside that folder: the partial and final names are single names inside it, and
+    /// the folder must resolve to exactly its chosen path both before the file is opened and before it is
+    /// named. As for downloads, SFTP v3 has no openat, so this catches a folder durably replaced by a link
+    /// and not one swapped for an instant.
+    ///
+    /// A partial copy left by an interrupted attempt is continued only if it is a regular file this
+    /// transfer made, the source still has the version it was written from, and its final bytes equal the
+    /// source's at the same offsets. A failed or cancelled attempt leaves its partial copy for the caller
+    /// to continue or remove with `removePartialUpload`.
+    public func uploadFile(profile: ConnectionProfile, request: UploadRequest, source: any TransferSource,
+                           started: @escaping UploadStartHandler, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        try await upload(profile: profile, request: request, source: source, batch: nil, started: started, progress: progress)
+    }
+    /// As `uploadFile`, over the batch's SFTP channel: a queue of files then opens and closes one channel,
+    /// which is four of each file's round trips. Every other request is the same, in the same order.
+    func uploadFile(profile: ConnectionProfile, request: UploadRequest, source: any TransferSource, batch: SnapshotTransferBatch,
+                    started: @escaping UploadStartHandler, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        try await upload(profile: profile, request: request, source: source, batch: batch, started: started, progress: progress)
+    }
+    private func upload(profile: ConnectionProfile, request: UploadRequest, source: any TransferSource, batch: SnapshotTransferBatch?,
+                        started: @escaping UploadStartHandler, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry {
+        guard UploadRequest.isValidName(request.name), UploadRequest.isPartialName(request.partialName) else { throw RemoteUploadError.invalidName }
+        let directory = try Self.validated(request.directory)
+        guard RemotePath.isAbsolute(directory) else { throw RemoteUploadError.destinationMoved }
+        // A copy within one server reads over the channel it writes on. A server that allows one channel has
+        // no second to give, and none is needed.
+        let within = (source as? RemoteFileTransferSource).flatMap { $0.sameConnection && $0.profile == profile ? $0 : nil }
+        let session: LiveSession, version: TransferSourceVersion
+        if let within {
+            session = try await self.session(for: profile)
+            do { version = try await describeSource(session: session, path: within.path, canonicalRoot: within.canonicalRoot) }
+            catch { throw Self.sourceFailure(error) }
+        } else {
+            version = try await source.describe()
+            session = try await self.session(for: profile)
+        }
+        guard version.size <= request.limit, version.size < UInt64(Int.max) else { throw RemoteUploadError.tooLarge(request.limit) }
+        let reportInterval = progressInterval, atomicReplace = replacesWithPosixRename, hardLinks = publishesWithHardLinks
+        let windowFloor = transferWindowFloor, windowLimit = transferWindowLimit
+        let operation: @Sendable (SFTPClient, TransferActivity) async throws -> (entry: RemoteEntry, sent: UInt64, linked: Bool) = { sftp, activity in
+            let readSource: @Sendable (UInt64, Int) async throws -> Data = { offset, count in
+                guard let within else { return try await source.read(at: offset, count: count) }
+                do { return try await Self.readRange(of: within.path, root: within.canonicalRoot, offset: offset, count: count, sftp: sftp) }
+                catch { throw Self.sourceFailure(error) }
+            }
+            let sendSource: @Sendable (UInt64, @escaping @Sendable (Data) async throws -> Void) async throws -> Void = { offset, sink in
+                guard let within else { return try await source.send(from: offset, expecting: version, to: sink) }
+                // What `sink` throws is the write's own failure, and passes through as it is.
+                let failure = ConsumerFailure()
+                do {
+                    _ = try await Self.streamOpen(within.path, root: within.canonicalRoot, offset: offset, version: version,
+                                                  windowFloor: windowFloor, windowLimit: windowLimit, sftp: sftp, activity: activity) { chunk in
+                        do { try await sink(chunk) } catch { failure.record(error); throw error }
+                    }
+                } catch { throw failure.error ?? Self.sourceFailure(error) }
+            }
+            let partialPath = RemotePath.appending(request.partialName, to: directory)
+            let finalPath = RemotePath.appending(request.name, to: directory)
+            // One round trip: where the folder is, what it is, what is under the partial name, and whether the
+            // name is taken. Each answer is judged in the order that makes it safe, the folder first.
+            let resolved = sftp.sendRealPath(atPath: directory)
+            let described = sftp.sendAttributes(at: directory)
+            let partialAttributes = sftp.sendAttributes(at: partialPath)
+            let partialLink = sftp.sendReadSymbolicLink(atPath: partialPath)
+            let taken = sftp.sendAttributes(at: finalPath)
+            guard try await resolved.get().utf8.elementsEqual(directory.utf8) else { throw RemoteUploadError.destinationMoved }
+            guard Self.entry(name: "", path: directory, attributes: try await described.get()).kind == .directory else {
+                throw RemoteUploadError.destinationMoved
+            }
+            let partial = try? await partialAttributes.get()
+            // A link under the partial name was not made by this app; it is removed, never written through.
+            var partialIsLink = (try? await partialLink.get()) != nil
+            let occupied = (try? await taken.get()) != nil
+            // Known before a byte is sent, so a large file isn't sent only to be refused its name.
+            if request.conflict == .fail, occupied { throw RemoteUploadError.destinationExists(request.name) }
+
+            var start: UInt64 = 0
+            var opened: SFTPFile?
+            if let resume = request.resumeVersion, resume == version, version.allowsResume, !partialIsLink, let partial,
+               Self.entry(name: "", path: partialPath, attributes: partial).kind == .file,
+               let length = partial.size, length > 0, length <= version.size {
+                let candidate = try await sftp.openFile(filePath: partialPath, flags: [.read, .write])
+                do {
+                    // This open follows a link, and the name was looked at a round trip ago. It is looked at again
+                    // now, before anything is written: a link put there since is not continued through, and is
+                    // removed below. One swapped in and out for an instant is not caught; SFTP can't refuse to
+                    // follow a link as it opens a name.
+                    let linkedSince = sftp.sendReadSymbolicLink(atPath: partialPath)
+                    let matches = try await Self.partialMatches(candidate, length: length, readSource: readSource, activity: activity)
+                    if (try? await linkedSince.get()) != nil { partialIsLink = true }
+                    if matches, !partialIsLink {
+                        opened = candidate; start = length
+                    } else { try await candidate.close() }
+                } catch {
+                    try? await candidate.close()
+                    throw error
+                }
+            }
+            let file: SFTPFile
+            if let opened { file = opened } else {
+                if partial != nil || partialIsLink { try await Self.removeIgnoringMissing(partialPath, sftp: sftp) }
+                // Exclusive, so the server makes a new file and never follows a name planted since.
+                do { file = try await sftp.openFile(filePath: partialPath, flags: [.write, .create, .forceCreate]) }
+                catch let status as SFTPMessage.Status where status.errorCode == .failure { throw RemoteUploadError.refused }
+            }
+            do {
+                await started(version, start)
+                try Task.checkCancellation()
+                let writer = PipelinedWriter(file: file, offset: start, total: version.size, activity: activity,
+                                             reportInterval: reportInterval, progress: progress)
+                await progress(.init(receivedBytes: start, totalBytes: version.size))
+                if start < version.size {
+                    do { try await sendSource(start) { try await writer.write($0) } }
+                    catch RemoteFileError.tooLarge { throw RemoteUploadError.sourceChanged } // The source grew.
+                }
+                try await writer.finish()
+                guard writer.offset == version.size else { throw RemoteUploadError.sourceChanged }
+                await progress(.init(receivedBytes: version.size, totalBytes: version.size))
+                // The source's modification time goes with its bytes, as a copy made by hand would keep it.
+                var times = SFTPFileAttributes()
+                if let modified = version.modifiedAt { times.accessModificationTime = .init(accessTime: modified, modificationTime: modified) }
+                let timed = version.modifiedAt == nil ? nil : file.sendSetAttributes(to: times)
+                let closed = file.sendClose()
+                // Asked with the close, once every byte is there, and judged before the file takes its name: the
+                // folder is still where it was. Asked as the bytes began, it would say only where it was then.
+                let recheck = sftp.sendRealPath(atPath: directory)
+                // Replacing needs to know what is there; asked with the close, it costs no round trip of its own.
+                let nameTaken = request.conflict == .replace ? PendingOccupant(of: finalPath, sftp: sftp) : nil
+                _ = try? await timed?.get() // Best effort: some servers refuse to set times.
+                try await closed.get()
+                guard try await recheck.get().utf8.elementsEqual(directory.utf8) else { throw RemoteUploadError.destinationMoved }
+                try Task.checkCancellation()
+                let published = try await Self.publish(partialPath, in: directory, request: request, atomicReplace: atomicReplace,
+                                                       hardLinks: hardLinks, asked: nameTaken, sftp: sftp)
+                await progress(.init(receivedBytes: version.size, totalBytes: version.size, isComplete: true))
+                let entry = RemoteEntry(name: published.name, path: RemotePath.appending(published.name, to: directory), kind: .file,
+                                        size: version.size, modifiedAt: version.modifiedAt)
+                return (entry, writer.offset - start, published.linked)
+            } catch {
+                try? await file.close()
+                if let status = error as? SFTPMessage.Status, status.errorCode == .failure { throw RemoteUploadError.refused }
+                throw error
+            }
+        }
+        let result: (entry: RemoteEntry, sent: UInt64, linked: Bool)
+        if let batch, batch.sharesChannel {
+            result = try await performOnBatchChannel(session: session, batch: batch, operation: operation)
+        } else {
+            result = try await performOnDedicatedChannel(session: session, budget: .idle(managedTransferIdle), operation: operation)
+        }
+        measurements.fileOperations += 1; measurements.bytesSent += Int(clamping: result.sent)
+        if result.linked { measurements.linkedPublishes += 1 }
+        return result.entry
+    }
+
+    /// Whether the last bytes of a partial copy are the source's bytes at the same offsets.
+    private nonisolated static func partialMatches(_ file: SFTPFile, length: UInt64,
+                                                   readSource: @Sendable (UInt64, Int) async throws -> Data,
+                                                   activity: TransferActivity) async throws -> Bool {
+        let overlap = Int(min(length, UInt64(resumeOverlapBytes)))
+        let offset = length - UInt64(overlap)
+        var remote = Data()
+        while remote.count < overlap {
+            let bytes = try await file.read(from: offset + UInt64(remote.count), length: UInt32(overlap - remote.count))
+            guard bytes.readableBytes > 0, bytes.readableBytes <= overlap - remote.count else { return false }
+            activity.receivedBytes(bytes.readableBytes)
+            remote.append(contentsOf: bytes.readableBytesView)
+        }
+        return try await readSource(offset, overlap) == remote
+    }
+
+    private nonisolated static func removeIgnoringMissing(_ path: String, sftp: SFTPClient) async throws {
+        do { try await sftp.remove(at: path) }
+        catch let status as SFTPMessage.Status where status.errorCode == .noSuchFile {}
+    }
+
+    /// What is under a name, or nil if it is free. A link that leads nowhere still takes the name.
+    private nonisolated static func occupant(of path: String, sftp: SFTPClient) async throws -> RemoteEntry.Kind? {
+        try await PendingOccupant(of: path, sftp: sftp).kind()
+    }
+
+    /// The question of what is under a name, already sent, so that its answer can come with others.
+    private struct PendingOccupant {
+        let path: String
+        let described: EventLoopFuture<SFTPFileAttributes>
+        let link: EventLoopFuture<String>
+        init(of path: String, sftp: SFTPClient) {
+            self.path = path
+            described = sftp.sendAttributes(at: path)
+            link = sftp.sendReadSymbolicLink(atPath: path)
+        }
+        func kind() async throws -> RemoteEntry.Kind? {
+            // STAT follows a link, so it describes what the link leads to. A link is a link whatever that is:
+            // one to a folder is replaced as a link, and the folder is left alone.
+            guard (try? await link.get()) == nil else { return .symlink }
+            do { return SFTPRemoteFileService.entry(name: "", path: path, attributes: try await described.get()).kind }
+            catch let status as SFTPMessage.Status where status.errorCode == .noSuchFile { return nil }
+        }
+    }
+
+    /// Gives a file a name only if nothing has it.
+    ///
+    /// `hardlink@openssh.com` does that in one step on every server that has it: the link is refused if the
+    /// name exists, whatever that server's RENAME would have done, and the old name is then removed.
+    ///
+    /// Without it, or on a file system without hard links, the name is looked at and the file renamed, and
+    /// that is not one step on any server. OpenSSH's RENAME makes a link itself where it can, and where it
+    /// can't it checks the name and renames over whatever is there by then (sftp-server.c, `process_rename`);
+    /// a server whose RENAME replaces outright leaves the whole round trip after the look here. Either way a
+    /// file created under the name in that instant is replaced. SFTP v3 offers nothing else that refuses a
+    /// taken name in one step, so this is a stated limit (docs/SECURITY.md, docs/TRANSFERS.md) and not one
+    /// this can close: refusing instead would refuse every upload to such a folder.
+    private struct NoReplaceMove {
+        let sftp: SFTPClient
+        var usesHardLinks: Bool
+        private(set) var linked = false
+
+        /// False if the name is taken, and `source` is then untouched.
+        mutating func move(_ source: String, to destination: String) async throws -> Bool {
+            guard usesHardLinks else { return try await rename(source, to: destination) }
+            do { try await sftp.hardLink(at: source, to: destination) }
+            catch is SFTPMessage.Status {
+                if try await SFTPRemoteFileService.occupant(of: destination, sftp: sftp) != nil { return false }
+                // The name is free and the link was still refused: no hard links here.
+                usesHardLinks = false
+                return try await rename(source, to: destination)
+            }
+            // The file has its name: that can't be taken back by path, since by now the name may be someone
+            // else's again. Removing the old name is tidying, and a failure leaves only a second, hidden name
+            // for the same file.
+            try? await sftp.remove(at: source)
+            linked = true
+            return true
+        }
+
+        /// Looks, then renames. Enough where only this transfer's own names can be in the way.
+        func rename(_ source: String, to destination: String) async throws -> Bool {
+            guard try await SFTPRemoteFileService.occupant(of: destination, sftp: sftp) == nil else { return false }
+            do { try await sftp.rename(at: source, to: destination); return true }
+            catch {
+                // Taken between the look and the rename.
+                if (try? await SFTPRemoteFileService.occupant(of: destination, sftp: sftp)) != nil { return false }
+                throw error
+            }
+        }
+    }
+
+    /// The hidden names a file is moved aside under while it is replaced on a server without
+    /// `posix-rename@openssh.com`: this transfer's own, the first free one each time, so that a file moved
+    /// aside by an attempt that stopped there is never moved over.
+    private nonisolated static func backupPaths(for partialName: String, in directory: String) -> [String] {
+        let stem = String(partialName.dropLast(UploadRequest.partialSuffix.count)) + UploadRequest.backupSuffix
+        return [stem, stem + ".2", stem + ".3"].map { RemotePath.appending($0, to: directory) }
+    }
+
+    /// Gives a complete partial copy its name, and returns the name it took.
+    ///
+    /// Without Replace nothing is ever renamed over: see `NoReplaceMove`. Replacing asks for
+    /// `posix-rename@openssh.com`, which swaps the file in one step. A server without it moves the old file
+    /// aside under a name of this transfer's own, names the new one, and only then removes what was moved
+    /// aside, so a failure part-way leaves the old file on the server, under its name or the hidden one.
+    private nonisolated static func publish(_ partialPath: String, in directory: String, request: UploadRequest, atomicReplace: Bool,
+                                            hardLinks: Bool, asked: PendingOccupant?, sftp: SFTPClient) async throws -> (name: String, linked: Bool) {
+        var mover = NoReplaceMove(sftp: sftp, usesHardLinks: hardLinks)
+        switch request.conflict {
+        case .fail:
+            guard try await mover.move(partialPath, to: RemotePath.appending(request.name, to: directory)) else {
+                throw RemoteUploadError.destinationExists(request.name)
+            }
+            return (request.name, mover.linked)
+        case .keepBoth:
+            for name in UploadRequest.numberedNames(for: request.name)
+            where try await mover.move(partialPath, to: RemotePath.appending(name, to: directory)) { return (name, mover.linked) }
+            throw RemoteUploadError.noFreeName(request.name)
+        case .replace:
+            let path = RemotePath.appending(request.name, to: directory)
+            let backups = backupPaths(for: request.partialName, in: directory)
+            for attempt in 0..<2 {
+                // The look sent with the close answers the first time round.
+                let occupant = attempt == 0 && asked != nil ? try await asked?.kind() : try await Self.occupant(of: path, sftp: sftp)
+                switch occupant {
+                case nil:
+                    guard try await mover.move(partialPath, to: path) else { continue } // Taken just now: replace that.
+                case .directory: throw RemoteUploadError.destinationIsFolder(request.name)
+                case .other: throw RemoteUploadError.destinationExists(request.name)
+                case .file, .symlink:
+                    if atomicReplace {
+                        do { try await sftp.posixRename(at: partialPath, to: path); return (request.name, false) }
+                        catch let status as SFTPMessage.Status where status.errorCode == .unsupportedOperation {}
+                    }
+                    var aside: String?
+                    for backup in backups where try await mover.rename(path, to: backup) { aside = backup; break }
+                    guard let aside else { throw RemoteUploadError.refused }
+                    do {
+                        guard try await mover.move(partialPath, to: path) else { throw RemoteUploadError.destinationExists(request.name) }
+                    } catch {
+                        // Put back if its name is still free. If it isn't, it stays where it was moved to.
+                        _ = try? await mover.rename(aside, to: path)
+                        throw error
+                    }
+                }
+                // The new file has the name. What was moved aside, now or by an attempt that stopped there, goes.
+                for backup in backups { try? await removeIgnoringMissing(backup, sftp: sftp) }
+                return (request.name, mover.linked)
+            }
+            throw RemoteUploadError.destinationExists(request.name)
+        }
+    }
+
+    /// Removes the partial copy, and puts back under `name` a file an unfinished Replace had moved aside,
+    /// if that name is still free.
+    public func removePartialUpload(profile: ConnectionProfile, directory: String, partialName: String, restoring name: String?) async throws {
+        guard UploadRequest.isPartialName(partialName), name.map(UploadRequest.isValidName) ?? true else { throw RemoteUploadError.invalidName }
+        let session = try await session(for: profile)
+        try await perform(session: session) { sftp in
+            let requested = try Self.validated(directory)
+            guard try await sftp.getRealPath(atPath: requested).utf8.elementsEqual(requested.utf8) else { throw RemoteUploadError.destinationMoved }
+            try await Self.removeIgnoringMissing(RemotePath.appending(partialName, to: requested), sftp: sftp)
+            guard let name else { return }
+            // The latest one moved aside is what had the name last.
+            for backup in Self.backupPaths(for: partialName, in: requested).reversed()
+            where try await Self.occupant(of: backup, sftp: sftp) != nil {
+                _ = try await NoReplaceMove(sftp: sftp, usesHardLinks: false).rename(backup, to: RemotePath.appending(name, to: requested))
+                break
+            }
+        }
+    }
+
+    /// Opens a regular file whose root and path must both still be exactly canonical, checked again once
+    /// it is open, as a saved-index download does.
+    private nonisolated static func openCanonicalFile(_ path: String, root: String, sftp: SFTPClient) async throws
+        -> (file: SFTPFile, attributes: SFTPFileAttributes) {
+        let rootPath = sftp.sendRealPath(atPath: try validated(root))
+        let targetPath = sftp.sendRealPath(atPath: try validated(path))
+        let currentRoot = try await rootPath.get()
+        let canonical = try await targetPath.get()
+        guard currentRoot.utf8.elementsEqual(root.utf8), canonical.utf8.elementsEqual(path.utf8),
+              RemoteResourcePath.contains(canonical, in: currentRoot) else { throw RemoteDocumentLinkError.outsideConnection }
+        let file = try await sftp.openFile(filePath: canonical, flags: .read)
+        do {
+            let rootCheck = sftp.sendRealPath(atPath: root)
+            let targetCheck = sftp.sendRealPath(atPath: canonical)
+            let handleAttributes = file.sendReadAttributes()
+            let checkedRoot = try await rootCheck.get()
+            let checkedTarget = try await targetCheck.get()
+            guard checkedRoot.utf8.elementsEqual(root.utf8), checkedTarget.utf8.elementsEqual(canonical.utf8) else {
+                throw RemoteDocumentLinkError.outsideConnection
+            }
+            let attributes = try await handleAttributes.get()
+            guard entry(name: "", path: canonical, attributes: attributes).kind == .file, attributes.size != nil else {
+                throw RemoteFileError.unsupportedFile
+            }
+            return (file, attributes)
+        } catch {
+            try? await file.close()
+            throw error
+        }
+    }
+
+    private nonisolated static func transferVersion(_ attributes: SFTPFileAttributes) -> TransferSourceVersion {
+        TransferSourceVersion(size: attributes.size ?? 0, modifiedAt: attributes.accessModificationTime?.modificationTime)
+    }
+
+    public func transferVersion(profile: ConnectionProfile, path: String, canonicalRoot: String) async throws -> TransferSourceVersion {
+        let session = try await session(for: profile)
+        do { return try await describeSource(session: session, path: path, canonicalRoot: canonicalRoot) }
+        catch { throw Self.sourceFailure(error) }
+    }
+
+    private func describeSource(session: LiveSession, path: String, canonicalRoot: String) async throws -> TransferSourceVersion {
+        try await perform(session: session) { sftp in
+            let rootPath = sftp.sendRealPath(atPath: try Self.validated(canonicalRoot))
+            let targetPath = sftp.sendRealPath(atPath: try Self.validated(path))
+            let describing = sftp.sendAttributes(at: path)
+            let root = try await rootPath.get()
+            let target = try await targetPath.get()
+            guard root.utf8.elementsEqual(canonicalRoot.utf8), target.utf8.elementsEqual(path.utf8),
+                  RemoteResourcePath.contains(target, in: root) else { throw RemoteDocumentLinkError.outsideConnection }
+            let attributes = try await describing.get()
+            guard Self.entry(name: "", path: target, attributes: attributes).kind == .file, attributes.size != nil else {
+                throw RemoteFileError.unsupportedFile
+            }
+            return Self.transferVersion(attributes)
+        }
+    }
+
+    public func readFileRange(profile: ConnectionProfile, path: String, canonicalRoot: String, offset: UInt64, count: Int) async throws -> Data {
+        guard count >= 0, count <= Self.resumeOverlapBytes else { throw RemoteFileError.tooLarge(Self.resumeOverlapBytes) }
+        let session = try await session(for: profile)
+        let bytes: Data
+        do { bytes = try await readSourceRange(session: session, path: path, canonicalRoot: canonicalRoot, offset: offset, count: count) }
+        catch { throw Self.sourceFailure(error) }
+        measurements.bytesReceived += bytes.count
+        return bytes
+    }
+
+    private func readSourceRange(session: LiveSession, path: String, canonicalRoot: String, offset: UInt64, count: Int) async throws -> Data {
+        try await performOnDedicatedChannel(session: session, timeout: 180) { sftp in
+            try await Self.readRange(of: path, root: canonicalRoot, offset: offset, count: count, sftp: sftp)
+        }
+    }
+
+    private nonisolated static func readRange(of path: String, root: String, offset: UInt64, count: Int, sftp: SFTPClient) async throws -> Data {
+        let (file, _) = try await openCanonicalFile(path, root: root, sftp: sftp)
+        do {
+            var bytes = Data()
+            while bytes.count < count {
+                let chunk = try await file.read(from: offset + UInt64(bytes.count), length: UInt32(count - bytes.count))
+                guard chunk.readableBytes > 0, chunk.readableBytes <= count - bytes.count else { throw RemoteUploadError.sourceChanged }
+                bytes.append(contentsOf: chunk.readableBytesView)
+            }
+            try await file.close()
+            return bytes
+        } catch {
+            try? await file.close()
+            throw error
+        }
+    }
+
+    /// A failure reading a copy's source, in words about reading. Left as it was, a generic SFTP failure
+    /// would reach the destination's upload and be reported as that server refusing to write.
+    private nonisolated static func sourceFailure(_ error: Error) -> Error {
+        if let status = error as? SFTPMessage.Status, status.errorCode == .failure {
+            return RemoteFileError.unavailable("The server couldn’t read the file to copy.")
+        }
+        if isChannelRefusal(error) {
+            return RemoteFileError.unavailable("The server the file is on refused another SFTP channel, so it can’t be copied from there while its own connection is busy. Try again, or download it and upload it instead.")
+        }
+        return error
+    }
+
+    /// Hands `consume` the file's bytes from `offset`, in order, a chunk at a time. Reads stay a window
+    /// ahead of `consume`, so a slow destination holds this back and a few mebibytes at most wait in memory.
+    public func streamFile(profile: ConnectionProfile, path: String, canonicalRoot: String, from offset: UInt64,
+                           expecting version: TransferSourceVersion,
+                           consume: @escaping @Sendable (Data) async throws -> Void) async throws {
+        try await streamFile(profile: profile, path: path, canonicalRoot: canonicalRoot, from: offset, expecting: version, batch: nil, consume: consume)
+    }
+    /// As `streamFile`, over the batch's channel when it has one: a queue of copies opens one channel on
+    /// the server they are read from, as it does on the server they are written to.
+    func streamFile(profile: ConnectionProfile, path: String, canonicalRoot: String, from offset: UInt64,
+                    expecting version: TransferSourceVersion, batch: SnapshotTransferBatch?,
+                    consume: @escaping @Sendable (Data) async throws -> Void) async throws {
+        guard offset <= version.size, version.size < UInt64(Int.max) else { throw RemoteUploadError.sourceChanged }
+        let session = try await session(for: profile)
+        let windowFloor = transferWindowFloor, windowLimit = transferWindowLimit
+        // What `consume` throws is the destination's failure, and passes through as it is.
+        let failure = ConsumerFailure()
+        let received: Int
+        do {
+            received = try await stream(session: session, path: path, canonicalRoot: canonicalRoot, offset: offset, version: version,
+                                        windowFloor: windowFloor, windowLimit: windowLimit, batch: batch) { chunk in
+                do { try await consume(chunk) } catch { failure.record(error); throw error }
+            }
+        } catch {
+            throw failure.error ?? Self.sourceFailure(error)
+        }
+        measurements.fileOperations += 1; measurements.bytesReceived += received
+    }
+
+    private func stream(session: LiveSession, path: String, canonicalRoot: String, offset: UInt64, version: TransferSourceVersion,
+                        windowFloor: Int, windowLimit: Int, batch: SnapshotTransferBatch?,
+                        consume: @escaping @Sendable (Data) async throws -> Void) async throws -> Int {
+        let operation: @Sendable (SFTPClient, TransferActivity) async throws -> Int = { sftp, activity in
+            try await Self.streamOpen(path, root: canonicalRoot, offset: offset, version: version, windowFloor: windowFloor,
+                                      windowLimit: windowLimit, sftp: sftp, activity: activity, consume: consume)
+        }
+        if let batch, batch.sharesChannel { return try await performOnBatchChannel(session: session, batch: batch, operation: operation) }
+        return try await performOnDedicatedChannel(session: session, budget: .idle(managedTransferIdle), operation: operation)
+    }
+
+    /// Opens the file on `sftp` and hands `consume` its bytes from `offset`. Returns how many it handed on.
+    private nonisolated static func streamOpen(_ path: String, root: String, offset: UInt64, version: TransferSourceVersion,
+                                               windowFloor: Int, windowLimit: Int, sftp: SFTPClient, activity: TransferActivity,
+                                               consume: @escaping @Sendable (Data) async throws -> Void) async throws -> Int {
+        let (file, attributes) = try await openCanonicalFile(path, root: root, sftp: sftp)
+        do {
+            guard transferVersion(attributes) == version else { throw RemoteUploadError.sourceChanged }
+            let end: Int
+            do {
+                end = try await BoundedPreviewReader.stream(initialSize: version.size, limit: Int(version.size), startOffset: Int(offset),
+                                                            window: windowFloor, windowLimit: windowLimit, windowFloor: windowFloor,
+                                                            readChunk: { position, amount in
+                    let bytes = try await file.read(from: position, length: amount)
+                    activity.receivedBytes(bytes.readableBytes)
+                    return bytes
+                }) { chunk in
+                    try await consume(Data(chunk.readableBytesView))
+                    // Bytes taken on are activity too. Reads already answered wait here for a destination slower
+                    // than its source, and with none arriving this channel would be taken for one that had
+                    // stopped. A destination that takes nothing still ends the copy, by its own deadline.
+                    activity.receivedBytes(chunk.readableBytes)
+                }.bytes
+            } catch RemoteFileError.tooLarge { throw RemoteUploadError.sourceChanged } // It grew while it was read.
+            guard end == Int(version.size) else { throw RemoteUploadError.sourceChanged }
+            // Asked with the close: a file rewritten at the same length while it was read is not the one
+            // described, and its copy would be part one and part the other.
+            let after = file.sendReadAttributes()
+            try await file.close()
+            guard transferVersion(try await after.get()) == version else { throw RemoteUploadError.sourceChanged }
+            return end - Int(offset)
+        } catch {
+            try? await file.close()
+            throw error
+        }
+    }
+}
+
+/// What a copy's destination threw while it was being handed bytes.
+private final class ConsumerFailure: @unchecked Sendable {
+    private let lock = NSLock()
+    private var first: Error?
+    var error: Error? { lock.withLock { first } }
+    func record(_ error: Error) { lock.withLock { if first == nil { first = error } } }
+}
+
+/// Keeps several WRITE requests in flight on one handle, so an upload isn't held to one chunk per round
+/// trip, and waits for the oldest when the window is full, so the source is read no faster than the
+/// server takes it. Used by one task at a time.
+///
+/// Each confirmation is counted as it arrives, on the connection's event loop, not when the writing
+/// task next waits for one: a source that supplies bytes slowly leaves the window unfilled for a long
+/// time, and the transfer must still be seen to be moving, by its idle deadline and by its progress.
+final class PipelinedWriter: @unchecked Sendable {
+    private let file: SFTPFile
+    private let total: UInt64
+    private let activity: TransferActivity
+    private let reportInterval: Duration
+    private let progress: DownloadProgressHandler
+    private let lock = NSLock()
+    // Under the lock: written as confirmations arrive.
+    private var confirmed: UInt64
+    private var pacing = TransferPacing(window: SFTPRemoteFileService.uploadWriteWindow, limit: SFTPRemoteFileService.uploadWriteWindowLimit,
+                                        chunkSize: SFTPRemoteFileService.uploadChunkBytes)
+    // The writing task's own.
+    private var pending: [EventLoopFuture<Void>] = []
+    private var lastReport: ContinuousClock.Instant?
+    /// The offset after everything handed to `write` so far.
+    private(set) var offset: UInt64
+
+    init(file: SFTPFile, offset: UInt64, total: UInt64, activity: TransferActivity, reportInterval: Duration,
+         progress: @escaping DownloadProgressHandler) {
+        self.file = file; self.offset = offset; self.confirmed = offset; self.total = total
+        self.activity = activity; self.reportInterval = reportInterval; self.progress = progress
+    }
+
+    func write(_ data: Data) async throws {
+        var buffer = ByteBuffer(data: data)
+        while let slice = buffer.readSlice(length: min(SFTPRemoteFileService.uploadChunkBytes, buffer.readableBytes)), slice.readableBytes > 0 {
+            guard offset + UInt64(slice.readableBytes) <= total else { throw RemoteUploadError.sourceChanged }
+            while pending.count >= lock.withLock({ pacing.window }) { try await pending.removeFirst().get() }
+            try Task.checkCancellation()
+            let bytes = slice.readableBytes, sent = ContinuousClock.now
+            let done = file.sendWrite(slice, at: offset)
+            done.whenSuccess { [self] in confirm(bytes, sentAt: sent) }
+            pending.append(done)
+            offset += UInt64(bytes)
+        }
+        await report()
+    }
+
+    /// Waits for every write to be confirmed, in order, and throws the first that wasn't.
+    func finish() async throws {
+        while !pending.isEmpty { try await pending.removeFirst().get() }
+    }
+
+    private func confirm(_ bytes: Int, sentAt: ContinuousClock.Instant) {
+        let now = ContinuousClock.now
+        lock.withLock {
+            confirmed += UInt64(bytes)
+            pacing.received(bytes: bytes, latency: sentAt.duration(to: now), at: now)
+        }
+        activity.receivedBytes(bytes)
+    }
+
+    private func report() async {
+        let now = ContinuousClock.now
+        guard lastReport.map({ $0.duration(to: now) >= reportInterval }) ?? true else { return }
+        lastReport = now
+        await progress(.init(receivedBytes: lock.withLock { confirmed }, totalBytes: total))
+    }
+}
+
 /// Keeps an operation's deadline from expiring while it is still receiving what it asked for.
 /// The search root itself failed: the error belongs to the caller, and says nothing about server search.
 private struct SearchRootFailure: Error { let underlying: Error }
@@ -1636,6 +2239,10 @@ public struct TransportMetrics: Sendable {
     public fileprivate(set) var fileOperations = 0
     public fileprivate(set) var readRequests = 0
     public fileprivate(set) var bytesReceived = 0
+    /// File bytes a server has confirmed writing, across uploads and copies.
+    public fileprivate(set) var bytesSent = 0
+    /// Uploads given their name by a hard link, which refuses a taken name in one step.
+    public fileprivate(set) var linkedPublishes = 0
     public fileprivate(set) var lastConnectionSeconds: TimeInterval = 0
     public fileprivate(set) var lastDirectorySeconds: TimeInterval = 0
     public fileprivate(set) var lastReadSeconds: TimeInterval = 0
@@ -1661,6 +2268,25 @@ protocol SnapshotBatchDownloading: RemoteFileService {
 }
 
 extension SFTPRemoteFileService: SnapshotBatchDownloading {}
+
+/// Uploads a queue's files over one SFTP channel of their own. See `SnapshotTransferBatch`.
+protocol BatchedUploading: RemoteFileUploading {
+    func uploadFile(profile: ConnectionProfile, request: UploadRequest, source: any TransferSource, batch: SnapshotTransferBatch,
+                    started: @escaping UploadStartHandler, progress: @escaping DownloadProgressHandler) async throws -> RemoteEntry
+    func endSnapshotBatch(_ batch: SnapshotTransferBatch) async
+}
+
+extension SFTPRemoteFileService: BatchedUploading {}
+
+/// Reads a queue's copies over one SFTP channel of their own on the server they come from.
+protocol BatchedStreaming: RemoteFileStreaming {
+    func streamFile(profile: ConnectionProfile, path: String, canonicalRoot: String, from offset: UInt64,
+                    expecting version: TransferSourceVersion, batch: SnapshotTransferBatch?,
+                    consume: @escaping @Sendable (Data) async throws -> Void) async throws
+    func endSnapshotBatch(_ batch: SnapshotTransferBatch) async
+}
+
+extension SFTPRemoteFileService: BatchedStreaming {}
 
 /// The files of one offline folder share an SFTP channel, opened by the first of them and closed by
 /// `endSnapshotBatch`. Each file still sends every request it sent on a channel of its own, in the same order

@@ -15,6 +15,8 @@ final class ServerCompatibilityTests: XCTestCase {
         let port: Int
         let username: String
         let channels: Int
+        /// Whether the server lets this account write to `uploads`. The others are read-only.
+        let writable: Bool?
         /// A member of the browsed root, which some servers (such as SFTPGo) present as "/".
         func path(_ name: String) -> String { root == "/" ? "/" + name : root + "/" + name }
     }
@@ -152,6 +154,125 @@ final class ServerCompatibilityTests: XCTestCase {
         let size = (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         XCTAssertLessThanOrEqual(size, 1000)
         _ = try await service.listDirectory(profile: profile, path: fixture.root)
+    }
+
+    /// On a server that takes writes: a file has its name only once it is whole, a taken name is refused, kept
+    /// beside or replaced as asked, an interrupted upload continues from what the server kept, and nothing of
+    /// the app's own is left in the folder. On a read-only server: the upload is refused and leaves nothing.
+    /// Every byte is read back over SFTP, since a container's files can't be read any other way.
+    func testUploadsAreNamedWhenWholeOrRefusedLeavingNothing() async throws {
+        let (service, profile, fixture, state) = try await connection()
+        let folder = try await service.listDirectory(profile: profile, path: fixture.path("uploads")).path
+        func pattern(_ count: Int, _ seed: UInt8) -> Data { Data((0..<count).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ $0 >> 9) ^ seed }) }
+        func staged(_ name: String, _ bytes: Data) throws -> URL {
+            let url = state.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
+            try bytes.write(to: url)
+            return url
+        }
+        func names() async throws -> [String] { try await service.listDirectory(profile: profile, path: folder).entries.map(\.name).sorted() }
+        func contents(_ name: String) async throws -> Data { try await service.readFile(profile: profile, path: folder + "/" + name, limit: 2_000_000) }
+        let started = UploadStarts()
+        func send(_ name: String, _ conflict: UploadConflictPolicy, _ source: any TransferSource, partial: UUID = UUID(),
+                  resuming version: TransferSourceVersion? = nil) async throws -> RemoteEntry {
+            try await service.uploadFile(profile: profile,
+                request: .init(directory: folder, name: name, conflict: conflict, partialName: UploadRequest.partialName(for: partial),
+                               resumeVersion: version, limit: 4_000_000),
+                source: source, started: { await started.record($0, $1) }, progress: { _ in })
+        }
+        let first = pattern(600_000, 0x00), second = pattern(450_000, 0x5A)
+        let original = LocalFileTransferSource(url: try staged("first.bin", first))
+
+        guard fixture.writable == true else {
+            do {
+                _ = try await send("refused.bin", .fail, original)
+                XCTFail("A read-only server must refuse the upload")
+            } catch { print("COMPATIBILITY upload refused: \(error)") }
+            let left = try await names()
+            XCTAssertEqual(left, [], "A refused upload leaves nothing in the folder, not even its partial name")
+            _ = try await service.listDirectory(profile: profile, path: fixture.root)
+            return
+        }
+
+        let entry = try await send("report.bin", .fail, original)
+        XCTAssertEqual(entry.name, "report.bin")
+        var bytes = try await contents("report.bin")
+        XCTAssertEqual(bytes, first)
+        var listed = try await names()
+        XCTAssertEqual(listed, ["report.bin"], "The partial name is gone once the file has its own")
+
+        // A taken name is refused before a byte is sent, and what is there is untouched.
+        do {
+            _ = try await send("report.bin", .fail, LocalFileTransferSource(url: try staged("second.bin", second)))
+            XCTFail("A taken name must be refused")
+        } catch RemoteUploadError.destinationExists {}
+        bytes = try await contents("report.bin")
+        XCTAssertEqual(bytes, first)
+        let beside = try await send("report.bin", .keepBoth, LocalFileTransferSource(url: state.appendingPathComponent("second.bin")))
+        XCTAssertEqual(beside.name, "report 2.bin")
+        let replaced = try await send("report.bin", .replace, LocalFileTransferSource(url: state.appendingPathComponent("second.bin")))
+        XCTAssertEqual(replaced.name, "report.bin")
+        bytes = try await contents("report.bin")
+        XCTAssertEqual(bytes, second, "Replace leaves the new bytes under the name")
+        bytes = try await contents("report 2.bin")
+        XCTAssertEqual(bytes, second)
+        listed = try await names()
+        XCTAssertEqual(listed, ["report 2.bin", "report.bin"], "No partial copy and no file moved aside is left")
+
+        // The source stops part-way: nothing appears under the name, the server keeps what it was sent, and a
+        // second attempt with the same partial name sends only the rest.
+        let id = UUID(), partial = UploadRequest.partialName(for: id)
+        do {
+            _ = try await send("archive.bin", .fail, FailingSource(base: original, limit: 300_000), partial: id)
+            XCTFail("A source that stops must fail the upload")
+        } catch {}
+        listed = try await names()
+        XCTAssertEqual(listed, [partial, "report 2.bin", "report.bin"].sorted(), "Only the hidden partial copy exists")
+        let version = try await original.describe()
+        let offsetBefore = await started.offsets.count
+        let finished = try await send("archive.bin", .fail, original, partial: id, resuming: version)
+        XCTAssertEqual(finished.name, "archive.bin")
+        let offsets = await started.offsets
+        XCTAssertGreaterThan(offsets.count, offsetBefore)
+        XCTAssertGreaterThan(try XCTUnwrap(offsets.last), 0, "The second attempt continues from what the server kept")
+        bytes = try await contents("archive.bin")
+        XCTAssertEqual(bytes, first)
+
+        // A partial copy that is given up is removed by its own name, and nothing else is.
+        let abandoned = UUID()
+        do { _ = try await send("abandoned.bin", .fail, FailingSource(base: original, limit: 100_000), partial: abandoned) } catch {}
+        try await service.removePartialUpload(profile: profile, directory: folder, partialName: UploadRequest.partialName(for: abandoned), restoring: nil)
+        listed = try await names()
+        XCTAssertEqual(listed, ["archive.bin", "report 2.bin", "report.bin"])
+        let metrics = await service.metrics()
+        print("COMPATIBILITY uploads linked=\(metrics.linkedPublishes) connections=\(metrics.connections)")
+        XCTAssertEqual(metrics.connections, 1, "Every upload used the one connection")
+    }
+}
+
+private actor UploadStarts {
+    private(set) var offsets: [UInt64] = []
+    func record(_ version: TransferSourceVersion, _ offset: UInt64) { offsets.append(offset) }
+}
+
+/// A source whose bytes stop arriving after `limit` of them, as when the device loses the file or the link.
+private struct FailingSource: TransferSource {
+    let base: LocalFileTransferSource
+    let limit: Int
+    struct Stopped: Error {}
+    private final class Count: @unchecked Sendable {
+        private let lock = NSLock(); private var total = 0
+        func add(_ count: Int) -> Int { lock.withLock { total += count; return total } }
+    }
+    func describe() async throws -> TransferSourceVersion { try await base.describe() }
+    func read(at offset: UInt64, count: Int) async throws -> Data { try await base.read(at: offset, count: count) }
+    func send(from offset: UInt64, expecting version: TransferSourceVersion,
+              to sink: @escaping @Sendable (Data) async throws -> Void) async throws {
+        let handed = Count()
+        try await base.send(from: offset, expecting: version) { chunk in
+            guard handed.add(chunk.count) <= limit else { throw Stopped() }
+            try await sink(chunk)
+        }
     }
 }
 

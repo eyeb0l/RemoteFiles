@@ -144,7 +144,7 @@ struct ReaderView: View {
                         }
                     }
                     Section(loadedAt.map { "Loaded \($0.formatted(date: .omitted, time: .shortened)) · \(profile.name)" } ?? profile.name) {
-                        Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnectAndGoHome() } }
+                        Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnect(profile) } }
                     }
                 } label: { Label("Document actions", systemImage: "ellipsis") }
             }

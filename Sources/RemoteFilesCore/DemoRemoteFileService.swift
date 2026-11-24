@@ -50,6 +50,9 @@ public actor DemoRemoteFileService: RemoteFileService {
         if let failure { throw RemoteFileError.unavailable(failure) }
     }
     public func listDirectory(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
+        await DemoUploads.shared.merged(into: try await sampleListing(profile: profile, path: path))
+    }
+    private func sampleListing(profile: ConnectionProfile, path: String) async throws -> DirectorySnapshot {
         try await pause()
         let path = path == "." ? "/Projects" : path
         if path == "/Projects/Empty" { return DirectorySnapshot(path: path, entries: []) }
@@ -116,6 +119,10 @@ public actor DemoRemoteFileService: RemoteFileService {
     }
     public func readFile(profile: ConnectionProfile, path: String, limit: Int) async throws -> Data {
         try await pause()
+        if let uploaded = await DemoUploads.shared.bytes(at: path) {
+            guard let uploaded, uploaded.count <= limit else { throw RemoteFileError.tooLarge(limit) }
+            return uploaded
+        }
         if let file = Self.searchSampleFile(path) ?? Self.mediaFile(RemotePath.name(of: path)) {
             let bytes = try Data(contentsOf: file)
             guard bytes.count <= limit else { throw RemoteFileError.tooLarge(limit) }
@@ -143,6 +150,7 @@ public actor DemoRemoteFileService: RemoteFileService {
     }
     public func resolveEntry(profile: ConnectionProfile, path: String) async throws -> RemoteEntry {
         try await pause()
+        if let uploaded = await DemoUploads.shared.entry(at: path) { return uploaded }
         if path == "." || path == "/Projects" || path == Self.searchSampleFolder || path == Self.thousandFilesFolder || path == DemoCertificates.folder ||
             path.hasSuffix("/Reports") || path.hasSuffix("/Reports/2026") || path.hasSuffix("/Empty") {
             let canonical = path == "." ? "/Projects" : path

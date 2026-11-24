@@ -10,6 +10,193 @@ VoiceOver and Release lanes no longer run on every escalated PR, build caches ar
 saved only from `main`, CI no longer shards the UI journeys, and the VoiceOver lane
 no longer builds a disposable project copy.
 
+## 23 November 2026: a lane that stopped with an I/O error, and four reader tests on a loaded Mac
+
+Two local lanes for the uploads work failed one after the other on a MacBook Air (M3), an iPhone 18
+Pro simulator on iOS 27.2, the lanes' output and the simulator runtime on an external SSD over USB.
+The same tree (source manifest `d4b8335c…65b36e`) passed both an hour later.
+
+**`voiceover`.** Seven journeys passed. The eighth, `testLongJSONAndSVGHaveReadOnlyVoiceOverPreviews`,
+got as far as ending the app the seventh had left and launching it again, at 19:41:19, and printed
+nothing more. Eight minutes later the runner stopped with `[Errno 5] Input/output error` in
+`BLOCKER.txt`. The runner's own output, a file on the same SSD, ends where the lane's tests began
+and has neither the lane's result nor the runner's "Acceptance blocked" line, which suggests that
+writes to that file had been failing. The SSD read and wrote 512 MB without error afterwards; the system log has nothing
+about the disk for those minutes, and the Mac did not sleep. The lane's warm launch had taken 40.1
+seconds, against 12.6 and 13.9 in the passing runs either side.
+
+**`simulator-core`**, started as that ended: 903 passed and four of `OverflowViewportTests` failed,
+three with "Timed out waiting for settled overflow viewport state" and
+`testLargeInitialMountDefersRegionsWithoutLosingFullProseCopyOrSelectAll` with `144` not less than
+`144`. The runner recorded load averages of 22.6, 90.1 and 83.1 as the lane began; in the run of 16:19
+that passed they were 2.0, 19.8 and 38.6. Other work was building RemoteFiles on the Mac in the half
+hour before: five build folders under `~/Library/Developer/Xcode/DerivedData`, none of them these
+lanes', were written to between 19:05 and 19:18. Reader drawing tests had timed out in the same way on
+22 November with lanes run side by side.
+
+**Whose it is.** Since the lanes last passed, the tree differed in how a window's scene phases reach
+its model (`RemoteFilesRootView.swift`), in tests of that, and in opt-in device journeys the lanes
+skip. The VoiceOver journey's last line is its attempt to launch the app, with nothing to say whether the
+launch completed, and the four reader tests are in reader code that has not changed. The load and
+the other builds are what was going on around the failures, not a cause shown. That does not prove the change innocent; the rerun is what there is.
+With nothing else running (load 1.9 at the start), `voiceover` passed 12 of 12 and `simulator-core`
+907 with the four allowed skips, on the same manifest, and `simulator-ui` after them, 37 with the 19
+opt-in device journeys skipped.
+
+**Not found.** What made the runner stop, or the reader tests fail. If it recurs, look at the SSD
+first: the runner's output file stopping short is the sign.
+
+**Three more that night.** After two small changes (the line the Downloads sheet ends with, and
+then a test), the lanes were run again and failed three more times, each on its own, before all
+three passed on one tree (source manifest `2e1c8130…d4b9e2`: `voiceover` 12, `simulator-core` 907
+with the four allowed skips, `simulator-ui` 37 with 19 skipped). One more small change followed,
+to what a download received under lock tells iOS, and the three passed again at the first
+attempt (source manifest `2eac6a52…997aef`, `simulator-core` 908).
+
+- `simulator-core`, 22:18: `OfflineReaderLifecycleTests.testLinkedReadersReleaseCoveredLeasesAndReverifyOnBackAndForeground`
+  failed with "Offline reader lifecycle did not settle" after 43.9 seconds, against 12.8 in the run
+  that passed. The lane's log has "WebContent process took 26.717261 seconds to launch" beside it.
+  The load averages when the lane ended were 45, 214 and 198; another project's simulator was booted
+  and three of its build folders were written at 22:37 and 22:38. The lane's own commands had until
+  then begun with `xcrun simctl shutdown all`, which shuts down other work's simulators too; they
+  now name this work's simulator. The test is in reader code that had not changed.
+- `simulator-core`, 22:41: `DownloadManagerTests.testOriginalBytesPersistAndCanBeRemoved` failed,
+  the limit handed to the transport being `13566779392` and not `DownloadManager.maximumFileBytes`.
+  That one is this work's doing. A download's limit is lowered to what the device has free, less
+  1 GiB, and the uploads work raised the limit from 4 GiB to 16: the test had needed 5 GiB free on
+  the machine running it and now needed 17, and the Mac had about 13.6 at that moment. The test now
+  sets the free space it assumes, as the two tests beside it that deal in gigabytes already did.
+  No other test was found to depend on the machine's free space.
+- `voiceover`, 23:37: `testDocumentActionsVoiceOverJourney` failed with "VoiceOver focus stayed on
+  Document actions Button after opening Document actions". A frame of the recording seven seconds
+  after the double tap shows the document with no menu open. That is not either of the ways this
+  journey has failed before (the entries below); whether the double tap reached VoiceOver, the app
+  or neither was not found. The
+  only difference from the tree whose lane had passed it two hours earlier was the test of the
+  download queue just described. It passed in the run after, and was not seen again in that one
+  run; how often the simulator does this is not known, and the journey has no answer for it.
+
+**The macOS suite, the same evening.** One run of `scripts/test-openssh.sh swift test`, made while
+simulator tests and a device build were also running and the load average was about 139, failed
+`SFTPIntegrationTests.testSubfolderSearchRecoversListingsInterruptedByAPeersDeadline` (a peer
+reported `timedOut` where the test expects `connectionEnded`, and the counts that follow from it)
+and passed the other 657 that ran. The method passed alone straight after, in 10 seconds against
+22.7 in the failing run, and the suite passed by itself later, 659 tests with one skipped. The cause
+was not looked for beyond that.
+
+## 22 November 2026: VoiceOver stepped past a document whose contents had just been replaced
+
+A local run of the `voiceover` lane for the uploads work, on a MacBook Air (M3) with an iPhone 18 Pro
+simulator on iOS 27.2, failed `VoiceOverChecks.testCachedRefreshingAndFailureSpeech`, the lane's first
+method, and passed the other eleven. The journey waits for the banner that replaces "Updating…" when a
+refresh fails, steps VoiceOver back to the top, and reads forward for the banner. The banner was on
+screen, with its Retry and Dismiss buttons and the document beneath it, and VoiceOver stepped from the
+bar above them straight to the bar below:
+
+```
+VO REFRESH FAILED CURRENT: Too large.md Heading
+VO REFRESH FAILED 0: Save Original to Files Button
+VO REFRESH FAILED 1: Document actions Button
+VO REFRESH FAILED 2: Find in Document Button
+```
+
+where a passing run reads `Previously loaded copy · Too Large to Preview. The limit is 2.1 MB.`,
+`Retry Button`, `Dismiss Button`, `Cached local report Heading` and `Previously loaded report text.`
+between the last two. Seconds earlier in the same run, before the banner, the same traversal had read
+the document ("Updating…", the heading, the text). The same thing had happened once that morning, on
+a tree from before most of that day's changes.
+
+**Whose it is.** The reader's refresh and its banner are not touched by the uploads change, which
+alters one menu action in that file. Run alternately, six times each, the working tree and `main`
+(`3ccc272`) both passed every time. Counting every run of the day, the working tree failed it twice in
+about 36 and `main` not once in 11, which does not tell them apart: in both failures the lane's warm
+launch had taken about 21 seconds, and in every passing run for which it was printed, 6 to 15. Both
+were the first run on a simulator that had just been erased or just been given a new build.
+
+**Not reproduced.** Three runs on a simulator erased and left to settle for four minutes, and four
+with every core of the Mac kept busy, did not step past the document once. (The last of the busy
+runs, at a load average over 400, failed differently: VoiceOver said nothing in its first 30
+seconds.) Nor did two runs with the simulator's `VoiceOverTouch` process held stopped for 160 ms
+of every 200, or three with the app itself held stopped as much, which brought the warm launch to
+between 17 and 24 seconds, the range of the two failures. So neither a slow app nor a slow
+VoiceOver is enough on its own. Nor did eight runs made straight after a cold boot, four of them
+on a simulator just erased and settled, which is how the lane meets this journey. In all, the
+skip was seen twice in about 57 runs and never when looked for.
+
+**Seen to work.** The changed journey was then run sixty times on the same simulator, with a cold
+boot before every sixth. In the twenty-sixth, with a warm launch of 8.3 seconds, VoiceOver stepped
+past the document exactly as before; the journey printed `VO STEPPED PAST THE DOCUMENT 1`, stepped
+back, and its second pass read the banner, Retry, Dismiss, the heading and the text. All sixty
+passed. So the supposition holds for the one skip seen since, and a slow launch is not what brings
+the skip about.
+
+**Change, on a supposition.** The supposition is that VoiceOver was still going by what had been on
+screen and would have read the banner a moment later. A pass that meets nothing of the document,
+neither the banner nor the cached copy's heading, is therefore made again, three passes in all, three
+seconds apart, printing `VO STEPPED PAST THE DOCUMENT`; the banner must be read in the last. When
+the change was made nothing had shown the supposition right: neither failing run made a second pass,
+and no run had stepped past the document since. A log with that line followed by the banner would show it; one with the line three
+times would show it wrong.
+The second pass itself was run once, by discarding what the first had read: the journey printed the
+line, stepped back, read the banner on its second pass and passed. That shows the passes work, not
+that the supposition is right. The lane then passed, twelve of twelve, with a warm launch of 19.3
+seconds and this journey reading the banner on its first pass, so a slow start alone does not bring
+the skip about.
+
+## 22 November 2026: a double tap VoiceOver did not take chose Refresh from the Document actions menu
+
+Local runs of the `voiceover` lane for the uploads work, on a MacBook Air (M3) with an iPhone 18 Pro
+simulator on iOS 27.2, failed `VoiceOverChecks.testDocumentActionsVoiceOverJourney` twice in five. Both
+times the double tap on **Document actions** was followed, a second later, by speech from the Back
+button and not from the menu's first item:
+
+```
+VO FOCUS moved from Document actions after 1.0 s: Projects Back button
+VO ACTIONS 0: Weekly review.md Heading
+```
+
+where a passing run logs `VO FOCUS moved from Document actions after 0.0 s: Refresh Button`. The
+traversal then reads the document, finds no **Refresh**, and fails as `VoiceOverTargetNotReached`. The
+wait added on 20 November does its job here: speech did leave the button. The menu was not open.
+
+That work adds an item to this menu, so `main` was tried on its own. The lane's first three journeys
+were run in turn on `3ccc272` (`main`) and on the working tree, on one simulator, six times each. One
+of `main`'s runs did not start. Of its other five, one failed this journey with exactly the lines
+above; the working tree's six passed it. So the failure is not the new menu item's.
+
+**Cause.** The failing run's screen recording shows the button's press highlight and then
+**Updating…** under the title, with the document blank for a frame: Refresh ran. The menu opens over
+its own button, and its first item, Refresh, is where the button was. For that moment the simulator was
+handing touches to the app and not to VoiceOver, so the double tap was two plain taps: the first opened
+the menu and the second chose the item under it. The menu closed, the document loaded again, and focus
+went back to the start of the screen. That touches were bypassing VoiceOver is shown by a later run:
+straight after a stray Refresh, one plain tap on the button opened the menu, where VoiceOver would only
+have moved to the button. A person using VoiceOver cannot do this; their touches go to VoiceOver. Why
+the simulator lets touches through now and then was not found: it happened in 4 of 24 repeats of the
+journey, then 1 of 24 and 1 of 36. It has not been seen in CI, whose history has this journey failing
+only as described in the two entries below.
+
+**Fix.** The journey reads where speech went after the double tap. If that is the Back button, and not
+an item of the menu, it prints `VO DOUBLE TAP CHOSE REFRESH`, waits for the document to be back and
+touches the button: if VoiceOver takes the touch, focus is on the button and it is double tapped; if
+the touch still goes to the app, the menu is open. Either way the journey goes on to read the menu.
+The 36 repeats passed, one of them by this path. Two earlier attempts did not work and are recorded so
+they are not tried again: tapping the title, on the idea that VoiceOver takes a double tap anywhere as
+activating the control it is on, opened nothing in any of sixteen runs; and stepping forward from the
+Back button to find the button again went into the document's text, because the toolbar's buttons do
+not follow the title in that order once the document has reloaded.
+
+Two other things from the same runs:
+
+- A full lane needs a simulator no VoiceOver run has used, as [the policy page](CI.md) says. A second
+  run on one simulator failed `testPublicKeyConfirmationVoiceOverAccountKeyCancelAndResult` on "This
+  public key is already listed" and
+  `testRecentRemovalVoiceOverActionDiscoveryAndSwipeControlKeepHomeAccessible` on a recent the first
+  run had removed.
+- Straight after `simctl erase`, the first journey failed twice as VoiceOver's first speech did not
+  come (`VoiceOverNeverSpoke`, and once an empty first phrase). Booting the erased simulator and
+  leaving it four minutes before the lane avoided it in the runs that followed.
+
 ## 20 November 2026: a nightly on a slower runner image failed a spinner wait and a first launch
 
 The nightly run [44718262394](https://github.com/eyeb0l/RemoteFiles/actions/runs/44718262394) on

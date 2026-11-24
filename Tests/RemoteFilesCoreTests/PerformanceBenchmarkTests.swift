@@ -48,6 +48,36 @@ final class PerformanceBenchmarkTests: XCTestCase {
         }
     }
 
+    /// Writes `count` bytes to a TCP sink and waits for it to close, which it does once it has read them all:
+    /// the link's speed in the other direction, with nothing above TCP.
+    private static func writeAll(host: String, port: Int, count: Int) throws -> Int {
+        var hints = addrinfo(); hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM
+        var found: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, String(port), &hints, &found) == 0, let info = found else { throw POSIXError(.EHOSTUNREACH) }
+        defer { freeaddrinfo(info) }
+        let socket = Darwin.socket(info.pointee.ai_family, info.pointee.ai_socktype, info.pointee.ai_protocol)
+        guard socket >= 0 else { throw POSIXError(.EIO) }
+        defer { close(socket) }
+        guard connect(socket, info.pointee.ai_addr, info.pointee.ai_addrlen) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .ECONNREFUSED) }
+        var buffer = [UInt8](repeating: 0, count: 1 << 16), sent = 0
+        for index in buffer.indices { buffer[index] = UInt8(truncatingIfNeeded: (index &* 2_654_435_761) >> 11) }
+        while sent < count {
+            let wrote = buffer.withUnsafeBytes { write(socket, $0.baseAddress, min($0.count, count - sent)) }
+            if wrote < 0 {
+                if errno == EINTR { continue }
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            sent += wrote
+        }
+        // Written is not delivered: the sink closes only after it has read to this end of the stream.
+        shutdown(socket, SHUT_WR)
+        while true {
+            let read = buffer.withUnsafeMutableBytes { Darwin.read(socket, $0.baseAddress, $0.count) }
+            if read == 0 { return sent }
+            if read < 0, errno != EINTR { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        }
+    }
+
     private var environment: [String: String] { ProcessInfo.processInfo.environment }
     private var measuring: Bool { environment["REMOTEFILES_PERFORMANCE_BENCHMARK"] == "1" }
     private var runs: Int { measuring ? Int(environment["REMOTEFILES_BENCHMARK_RUNS"] ?? "") ?? 5 : 1 }
@@ -476,7 +506,9 @@ final class PerformanceBenchmarkTests: XCTestCase {
         }
         // By name: the same link without SSH or SFTP. `REMOTEFILES_BENCHMARK_RAW_PORTS` lists ports on the server's
         // host that send the 64 MiB file over plain TCP; `REMOTEFILES_BENCHMARK_SFTP_PORTS` lists other ports of this
-        // server, such as one without the proxy. Every arm takes its turn in a rotating order.
+        // server, such as one without the proxy. `REMOTEFILES_BENCHMARK_RAW_SINK_PORTS` lists ports that read a
+        // stream to its end and then close, for the other direction, and adds an upload of the same size beside
+        // each download. Every arm takes its turn in a rotating order.
         if measuring, environment["REMOTEFILES_BENCHMARK_ONLY"]?.contains("linkbaseline") == true {
             func ports(_ key: String) -> [Int] { (environment[key] ?? "").split(separator: ",").compactMap { Int($0) } }
             var arms: [(String, () async throws -> Int)] = []
@@ -496,7 +528,17 @@ final class PerformanceBenchmarkTests: XCTestCase {
                     return try await first + second
                 }))
             }
+            let sinks = (environment["REMOTEFILES_BENCHMARK_RAW_SINK_PORTS"] ?? "").split(separator: ",")
+            for entry in sinks {
+                let parts = entry.split(separator: ":")
+                guard let raw = parts.last.flatMap({ Int($0) }) else { continue }
+                let receiver = parts.count == 2 ? String(parts[0]) : host
+                arms.append(("tcpup" + (parts.count == 2 ? "-\(receiver)-" : "") + "\(raw)",
+                             { try await Task.detached { try Self.writeAll(host: receiver, port: raw, count: 64 << 20) }.value }))
+            }
             let temp = folder.appendingPathComponent("baseline.bin"), file = root + "/big-64m.bin"
+            let outgoing = folder.appendingPathComponent("baseline-up.bin")
+            if !sinks.isEmpty { try Data((0..<(64 << 20)).map { UInt8(truncatingIfNeeded: ($0 &* 2_654_435_761) >> 11) }).write(to: outgoing) }
             for other in [port] + ports("REMOTEFILES_BENCHMARK_SFTP_PORTS") {
                 // The main port reuses the warmed profile: a new profile would open a new connection inside the first sample.
                 let endpointProfile = other == port ? profile : ConnectionProfile(name: "Benchmark \(other)", host: host, port: other, username: user,
@@ -513,6 +555,15 @@ final class PerformanceBenchmarkTests: XCTestCase {
                     let entry = try await client.downloadManagedFile(profile: endpointProfile, path: file, allowedRoot: root, destination: temp, limit: 1 << 30) { _ in }
                     return Int(entry.size ?? 0)
                 }))
+                if !sinks.isEmpty {
+                    arms.append(("sftpup\(other)", {
+                        let entry = try await client.uploadFile(profile: endpointProfile,
+                            request: .init(directory: root + "/uploads", name: "baseline-" + UUID().uuidString + ".bin", conflict: .fail,
+                                           partialName: UploadRequest.partialName(for: UUID()), limit: 1 << 30),
+                            source: LocalFileTransferSource(url: outgoing), started: { _, _ in }, progress: { _ in })
+                        return Int(entry.size ?? 0)
+                    }))
+                }
             }
             for pass in 0..<runs {
                 for index in 0..<arms.count {
@@ -580,6 +631,54 @@ final class PerformanceBenchmarkTests: XCTestCase {
             try await recorder.peakFootprint("download.64MiB.peakMB", runs: 1) {
                 _ = try await warm.downloadManagedFile(profile: profile, path: file, allowedRoot: root, destination: temp, limit: 1 << 30) { _ in }
             }
+        }
+        if selected("upload") || selected("copy") {
+            // Written to the server and read back over SFTP, so the same lines run on a phone, which can't see
+            // the fixture's files. As the app's queue sends them: one connection of its own, one channel.
+            let destination = root + "/uploads"
+            let megabytes = measuring ? 64 : 1
+            var block = Data((0..<1_048_576).map { UInt8(truncatingIfNeeded: ($0 &* 2_654_435_761) >> 11) })
+            var bytes = Data(capacity: megabytes * block.count)
+            for index in 0..<megabytes {
+                block[0] = UInt8(truncatingIfNeeded: index); block[1] = UInt8(truncatingIfNeeded: index >> 8)
+                bytes.append(block)
+            }
+            let local = folder.appendingPathComponent("upload-source.bin"), tiny = folder.appendingPathComponent("upload-small.txt")
+            try bytes.write(to: local); try Data(repeating: 0x41, count: 50).write(to: tiny)
+            let writer = service(), reader = service()
+            addTeardownBlock { await writer.disconnect(); await reader.disconnect() }
+            let writes = SnapshotTransferBatch(), reads = SnapshotTransferBatch()
+            @Sendable func send(_ source: any TransferSource) async throws -> RemoteEntry {
+                try await writer.uploadFile(profile: profile,
+                    request: .init(directory: destination, name: "bench-" + UUID().uuidString + ".bin", conflict: .fail,
+                                   partialName: UploadRequest.partialName(for: UUID()), limit: 1 << 30),
+                    source: source, batch: writes, started: { _, _ in }, progress: { _ in })
+            }
+            // The first file opens the connection and its channel; the timings below are a queue's later files.
+            let first = try await send(LocalFileTransferSource(url: local))
+            let returned = folder.appendingPathComponent("upload-returned.bin")
+            _ = try await warm.downloadManagedFile(profile: profile, path: first.path, allowedRoot: destination, destination: returned, limit: 1 << 30) { _ in }
+            XCTAssertEqual(try Data(contentsOf: returned), bytes, "What was uploaded is what the server holds")
+            if selected("upload") {
+                try await recorder.timeAsync("upload.50B.queued", runs: runs) { _ = try await send(LocalFileTransferSource(url: tiny)) }
+                try await recorder.timeAsync("upload.\(megabytes)MiB.queued", runs: runs) { _ = try await send(LocalFileTransferSource(url: local)) }
+                recorder.deriveThroughput(from: "upload.\(megabytes)MiB.queued", bytes: Double(bytes.count))
+                try await recorder.peakFootprint("upload.\(megabytes)MiB.peakMB", runs: 1) { _ = try await send(LocalFileTransferSource(url: local)) }
+            }
+            if selected("copy") {
+                // From one connection to another, through this device.
+                var remote = RemoteFileTransferSource(service: reader, profile: profile, path: first.path, canonicalRoot: destination)
+                remote.batch = reads
+                let source = remote
+                let copied = try await send(source)
+                XCTAssertEqual(copied.size, UInt64(bytes.count))
+                try await recorder.timeAsync("copy.\(megabytes)MiB.queued", runs: runs) { _ = try await send(source) }
+                recorder.deriveThroughput(from: "copy.\(megabytes)MiB.queued", bytes: Double(bytes.count))
+                try await recorder.peakFootprint("copy.\(megabytes)MiB.peakMB", runs: 1) { _ = try await send(source) }
+                _ = try await warm.downloadManagedFile(profile: profile, path: copied.path, allowedRoot: destination, destination: returned, limit: 1 << 30) { _ in }
+                XCTAssertEqual(try Data(contentsOf: returned), bytes, "What was copied is what the source held")
+            }
+            await writer.endSnapshotBatch(writes); await reader.endSnapshotBatch(reads)
         }
         recorder.flush()
     }
@@ -804,6 +903,7 @@ final class PerformanceBenchmarkTests: XCTestCase {
         let manager = FileManager.default
         try manager.createDirectory(at: root.appendingPathComponent("d10"), withIntermediateDirectories: true)
         try manager.createDirectory(at: root.appendingPathComponent("tree/below"), withIntermediateDirectories: true)
+        try manager.createDirectory(at: root.appendingPathComponent("uploads"), withIntermediateDirectories: true)
         for index in 0..<10 { manager.createFile(atPath: root.appendingPathComponent("d10/entry-\(index).txt").path, contents: nil) }
         manager.createFile(atPath: root.appendingPathComponent("tree/below/needle.txt").path, contents: nil)
         manager.createFile(atPath: root.appendingPathComponent("report.md").path, contents: Data("# Report\n".utf8))

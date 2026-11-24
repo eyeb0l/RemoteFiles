@@ -1,5 +1,6 @@
 #if os(iOS)
 import SwiftUI
+import PhotosUI
 import RemoteFilesCore
 
 enum FolderSearchScope: Hashable { case folder, subfolders, contents }
@@ -185,6 +186,15 @@ struct FolderView: View {
     @FocusState private var searchFocused: Bool
     /// The row a hardware keyboard's arrow keys have selected; Return opens it.
     @State private var keyboardSelection: String?
+    @State private var choosingUploads = false
+    @State private var choosingPhotos = false
+    @State private var pickedPhotos: [PhotosPickerItem] = []
+    /// Photos and videos being copied out of the library before they are queued.
+    @State private var preparingPhotos = false
+    @State private var uploadConflict: TransferConflictPrompt?
+    @State private var dropTargeted = false
+    /// What uploads and copies had added to this folder when it was last listed.
+    @State private var lastChangeCount = 0
     init(model: AppModel, profile: ConnectionProfile, requestedPath: String) {
         self.model = model
         self.profile = profile
@@ -218,7 +228,7 @@ struct FolderView: View {
                 subfolderResults
             } else {
                 FolderRowList(rows: visible, revision: visibleRevision, selection: keyboardSelection, resolving: resolving,
-                              empty: visible.isEmpty ? folderEmpty : nil, refresh: {
+                              empty: visible.isEmpty ? folderEmpty : nil, drop: fileDrop, refresh: {
                     pullRefreshing = true
                     await reload()
                     pullRefreshing = false
@@ -243,7 +253,7 @@ struct FolderView: View {
         }
         // A failed first load explains itself in place.
         // Pulling to refresh has its own spinner.
-        .contentStatus(progress: listing != nil && loading && !pullRefreshing ? "Updating…" : nil,
+        .contentStatus(progress: preparingPhotos ? "Preparing photos…" : listing != nil && loading && !pullRefreshing ? "Updating…" : nil,
                        failure: listing == nil ? nil : error.map { "Couldn’t update this folder · \($0)" },
                        retry: { refreshID += 1 })
         .navigationTitle(RemotePath.displayName(RemotePath.name(of: path)))
@@ -260,6 +270,8 @@ struct FolderView: View {
             Text("Contents").tag(FolderSearchScope.contents)
         }
         .toolbar {
+            // Beside the folder an upload was started from, so its progress shows without leaving it.
+            TransferStatus(model: model)
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Section {
@@ -268,6 +280,14 @@ struct FolderView: View {
                             Task { await model.favourite(profile: profile, path: path) }
                         }.disabled(listing == nil)
                         Button("Refresh", systemImage: "arrow.clockwise") { refreshID += 1 }
+                    }
+                    if model.supportsTransfers {
+                        Section {
+                            Button("Upload Files…", systemImage: "arrow.up.doc") { choosingUploads = true }
+                                .disabled(listing == nil || !model.canTransfer)
+                            Button("Upload Photos…", systemImage: "photo.on.rectangle") { choosingPhotos = true }
+                                .disabled(listing == nil || !model.canTransfer || preparingPhotos)
+                        }
                     }
                     Section {
                         Picker("Sort By", systemImage: "arrow.up.arrow.down", selection: sortSelection) {
@@ -288,12 +308,45 @@ struct FolderView: View {
                         }
                     }
                     Section {
-                        Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnectAndGoHome() } }
+                        Button("Disconnect", systemImage: "network.slash") { Task { await model.disconnect(profile) } }
                     }
                 } label: { Label("Folder actions", systemImage: "ellipsis") }
             }
         }
-        .task(id: ReloadWork(foreground: model.isForeground, session: model.sessionRevision, refresh: refreshID)) { await reloadIfNeeded() }
+        .task(id: ReloadWork(foreground: model.isForeground, session: model.sessionRevision, refresh: refreshID,
+                             changes: model.folderChangeCount(profile.id, path: path))) { await reloadIfNeeded() }
+        .sheet(isPresented: $choosingUploads) {
+            UploadFilePicker { beginUpload($0) }.ignoresSafeArea().coversKeyboardCommands()
+        }
+        // The system's own picker, which shows the library without the app being given access to it. Items
+        // are asked for in their current format, so an original isn't converted on its way out.
+        .photosPicker(isPresented: $choosingPhotos, selection: $pickedPhotos, matching: nil, preferredItemEncoding: .current)
+        .task(id: pickedPhotos.count) {
+            guard !pickedPhotos.isEmpty else { return }
+            let items = pickedPhotos
+            preparingPhotos = true
+            let loaded = await PickedLibraryFile.load(items)
+            preparingPhotos = false
+            // Left part-way, as when the folder closes: what was copied out so far isn't sent on its own.
+            guard !Task.isCancelled else {
+                for file in loaded.files { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+                return
+            }
+            pickedPhotos = []
+            if loaded.failed > 0 {
+                model.errorMessage = loaded.failed == 1 ? "One item couldn’t be loaded from the library and wasn’t uploaded."
+                    : "\(loaded.failed) items couldn’t be loaded from the library and weren’t uploaded."
+            }
+            beginUpload(loaded.files, staging: loaded.files.map { $0.deletingLastPathComponent() })
+        }
+        .transferConflictDialog($uploadConflict)
+        .overlay {
+            if dropTargeted, listing != nil, model.canTransfer {
+                RoundedRectangle(cornerRadius: 14).strokeBorder(RemoteFilesStyle.accent, lineWidth: 3)
+                    .padding(6).allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+        }
         .onDisappear { resolveTask?.cancel(); resolveTask = nil }
         .task(id: VisibleWork(filter: filter, showHidden: showHidden, order: sortOrder, options: searchOptions)) { await updateVisible() }
         // A saved index of this folder set to update automatically refreshes once it is old enough,
@@ -321,7 +374,35 @@ struct FolderView: View {
             if !presented, filter.isEmpty { searchScope = .folder }
         }
     }
-    private struct ReloadWork: Equatable { let foreground: Bool, session: Int, refresh: Int }
+    private struct ReloadWork: Equatable { let foreground: Bool, session: Int, refresh: Int, changes: Int }
+    /// Sends files this app holds copies of to this folder. A name the folder already shows is asked about
+    /// first; one that appears on the server meanwhile is asked about in Transfers, never written over.
+    /// Files dragged in from another app are uploaded to the folder whose list they are dropped on.
+    private var fileDrop: FileDrop {
+        FileDrop(accepts: { listing != nil && model.canTransfer }, targeted: { dropTargeted = $0 }) { providers in
+            guard listing != nil, model.canTransfer, let folder = try? model.incomingUploadDirectory() else { return }
+            UploadDrop.load(providers, into: folder) { files, skipped, unread in
+                if let message = UploadDrop.message(skipped: skipped, unread: unread) { model.errorMessage = message }
+                beginUpload(files, staging: [folder])
+            }
+        }
+    }
+
+    private func beginUpload(_ files: [URL], staging: [URL] = []) {
+        func discard() {
+            for file in files { try? FileManager.default.removeItem(at: file) }
+            for folder in staging { try? FileManager.default.removeItem(at: folder) }
+        }
+        guard let listing, !files.isEmpty, model.canTransfer else { discard(); return }
+        let directory = listing.path, profile = profile, model = model
+        let names = Set(listing.rows.map(\.entry.name))
+        let taken = files.map(\.lastPathComponent).filter(names.contains)
+        let send: (UploadConflictPolicy?) -> Void = { answer in
+            model.enqueueUploads(files, to: profile, directory: directory, taken: Set(taken), answer: answer)
+            for folder in staging { try? FileManager.default.removeItem(at: folder) }
+        }
+        if taken.isEmpty { send(nil) } else { uploadConflict = .init(names: taken, total: files.count, resolve: send, cancel: discard) }
+    }
     private struct VisibleWork: Equatable { let filter: String, showHidden: Bool, order: FolderSortOrder, options: SearchQueryOptions }
     private struct SettledWork: Equatable { let path: String?, loading: Bool, failed: Bool, foreground: Bool, session: Int }
     private struct SearchWork: Equatable {
@@ -513,9 +594,12 @@ struct FolderView: View {
         }
     }
     private func reloadIfNeeded() async {
+        let changes = model.folderChangeCount(profile.id, path: path)
+        defer { lastChangeCount = changes }
         if listing == nil || lastSessionRevision != model.sessionRevision || lastRefreshID != refreshID {
             await reload()
-        } else if model.isForeground, !model.isListingFresh(profile.id, path: requestedPath) {
+        } else if model.isForeground, changes != lastChangeCount || !model.isListingFresh(profile.id, path: requestedPath) {
+            // An upload or copy that has just arrived shows without a spinner, as any quiet check does.
             await revalidateQuietly()
         }
     }
@@ -697,6 +781,7 @@ private struct FolderRowList<Row: View>: View, Equatable {
     let selection: String?
     let resolving: String?
     let empty: (title: String, symbol: String, detail: String)?
+    var drop: FileDrop? = nil
     let refresh: () async -> Void
     @ViewBuilder let row: (FolderRow) -> Row
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
@@ -723,6 +808,7 @@ private struct FolderRowList<Row: View>: View, Equatable {
             .scrollDismissesKeyboard(.immediately)
             .refreshable { await refresh() }
             .ownFocusGroup()
+            .background { if let drop { FileDropTarget(drop: drop) } }
         }
     }
 }
@@ -742,35 +828,176 @@ extension View {
 private struct FocusGroupClaim: UIViewRepresentable {
     static let identifier = "dev.iris.RemoteFiles.folder-rows"
     func makeUIView(context: Context) -> Marker { Marker() }
-    func updateUIView(_ marker: Marker, context: Context) { marker.claim() }
-    final class Marker: UIView {
-        init() { super.init(frame: .zero); isUserInteractionEnabled = false; isAccessibilityElement = false }
-        required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
-        override func didMoveToWindow() { super.didMoveToWindow(); claim() }
-        override func layoutSubviews() { super.layoutSubviews(); claim() }
-        func claim() {
-            guard let window, bounds.width > 0, bounds.height > 0 else { return }
-            let frame = convert(bounds, to: window)
-            var ancestor = superview
-            while let view = ancestor {
-                if let list = Self.list(in: view, matching: frame, window: window) {
-                    if list.focusGroupIdentifier != FocusGroupClaim.identifier { list.focusGroupIdentifier = FocusGroupClaim.identifier }
-                    return
-                }
-                ancestor = view.superview
-            }
+    func updateUIView(_ marker: Marker, context: Context) { marker.listMayHaveChanged() }
+    final class Marker: ListBackgroundMarker {
+        override func listMayHaveChanged() {
+            guard let list = nearestList(), list.focusGroupIdentifier != FocusGroupClaim.identifier else { return }
+            list.focusGroupIdentifier = FocusGroupClaim.identifier
         }
-        private static func list(in view: UIView, matching frame: CGRect, window: UIWindow) -> UICollectionView? {
-            if let list = view as? UICollectionView {
-                // A list runs on under the bars, beyond the frame SwiftUI lays it out in. Its bounds
-                // move as it scrolls, so compare where it sits, not what it shows.
-                let placed = list.superview?.convert(list.frame, to: window) ?? .null
-                return placed.contains(frame.insetBy(dx: 1, dy: 1)) ? list : nil
+    }
+}
+
+/// A view that sits behind a list and finds the collection view SwiftUI draws that list as: the nearest
+/// collection view that covers this view's frame, on this view's own screen.
+class ListBackgroundMarker: UIView {
+    init() { super.init(frame: .zero); isUserInteractionEnabled = false; isAccessibilityElement = false }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+    override func didMoveToWindow() { super.didMoveToWindow(); listMayHaveChanged() }
+    override func layoutSubviews() { super.layoutSubviews(); listMayHaveChanged() }
+    func listMayHaveChanged() {}
+    /// The view of the view controller this marker is in: one screen's own views. A push or pop puts another
+    /// screen's list beside this one for a moment, in the same place, and the search must not reach it.
+    var screen: UIView? { screenController?.viewIfLoaded }
+    var screenController: UIViewController? {
+        var responder = next
+        while let current = responder {
+            if let controller = current as? UIViewController { return controller }
+            responder = current.next
+        }
+        return nil
+    }
+    func nearestList() -> UICollectionView? {
+        guard let window, bounds.width > 0, bounds.height > 0 else { return nil }
+        let frame = convert(bounds, to: window), screen = screen
+        var ancestor = superview
+        while let view = ancestor {
+            if let list = Self.list(in: view, matching: frame, window: window) { return list }
+            if view === screen { return nil }
+            ancestor = view.superview
+        }
+        return nil
+    }
+    private static func list(in view: UIView, matching frame: CGRect, window: UIWindow) -> UICollectionView? {
+        if let list = view as? UICollectionView {
+            // A list runs on under the bars, beyond the frame SwiftUI lays it out in. Its bounds
+            // move as it scrolls, so compare where it sits, not what it shows.
+            let placed = list.superview?.convert(list.frame, to: window) ?? .null
+            return placed.contains(frame.insetBy(dx: 1, dy: 1)) ? list : nil
+        }
+        for child in view.subviews where !(child is ListBackgroundMarker) {
+            if let found = list(in: child, matching: frame, window: window) { return found }
+        }
+        return nil
+    }
+}
+
+/// What a folder's list does with files dragged onto it from another app.
+struct FileDrop {
+    /// Asked when a drag arrives and again when it is dropped.
+    let accepts: @MainActor () -> Bool
+    /// Whether a drag this list would take is over it.
+    let targeted: @MainActor (Bool) -> Void
+    let perform: @MainActor ([NSItemProvider]) -> Void
+}
+
+/// Sits behind a folder's list and takes drops for it. A SwiftUI `onDrop` around the list was not offered
+/// a file dragged from Files and held over the list, which is all of a folder's screen (iOS 27.2), so the
+/// list's collection view is answered for directly, as its drop delegate (`Coordinator`).
+struct FileDropTarget: UIViewRepresentable {
+    let drop: FileDrop
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeUIView(context: Context) -> Marker {
+        let marker = Marker(); marker.coordinator = context.coordinator; context.coordinator.marker = marker; return marker
+    }
+    func updateUIView(_ marker: Marker, context: Context) {
+        context.coordinator.drop = drop
+        marker.listMayHaveChanged()
+    }
+    /// Takes the target off its list and parts the two for good: a look for the list that was already
+    /// waiting to run, after a return to the screen or a transition, then finds nothing to put back.
+    static func dismantleUIView(_ marker: Marker, coordinator: Coordinator) {
+        coordinator.attach(to: nil)
+        coordinator.marker = nil; coordinator.drop = nil
+        marker.coordinator = nil
+    }
+
+    final class Marker: ListBackgroundMarker {
+        weak var coordinator: Coordinator?
+        /// Puts the target on this screen's list once the list can be found. It stays there while the screen
+        /// is covered by another, so going back needs nothing, and comes off only with the view; a target
+        /// left on a list it is no longer behind declines every drag (`Coordinator.accepts`).
+        override func listMayHaveChanged() {
+            guard window != nil, let list = nearestList() else { return }
+            coordinator?.attach(to: list)
+        }
+        /// Coming back on screen, the list may be put back after this view, with no layout of this view to
+        /// follow, so look again once the views are in place and once any push or pop has finished.
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil else { return }
+            DispatchQueue.main.async { [weak self] in self?.listMayHaveChanged() }
+            screenController?.transitionCoordinator?.animate(alongsideTransition: nil) { [weak self] _ in self?.listMayHaveChanged() }
+        }
+    }
+
+    /// Answers for the list as its drop delegate, in front of the one SwiftUI gave it.
+    ///
+    /// A collection view with a drop delegate has a drop interaction of its own, and SwiftUI's list always
+    /// gives it one, which forbids a drop on a row. A second interaction beside that one lost to it wherever
+    /// there was a row: it took a file dropped on the empty part of a folder and never one dropped on a row,
+    /// which is where a file dropped on a folder with anything in it lands (found on an iPad; the callbacks
+    /// were enter, one update, exit, and no drop). So there is one interaction, the list's, and this answers
+    /// it for files while the folder can take them and hands everything else to SwiftUI's delegate.
+    @MainActor final class Coordinator: NSObject, UICollectionViewDropDelegate {
+        var drop: FileDrop?
+        weak var marker: Marker?
+        private weak var list: UICollectionView?
+        /// The delegate the list had, which still answers for whatever this doesn't take.
+        private weak var listsOwn: (any UICollectionViewDropDelegate)?
+        func attach(to list: UICollectionView?) {
+            if let old = self.list, old !== list, old.dropDelegate === self { old.dropDelegate = listsOwn }
+            if list !== self.list { listsOwn = nil }
+            self.list = list
+            // Also when the list is the same one: SwiftUI may have put its own delegate back.
+            guard let list, list.dropDelegate !== self else { return }
+            // Never another target: were two ever behind one list, each would otherwise come to pass on to the
+            // other. Whichever is in front passes on to the list's own.
+            var own = list.dropDelegate
+            while let other = own as? Coordinator { own = other.listsOwn }
+            listsOwn = own
+            list.dropDelegate = self
+        }
+        /// Whether a drag may be taken here now: the folder can take an upload, and the list the drag is over
+        /// is still the one this target is behind. A list this target was once behind takes nothing for it.
+        private func accepts(_ list: UICollectionView) -> Bool {
+            guard let marker, marker.window != nil, let own = marker.nearestList(), list === own else {
+                DispatchQueue.main.async { [weak self] in self?.marker?.listMayHaveChanged() }
+                return false
             }
-            for child in view.subviews where !(child is Marker) {
-                if let found = list(in: child, matching: frame, window: window) { return found }
+            return drop?.accepts() == true
+        }
+        func takes(_ session: any UIDropSession, on list: UICollectionView) -> Bool {
+            accepts(list) && session.hasItemsConforming(toTypeIdentifiers: UploadDrop.types.map(\.identifier))
+        }
+        func collectionView(_ list: UICollectionView, canHandle session: any UIDropSession) -> Bool {
+            // A delegate that doesn't say is taken by UIKit to handle every session.
+            takes(session, on: list) || (listsOwn?.collectionView?(list, canHandle: session) ?? (listsOwn != nil))
+        }
+        func collectionView(_ list: UICollectionView, dropSessionDidEnter session: any UIDropSession) {
+            if takes(session, on: list) { drop?.targeted(true) }
+            listsOwn?.collectionView?(list, dropSessionDidEnter: session)
+        }
+        func collectionView(_ list: UICollectionView, dropSessionDidUpdate session: any UIDropSession,
+                            withDestinationIndexPath destination: IndexPath?) -> UICollectionViewDropProposal {
+            // The whole folder is the destination, whichever row the file is over.
+            if takes(session, on: list) { return UICollectionViewDropProposal(operation: .copy) }
+            return listsOwn?.collectionView?(list, dropSessionDidUpdate: session, withDestinationIndexPath: destination)
+                ?? UICollectionViewDropProposal(operation: .cancel)
+        }
+        func collectionView(_ list: UICollectionView, dropSessionDidExit session: any UIDropSession) {
+            drop?.targeted(false)
+            listsOwn?.collectionView?(list, dropSessionDidExit: session)
+        }
+        func collectionView(_ list: UICollectionView, dropSessionDidEnd session: any UIDropSession) {
+            drop?.targeted(false)
+            listsOwn?.collectionView?(list, dropSessionDidEnd: session)
+        }
+        func collectionView(_ list: UICollectionView, performDropWith coordinator: any UICollectionViewDropCoordinator) {
+            drop?.targeted(false)
+            guard takes(coordinator.session, on: list) else {
+                listsOwn?.collectionView(list, performDropWith: coordinator); return
             }
-            return nil
+            drop?.perform(coordinator.session.items.map(\.itemProvider))
         }
     }
 }
