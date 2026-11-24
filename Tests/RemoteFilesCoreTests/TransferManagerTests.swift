@@ -40,6 +40,8 @@ final class TransferManagerTests: XCTestCase {
         XCTAssertEqual(manager.items.first?.sentBytes, UInt64(bytes.count))
         XCTAssertNil(manager.items.first?.partialVersion)
         XCTAssertEqual(completed.map(\.id), [id])
+        XCTAssertEqual(manager.arrivals(on: profile.id, in: "/srv/inbox"), 1, "Counted for every window showing the folder")
+        XCTAssertEqual(manager.arrivals(on: profile.id, in: "/srv"), 0)
         let received = await service.received["Report final.pdf"]
         XCTAssertEqual(received, bytes)
         let request = try await XCTUnwrapAsync(await service.requests.first)
@@ -175,6 +177,54 @@ final class TransferManagerTests: XCTestCase {
         manager.remove(id, service: lost)
         XCTAssertNil(manager.items.first { $0.id == id })
         try await wait { await lost.removedPartials == [UploadRequest.partialName(for: id)] }
+    }
+
+    /// Clear Finished takes a cancelled transfer out of the list. One cancelled a moment ago still has the
+    /// worker's slot, and it is the worker that asks the server to drop the partial copy.
+    func testClearingFinishedTransfersLeavesOneStillStoppingToRemoveItsPartialCopy() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let service = UploadFixture(held: ["held.bin"])
+        let manager = try TransferManager(directory: directory)
+        let held = try manager.enqueueUpload(consuming: try file("held.bin"), named: "held.bin", to: profile, directory: "/srv", service: service)
+        try await wait { await service.waiting == ["held.bin"] }
+        manager.cancel(held)
+        XCTAssertEqual(manager.activeID, held)
+        manager.removeFinished()
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.map(\.id), [], "It goes from the list once it has stopped")
+        let removed = await service.removedPartials
+        XCTAssertEqual(removed, [UploadRequest.partialName(for: held)])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(held.uuidString).path))
+
+        // One that has finished and is closing its connection goes too, and the transfer after it stays.
+        let slow = UploadFixture(holdsClose: true)
+        let done = try manager.enqueueUpload(consuming: try file("done.bin"), named: "done.bin", to: profile, directory: "/srv", service: slow)
+        try await wait { await slow.closing }
+        XCTAssertEqual(manager.items.map(\.state), [.completed])
+        XCTAssertEqual(manager.activeID, done)
+        manager.removeFinished()
+        let next = try manager.enqueueUpload(consuming: try file("next.bin"), named: "next.bin", to: profile, directory: "/srv", service: slow)
+        await slow.finishClose()
+        try await wait { manager.activeID == nil && manager.items.first?.state == .completed }
+        XCTAssertEqual(manager.items.map(\.id), [next])
+    }
+
+    /// A folder's list may be some time old when a file is copied from it. What is sent is the file as it is
+    /// when the copy starts, and the progress and the time asked of iOS are measured by that.
+    func testACopyWhoseSourceHasGrownSinceItWasListedIsMeasuredByWhatIsSent() async throws {
+        let directory = directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let bytes = Data((0..<70_000).map { UInt8(truncatingIfNeeded: $0 &* 7) })
+        let service = UploadFixture(held: ["grown.log"], remoteFiles: ["/data/grown.log": bytes])
+        let manager = try TransferManager(directory: directory)
+        let listed = RemoteEntry(name: "grown.log", path: "/data/grown.log", kind: .file, size: 1_000)
+        try manager.enqueueCopy(of: listed.selectedForTransfer, from: other, to: profile, directory: "/srv", service: service)
+        XCTAssertEqual(manager.items.first?.expectedBytes, 1_000)
+        try await wait { await service.waiting == ["grown.log"] }
+        XCTAssertEqual(manager.items.first?.expectedBytes, UInt64(bytes.count))
+        await service.release("grown.log")
+        try await wait { manager.activeID == nil }
+        XCTAssertEqual(manager.items.first?.state, .completed)
+        XCTAssertEqual(manager.items.first?.progress.totalBytes, UInt64(bytes.count))
     }
 
     func testACopyReadsFromItsSourceConnectionAndIsBoundedByTheFolderItWasChosenFrom() async throws {

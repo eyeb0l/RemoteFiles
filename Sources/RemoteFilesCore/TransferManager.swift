@@ -20,7 +20,7 @@ public struct ManagedTransfer: Identifiable, Codable, Sendable {
     /// The name asked for; once completed, the name the file took.
     public var filename: String
     public let source: Source
-    public let expectedBytes: UInt64?
+    public internal(set) var expectedBytes: UInt64?
     public var conflict: UploadConflictPolicy
     public var state: ManagedTransferState
     /// Bytes the server has confirmed writing.
@@ -81,6 +81,10 @@ public final class TransferManager {
     public private(set) var items: [ManagedTransfer] = []
     public private(set) var persistenceError: String?
     public private(set) var activeID: UUID?
+    /// How many transfers have arrived in each folder since launch. Every window shares this queue, so one
+    /// showing a folder can list it again whichever window the transfer was started in.
+    private var arrivals: [String: Int] = [:]
+    public func arrivals(on connection: UUID, in directory: String) -> Int { arrivals[connection.uuidString + "|" + directory, default: 0] }
     public var didChange: (() -> Void)?
     private let directory: URL
     private var worker: Task<Void, Never>?
@@ -272,7 +276,11 @@ public final class TransferManager {
 
     /// Removes every transfer that has finished, successfully or by cancellation.
     public func removeFinished() {
-        for item in items where item.state == .completed || item.state == .cancelled { removeRecord(item.id) }
+        for item in items where item.state == .completed || item.state == .cancelled {
+            // One cancelled a moment ago may still be stopping. It goes when it has, as `remove` has it go,
+            // so that its partial copy on the server is removed too.
+            if item.id == activeID { removeActiveWhenFinished = true } else { removeRecord(item.id) }
+        }
         publish()
     }
 
@@ -339,6 +347,10 @@ public final class TransferManager {
             }
             await Self.close(transport, lockingKeys: !isForeground || stopped)
         }
+        // Asked to go while it still had the slot. Here, and not as its transfer ends, so that one asked to go
+        // while its connection closes goes too, and the asking is never left for the transfer after it.
+        if removeActiveWhenFinished, let activeID { removeRecord(activeID) }
+        removeActiveWhenFinished = false
         activeID = nil; worker = nil; publish(); startNext()
     }
 
@@ -462,6 +474,7 @@ public final class TransferManager {
                         self.items[index].filename = entry.name
                     }
                     self.removeLocalFiles(item.id)
+                    self.arrivals[item.destination.id.uuidString + "|" + item.directory, default: 0] += 1
                     context.onCompletion?(self.items[index])
                 }
             } catch {
@@ -484,10 +497,6 @@ public final class TransferManager {
                 }
             }
             self.contexts.removeValue(forKey: item.id)
-            if self.removeActiveWhenFinished {
-                self.removeActiveWhenFinished = false
-                self.removeRecord(item.id)
-            }
             await self.finishWorker(service)
         }
         publish()
@@ -506,6 +515,8 @@ public final class TransferManager {
         // copy, which a cancellation or removal then asks it to drop.
         items[index].partialVersion = version
         items[index].sentBytes = offset
+        // What is being sent is this version. A size read from a folder's list some time ago may not be its.
+        items[index].expectedBytes = version.size
         publish()
     }
     static func allowsResume(after error: Error) -> Bool {

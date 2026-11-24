@@ -79,6 +79,15 @@ final class SFTPUploadIntegrationTests: XCTestCase {
         var isDirectory: ObjCBool = false
         XCTAssertTrue(FileManager.default.fileExists(atPath: server.folder + "/folder.txt", isDirectory: &isDirectory) && isDirectory.boolValue)
 
+        // A link is replaced as a link, whatever it leads to: here the folder, which is left as it was.
+        try FileManager.default.createSymbolicLink(atPath: server.folder + "/shortcut.txt", withDestinationPath: server.folder + "/folder.txt")
+        let overLink = try await upload("shortcut.txt", .replace)
+        XCTAssertEqual(overLink.name, "shortcut.txt")
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: server.folder + "/shortcut.txt")[.type] as? FileAttributeType, .typeRegular)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: server.folder + "/shortcut.txt")), replacement)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: server.folder + "/folder.txt"), [])
+        try FileManager.default.removeItem(atPath: server.folder + "/shortcut.txt")
+
         // A name taken while the bytes were on their way keeps them on the server, and the answer then
         // needs no second transfer.
         let id = UUID(), offsets = Offsets(), versions = Versions()
@@ -509,6 +518,24 @@ final class SFTPUploadIntegrationTests: XCTestCase {
         }
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: server.folder), [])
 
+        // A folder moved away while the bytes were on their way, with a link left in its place, still takes
+        // them: the file was opened in it. It is asked about again once they are there, and nothing is named.
+        let moving = server.fixture + "/files/upload-moving-" + UUID().uuidString, moved = moving + "-moved"
+        try FileManager.default.createDirectory(atPath: moving, withIntermediateDirectories: false)
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: moving); try? FileManager.default.removeItem(atPath: moved) }
+        do {
+            _ = try await server.service.uploadFile(profile: server.profile,
+                request: .init(directory: moving, name: "report.bin", conflict: .fail, partialName: UploadRequest.partialName(for: UUID()), limit: 1024 * 1024),
+                source: LocalFileTransferSource(url: local), started: { _, _ in
+                    // Long enough for an answer asked for before this to have come back.
+                    try? await Task.sleep(for: .milliseconds(300))
+                    try? FileManager.default.moveItem(atPath: moving, toPath: moved)
+                    try? FileManager.default.createSymbolicLink(atPath: moving, withDestinationPath: moved)
+                }, progress: { _ in })
+            XCTFail("A folder that was moved during the transfer must be refused")
+        } catch RemoteUploadError.destinationMoved {}
+        XCTAssertFalse(FileManager.default.fileExists(atPath: moved + "/report.bin"))
+
         // Removal takes only a name this app makes, in a folder that is still where it was.
         let id = UUID(), partial = server.folder + "/" + UploadRequest.partialName(for: id)
         try Data("partial".utf8).write(to: URL(fileURLWithPath: partial))
@@ -581,6 +608,17 @@ final class SFTPUploadIntegrationTests: XCTestCase {
         let resumedAt = await offsets.values
         XCTAssertEqual(resumedAt, [UInt64(prefix.count)])
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: resumed.path)), bytes)
+
+        // A source rewritten while it was read, at the same length, is not the file that was described.
+        let rewritten = RewrittenSource(base: remote, path: original, bytes: Data(bytes.reversed()))
+        do {
+            _ = try await pool.uploadFile(profile: destination,
+                request: .init(directory: folder, name: "rewritten.bin", conflict: .fail, partialName: UploadRequest.partialName(for: UUID()), limit: 64 * 1024 * 1024),
+                source: rewritten, started: { _, _ in }, progress: { _ in })
+            XCTFail("A copy of a source that changed under it must not be named")
+        } catch RemoteUploadError.sourceChanged {}
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder + "/rewritten.bin"))
+        try bytes.write(to: URL(fileURLWithPath: original))
 
         // The source is bounded by the folder it was chosen from: a link out of it is refused.
         let outside = RemoteFileTransferSource(service: pool, profile: source, path: fixture.files + "/outside-export.txt", canonicalRoot: fixture.files)
@@ -686,6 +724,33 @@ private struct StallingSource: TransferSource {
 }
 
 /// Hands on a file a small chunk at a time with a pause before each, as a slow server would.
+/// A remote source whose file is written over, at the same length and with a later date, once its first
+/// bytes have been handed on.
+private struct RewrittenSource: TransferSource {
+    let base: RemoteFileTransferSource
+    let path: String
+    let bytes: Data
+    func describe() async throws -> TransferSourceVersion { try await base.describe() }
+    func read(at offset: UInt64, count: Int) async throws -> Data { try await base.read(at: offset, count: count) }
+    func send(from offset: UInt64, expecting version: TransferSourceVersion,
+              to sink: @escaping @Sendable (Data) async throws -> Void) async throws {
+        let once = OnceFlag()
+        try await base.send(from: offset, expecting: version) { chunk in
+            if once.take() {
+                let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+                try handle.write(contentsOf: bytes); try handle.close()
+                try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_790_000_600)], ofItemAtPath: path)
+            }
+            try await sink(chunk)
+        }
+    }
+}
+private final class OnceFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var taken = false
+    func take() -> Bool { lock.withLock { if taken { return false }; taken = true; return true } }
+}
+
 private struct PacedSource: TransferSource {
     let base: LocalFileTransferSource
     let chunk: Int

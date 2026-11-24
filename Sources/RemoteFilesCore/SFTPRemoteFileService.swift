@@ -1676,8 +1676,6 @@ extension SFTPRemoteFileService: RemoteFileUploading, RemoteFileStreaming {
                 catch let status as SFTPMessage.Status where status.errorCode == .failure { throw RemoteUploadError.refused }
             }
             do {
-                // Sent now and judged before the file takes its name: the folder is still where it was.
-                let recheck = sftp.sendRealPath(atPath: directory)
                 await started(version, start)
                 try Task.checkCancellation()
                 let writer = PipelinedWriter(file: file, offset: start, total: version.size, activity: activity,
@@ -1695,6 +1693,9 @@ extension SFTPRemoteFileService: RemoteFileUploading, RemoteFileStreaming {
                 if let modified = version.modifiedAt { times.accessModificationTime = .init(accessTime: modified, modificationTime: modified) }
                 let timed = version.modifiedAt == nil ? nil : file.sendSetAttributes(to: times)
                 let closed = file.sendClose()
+                // Asked with the close, once every byte is there, and judged before the file takes its name: the
+                // folder is still where it was. Asked as the bytes began, it would say only where it was then.
+                let recheck = sftp.sendRealPath(atPath: directory)
                 // Replacing needs to know what is there; asked with the close, it costs no round trip of its own.
                 let nameTaken = request.conflict == .replace ? PendingOccupant(of: finalPath, sftp: sftp) : nil
                 _ = try? await timed?.get() // Best effort: some servers refuse to set times.
@@ -1761,9 +1762,11 @@ extension SFTPRemoteFileService: RemoteFileUploading, RemoteFileStreaming {
             link = sftp.sendReadSymbolicLink(atPath: path)
         }
         func kind() async throws -> RemoteEntry.Kind? {
-            let isLink = (try? await link.get()) != nil
+            // STAT follows a link, so it describes what the link leads to. A link is a link whatever that is:
+            // one to a folder is replaced as a link, and the folder is left alone.
+            guard (try? await link.get()) == nil else { return .symlink }
             do { return SFTPRemoteFileService.entry(name: "", path: path, attributes: try await described.get()).kind }
-            catch let status as SFTPMessage.Status where status.errorCode == .noSuchFile { return isLink ? .symlink : nil }
+            catch let status as SFTPMessage.Status where status.errorCode == .noSuchFile { return nil }
         }
     }
 
@@ -2058,7 +2061,11 @@ extension SFTPRemoteFileService: RemoteFileUploading, RemoteFileStreaming {
                 }.bytes
             } catch RemoteFileError.tooLarge { throw RemoteUploadError.sourceChanged } // It grew while it was read.
             guard end == Int(version.size) else { throw RemoteUploadError.sourceChanged }
+            // Asked with the close: a file rewritten at the same length while it was read is not the one
+            // described, and its copy would be part one and part the other.
+            let after = file.sendReadAttributes()
             try await file.close()
+            guard transferVersion(try await after.get()) == version else { throw RemoteUploadError.sourceChanged }
             return end - Int(offset)
         } catch {
             try? await file.close()

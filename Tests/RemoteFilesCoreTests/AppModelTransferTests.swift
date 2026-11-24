@@ -139,9 +139,13 @@ private actor HostService: RemoteFileService, HostSessionClosing, RemoteFileSess
     private let first = ConnectionProfile(name: "Web", host: "web.invalid", username: "deploy", identityID: UUID(), startingDirectory: "/srv")
     private let second = ConnectionProfile(name: "Backup", host: "backup.invalid", username: "deploy", identityID: UUID(), startingDirectory: "/data")
 
-    private func makeModel(_ service: HostService) async throws -> AppModel {
+    private func libraryDirectory() -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("model-transfers-" + UUID().uuidString)
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        return directory
+    }
+    private func makeModel(_ service: HostService, directory: URL? = nil) async throws -> AppModel {
+        let directory = directory ?? libraryDirectory()
         let model = try AppModel(directory: directory, fileService: service)
         await model.load()
         model.metadata.connections = [first, second]
@@ -277,6 +281,22 @@ private actor HostService: RemoteFileService, HostSessionClosing, RemoteFileSess
         XCTAssertEqual(closed, [profiles[1].id])
         XCTAssertNil(model.connectionStates[profiles[1].id])
         XCTAssertEqual(model.connectionStates[profiles[0].id], "Connected")
+    }
+
+    /// Windows share the queue and each has its own folders. A file sent from one window arrives in a folder
+    /// another may be showing, and that window must hear of it too.
+    func testAFinishedTransferRefreshesItsFolderInEveryWindow() async throws {
+        let service = HostService()
+        let directory = libraryDirectory()
+        let window = try await makeModel(service, directory: directory)
+        let beside = try await makeModel(service, directory: directory)
+        XCTAssertTrue(window.transfers === beside.transfers)
+        window.enqueueUploads([try file("sent.txt")], to: first, directory: "/srv")
+        try await wait { window.transfers?.items.allSatisfy { $0.state == .completed } == true }
+        XCTAssertEqual(window.folderChangeCount(first.id, path: "/srv"), 1)
+        XCTAssertEqual(beside.folderChangeCount(first.id, path: "/srv"), 1)
+        XCTAssertEqual(beside.folderChangeCount(first.id, path: "/data"), 0)
+        XCTAssertEqual(beside.folderChangeCount(second.id, path: "/srv"), 0)
     }
 
     func testUploadsLeaveOutOrAnswerTakenNamesAndAFinishedOneRefreshesItsFolder() async throws {

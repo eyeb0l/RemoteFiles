@@ -101,9 +101,9 @@ final class AppModel {
     private let transferTransport: (any RemoteFileUploading)?
     private let demoTransferTransport = DemoRemoteFileService()
     var uploadTransport: (any RemoteFileUploading)? { demo ? demoTransferTransport : transferTransport }
-    /// Counts what uploads and copies have added to each folder, so one on screen lists itself again.
-    private var folderChanges: [String: Int] = [:]
-    func folderChangeCount(_ id: UUID, path: String) -> Int { folderChanges[id.uuidString + "|" + path, default: 0] }
+    /// Counts what uploads and copies have added to each folder, so one on screen lists itself again. The
+    /// queue keeps the count, since every window shares it: the transfer may have been started in another.
+    func folderChangeCount(_ id: UUID, path: String) -> Int { transfers?.arrivals(on: id, in: path) ?? 0 }
     let offlineDirectory: URL
     private(set) var offlineStore: OfflineFileStore?
     private(set) var offlinePins: [OfflinePin] = []
@@ -522,13 +522,12 @@ final class AppModel {
             if !Task.isCancelled { self?.transferNotice = nil }
         }
     }
-    /// A file arrived in this folder. What is remembered of it is checked with the server when next shown,
-    /// and a view showing it now lists it again.
+    /// A file arrived in this folder. What is remembered of it is checked with the server when next shown;
+    /// a view showing it now lists it again, by `folderChangeCount`.
     private func folderChanged(_ id: UUID, path: String) {
         for key in directories.keys where key.id == id && directories[key]?.listing.path.utf8.elementsEqual(path.utf8) == true {
             directories[key]?.storedAt = nil
         }
-        folderChanges[id.uuidString + "|" + path, default: 0] += 1
     }
     /// The scene is active again. Only the background ends a session, so only a return from it starts
     /// a new one, which has every folder, reader and search on screen read again. Control Centre,
